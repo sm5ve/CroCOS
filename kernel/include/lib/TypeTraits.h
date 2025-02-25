@@ -47,7 +47,7 @@ using SmallestUInt_t = typename SmallestUInt<
 
 template <typename T>
 struct is_trivially_copyable {
-    static constexpr bool value = __has_trivial_copy(T);
+    static constexpr bool value = __is_trivially_copyable(T);
 };
 
 template <typename T>

@@ -7,6 +7,8 @@
 #ifdef __x86_64__
 #include <arch/amd64.h>
 #endif
+extern size_t archProcessorCount;
+
 namespace kernel::hal{
     void serialOutputString(const char *str) {
 #ifdef __x86_64__
@@ -36,6 +38,10 @@ namespace kernel::hal{
 #ifdef __x86_64__
         kernel::amd64::release_spinlock(lock);
 #endif
+    }
+
+    size_t processorCount(){
+        return archProcessorCount;
     }
 
     ProcessorID getCurrentProcessorID(){

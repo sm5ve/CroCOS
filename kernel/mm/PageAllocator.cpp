@@ -30,6 +30,11 @@ namespace kernel::mm::PageAllocator{
 
     const SmallPageBufferOffset SMALL_POOL_FULL{smallPagesPerBigPage};
 
+    enum BulkAllocationPolicy{
+        USE_UP_SMALL,
+        PREFER_BIG
+    };
+
     //We *don't* return a SmallPoolIndex here because
     constexpr size_t getIndexIntoSmallPagePool(BigPoolIndex bigPage, SmallPoolIndex smallPage){
         //Make sure there's no funny business going on with sign extensions
@@ -40,6 +45,16 @@ namespace kernel::mm::PageAllocator{
         size_t base_index = (size_t)(range.start.value / bigPageSize);
         size_t abs_index = (size_t)(addr.value / bigPageSize);
         return (BigPageIndex)(abs_index - base_index);
+    }
+
+    constexpr phys_addr getBigPageAddress(BigPageIndex bigPage, phys_memory_range range){
+        return phys_addr((uint64_t)bigPage * bigPageSize
+                         + roundDownToNearestMultiple(range.start.value, bigPageSize));
+    }
+
+    constexpr phys_addr getSmallPageAddress(BigPageIndex bigPage, SmallPageIndex smallPage, phys_memory_range range){
+        return phys_addr((uint64_t)bigPage * bigPageSize + (uint64_t)smallPage * smallPageSize
+                         + roundDownToNearestMultiple(range.start.value, bigPageSize));
     }
 
     constexpr SmallPageIndex getSmallPageIndexFromAddress(phys_addr addr){
@@ -145,9 +160,37 @@ namespace kernel::mm::PageAllocator{
             return pool[(size_t)i];
         }
 
+        inline BigPageIndex& bigPagePoolFreeBottom(hal::ProcessorID pid){
+            return bigPagePoolForProcessor(pid)[local_pool_info[pid].bottom_of_free_pool];
+        }
+
+        inline BigPageIndex& topOfLocalPool(hal::ProcessorID pid){
+            return bigPagePoolForProcessor(pid)[local_pool_info[pid].local_pool_size];
+        }
+
+        inline BigPageIndex& bigPagePoolPartiallyUsedTop(hal::ProcessorID pid){
+#ifdef ALLOCATOR_DEBUG
+            assert(local_pool_info[pid].bottom_of_used_pool > 0, "Local pool has no partially used big pages");
+#endif
+            return bigPagePoolForProcessor(pid)[local_pool_info[pid].bottom_of_used_pool - 1];
+        }
+
         inline BigPageIndex& bigPageRefFromFreeMap(BigPageIndex i){
             auto freeMapping = bigPageFreeMapEntry(i);
             return bigPageAtIndex(freeMapping.index, bigPagePoolForBufferId(freeMapping.bufferId));
+        }
+
+        inline bool smallPageAllocated(BigPageIndex bi, SmallPageIndex si){
+            return smallPageFreeMapEntry(bi, si) < smallPageFreeMapBottom(bi);
+        }
+
+        inline bool bigPageAllocated(BigPageIndex bi){
+            auto freeMapEntry = bigPageFreeMapEntry(bi);
+            if(freeMapEntry.bufferId == GLOBAL_POOL){
+                return false;
+            }
+            return (freeMapEntry.bufferId < local_pool_info[freeMapEntry.bufferId - 1].bottom_of_free_pool)
+            && (freeMapEntry.bufferId >= local_pool_info[freeMapEntry.bufferId - 1].bottom_of_used_pool);
         }
 
         // Helper function to swap big pages and their corresponding free map entries
@@ -174,7 +217,7 @@ namespace kernel::mm::PageAllocator{
             assert(bigPagePoolForBufferId(bigPageFreeMapEntry(i).bufferId) == localPool, "localPool set incorrectly!");
             assert((size_t) bigPageFreeMapEntry(i).index < bottomOfFreePool, "big page should be allocated");
 #endif
-            swapBigPages(i, localPool[bottomOfFreePool]);
+            swapBigPages(i, localPool[bottomOfFreePool - 1]);
             bottomOfFreePool--;
         }
 
@@ -196,7 +239,7 @@ namespace kernel::mm::PageAllocator{
             assert(bigPagePoolForBufferId(bigPageFreeMapEntry(i).bufferId) == localPool, "localPool set incorrectly!");
             assert((size_t) bigPageFreeMapEntry(i).index < bottomOfUsedPool, "big page should be partially allocated");
 #endif
-            swapBigPages(i, localPool[bottomOfUsedPool]);
+            swapBigPages(i, localPool[bottomOfUsedPool - 1]);
             bottomOfUsedPool--;
         }
 
@@ -223,10 +266,10 @@ namespace kernel::mm::PageAllocator{
             assert(&bottomOfFreePool == &local_pool_info[bigPageFreeMapEntry(i).bufferId - 1].bottom_of_free_pool, "bottomOfFreePool not correctly set!");
             assert((size_t) bigPageFreeMapEntry(i).index < bottomOfUsedPool, "big page should be partially allocated");
 #endif
-            BigPageIndex& bottomUsed = localPool[bottomOfUsedPool];
-            BigPageIndex& bottomFree = localPool[bottomOfFreePool];
-            rotateLeft(bigPageFreeMapEntry(bottomUsed), bigPageFreeMapEntry(bottomFree), bigPageFreeMapEntry(i));
-            rotateLeft(bottomUsed, bottomFree, i);
+            BigPageIndex& topOfUsed = localPool[bottomOfFreePool - 1];
+            BigPageIndex& topOfPartiallyAllocated = localPool[bottomOfUsedPool - 1];
+            rotateLeft(bigPageFreeMapEntry(topOfUsed), bigPageFreeMapEntry(topOfPartiallyAllocated), bigPageFreeMapEntry(i));
+            rotateLeft(topOfUsed, topOfPartiallyAllocated, i);
             bottomOfUsedPool--;
             bottomOfFreePool--;
         }
@@ -247,6 +290,25 @@ namespace kernel::mm::PageAllocator{
             local_pool_info[pid].local_pool_size++;
         }
 
+        void claimBigPagesFromGlobalPool(size_t count, hal::ProcessorID pid){
+#ifdef ALLOCATOR_DEBUG
+            assert(global_pool_size >= count, "Tried to take big page from empty global pool");
+#endif
+            //Copy the big page indices to the top of the local pool
+            memcpy(&topOfLocalPool(pid), &global_page_pool[global_pool_size - count], sizeof(BigPageIndex) * count);
+            //Shrink the global pool
+            global_pool_size -= count;
+            //update the free mappings
+            auto lpool = bigPagePoolForProcessor(pid);
+            for(size_t i = 0; i < count; i++){
+                auto bi = (BigPoolIndex)(local_pool_info[pid].local_pool_size + i);
+                bigPageFreeMapEntry(lpool[(size_t)bi]).index = bi;
+                bigPageFreeMapEntry(lpool[(size_t)bi]).bufferId = fromProcID(pid);
+            }
+            //grow the local pool to see the new free big page
+            local_pool_info[pid].local_pool_size += count;
+        }
+
         void claimSpecificBigPageFromGlobalPool(BigPageIndex bigPageIdx, hal::ProcessorID pid){
 #ifdef ALLOCATOR_DEBUG
             assert(bigPageFreeMapEntry(bigPageIdx).bufferId == GLOBAL_POOL, "Tried to take big page from a local pool");
@@ -260,6 +322,14 @@ namespace kernel::mm::PageAllocator{
 
         //This should be called rarely... so I'm far more concerned about correctness than with speed
         void reserveSmallPage(BigPageIndex bi, SmallPageIndex si, hal::ProcessorID pid) {
+            //If the small page has already been allocated, we probably reserved it already. This could happen, for example,
+            //after the memory allocator has been initialized, and the kernel tries to reserve its own pages.
+            //At this point, it seems harmless (especially since we should no longer be reserving pages after a certain
+            //point early in the boot process, but allocating them)
+            if(smallPageAllocated(bi, si)){
+                assert(bigPageFreeMapEntry(bi).bufferId == fromProcID(pid), "Prereserved small page sanity check failed");
+                return;
+            }
             // If the big page belongs to the global pool, claim it for the current processor.
             if (bigPageFreeMapEntry(bi).bufferId == GLOBAL_POOL) {
                 claimSpecificBigPageFromGlobalPool(bi, pid);
@@ -318,6 +388,12 @@ namespace kernel::mm::PageAllocator{
         }
 
         void reserveBigPage(BigPageIndex bi, hal::ProcessorID pid){
+            //Just as with the small page case, it's conceivable that we might try to reserve a big page twice for
+            //legitimate reasons. If we see the page has already been reserved, run a sanity check
+            if(bigPageAllocated(bi)){
+                assert(bigPageFreeMapEntry(bi).bufferId == fromProcID(pid), "Rereservation sanity check failed");
+                return;
+            }
             //First check if the big page belongs to the global pool, and if so, claim ownership of it
             if(bigPageFreeMapEntry(bi).bufferId == GLOBAL_POOL){
                 claimSpecificBigPageFromGlobalPool(bi, pid);
@@ -327,7 +403,56 @@ namespace kernel::mm::PageAllocator{
             assert((size_t) bigPageFreeMapEntry(bi).index >= local_pool_info[pid].bottom_of_free_pool,
                    "Tried to reserve big page that's already in use");
 #endif
-            moveFreeBigPageToAllocated(bigPageRefFromFreeMap(bi), bigPagePoolForProcessor(pid), local_pool_info[pid].bottom_of_free_pool);
+            //It's also possible that we already reserved small sub-pages of this big page, in which case
+            //we need to handle this specially.
+            if((size_t)bigPageFreeMapEntry(bi).index < (size_t)local_pool_info[pid].bottom_of_used_pool){
+                movePartiallyAllocatedBigPageToAllocated(bigPageRefFromFreeMap(bi), bigPagePoolForProcessor(pid),
+                                           local_pool_info[pid].bottom_of_used_pool);
+            }
+            else {
+                moveFreeBigPageToAllocated(bigPageRefFromFreeMap(bi), bigPagePoolForProcessor(pid),
+                                           local_pool_info[pid].bottom_of_free_pool);
+            }
+        }
+
+        SmallPageIndex allocateSmallPage(BigPageIndex i, hal::ProcessorID pid){
+#ifdef ALLOCATOR_DEBUG
+            assert(smallPageFreeOffset(i) < SMALL_POOL_FULL, "tried to allocate small page from full big page");
+#endif
+            SmallPageIndex out = smallPagePoolFreeBottom(i);
+            smallPageFreeOffset(i)++;
+            if(smallPageFreeOffset(i) == SMALL_POOL_FULL){
+                movePartiallyAllocatedBigPageToAllocated(i, bigPagePoolForProcessor(pid), local_pool_info[pid].bottom_of_used_pool);
+            }
+            local_pool_info[pid].free_small_pages_in_partial_allocs--;
+            return out;
+        }
+
+        void allocateSmallPages(Vector<phys_addr> small_pages, size_t max_pagecount, BigPageIndex bi, hal::ProcessorID pid){
+#ifdef ALLOCATOR_DEBUG
+            assert(smallPageFreeOffset(bi) < SMALL_POOL_FULL, "tried to allocate small page from full big page");
+            assert(bigPageFreeMapEntry(bi).bufferId == fromProcID(pid), "tried to allocate from big page belonging to wrong pool");
+#endif
+            auto freeOffset = smallPageFreeOffset(bi);
+            size_t allocatable = min(max_pagecount, (size_t)(SMALL_POOL_FULL - freeOffset));
+            for(size_t n = 0; n < allocatable; n++){
+                small_pages.push(getSmallPageAddress(bi, smallPageAtIndex(bi, (SmallPoolIndex)(freeOffset + n)), range));
+            }
+            smallPageFreeOffset(bi) += (SmallPageBufferOffset)allocatable;
+            if(smallPageFreeOffset(bi) == SMALL_POOL_FULL){
+                movePartiallyAllocatedBigPageToAllocated(bi, bigPagePoolForProcessor(pid), local_pool_info[pid].bottom_of_used_pool);
+            }
+        }
+
+        void freeSmallPageInternal(BigPageIndex bi, SmallPageIndex si){
+            SmallPoolIndex& toSwapFreeMap = smallPageFreeMapEntry(bi, si);
+            SmallPoolIndex& usedTopFreeMap = smallPageFreeMapEntry(bi,
+                                           (SmallPageIndex)(small_page_free_index[(size_t)bi] - 1));
+            SmallPageIndex& toSwap = smallPageAtIndex(bi, toSwapFreeMap);
+            SmallPageIndex& usedTop = smallPageAtIndex(bi, usedTopFreeMap);
+            swap(toSwapFreeMap, usedTopFreeMap);
+            swap(toSwap, usedTop);
+            small_page_free_index[(size_t)bi]--;
         }
 
     public:
@@ -442,6 +567,91 @@ namespace kernel::mm::PageAllocator{
             }
             //At this point, we just need to reserve any small pages not contained in the memory range
             reserveOverlap(0);
+
+        }
+
+        [[nodiscard]]
+        size_t getFreeLocalBigPages(hal::ProcessorID pid) const{
+            return local_pool_info[pid].local_pool_size - local_pool_info[pid].bottom_of_free_pool;
+        }
+
+        [[nodiscard]]
+        //returns the total number of free small pages available in the local pool (including those possibly storable
+        //in unallocated big pages)
+        size_t getFreeLocalSmallPages(hal::ProcessorID pid) const{
+            return local_pool_info[pid].free_small_pages_in_partial_allocs + getFreeLocalBigPages(pid) * smallPagesPerBigPage;
+        }
+
+        [[nodiscard]]
+        phys_addr allocateSmallPage(hal::ProcessorID pid){
+            //If we don't have any partially allocated pages, move a big page down to the partially occupied zone
+            if(local_pool_info[pid].bottom_of_used_pool == 0){
+#ifdef ALLOCATOR_DEBUG
+                assert(getFreeLocalBigPages(pid) > 0, "Tried to allocate a small page from an empty local pool!");
+#endif
+                moveFreeBigPageToPartiallyAllocated(bigPagePoolFreeBottom(pid), bigPagePoolForProcessor(pid),
+                                                    local_pool_info[pid].bottom_of_free_pool, local_pool_info[pid].bottom_of_used_pool);
+            }
+            BigPageIndex& bi = bigPagePoolPartiallyUsedTop(pid);
+            SmallPageIndex si = allocateSmallPage(bi, pid);
+            return getSmallPageAddress(bi, si, range);
+        }
+
+        [[nodiscard]]
+        phys_addr allocateBigPage(hal::ProcessorID pid){
+#ifdef ALLOCATOR_DEBUG
+                assert(getFreeLocalBigPages(pid) > 0, "Tried to allocate a big page from an empty local pool!");
+#endif
+            BigPageIndex& bi = bigPagePoolFreeBottom(pid);
+            local_pool_info[pid].bottom_of_free_pool++;
+            return getBigPageAddress(bi, range);
+        }
+
+        size_t stealBigPagesFromGlobalPool(size_t requestedBigPages, hal::ProcessorID pid){
+            size_t allocatable = min(requestedBigPages, global_pool_size);
+            claimBigPagesFromGlobalPool(allocatable, pid);
+            return allocatable;
+        }
+
+        bool addressInRange(phys_addr addr){
+            return (addr.value >= range.start.value) && (addr.value < range.end.value);
+        }
+
+        bool isAddressInLocalPoolForProcessor(phys_addr addr, hal::ProcessorID  pid){
+            auto bi = getBigPageIndexFromAddress(addr, range);
+            return bigPageFreeMapEntry(bi).bufferId == fromProcID(pid);
+        }
+
+        void freeSmallPage(phys_addr addr, hal::ProcessorID pid){
+            BigPageIndex bi = getBigPageIndexFromAddress(addr, range);
+            SmallPageIndex si = getSmallPageIndexFromAddress(addr);
+#ifdef ALLOCATOR_DEBUG
+            assert(bigPageFreeMapEntry(bi).bufferId == fromProcID(pid), "PID mismatch");
+            assert((size_t)smallPageFreeOffset(bi) > (size_t)smallPageFreeMapEntry(bi, si), "Tried to free unallocated small page");
+#endif
+            freeSmallPageInternal(bi, si);
+            local_pool_info[pid].free_small_pages_in_partial_allocs++;
+            //If we freed the last small page, move the big page to the freed zone
+            if(small_page_free_index[(size_t)bi] == 0){
+                movePartiallyAllocatedBigPageToFree(bi, bigPagePoolForProcessor(pid), local_pool_info[pid].bottom_of_free_pool, local_pool_info[pid].bottom_of_used_pool);
+                local_pool_info[pid].free_small_pages_in_partial_allocs -= smallPagesPerBigPage;
+            }
+            //If the big page used to be full, move it to the partially allocated zone
+            if(small_page_free_index[(size_t)bi] == SMALL_POOL_FULL - 1){
+                moveAllocatedBigPageToPartiallyAllocated(bi, bigPagePoolForProcessor(pid), local_pool_info[pid].bottom_of_used_pool);
+            }
+        }
+
+        void freeBigPage(phys_addr addr, hal::ProcessorID pid){
+            BigPageIndex bi = getBigPageIndexFromAddress(addr, range);
+#ifdef ALLOCATOR_DEBUG
+            assert(bigPageFreeMapEntry(bi).bufferId == fromProcID(pid), "PID mismatch");
+            assert((size_t)bigPageFreeMapEntry(bi).index < local_pool_info[pid].bottom_of_free_pool,
+                   "Tried to free already freed big page");
+            assert((size_t)bigPageFreeMapEntry(bi).index >= local_pool_info[pid].bottom_of_used_pool,
+                   "Tried to free big page that is only partially allocated");
+#endif
+            moveAllocatedBigPageToFree(bi, bigPagePoolForProcessor(pid), local_pool_info[pid].bottom_of_free_pool);
         }
     };
 
@@ -488,33 +698,324 @@ namespace kernel::mm::PageAllocator{
         }
     }
 
+    //TODO maybe make this tunable at some point?
+    const size_t STEAL_EXTRA_REQUESTED_PAGES = 4;
+
+    bool tryStealPages(size_t requiredBigPages, hal::ProcessorID pid){
+        size_t requestedPages = requiredBigPages + STEAL_EXTRA_REQUESTED_PAGES; //
+        hal::acquire_spinlock(global_lock);
+        for(auto& allocator : *allocators){
+            if(allocator.global_pool_size > 0){
+                requestedPages -= allocator.stealBigPagesFromGlobalPool(requestedPages, pid);
+            }
+            if(requestedPages <= STEAL_EXTRA_REQUESTED_PAGES){
+                hal::release_spinlock(global_lock);
+                return true;
+            }
+        }
+        hal::release_spinlock(global_lock);
+        //TODO support stealing from other processors
+        return false;
+    }
+
+    void tryDonatePagesIfNecessary(hal::ProcessorID pid){
+        (void)pid;
+        //TODO
+    }
+
+    void reservePhysicalRange(phys_memory_range range){
+        for(auto& allocator : *allocators){
+            allocator.reservePhysMemoryRange(range, 0);
+        }
+    }
+
     // Allocates a small page and returns its physical address
-    phys_addr allocateSmallPage();
+    phys_addr allocateSmallPage(){
+        auto pid = hal::getCurrentProcessorID();
+        phys_addr out(nullptr);
+        hal::acquire_spinlock(local_locks[pid]);
+        //Try to allocate, steal if necessary, then try to allocate again
+        while(true){
+            for(auto& allocator : *allocators){
+                if(allocator.getFreeLocalSmallPages(pid) > 0){
+                    out = allocator.allocateSmallPage(pid);
+                    hal::release_spinlock(local_locks[pid]);
+                    return out;
+                }
+            }
+            if(!tryStealPages(1, pid)){
+                hal::release_spinlock(local_locks[pid]);
+                return out;
+            }
+        }
+    }
 
     // Allocates a big page and returns its physical address
-    phys_addr allocateBigPage();
+    phys_addr allocateBigPage(){
+        auto pid = hal::getCurrentProcessorID();
+        phys_addr out(nullptr);
+        hal::acquire_spinlock(local_locks[pid]);
+        //Try to allocate, steal if necessary, then try to allocate again
+        while(true){
+            for(auto& allocator : *allocators){
+                if(allocator.getFreeLocalBigPages(pid) > 0){
+                    out = allocator.allocateBigPage(pid);
+                    hal::release_spinlock(local_locks[pid]);
+                    return out;
+                }
+            }
+            if(!tryStealPages(1, pid)){
+                hal::release_spinlock(local_locks[pid]);
+                return out;
+            }
+        }
+    }
 
-    // Frees a small page that was allocated to the local processor's pool
-    void freeLocalSmallPage(phys_addr page);
+    //Frees a small page that was allocated to the local processor's pool
+    //This notion of a "local" free isn't exactly super meaningful for the case of freeing a single page
+    //It only skips one comparison. But the analogous notion for bulk frees should be more meaningful.
+    void freeLocalSmallPage(phys_addr page){
+        auto pid = hal::getCurrentProcessorID();
+        for(auto& allocator : *allocators){
+            if(allocator.addressInRange(page)){
+                hal::acquire_spinlock(local_locks[pid]);
+                allocator.freeSmallPage(page, pid);
+                tryDonatePagesIfNecessary(pid);
+                hal::release_spinlock(local_locks[pid]);
+                return;
+            }
+        }
+        assertNotReached("Tried to free page outside of range of allocators");
+    }
 
-    // Frees a big page that was allocated to the local processor's pool
-    void freeLocalBigPage(phys_addr page);
+    //Frees a big page that was allocated to the local processor's pool
+    //This notion of a "local" free isn't exactly super meaningful for the case of freeing a single page
+    //It only skips one comparison. But the analogous notion for bulk frees should be more meaningful.
+    void freeLocalBigPage(phys_addr page){
+        auto pid = hal::getCurrentProcessorID();
+        for(auto& allocator : *allocators){
+            if(allocator.addressInRange(page)){
+                hal::acquire_spinlock(local_locks[pid]);
+                allocator.freeBigPage(page, pid);
+                tryDonatePagesIfNecessary(pid);
+                hal::release_spinlock(local_locks[pid]);
+                return;
+            }
+        }
+        assertNotReached("Tried to free page outside of range of allocators");
+    }
 
     // Frees a small page (with no restriction on the which pool the page belongs to)
-    void freeSmallPage(phys_addr page);
+    void freeSmallPage(phys_addr page){
+        for(auto& allocator : *allocators){
+            if(allocator.addressInRange(page)){
+                auto bid = allocator.big_page_free_map[(size_t)getBigPageIndexFromAddress(page, allocator.range)].bufferId;
+#ifdef ALLOCATOR_DEBUG
+                assert(bid != 0, "Tried to free unowned page.");
+#endif
+                auto pid = (hal::ProcessorID)(bid - 1);
+                hal::acquire_spinlock(local_locks[pid]);
+                allocator.freeSmallPage(page, pid);
+                tryDonatePagesIfNecessary(pid);
+                hal::release_spinlock(local_locks[pid]);
+            }
+        }
+        assertNotReached("Tried to free page outside of range of allocators");
+    }
 
     // Frees a big page (with no restriction on the which pool the page belongs to)
-    void freeBigPage(phys_addr page);
+    void freeBigPage(phys_addr page){
+        for(auto& allocator : *allocators){
+            if(allocator.addressInRange(page)){
+                auto bid = allocator.big_page_free_map[(size_t)getBigPageIndexFromAddress(page, allocator.range)].bufferId;
+#ifdef ALLOCATOR_DEBUG
+                assert(bid != 0, "Tried to free unowned page.");
+#endif
+                auto pid = (hal::ProcessorID)(bid - 1);
+                hal::acquire_spinlock(local_locks[pid]);
+                allocator.freeBigPage(page, pid);
+                tryDonatePagesIfNecessary(pid);
+                hal::release_spinlock(local_locks[pid]);
+            }
+        }
+        assertNotReached("Tried to free page outside of range of allocators");
+    }
+
+    inline BulkAllocationPolicy getLocalAllocationPolicy(hal::ProcessorID pid, size_t availableSmallPagesInLocalPools, size_t availableBigPagesInLocalPools, size_t smallPagesInPartiallyUsedBigPages){
+        (void)pid;
+        (void)availableSmallPagesInLocalPools;
+        (void)availableBigPagesInLocalPools;
+        if(smallPagesInPartiallyUsedBigPages > smallPagesPerBigPage * 4 * allocators -> getSize()){
+            return BulkAllocationPolicy::USE_UP_SMALL;
+        }
+        else{
+            return BulkAllocationPolicy::PREFER_BIG;
+        }
+    }
 
     // Allocates enough pages to satisfy a request for a certain capacity
     // Returns vectors of small and big pages to fulfill the request
-    bool allocatePages(size_t capacity, Vector<phys_addr>& smallPages, Vector<phys_addr>& bigPages);
+    bool allocatePages(size_t requestedCapacityInBytes, Vector<phys_addr>& smallPages, Vector<phys_addr>& bigPages){
+        //First acquire a lock for our local pool
+        auto pid = hal::getCurrentProcessorID();
+        hal::acquire_spinlock(local_locks[pid]);
+        //Determine how much space is available in the appropriate local pool of each allocator
+        size_t availableSmallPagesInLocalPools = 0;
+        size_t availableBigPagesInLocalPools = 0;
+        for(auto& allocator : *allocators){
+            availableSmallPagesInLocalPools += allocator.getFreeLocalSmallPages(pid);
+            availableBigPagesInLocalPools += allocator.getFreeLocalBigPages(pid);
+        }
+        size_t smallPagesInPartiallyUsedBigPages = availableSmallPagesInLocalPools - availableBigPagesInLocalPools * smallPagesPerBigPage;
+        //If we don't have enough capacity, try to steal enough pages to fulfill the request
+        if(requestedCapacityInBytes > availableSmallPagesInLocalPools * smallPageSize){
+            size_t neededBigPages = divideAndRoundUp(requestedCapacityInBytes - availableSmallPagesInLocalPools * smallPageSize,
+                                                     bigPageSize);
+            if(!tryStealPages(neededBigPages, pid)){
+                //if we aren't able to steal the pages, bail out!
+                hal::release_spinlock(local_locks[pid]);
+                return false;
+            }
+        }
+        auto allocationPolicy = getLocalAllocationPolicy(pid, availableSmallPagesInLocalPools, availableBigPagesInLocalPools, smallPagesInPartiallyUsedBigPages);
+        if(allocationPolicy == BulkAllocationPolicy::USE_UP_SMALL){
+            //Our aim is to first use up whatever partially allocated big pages we have at our disposal
+            size_t requestedSmallPages = divideAndRoundUp(requestedCapacityInBytes, smallPageSize);
+            //Minimize reallocations in vector by preallocating some space in our vector of small pages
+            smallPages.ensureRoom(min(requestedSmallPages, smallPagesInPartiallyUsedBigPages));
+            for(auto& allocator : *allocators){
+                //As long as the allocator has partially allocated large pages, keep allocating small pages
+                while(allocator.local_pool_info[pid].bottom_of_used_pool > 0){
+                    smallPages.push(allocator.allocateSmallPage(pid));
+                    requestedSmallPages--;
+                    if(requestedSmallPages == 0){
+                        hal::release_spinlock(local_locks[pid]);
+                        return true;
+                    }
+                }
+            }
+            //If we made it here, none of the allocators should have any remaining partially allocated big pages
+            //in the corresponding local pool. Thus, we just need to allocate enough small pages so that our remaining
+            //requestedSmallPages is a multiple of smallPagesPerBigPage
+            for(auto& allocator : *allocators){
+                if(allocator.getFreeLocalBigPages(pid) > 0){
+                    while(requestedSmallPages % smallPagesPerBigPage != 0){
+                        smallPages.push(allocator.allocateSmallPage(pid));
+                        requestedSmallPages--;
+                    }
+                    break;
+                }
+            }
+            //Now we can fulfill the rest of our allocation with big pages
+            bigPages.ensureRoom(requestedSmallPages / smallPagesPerBigPage);
+            for(auto& allocator : *allocators){
+                while(allocator.getFreeLocalBigPages(pid) > 0){
+                    bigPages.push(allocator.allocateBigPage(pid));
+                    requestedSmallPages -= smallPagesPerBigPage;
+                    if(requestedSmallPages == 0){
+                        hal::release_spinlock(local_locks[pid]);
+                        return true;
+                    }
+                }
+            }
+        }
+        else if(allocationPolicy == BulkAllocationPolicy::PREFER_BIG){
+            size_t requestedSmallPages = divideAndRoundUp(requestedCapacityInBytes, smallPageSize);
+            //First allocate as much memory as we can with big pages
+            for(auto& allocator : *allocators){
+                while(allocator.getFreeLocalBigPages(pid) > 0 && requestedSmallPages >= smallPagesPerBigPage){
+                    bigPages.push(allocator.allocateBigPage(pid));
+                    requestedSmallPages -= smallPagesPerBigPage;
+                }
+                if(requestedSmallPages > smallPagesPerBigPage){
+                    break;
+                }
+            }
+            //Preallocate enough room in the small pages vector
+            smallPages.ensureRoom(requestedSmallPages);
+            //Then take small pages from whatever allocators have partially used big pages
+            for(auto& allocator : *allocators){
+                while(allocator.local_pool_info[pid].bottom_of_used_pool > 0){
+                    smallPages.push(allocator.allocateSmallPage(pid));
+                    requestedSmallPages--;
+                    if(requestedSmallPages == 0){
+                        hal::release_spinlock(local_locks[pid]);
+                        return true;
+                    }
+                }
+            }
+            //Finally, fill in the rest of the small pages from the first allocator that has space
+            for(auto& allocator : *allocators){
+                if(allocator.getFreeLocalBigPages(pid) > 0){
+                    while(requestedSmallPages > 0){
+                        smallPages.push(allocator.allocateSmallPage(pid));
+                        requestedSmallPages--;
+                    }
+                }
+            }
+        }
+        hal::release_spinlock(local_locks[pid]);
+        return true;
+    }
 
     // Frees a set of pages that were allocated to the local processor's pool
-    void freeLocalPages(Vector<phys_addr>& smallPages, Vector<phys_addr>& bigPages);
+    void freeLocalPages(Vector<phys_addr>& smallPages, Vector<phys_addr>& bigPages){
+        //TODO change this method to first sort the vectors so we don't need to do any nested iteration
+        //This is an initial "good enough" implementation so I can move on to more fun stuff
+        auto pid = hal::getCurrentProcessorID();
+        hal::acquire_spinlock(local_locks[pid]);
+        for(auto& allocator : *allocators){
+            for(size_t i = 0; i < smallPages.getSize(); i++){
+                if(allocator.addressInRange(smallPages[i])){
+                    allocator.freeSmallPage(smallPages[i], pid);
+                    smallPages.remove(i--);
+                }
+            }
+            for(size_t i = 0; i < bigPages.getSize(); i++){
+                if(allocator.addressInRange(bigPages[i])){
+                    allocator.freeBigPage(bigPages[i], pid);
+                    bigPages.remove(i--);
+                }
+            }
+        }
+        hal::release_spinlock(local_locks[pid]);
+        assert(smallPages.getSize() == 0 && bigPages.getSize() == 0, "Tried to free pages that were out of allocator ranges");
+    }
 
     // Frees a set of pages (with no restriction on the which pools the pages belong to)
-    void freePages(Vector<phys_addr>& smallPages, Vector<phys_addr>& bigPages);
+    void freePages(Vector<phys_addr>& smallPages, Vector<phys_addr>& bigPages){
+        //FIXME this is really a horrendously bad way of doing things
+        for(uint8_t pid = 0; pid < hal::processorCount(); pid++) {
+            //TODO change this method to first sort the vectors so we don't need to do any nested iteration
+            //This is an initial "good enough" implementation so I can move on to more fun stuff
+            hal::acquire_spinlock(local_locks[pid]);
+            for (auto &allocator: *allocators) {
+                for (size_t i = 0; i < smallPages.getSize(); i++) {
+                    if (allocator.addressInRange(smallPages[i])) {
+                        if(allocator.isAddressInLocalPoolForProcessor(smallPages[i], pid)){
+                            allocator.freeSmallPage(smallPages[i], pid);
+                            smallPages.remove(i--);
+                        }
+                    }
+                }
+                for (size_t i = 0; i < bigPages.getSize(); i++) {
+                    if (allocator.addressInRange(bigPages[i])) {
+                        if(allocator.isAddressInLocalPoolForProcessor(bigPages[i], pid)) {
+                            allocator.freeBigPage(bigPages[i], pid);
+                            bigPages.remove(i--);
+                        }
+                    }
+                }
+            }
+            hal::release_spinlock(local_locks[pid]);
+        }
+        assert(smallPages.getSize() == 0 && bigPages.getSize() == 0,
+               "Tried to free pages that were out of allocator ranges");
+    }
+
+    // Allocates enough (physically contiguous) pages to satisfy a request for a certain capacity
+    // Returns vectors of small and big pages to fulfill the request
+    bool allocateContiguousPhysicalPages(size_t requestedCapacityInBytes, Vector<phys_addr>& smallPages, Vector<phys_addr>& bigPages);
 
     // Retrieves memory usage statistics (free pages, allocated pages, distribution among local/global pools, fragmentation etc.)
     //MemoryUsageStats getUsageStatistics();

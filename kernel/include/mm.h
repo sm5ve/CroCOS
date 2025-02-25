@@ -14,15 +14,23 @@ namespace kernel::mm{
     struct phys_addr {
         uint64_t value;
         constexpr explicit phys_addr(uint64_t v) : value(v) {}
+        constexpr explicit phys_addr() : value(0) {}
         constexpr explicit phys_addr(void* v) : value((uint64_t)v) {}
     };
 
     struct virt_addr {
         uint64_t value;
         constexpr explicit virt_addr(uint64_t v) : value(v) {}
+        constexpr explicit virt_addr() : value(0) {}
         constexpr explicit virt_addr(void* v) : value((uint64_t)v) {}
         template <typename T>
         constexpr T* as_ptr(){return (T*)value;};
+    };
+
+    struct MemoryStatistics{
+        Vector<size_t> freeBigPageCount;
+        Vector<size_t> freeSmallPageCount; //includes sub-pages of big pages
+        size_t globalPoolSize;
     };
 
     struct phys_memory_range {
@@ -50,6 +58,12 @@ namespace kernel::mm{
         constexpr size_t bigPagesInMaxMemory = maxMemorySupported / bigPageSize;
         void init(Vector<page_allocator_range_info>& regions, size_t processor_count);
         size_t requestedBufferSizeForRange(mm::phys_memory_range range, size_t processor_count);
+        void reservePhysicalRange(phys_memory_range);
+        phys_addr allocateSmallPage();
+        phys_addr allocateBigPage();
+        void freeLocalSmallPage(phys_addr);
+        bool allocatePages(size_t requestedCapacityInBytes, Vector<phys_addr>& smallPages, Vector<phys_addr>& bigPages);
+        void freeLocalPages(Vector<phys_addr>& smallPages, Vector<phys_addr>& bigPages);
     }
 
     phys_addr virt_to_phys(virt_addr);

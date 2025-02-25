@@ -73,6 +73,10 @@ extern volatile uint64_t boot_page_directory_pointer_table[512];
  * └─0x0000000000000000
  */
 
+extern uint32_t phys_end;
+
+size_t archProcessorCount;
+
 namespace kernel::amd64{
     //TODO list:
     //Set up page allocator data structures
@@ -256,6 +260,7 @@ namespace kernel::amd64{
         for(auto madt : madts){
             processorCount += madt->getEnabledProcessorCount();
         }
+        archProcessorCount = processorCount;
 
         //If for some reason ACPI initialization failed, assume as a fallback that we've only got one core
         //Without ACPI we don't have the information to spin up the other cores anyways
@@ -288,5 +293,8 @@ namespace kernel::amd64{
         unmapTemporaryWindow();
 
         kernel::mm::PageAllocator::init(free_memory_regions, processorCount);
+        //Find the memory range where the kernel resides and reserve it so we don't overwrite anything!
+        mm::phys_memory_range range{.start=mm::phys_addr(nullptr), .end=mm::phys_addr(&phys_end)};
+        kernel::mm::PageAllocator::reservePhysicalRange(range);
     }
 }

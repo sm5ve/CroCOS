@@ -48,6 +48,7 @@ namespace kernel::hal{
 
     //Guaranteed to be between 0 and (the total number of logical processors - 1)
     ProcessorID getCurrentProcessorID();
+    size_t processorCount();
 }
 
 #endif //CROCOS_HAL_H
