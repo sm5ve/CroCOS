@@ -10,6 +10,10 @@
 #include <mm.h>
 #include <lib/str.h>
 
+#ifdef __x86_64__
+#include <arch/amd64.h>
+#endif
+
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Waddress-of-packed-member"
 namespace kernel::acpi{
@@ -117,7 +121,9 @@ namespace kernel::acpi{
             //count how big of a buffer we should preallocate. Probably overkill, but seems most correct.
             for(uint32_t* tablePhysAddress = &(root -> tablePointer); (uint64_t)tablePhysAddress <
             (uint64_t)root + (root -> h.length); tablePhysAddress++){
-                SDTHeader* table = phys_to_virt(mm::phys_addr((uint64_t)*tablePhysAddress)).as_ptr<SDTHeader>();
+#ifdef __x86_64__
+                SDTHeader* table = amd64::early_boot_phys_to_virt(mm::phys_addr((uint64_t)*tablePhysAddress)).as_ptr<SDTHeader>();
+#endif
                 if(startsWith(table -> signature, ACPISignature<T>::value) && verifyTableChecksum(table) == ACPIChecksumResult::PASS){
                     tableCount++;
                 }
@@ -125,7 +131,9 @@ namespace kernel::acpi{
             Vector<T*> out(tableCount);
             for(uint32_t* tablePhysAddress = &(root -> tablePointer); (uint64_t)tablePhysAddress <
             (uint64_t)root + (root -> h.length); tablePhysAddress++){
-                SDTHeader* table = phys_to_virt(mm::phys_addr(*tablePhysAddress)).as_ptr<SDTHeader>();
+#ifdef __x86_64__
+                SDTHeader* table = amd64::early_boot_phys_to_virt(mm::phys_addr(*tablePhysAddress)).as_ptr<SDTHeader>();
+#endif
                 if(startsWith(table -> signature, ACPISignature<T>::value) && verifyTableChecksum(table) == ACPIChecksumResult::PASS){
                     out.push((T*)table);
                 }
@@ -138,7 +146,9 @@ namespace kernel::acpi{
             //count how big of a buffer we should preallocate. Probably overkill, but seems most correct.
             for(uint64_t* tablePhysAddress = &(root -> tablePointer); (uint64_t)tablePhysAddress <
             (uint64_t)root + (root -> h.length); tablePhysAddress++){
-                SDTHeader* table = phys_to_virt(mm::phys_addr(*tablePhysAddress)).as_ptr<SDTHeader>();
+#ifdef __x86_64__
+                SDTHeader* table = amd64::early_boot_phys_to_virt(mm::phys_addr(*tablePhysAddress)).as_ptr<SDTHeader>();
+#endif
                 if(startsWith(table -> signature, ACPISignature<T>::value) && verifyTableChecksum(table) == ACPIChecksumResult::PASS){
                     tableCount++;
                 }
@@ -146,7 +156,9 @@ namespace kernel::acpi{
             Vector<T*> out(tableCount);
             for(uint64_t* tablePhysAddress = &(root -> tablePointer); (uint64_t)tablePhysAddress <
             (uint64_t)root + (root -> h.length); tablePhysAddress++){
-                SDTHeader* table = phys_to_virt(mm::phys_addr(*tablePhysAddress)).as_ptr<SDTHeader>();
+#ifdef __x86_64__
+                SDTHeader* table = amd64::early_boot_phys_to_virt(mm::phys_addr(*tablePhysAddress)).as_ptr<SDTHeader>();
+#endif
                 if(startsWith(table -> signature, ACPISignature<T>::value) && verifyTableChecksum(table) == ACPIChecksumResult::PASS){
                     out.push((T*)table);
                 }

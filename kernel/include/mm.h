@@ -9,24 +9,9 @@
 #include <lib/TypeTraits.h>
 #include <arch/hal.h>
 #include <lib/ds/Vector.h>
+#include <kernel.h>
 
 namespace kernel::mm{
-    struct phys_addr {
-        uint64_t value;
-        constexpr explicit phys_addr(uint64_t v) : value(v) {}
-        constexpr explicit phys_addr() : value(0) {}
-        constexpr explicit phys_addr(void* v) : value((uint64_t)v) {}
-    };
-
-    struct virt_addr {
-        uint64_t value;
-        constexpr explicit virt_addr(uint64_t v) : value(v) {}
-        constexpr explicit virt_addr() : value(0) {}
-        constexpr explicit virt_addr(void* v) : value((uint64_t)v) {}
-        template <typename T>
-        constexpr T* as_ptr(){return (T*)value;};
-    };
-
     struct MemoryStatistics{
         Vector<size_t> freeBigPageCount;
         Vector<size_t> freeSmallPageCount; //includes sub-pages of big pages
@@ -36,7 +21,20 @@ namespace kernel::mm{
     struct phys_memory_range {
         phys_addr start;
         phys_addr end;
+        [[nodiscard]]
         size_t getSize();
+    };
+
+    struct virt_memory_range {
+        virt_addr start;
+        virt_addr end;
+        [[nodiscard]]
+        size_t getSize();
+    };
+
+    enum PageSize{
+        BIG,
+        SMALL
     };
 
     namespace PageAllocator{
@@ -62,12 +60,127 @@ namespace kernel::mm{
         phys_addr allocateSmallPage();
         phys_addr allocateBigPage();
         void freeLocalSmallPage(phys_addr);
+        void freeLocalBigPage(phys_addr);
+        void freeSmallPage(phys_addr);
+        void freeBigPage(phys_addr);
         bool allocatePages(size_t requestedCapacityInBytes, Vector<phys_addr>& smallPages, Vector<phys_addr>& bigPages);
         void freeLocalPages(Vector<phys_addr>& smallPages, Vector<phys_addr>& bigPages);
     }
 
-    phys_addr virt_to_phys(virt_addr);
-    virt_addr phys_to_virt(phys_addr);
+    namespace vm {
+        enum PageFaultHandleResult {
+            HANDLED_IN_KERNEL,
+            DEFERRED,
+            UNHANDLED
+        };
+
+        enum PageFaultType {
+            READ_FAULT,
+            WRITE_FAULT
+        };
+
+        enum RegionPermissions : uint8_t {
+            READ  = 1 << 0,
+            WRITE = 1 << 1,
+            EXEC  = 1 << 2
+        };
+
+        enum CacheType {
+            CACHED,
+            UNCACHED,
+            WRITE_THROUGH,
+            WRITE_COMBINE
+        };
+
+        class BackingRegion {
+        protected:
+            char *name;
+            CacheType cacheType;
+        public:
+            const char *getName();
+
+            [[nodiscard]]
+            virtual size_t getSize() const = 0;
+
+            [[nodiscard]]
+            virtual PageFaultHandleResult handlePageFault(virt_addr faulting_addr, virt_addr faulting_ip, PageFaultType) const = 0;
+            virtual ~BackingRegion() = default;
+            virtual CacheType getCacheType();
+        };
+
+        class PhysicalBackingRegion : public BackingRegion {
+        private:
+            enum PageType {
+                PRESENT_EXCLUSIVELY_OWNED,  // No refcounting needed, directly stores phys_addr
+                PRESENT_SHARED,             // Uses a heap-allocated RefCountedPage*
+                LAZY,
+                VACANT,
+                COPY_ON_WRITE
+            };
+
+            struct RefCountedPage {
+                phys_addr presentPageAddr;
+                uint64_t refCount;
+            };
+
+            struct BackingPage {
+                PageType type;
+                PageSize size;
+                union {
+                    phys_addr exclusivePageAddr;   // Used for PRESENT_EXCLUSIVELY_OWNED
+                    RefCountedPage* sharedPage;    // Used for PRESENT_SHARED & COW
+                };
+
+                ~BackingPage();
+            };
+
+            Vector<BackingPage> backing;
+        };
+
+        class SubPageMMIOBackingRegion : public BackingRegion {
+        private:
+            phys_memory_range window;
+        public:
+            explicit SubPageMMIOBackingRegion(phys_memory_range);
+        };
+
+        class VirtualAddressZone;
+
+        class RegionMapping {
+        private:
+            BackingRegion &backingRegion;
+            char *name;
+            virt_addr base;
+            RegionPermissions permissions;
+
+            friend VirtualAddressZone;
+        public:
+            RegionMapping(BackingRegion &, RegionPermissions, char *name = (char *) "");
+
+            [[nodiscard]]
+            const char *getName();
+
+            [[nodiscard]]
+            const virt_addr getBase();
+        };
+
+        class VirtualAddressZone {
+        private:
+            Vector<RegionMapping> mappings;
+            //Add augmented AVL tree structure here
+        public:
+            //Finds somewhere in the virtual address space that can fit our region and maps it.
+            //
+            virt_addr mapRegion(RegionMapping&&);
+            bool mapRegion(RegionMapping&&, virt_addr base);
+        };
+
+        class VirtualAddressSpace {
+        private:
+            Vector<VirtualAddressZone> zones;
+        public:
+        };
+    }
 }
 
 #endif //CROCOS_MM_H

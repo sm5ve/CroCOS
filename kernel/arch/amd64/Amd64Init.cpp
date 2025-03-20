@@ -11,11 +11,12 @@
 #include <lib/math.h>
 #include <assert.h>
 #include "multiboot.h"
+#include "PageTableManager.h"
 
 extern uint32_t mboot_magic;
 extern uint32_t mboot_table;
 
-alignas(4096) uint64_t temporaryPageDir[512];
+alignas(4096) uint64_t bootstrapPageDir[512];
 extern volatile uint64_t boot_pml4[512];
 extern volatile uint64_t boot_page_directory_pointer_table[512];
 
@@ -98,12 +99,12 @@ namespace kernel::amd64{
         assert((base.value & (kernel::mm::PageAllocator::bigPageSize - 1)) == 0, "Misaligned window");
         for(size_t x = 0; x < 512; x++){
             //Write 2MiB page address to page table entry, truncate appropriately
-            temporaryPageDir[x] = (base.value + x * kernel::mm::PageAllocator::bigPageSize) & (mm::PageAllocator::maxMemorySupported - 1);
-            temporaryPageDir[x] |= (1 << 7) | 3; //Indicate this is a big page, it's R/W and present
+            bootstrapPageDir[x] = (base.value + x * kernel::mm::PageAllocator::bigPageSize) & (mm::PageAllocator::maxMemorySupported - 1);
+            bootstrapPageDir[x] |= (1 << 7) | 3; //Indicate this is a big page, it's R/W and present
         }
         //add a reference to our page directory to the page directory pointer table
-        boot_page_directory_pointer_table[509] = mm::virt_to_phys(mm::virt_addr(&temporaryPageDir)).value | 3;
-        return (void*)(mm::phys_to_virt(mm::phys_addr((void*)0)).value - (1 << 30));
+        boot_page_directory_pointer_table[509] = amd64::early_boot_virt_to_phys(mm::virt_addr(&bootstrapPageDir)).value | 3;
+        return (void*)(amd64::early_boot_phys_to_virt(mm::phys_addr((void*)0)).value - (1 << 30));
     }
 
     void unmapTemporaryWindow(){
@@ -142,7 +143,7 @@ namespace kernel::amd64{
                "Memory range size is too big! We don't support more than 512 GiB of memory yet!");
 
         const size_t total_space_needed = buffer_space_needed + paging_structure_space_needed;
-        //Find largest small page aligned address that will let us fit all necessary buffer structures
+        //Find the largest small page aligned address that will let us fit all necessary buffer structures
         //and paging structures in the memory range
         const mm::phys_addr buffer_phys_base(roundDownToNearestMultiple(range.end.value - total_space_needed,
                                                                         mm::PageAllocator::smallPageSize));
@@ -251,7 +252,7 @@ namespace kernel::amd64{
         unmapIdentity();
 
         flushTLB();
-        //Our first goal is to find the MADT, so we will have the right info to properly initialize the
+        //Our first goal is to find the MADT, so we will have the right info to properly init the
         //page allocator.
         kernel::acpi::tryFindACPI();
         auto madts = kernel::acpi::getTables<acpi::MADT>();
@@ -273,8 +274,8 @@ namespace kernel::amd64{
 
         Vector<mm::PageAllocator::page_allocator_range_info> free_memory_regions;
 
-        mboot_info* mbootInfo = mm::phys_to_virt(mm::phys_addr(mboot_table)).as_ptr<mboot_info>();
-        mboot_mmap_entry* mbootMmapBase = mm::phys_to_virt(mm::phys_addr(mbootInfo -> mmap_ptr)).as_ptr<mboot_mmap_entry>();
+        mboot_info* mbootInfo = amd64::early_boot_phys_to_virt(mm::phys_addr(mboot_table)).as_ptr<mboot_info>();
+        mboot_mmap_entry* mbootMmapBase = amd64::early_boot_phys_to_virt(mm::phys_addr(mbootInfo -> mmap_ptr)).as_ptr<mboot_mmap_entry>();
 
         //Extract a list of free memory regions from the multiboot header, reserve the buffers requested by
         //the page allocator, and package that up to pass along to the page allocator
@@ -296,5 +297,6 @@ namespace kernel::amd64{
         //Find the memory range where the kernel resides and reserve it so we don't overwrite anything!
         mm::phys_memory_range range{.start=mm::phys_addr(nullptr), .end=mm::phys_addr(&phys_end)};
         kernel::mm::PageAllocator::reservePhysicalRange(range);
+        kernel::amd64::PageTableManager::init(processorCount);
     }
 }

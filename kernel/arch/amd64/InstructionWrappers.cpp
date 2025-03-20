@@ -45,4 +45,29 @@ namespace kernel::amd64 {
     void cli() { asm volatile("cli"); }
 
     void sti() { asm volatile("sti"); }
+
+    bool atomic_cmpxchg_u64(volatile uint64_t &var, volatile uint64_t &expected, uint64_t desired) {
+        uint8_t success;
+        __asm__ volatile (
+                "lock; cmpxchgq %3, %1\n"
+                "sete %2"
+                : "+a" (expected), "+m" (var), "=r" (success)
+                : "r" (desired)
+                : "memory", "cc"
+                );
+        return success;
+    }
+
+    void atomic_and(volatile uint64_t &var, uint64_t mask) {
+        __asm__ volatile (
+                "lock; andq %1, %0"
+                : "+m" (var)    // Output: memory operand (read/write)
+                : "r" (mask)    // Input: register operand
+                : "memory"      // Clobber: tells the compiler memory is modified
+                );
+    }
+
+    void invlpg(uint64_t addr){
+        __asm__ volatile("invlpg (%0)" :: "r"(addr) : "memory");
+    }
 }

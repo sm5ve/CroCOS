@@ -538,7 +538,7 @@ namespace kernel::mm::PageAllocator{
             assert(buff_vaddr - (uint64_t)info.buffer_start <= requestedBufferSizeForRange(range, processor_count),
                    "Somehow we're using more of the buffer than we asked for???");
 
-            //Allocate an array for the local pool info in the "heap" (bump allocator for now), initialize
+            //Allocate an array for the local pool info in the "heap" (bump allocator for now), init
             local_pool_info = new LocalPoolInfo[processor_count];
             for(size_t i = 0; i < processor_count; i++){
                 local_pool_info[i].bottom_of_free_pool = BigPageBufferOffset{0};
@@ -557,7 +557,7 @@ namespace kernel::mm::PageAllocator{
                 //Give every big page to the global pool
                 global_page_pool[i] = BigPageIndex{bi};
                 big_page_free_map[i] = {bpi, GLOBAL_POOL};
-                //for every big page, initialize the corresponding part of the small page pool
+                //for every big page, init the corresponding part of the small page pool
                 for(size_t j = 0; j < smallPagesPerBigPage; j++){
                     SmallPageIndex si{(SmallIndexRawType) j};
                     SmallPoolIndex spi{(SmallIndexRawType) j};
@@ -978,6 +978,7 @@ namespace kernel::mm::PageAllocator{
                 }
             }
         }
+        tryDonatePagesIfNecessary(pid);
         hal::release_spinlock(local_locks[pid]);
         assert(smallPages.getSize() == 0 && bigPages.getSize() == 0, "Tried to free pages that were out of allocator ranges");
     }
@@ -1007,6 +1008,7 @@ namespace kernel::mm::PageAllocator{
                     }
                 }
             }
+            tryDonatePagesIfNecessary(pid);
             hal::release_spinlock(local_locks[pid]);
         }
         assert(smallPages.getSize() == 0 && bigPages.getSize() == 0,

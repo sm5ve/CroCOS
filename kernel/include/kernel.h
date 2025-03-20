@@ -13,6 +13,24 @@ namespace kernel{
     extern PrintStream& DbgOut;
     void* kmalloc(size_t size, std::align_val_t = std::align_val_t{1});
     void kfree(void* ptr);
+
+    namespace mm{
+        struct phys_addr {
+            uint64_t value;
+            constexpr explicit phys_addr(uint64_t v) : value(v) {}
+            constexpr explicit phys_addr() : value(0) {}
+            explicit phys_addr(void* v) : value((uint64_t)v) {}
+        };
+
+        struct virt_addr {
+            uint64_t value;
+            constexpr explicit virt_addr(uint64_t v) : value(v) {}
+            constexpr explicit virt_addr() : value(0) {}
+            explicit virt_addr(void* v) : value((uint64_t)v) {}
+            template <typename T>
+            constexpr T* as_ptr(){return (T*)value;};
+        };
+    }
 }
 
 extern "C" void* memset(void* dest, int value, size_t len);

@@ -7,6 +7,11 @@
 
 #include "stdint.h"
 #include "stddef.h"
+#include <arch/spinlock.h>
+
+#ifdef __x86_64__
+#include <arch/amd64.h>
+#endif
 
 #define TOCTOU_LOCK_CHECK(lock, condition, action, failure) \
 if (condition) { \
@@ -24,17 +29,6 @@ failure;\
 namespace kernel::hal{
     void serialOutputString(const char* str);
     void hwinit();
-
-    typedef struct alignas(64){
-        uint64_t lock_bit;
-        uint64_t acquire_count;
-#ifdef __x86_64__
-        uint64_t padding[6]; //make sure we take up an entire cache line to minimize bus traffic (https://wiki.osdev.org/Spinlock)
-#endif
-    } spinlock_t;
-
-    const spinlock_t SPINLOCK_INITIALIZER = {0, 0, {0, 0, 0, 0, 0, 0}};
-
     void acquire_spinlock(kernel::hal::spinlock_t& lock);
     //Returns true if we were able to acquire the lock, and false otherwise
     bool try_acquire_spinlock(kernel::hal::spinlock_t& lock);
@@ -44,11 +38,16 @@ namespace kernel::hal{
     using ProcessorID = uint8_t;
     const size_t MAX_PROCESSOR_COUNT = 256;
     const size_t CACHE_LINE_SIZE = 64;
+    //using GeneralRegisterFile = kernel::amd64::GeneralRegisterFile;
 #endif
 
     //Guaranteed to be between 0 and (the total number of logical processors - 1)
     ProcessorID getCurrentProcessorID();
     size_t processorCount();
+
+    inline void compiler_fence(){
+        asm volatile("" ::: "memory");
+    };
 }
 
 #endif //CROCOS_HAL_H

@@ -6,7 +6,9 @@
 #define CROCOS_AMD64_TABLES_H
 
 #include <arch/hal.h>
-#include "stdint.h"
+#include <arch/spinlock.h>
+#include <kconfig.h>
+#include <kernel.h>
 
 namespace kernel::amd64 {
     //Derived from https://wiki.osdev.org/CPUID, or tables 3-19 and 3-20 in volume 2 of the Intel manual.
@@ -75,6 +77,10 @@ namespace kernel::amd64 {
         EDX_PBE          = 1 << 31
     };
 
+    struct GeneralRegisterFile{
+
+    };
+
     //Wrapper for the CPUID instruction. The first four parameters are references to uint32_t's corresponding to
     //the registers EAX-EDX. The last parameter is the value to load into EAX (the "leaf" per the
     // Intel manual) before calling CPUID.
@@ -92,12 +98,27 @@ namespace kernel::amd64 {
     uint16_t inw(uint16_t port);
     void cli();
     void sti();
+    bool atomic_cmpxchg_u64(volatile uint64_t &var, volatile uint64_t &expected, uint64_t desired);
+    void atomic_and(volatile uint64_t &var, uint64_t mask);
+    void invlpg(uint64_t addr);
 
     void hwinit();
 
     void acquire_spinlock(kernel::hal::spinlock_t& lock);
     bool try_acquire_spinlock(kernel::hal::spinlock_t& lock);
     void release_spinlock(kernel::hal::spinlock_t& lock);
+
+    inline void mfence() {
+        asm volatile("mfence" ::: "memory");
+    }
+
+    inline constexpr mm::virt_addr early_boot_phys_to_virt(mm::phys_addr x){
+        return mm::virt_addr(x.value + VMEM_OFFSET);
+    }
+
+    inline constexpr mm::phys_addr early_boot_virt_to_phys(mm::virt_addr x){
+        return mm::phys_addr(x.value - VMEM_OFFSET);
+    }
 }
 
 #endif //CROCOS_AMD64_TABLES_H
