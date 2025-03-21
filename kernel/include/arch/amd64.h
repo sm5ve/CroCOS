@@ -99,7 +99,11 @@ namespace kernel::amd64 {
     void cli();
     void sti();
     bool atomic_cmpxchg_u64(volatile uint64_t &var, volatile uint64_t &expected, uint64_t desired);
+    bool atomic_cmpxchg_u32(volatile uint32_t &var, volatile uint32_t &expected, uint32_t desired);
+    bool atomic_cmpxchg_u16(volatile uint16_t &var, volatile uint16_t &expected, uint16_t desired);
+    bool atomic_cmpxchg_u8(volatile uint8_t &var, volatile uint8_t &expected, uint8_t desired);
     void atomic_and(volatile uint64_t &var, uint64_t mask);
+    void atomic_or(volatile uint64_t &var, uint64_t mask);
     void invlpg(uint64_t addr);
 
     void hwinit();

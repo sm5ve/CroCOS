@@ -312,9 +312,106 @@ namespace kernel::amd64::PageTableManager{
         }
     }
 
-    uint64_t partiallyAllocatedLinkedListHeadIndex;
-    uint64_t unpopulatedHead;
-    hal::spinlock_t directoryLinkedListLock;
+    uint16_t unpopulatedHead;
+
+    uint16_t partiallyOccupiedRingBuffer[ENTRIES_PER_TABLE];
+    volatile uint16_t poQueueWriteHead;
+    volatile uint16_t poQueueWrittenLimit;
+    volatile uint16_t poQueueReadHead;
+    uint64_t fullMarkers[ENTRIES_PER_TABLE / sizeof(uint64_t)];
+    uint64_t partiallyOccupiedMarkers[ENTRIES_PER_TABLE / sizeof(uint64_t)];
+
+    bool markFullState(uint16_t index, bool full){
+        auto i = index / sizeof(uint64_t);
+        uint64_t mask = (1 << (index % sizeof(uint64_t)));
+        bool didSwap;
+        do {
+            auto oldValue = fullMarkers[i];
+            // Check if the bit already has the desired state
+            if (full == ((oldValue & mask) != 0)) {
+                return false;  // No change needed
+            }
+            // Set or clear the bit based on 'full'
+            auto newValue = full ? (oldValue | mask) : (oldValue & ~mask);
+            didSwap = atomic_cmpxchg_u64(fullMarkers[i], oldValue, newValue);
+        } while (!didSwap);
+        return true;
+    }
+
+    bool markPartiallyOccupiedState(uint16_t index, bool partiallyOccupied){
+        auto i = index / sizeof(uint64_t);
+        uint64_t mask = (1 << (index % sizeof(uint64_t)));
+        bool didSwap;
+        do {
+            auto oldValue = partiallyOccupiedMarkers[i];
+            // Check if the bit already has the desired state
+            if (partiallyOccupied == ((oldValue & mask) != 0)) {
+                return false;  // No change needed
+            }
+            // Set or clear the bit based on 'partiallyOccupied'
+            auto newValue = partiallyOccupied ? (oldValue | mask) : (oldValue & ~mask);
+            didSwap = atomic_cmpxchg_u64(partiallyOccupiedMarkers[i], oldValue, newValue);
+        } while (!didSwap);
+        return true;
+    }
+
+    bool getFullState(uint16_t index){
+        auto i = index / sizeof(uint64_t);
+        uint64_t mask = (1 << (index % sizeof(uint64_t)));
+        return (fullMarkers[i] & mask) != 0;
+    }
+
+    void initializePartiallyOccupiedRingBuffer(){
+        memset(partiallyOccupiedRingBuffer, 0, sizeof(partiallyOccupiedRingBuffer));
+        memset(fullMarkers, 0, sizeof(fullMarkers));
+        poQueueWriteHead = 1;
+        poQueueWrittenLimit = 1;
+        poQueueReadHead = 0;
+        unpopulatedHead = 2;
+        partiallyOccupiedRingBuffer[0] = 1; //the first partially occupied page on initialization is in index 1
+        markFullState(0, true); //let's mark the 0th page as full since it's special.
+    }
+
+    void markTableAsFull(PageDirectoryEntry* table){
+        auto index = static_cast<uint16_t>(((uint64_t) table - (uint64_t) pageStructureVirtualBase) /
+                                               mm::PageAllocator::smallPageSize);
+        if(markFullState(index, true)){
+            //If we're the ones to mark the state as full, we're responsible for removing the index from the queue
+            assert(partiallyOccupiedRingBuffer[poQueueReadHead] == index,
+                   "Erroneously marked table as full that is not at front of queue");
+            //Because we were the ones to mark the full state of the page as true, we know we are guaranteed to have
+            //exclusive ownership over the read head.
+            poQueueReadHead = static_cast<uint16_t>((poQueueReadHead + 1) % ENTRIES_PER_TABLE);
+            markPartiallyOccupiedState(index, false);
+        }
+    }
+
+    void markTableAsPartiallyOccupied(PageDirectoryEntry* table){
+        auto index = static_cast<uint16_t>(((uint64_t) table - (uint64_t) pageStructureVirtualBase) /
+                                               mm::PageAllocator::smallPageSize);
+        if(markPartiallyOccupiedState(index, true)){
+            //If we're the ones to mark the state as partially occupied, we're responsible for pushing this to the queue
+            //unlike in the above case, it is expected that we may try to mark many different indices as partially occupied
+            //at the same time, so we have no guarantees over exclusive ownership over the write head
+            bool didAdvanceHead;
+            uint16_t prevWriteHead;
+            do{
+                prevWriteHead = poQueueWriteHead;
+                auto next = static_cast<uint16_t>((prevWriteHead + 1) % ENTRIES_PER_TABLE);
+                didAdvanceHead = atomic_cmpxchg_u16(poQueueWriteHead, prevWriteHead, next);
+            } while(!didAdvanceHead);
+            //write the index to the queue
+            partiallyOccupiedRingBuffer[prevWriteHead] = index;
+            //mark the page as not full, allowing it to be marked as full again in the future
+            markFullState(index, false);
+            mfence();
+            while(true){
+                if(atomic_cmpxchg_u16(poQueueWrittenLimit, prevWriteHead, prevWriteHead + 1)){
+                    break;
+                }
+            };
+        }
+    }
 
     PageDirectoryEntry* getPageTableForIndex(uint64_t index){
         return (PageDirectoryEntry*)((uint64_t)pageStructureVirtualBase + index * mm::PageAllocator::smallPageSize);
@@ -338,51 +435,69 @@ namespace kernel::amd64::PageTableManager{
         return &table[index];
     }
 
-    PageDirectoryEntry* allocateInternalPageTableEntry(){
-        while(true){
-            //If there are no partially allocated pages in the linked list, allocate a new page and map it in
-            auto prevUnpopulatedHead = unpopulatedHead;
-            if(partiallyAllocatedLinkedListHeadIndex == prevUnpopulatedHead){
-                assert(prevUnpopulatedHead < ENTRIES_PER_TABLE, "The page table manager ran out of space");
-                //if we are able to increment the unpopulated head, then we are responsible for allocating a page
-                //and mapping it in to virtual memory
-                if(atomic_cmpxchg_u64(unpopulatedHead, prevUnpopulatedHead, prevUnpopulatedHead + 1)){
-                    //allocate the backing memory
-                    auto physPage = mm::PageAllocator::allocateSmallPage();
-                    //map it into virtual address space as a global page with R/W privileges
-                    pageTableMappingTable[prevUnpopulatedHead] = physPage.value | 3 | (1 << 8);
-                    //now initialize the metadata for the free list
-                    initializeInternalPageTableFreeMetadata(getPageTableForIndex(prevUnpopulatedHead));
-                    //Add in a memory fence, since we're going to use the value of pageMappingDirectory[prevUnpopulatedHead]
-                    //to determine when the page table is ready to use
-                    mfence();
-                    //finally map it as a page table in the page directory
-                    auto next = PageDirectoryEntry(physPage.value | 3);
-                    next.set_local_metadata<LOCAL_OFFSET_INDEX>(pageMappingDirectory[prevUnpopulatedHead].get_local_metadata<LOCAL_OFFSET_INDEX>());
-                    pageMappingDirectory[prevUnpopulatedHead] = next;
+    void freeInternalPageTableEntry(PageDirectoryEntry& entry){
+        assert(entry.present(), "Tried to free non-present entry");
+        auto tableBase = (PageDirectoryEntry*)((uint64_t)&entry & (uint64_t)~((1 << 12) - 1));
+        uint64_t entryIndex = ((uint64_t)&entry - (uint64_t)tableBase) / sizeof(PageDirectoryEntry);
+        bool didFree;
+        do{
+            auto priorHead = tableBase[0];
+            entry = PageDirectoryEntry(0);
+            entry.set_local_metadata<LOCAL_VIRT_ADDR, true>(priorHead.get_local_metadata<LOCAL_OFFSET_INDEX>());
+            auto newHead = priorHead;
+            newHead.set_local_metadata<LOCAL_OFFSET_INDEX>(entryIndex);
+            didFree = atomic_cmpxchg_u64(tableBase[0].value, priorHead.value, newHead.value);
+        } while(!didFree);
+        //Mark the table as partially occupied - if it used to be full, move it to the queue
+        markTableAsPartiallyOccupied(tableBase);
+    }
+
+    void allocateNewPageTableIfNecessary(){
+        auto prevWriteHead = poQueueWriteHead;
+        //check if the queue is empty
+        if(poQueueReadHead == prevWriteHead){
+            auto nextWriteHead = static_cast<uint16_t>((prevWriteHead + 1) % ENTRIES_PER_TABLE);
+            //If we can advance the write head, we're responsible for allocating a new page table and adding it to the queue!
+            if(atomic_cmpxchg_u16(poQueueWriteHead, prevWriteHead, nextWriteHead)){
+                //In particular, only one processor at a time can possibly be running this code
+                auto backingPageAddr = mm::PageAllocator::allocateSmallPage();
+                //Map the table into memory with R/W and as global
+                pageTableMappingTable[unpopulatedHead] = PageDirectoryEntry(backingPageAddr.value | (1 << 8) | 3);
+                //initialize the page table
+                initializeInternalPageTableFreeMetadata(getPageTableForIndex(unpopulatedHead));
+                //put it in the queue
+                partiallyOccupiedRingBuffer[prevWriteHead] = unpopulatedHead;
+                //advance the unpopulated head
+                unpopulatedHead++;
+                //finally advance the written limit
+                mfence();
+                while(true){
+                    if(atomic_cmpxchg_u16(poQueueWrittenLimit, prevWriteHead, nextWriteHead)){
+                        break;
+                    }
                 }
             }
-            //If we happened to make it here while another processor is still populating this entry, wait!
-            while(!pageMappingDirectory[partiallyAllocatedLinkedListHeadIndex].present()){
+        }
+    }
+
+    PageDirectoryEntry* allocateInternalPageTableEntry(){
+        while(true){
+            //if the queue is not empty, try to allocate a page from the table pointed to by the read head
+            auto readHead = poQueueReadHead;
+            if(readHead != poQueueWrittenLimit){
+                if(!getFullState(partiallyOccupiedRingBuffer[readHead])){
+                    auto table = getPageTableForIndex(partiallyOccupiedRingBuffer[readHead]);
+                    auto out = allocateInternalPageTableEntryForTable(table);
+                    if(out != nullptr){
+                        return out;
+                    }
+                    markTableAsFull(table);
+                }
+            }
+            else{
+                allocateNewPageTableIfNecessary();
                 asm volatile("pause");
             }
-            auto priorListHead = partiallyAllocatedLinkedListHeadIndex;
-            auto potentialOut = allocateInternalPageTableEntryForTable(getPageTableForIndex(priorListHead));
-            if(potentialOut != nullptr){
-                return potentialOut;
-            }
-            //if the page table seems to be full, try to remove it from the partially allocated linked list
-            hal::acquire_spinlock(directoryLinkedListLock);
-            //verify no other processor has advanced the linked list head
-            if(priorListHead == partiallyAllocatedLinkedListHeadIndex){
-                //advance the head
-                partiallyAllocatedLinkedListHeadIndex = pageMappingDirectory[priorListHead].get_local_metadata<LOCAL_OFFSET_INDEX>();
-
-                //mark the table as full - this data will be used later when freeing a page table to determine if the
-                //internal page table should be added back to the linked list
-                pageMappingDirectory[priorListHead].set_local_metadata<LOCAL_INTERNAL_TABLE_MARKED_FULL>(true);
-            }
-            hal::release_spinlock(directoryLinkedListLock);
         }
     }
 
@@ -412,8 +527,7 @@ namespace kernel::amd64::PageTableManager{
         initializeInternalPageTableFreeMetadata((PageDirectoryEntry*)pageTableMappingTable);
         initializeInternalPageTableFreeMetadata((PageDirectoryEntry*)pageTable0);
         //Initialize the metadata for the internal page directory - this is done by hand
-        unpopulatedHead = 2;
-        partiallyAllocatedLinkedListHeadIndex = 1;
+        initializePartiallyOccupiedRingBuffer();
         //Allocate the page table entries to map in our two startup page tables and map the page directory 2 MiB into our window
         auto ptmt0 = allocateInternalPageTableEntryForTable((PageDirectoryEntry*)pageTableMappingTable);
         auto ptmt1 = allocateInternalPageTableEntryForTable((PageDirectoryEntry*)pageTableMappingTable);
@@ -438,5 +552,11 @@ namespace kernel::amd64::PageTableManager{
 
         //Now that the directory's mapped in where we expect it to be, initialize the metadata!
         initializeInternalPageDirectoryFreeMetadata(pageMappingDirectory);
+
+        kernel::DbgOut << "allocating page table entry at " << allocateInternalPageTableEntry() << "\n";
+        for(auto i = 0; i < 3000; i++){
+            allocateInternalPageTableEntry();
+        }
+        kernel::DbgOut << "allocating page table entry at " << allocateInternalPageTableEntry() << "\n";
     }
 }
