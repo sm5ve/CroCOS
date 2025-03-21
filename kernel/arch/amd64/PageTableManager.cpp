@@ -82,6 +82,11 @@ namespace kernel::amd64::PageTableManager{
             return value & 1;
         }
 
+        void setAndPreserveMetadata(PageDirectoryEntry entry){
+            uint64_t mask = (0xfl << 8) | (0x7ffl << 52);
+            this -> value = (this -> value & mask) | (entry.value & ~mask);
+        }
+
         template <size_t bitIndex, size_t length, size_t startEntry>
         [[nodiscard]]
         static uint64_t get_global_metadata(const PageDirectoryEntry* table) {
@@ -364,12 +369,14 @@ namespace kernel::amd64::PageTableManager{
     void initializePartiallyOccupiedRingBuffer(){
         memset(partiallyOccupiedRingBuffer, 0, sizeof(partiallyOccupiedRingBuffer));
         memset(fullMarkers, 0, sizeof(fullMarkers));
+        memset(partiallyOccupiedMarkers, 0xff, sizeof(fullMarkers));
         poQueueWriteHead = 1;
         poQueueWrittenLimit = 1;
         poQueueReadHead = 0;
         unpopulatedHead = 2;
         partiallyOccupiedRingBuffer[0] = 1; //the first partially occupied page on initialization is in index 1
         markFullState(0, true); //let's mark the 0th page as full since it's special.
+        markPartiallyOccupiedState(0, false); //let's mark the 0th page as not partially occupied since it's special.
     }
 
     void markTableAsFull(PageDirectoryEntry* table){
@@ -418,6 +425,7 @@ namespace kernel::amd64::PageTableManager{
     }
 
     PageDirectoryEntry* allocateInternalPageTableEntryForTable(PageDirectoryEntry* table){
+        assert(((uint64_t)table & ((1ul << 12) - 1)) == 0, "page table not aligned");
         bool didAllocate;
         uint64_t index;
         do{
@@ -432,11 +440,12 @@ namespace kernel::amd64::PageTableManager{
             newEntry.set_local_metadata<LOCAL_OFFSET_INDEX>(nextIndex);
             didAllocate = atomic_cmpxchg_u64(table[0].value, prevEntry.value, newEntry.value);
         } while(!didAllocate);
+        assert(!table[index].present(), "Tried to allocate a page table entry that was already present");
         return &table[index];
     }
 
     void freeInternalPageTableEntry(PageDirectoryEntry& entry){
-        assert(entry.present(), "Tried to free non-present entry");
+        //assert(entry.present(), "Tried to free non-present entry");
         auto tableBase = (PageDirectoryEntry*)((uint64_t)&entry & (uint64_t)~((1 << 12) - 1));
         uint64_t entryIndex = ((uint64_t)&entry - (uint64_t)tableBase) / sizeof(PageDirectoryEntry);
         bool didFree;
@@ -485,17 +494,22 @@ namespace kernel::amd64::PageTableManager{
             //if the queue is not empty, try to allocate a page from the table pointed to by the read head
             auto readHead = poQueueReadHead;
             if(readHead != poQueueWrittenLimit){
+                //double-check that the entry is not marked as full
                 if(!getFullState(partiallyOccupiedRingBuffer[readHead])){
+                    //try to allocate an entry
                     auto table = getPageTableForIndex(partiallyOccupiedRingBuffer[readHead]);
                     auto out = allocateInternalPageTableEntryForTable(table);
                     if(out != nullptr){
                         return out;
                     }
+                    //if the allocation failed, mark the table as full
                     markTableAsFull(table);
                 }
             }
             else{
+                //if the queue is empty (or there are writes to the queue still pending) allocate a new page table
                 allocateNewPageTableIfNecessary();
+                //this is a tight loop, so this should help on hyperthreaded cpus
                 asm volatile("pause");
             }
         }
@@ -526,6 +540,7 @@ namespace kernel::amd64::PageTableManager{
         //Initialize the free list metadata
         initializeInternalPageTableFreeMetadata((PageDirectoryEntry*)pageTableMappingTable);
         initializeInternalPageTableFreeMetadata((PageDirectoryEntry*)pageTable0);
+
         //Initialize the metadata for the internal page directory - this is done by hand
         initializePartiallyOccupiedRingBuffer();
         //Allocate the page table entries to map in our two startup page tables and map the page directory 2 MiB into our window
@@ -534,9 +549,9 @@ namespace kernel::amd64::PageTableManager{
         auto pdirEntry = allocateInternalPageTableEntryForTable((PageDirectoryEntry*)pageTable0);
 
         //Populate the entries by hand
-        *ptmt0 = PageDirectoryEntry(amd64::early_boot_virt_to_phys(mm::virt_addr(pageTableMappingTable)).value | 3 | (1 << 8));
-        *ptmt1 = PageDirectoryEntry(amd64::early_boot_virt_to_phys(mm::virt_addr(pageTable0)).value | 3 | (1 << 8));
-        *pdirEntry = PageDirectoryEntry(amd64::early_boot_virt_to_phys(mm::virt_addr(bootstrapPageDir)).value | 3 | (1 << 8));
+        ptmt0 -> setAndPreserveMetadata(PageDirectoryEntry(amd64::early_boot_virt_to_phys(mm::virt_addr(pageTableMappingTable)).value | 3 | (1 << 8)));
+        ptmt1 -> setAndPreserveMetadata(PageDirectoryEntry(amd64::early_boot_virt_to_phys(mm::virt_addr(pageTable0)).value | 3 | (1 << 8)));
+        pdirEntry -> setAndPreserveMetadata(PageDirectoryEntry(amd64::early_boot_virt_to_phys(mm::virt_addr(bootstrapPageDir)).value | 3 | (1 << 8)));
 
         //Set up the initial state of the page directory - pageTableMappingTable goes in the bottom, and pageTable0 goes next, and serves
         //as our first general purpose internal page table
@@ -550,13 +565,21 @@ namespace kernel::amd64::PageTableManager{
         //install the page directory
         boot_page_directory_pointer_table[509] = amd64::early_boot_virt_to_phys(mm::virt_addr(bootstrapPageDir)).value | 3;
 
+
+
         //Now that the directory's mapped in where we expect it to be, initialize the metadata!
         initializeInternalPageDirectoryFreeMetadata(pageMappingDirectory);
 
         kernel::DbgOut << "allocating page table entry at " << allocateInternalPageTableEntry() << "\n";
+        PageDirectoryEntry* entries[3000];
         for(auto i = 0; i < 3000; i++){
-            allocateInternalPageTableEntry();
+            entries[i] = allocateInternalPageTableEntry();
+        }
+        for(auto i = 0; i < 3000; i++){
+            freeInternalPageTableEntry(*entries[i]);
         }
         kernel::DbgOut << "allocating page table entry at " << allocateInternalPageTableEntry() << "\n";
+        kernel::DbgOut << "poQueueReadHead is " << poQueueReadHead << "\n";
+        kernel::DbgOut << "poQueueWrittenLimit is " << poQueueWrittenLimit << "\n";
     }
 }
