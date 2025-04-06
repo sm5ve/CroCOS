@@ -21,8 +21,9 @@
 #define ENTRIES_PER_TABLE 512
 
 extern uint64_t bootstrapPageDir[ENTRIES_PER_TABLE];
-alignas(4096) uint64_t pageTableMappingTable[ENTRIES_PER_TABLE];
-alignas(4096) uint64_t pageTable0[ENTRIES_PER_TABLE];
+alignas(4096) uint64_t internalPageTableMapping[ENTRIES_PER_TABLE];
+alignas(4096) uint64_t internalTableMetadataMapping[ENTRIES_PER_TABLE];
+alignas(4096) uint64_t initialInternalPageTable[ENTRIES_PER_TABLE];
 extern volatile uint64_t boot_pml4[ENTRIES_PER_TABLE];
 extern volatile uint64_t boot_page_directory_pointer_table[ENTRIES_PER_TABLE];
 
@@ -40,6 +41,7 @@ namespace kernel::amd64::PageTableManager{
 
     PageDirectoryEntry* pageMappingDirectory;
     PageDirectoryEntry* pageStructureVirtualBase;
+    uint64_t* pageTableGlobalMetadataBase;
 
     // PageDirectoryEntry is a trivial wrapper around uint64_t.
     struct alignas(8) PageDirectoryEntry {
@@ -87,7 +89,8 @@ namespace kernel::amd64::PageTableManager{
 
         template <size_t bitIndex, size_t length, size_t startEntry>
         [[nodiscard]]
-        static uint64_t get_global_metadata(const PageDirectoryEntry* table) {
+        static uint64_t get_inline_global_metadata(const PageDirectoryEntry* table) {
+            assert((uint64_t)table % mm::PageAllocator::smallPageSize == 0, "Page table improperly aligned");
             //global metadata should support both big page entries and entries mapping to page tables, hence the
             //more restrictive assert.
             static_assert((bitIndex >= 9 && bitIndex <= 11) || (bitIndex >= 52 && bitIndex <= 58),
@@ -100,7 +103,8 @@ namespace kernel::amd64::PageTableManager{
         }
 
         template <size_t bitIndex, size_t length, size_t startEntry>
-        static void set_global_metadata(PageDirectoryEntry* table, uint64_t value) {
+        static void set_inline_global_metadata(PageDirectoryEntry* table, uint64_t value) {
+            assert((uint64_t)table % mm::PageAllocator::smallPageSize == 0, "Page table improperly aligned");
             static_assert((bitIndex >= 9 && bitIndex <= 11) || (bitIndex >= 52 && bitIndex <= 58),
                           "Metadata out of bounds");
             const uint64_t mask = (1ul << bitIndex);
@@ -108,6 +112,12 @@ namespace kernel::amd64::PageTableManager{
                 const uint64_t bit = (value >> (length - i - 1)) & 1;
                 table[i + startEntry] = PageDirectoryEntry((table[i + startEntry] & ~mask) | (bit << bitIndex));
             }
+        }
+
+        static uint64_t& fast_global_metadata(PageDirectoryEntry* table){
+            assert((uint64_t)table % mm::PageAllocator::smallPageSize == 0, "Page table improperly aligned");
+            auto absolutePageIndex = ((uint64_t)table - (uint64_t)pageStructureVirtualBase) / mm::PageAllocator::smallPageSize;
+            return pageTableGlobalMetadataBase[absolutePageIndex];
         }
 
         static void acquire_table_lock(PageDirectoryEntry* table){
@@ -384,7 +394,7 @@ namespace kernel::amd64::PageTableManager{
         poQueueWriteHead = 1;
         poQueueWrittenLimit = 1;
         poQueueReadHead = 0;
-        unpopulatedHead = 2;
+        unpopulatedHead = 3;
         partiallyOccupiedRingBuffer[0] = 1; //the first partially occupied page on initialization is in index 1
         markFullState(0, true); //let's mark the 0th page as full since it's special.
         markPartiallyOccupiedState(0, false); //let's mark the 0th page as not partially occupied since it's special.
@@ -475,18 +485,26 @@ namespace kernel::amd64::PageTableManager{
         auto prevWriteHead = poQueueWriteHead;
         //check if the queue is empty
         if(poQueueReadHead == prevWriteHead){
-            //TODO try to steal a table from the overflow pool
             auto nextWriteHead = static_cast<uint16_t>((prevWriteHead + 1) % ENTRIES_PER_TABLE);
             //If we can advance the write head, we're responsible for allocating a new page table and adding it to the queue!
             if(atomic_cmpxchg_u16(poQueueWriteHead, prevWriteHead, nextWriteHead)){
+                //TODO for the fast global metadata, I will have to allocate and map in a second page here...
                 //In particular, only one processor at a time can possibly be running this code
                 auto backingPageAddr = mm::PageAllocator::allocateSmallPage();
                 //Map the table into memory with R/W and as global
-                pageTableMappingTable[unpopulatedHead] = PageDirectoryEntry(backingPageAddr.value | (1 << 8) | 3);
+                internalPageTableMapping[unpopulatedHead] = PageDirectoryEntry(backingPageAddr.value | (1 << 8) | 3);
+                //Map in a new global metadata page
+                auto metadataPageAddr = mm::PageAllocator::allocateSmallPage();
+                internalTableMetadataMapping[unpopulatedHead] = PageDirectoryEntry(metadataPageAddr.value | (1 << 8) | 3);
+                //clear the page table and its metadata
+                memset((void*)((uint64_t)pageStructureVirtualBase + unpopulatedHead * mm::PageAllocator::smallPageSize), 0, mm::PageAllocator::smallPageSize);
+                memset((void*)((uint64_t)pageTableGlobalMetadataBase + unpopulatedHead * mm::PageAllocator::smallPageSize), 0, mm::PageAllocator::smallPageSize);
                 //initialize the page table
                 initializeInternalPageTableFreeMetadata(getPageTableForIndex(unpopulatedHead));
                 //put it in the queue
                 partiallyOccupiedRingBuffer[prevWriteHead] = unpopulatedHead;
+                //install the page table in the internal page directory
+                pageMappingDirectory[unpopulatedHead] = PageDirectoryEntry(backingPageAddr.value | (1 << 8) | 3);
                 //advance the unpopulated head
                 unpopulatedHead++;
                 //finally advance the written limit
@@ -526,6 +544,21 @@ namespace kernel::amd64::PageTableManager{
         }
     }
 
+    void runSillyTest(){
+        kernel::DbgOut << "allocating page table entry at " << allocateInternalPageTableEntry() << "\n";
+        PageDirectoryEntry* entries[3000];
+        for(auto i = 0; i < 3000; i++){
+            entries[i] = allocateInternalPageTableEntry();
+        }
+        for(auto i = 0; i < 3000; i++){
+            allocateInternalPageTableEntry();
+            freeInternalPageTableEntry(*entries[i]);
+        }
+        kernel::DbgOut << "allocating page table entry at " << allocateInternalPageTableEntry() << "\n";
+        kernel::DbgOut << "poQueueReadHead is " << poQueueReadHead << "\n";
+        kernel::DbgOut << "poQueueWrittenLimit is " << poQueueWrittenLimit << "\n";
+    }
+
     void init(size_t processorCount){
         auto index = 0;
         meaningfulBitmapPages = divideAndRoundUp(processorCount, sizeof(uint64_t));
@@ -546,37 +579,51 @@ namespace kernel::amd64::PageTableManager{
         //structures by hand. In particular, we are setting aside the 1 GiB span of virtual address space at -3 GiB
         //for the page table manager to map in page tables that are in use.
         memset(bootstrapPageDir, 0, sizeof(bootstrapPageDir));
-        memset(pageTableMappingTable, 0, sizeof(pageTableMappingTable));
-        memset(pageTable0, 0, sizeof(pageTable0));
+        memset(internalPageTableMapping, 0, sizeof(internalPageTableMapping));
+        memset(internalTableMetadataMapping, 0, sizeof(internalTableMetadataMapping));
+        memset(initialInternalPageTable, 0, sizeof(initialInternalPageTable));
         //Initialize the free list metadata
-        initializeInternalPageTableFreeMetadata((PageDirectoryEntry*)pageTableMappingTable);
-        initializeInternalPageTableFreeMetadata((PageDirectoryEntry*)pageTable0);
+        initializeInternalPageTableFreeMetadata((PageDirectoryEntry*)internalPageTableMapping);
+        initializeInternalPageTableFreeMetadata((PageDirectoryEntry*)initialInternalPageTable);
 
         //Initialize the metadata for the internal page directory - this is done by hand
         initializePartiallyOccupiedRingBuffer();
         //Allocate the page table entries to map in our two startup page tables and map the page directory 2 MiB into our window
-        auto ptmt0 = allocateInternalPageTableEntryForTable((PageDirectoryEntry*)pageTableMappingTable);
-        auto ptmt1 = allocateInternalPageTableEntryForTable((PageDirectoryEntry*)pageTableMappingTable);
-        auto pdirEntry = allocateInternalPageTableEntryForTable((PageDirectoryEntry*)pageTable0);
+        auto entryInMappingPT_for_PTMap= allocateInternalPageTableEntryForTable((PageDirectoryEntry*)internalPageTableMapping);
+        auto entryInMappingPT_for_PTMetadataMap= allocateInternalPageTableEntryForTable((PageDirectoryEntry*)internalPageTableMapping);
+        auto entryInMappingPT_for_initialPT= allocateInternalPageTableEntryForTable((PageDirectoryEntry*)internalPageTableMapping);
+        auto entryInInitialPT_for_PDir = allocateInternalPageTableEntryForTable((PageDirectoryEntry*)initialInternalPageTable);
 
         //Populate the entries by hand
-        ptmt0 -> setAndPreserveMetadata(PageDirectoryEntry(amd64::early_boot_virt_to_phys(mm::virt_addr(pageTableMappingTable)).value | 3 | (1 << 8)));
-        ptmt1 -> setAndPreserveMetadata(PageDirectoryEntry(amd64::early_boot_virt_to_phys(mm::virt_addr(pageTable0)).value | 3 | (1 << 8)));
-        pdirEntry -> setAndPreserveMetadata(PageDirectoryEntry(amd64::early_boot_virt_to_phys(mm::virt_addr(bootstrapPageDir)).value | 3 | (1 << 8)));
+        entryInMappingPT_for_PTMap -> setAndPreserveMetadata(PageDirectoryEntry(amd64::early_boot_virt_to_phys(mm::virt_addr(internalPageTableMapping)).value | 3 | (1 << 8)));
+        entryInMappingPT_for_PTMetadataMap -> setAndPreserveMetadata(PageDirectoryEntry(amd64::early_boot_virt_to_phys(mm::virt_addr(internalPageTableMapping)).value | 3 | (1 << 8)));
+        entryInMappingPT_for_initialPT -> setAndPreserveMetadata(PageDirectoryEntry(amd64::early_boot_virt_to_phys(mm::virt_addr(initialInternalPageTable)).value | 3 | (1 << 8)));
+        entryInInitialPT_for_PDir -> setAndPreserveMetadata(PageDirectoryEntry(amd64::early_boot_virt_to_phys(mm::virt_addr(bootstrapPageDir)).value | 3 | (1 << 8)));
 
-        //Set up the initial state of the page directory - pageTableMappingTable goes in the bottom, and pageTable0 goes next, and serves
-        //as our first general purpose internal page table
-        bootstrapPageDir[0] = amd64::early_boot_virt_to_phys(mm::virt_addr(pageTableMappingTable)).value | 3;
-        bootstrapPageDir[1] = amd64::early_boot_virt_to_phys(mm::virt_addr(pageTable0)).value | 3;
+        //Set up the initial state of the page directory - internalPageTableMapping goes in the bottom, then the metadata mapping,
+        //and finally initialInternalPageTable which maps in the page directory and acts as our first general purpose internal page table
+        bootstrapPageDir[0] = amd64::early_boot_virt_to_phys(mm::virt_addr(internalPageTableMapping)).value | 3;
+        bootstrapPageDir[1] = amd64::early_boot_virt_to_phys(mm::virt_addr(internalTableMetadataMapping)).value | 3;
+        bootstrapPageDir[2] = amd64::early_boot_virt_to_phys(mm::virt_addr(initialInternalPageTable)).value | 3;
+
+        //Set up our initial metadata page
+        for(auto i = 0; i < 3; i++){
+            internalTableMetadataMapping[i] = PageDirectoryEntry(mm::PageAllocator::allocateSmallPage().value | 3 | (1 << 8));
+        }
 
         //set up our pointers
         pageStructureVirtualBase = reinterpret_cast<PageDirectoryEntry *>(-3ul << 30); //-3 GiB
-        pageMappingDirectory = (PageDirectoryEntry*)((uint64_t)pageStructureVirtualBase + (1ul << 21));
+        pageTableGlobalMetadataBase = reinterpret_cast<uint64_t *>((uint64_t)pageStructureVirtualBase + (1ul << 21));
+        pageMappingDirectory = (PageDirectoryEntry*)((uint64_t)pageTableGlobalMetadataBase + (1ul << 21));
 
         //install the page directory
         boot_page_directory_pointer_table[509] = amd64::early_boot_virt_to_phys(mm::virt_addr(bootstrapPageDir)).value | 3;
 
         //Now that the directory's mapped in where we expect it to be, initialize the metadata!
         initializeInternalPageDirectoryFreeMetadata(pageMappingDirectory);
+        memset(pageTableGlobalMetadataBase, 0, mm::PageAllocator::smallPageSize * 3);
+        //ensureReservePoolNotEmpty();
+
+        runSillyTest();
     }
 }

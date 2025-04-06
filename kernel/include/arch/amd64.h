@@ -204,6 +204,8 @@ namespace kernel::amd64 {
         //Runs processor-local cleanup on the overflow pool. May perform page flushes, so this is not necessarily
         //a cheap operation
         void processOverflowPool();
+        //Preallocate some page tables if necessary - potentially expensive operation.
+        void ensureReservePoolNotEmpty();
     }
 }
 
