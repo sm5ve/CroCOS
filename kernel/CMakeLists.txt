@@ -15,7 +15,8 @@ set(KERNEL_SRC
         lib/PrintStream.cpp include/lib/PrintStream.h include/lib/TypeTraits.h include/lib/str.h lib/str.cpp arch/hal/hal.cpp include/arch/hal.h include/kernel.h mm/BumpAllocator.cpp lib/panic.cpp mm/kmalloc.cpp mm/allocators.h include/acpi.h include/mm.h acpi/ACPIFixedTables.cpp include/lib/ds/Vector.h include/assert.h include/panic.h include/utility.h include/lib/ds/SmartPointer.h mm/MemoryManager.cpp include/lib/math.h arch/amd64/memops.cpp
         include/arch/spinlock.h
         arch/amd64/PageTableManager.cpp
-        arch/amd64/PageTableManager.h)
+        include/FlushPlanner.h
+)
 
 add_executable(Kernel ${KERNEL_SRC})
 target_link_options(Kernel PUBLIC -ffreestanding -mcmodel=kernel -nostdlib -T ${CMAKE_SOURCE_DIR}/kernel/linker.ld)

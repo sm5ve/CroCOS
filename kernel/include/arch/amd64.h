@@ -9,6 +9,8 @@
 #include <arch/spinlock.h>
 #include <kconfig.h>
 #include <kernel.h>
+#include <lib/ds/Vector.h>
+#include <FlushPlanner.h>
 
 namespace kernel::amd64 {
     //Derived from https://wiki.osdev.org/CPUID, or tables 3-19 and 3-20 in volume 2 of the Intel manual.
@@ -122,6 +124,86 @@ namespace kernel::amd64 {
 
     inline constexpr mm::phys_addr early_boot_virt_to_phys(mm::virt_addr x){
         return mm::phys_addr(x.value - VMEM_OFFSET);
+    }
+
+    namespace PageTableManager{
+        struct CompositeHandle{
+            uint64_t value;
+        };
+
+        struct PartialHandle{
+            uint64_t value;
+        };
+
+        const uint64_t partialPageStructureAlignment = (1ul << 39);
+        const uint32_t pcidMax = (1 << 12);
+
+        void init(size_t processorCount);
+
+        PartialHandle makePartialPageStructure(mm::virt_addr base, size_t size);
+        CompositeHandle makeCompositePageStructure(uint32_t pcid);
+        void destroyPartialPageStructure(PartialHandle);
+        void destroyCompositePageStructure(CompositeHandle);
+
+        [[nodiscard]]
+        mm::phys_addr resolveVirtualAddress(PartialHandle, mm::virt_addr);
+        [[nodiscard]]
+        mm::phys_addr resolveVirtualAddress(CompositeHandle, mm::virt_addr);
+
+        //Only VirtualAddressZones should be modifying their mappings, so we only expose methods to modify mappings
+        //using the PartialHandle
+        void mapAddress(PartialHandle, mm::phys_addr, mm::virt_addr, mm::PageSize,
+                        mm::PageMappingPermissions permissions,
+                        mm::PageMappingCacheType cacheType = mm::PageMappingCacheType::FULLY_CACHED);
+        void unmapAddress(PartialHandle, mm::virt_addr);
+
+        //Only supports mapping pages of the same size. For mixed-size mappings, call this function multiple times
+        //on the relevant subsets. In particular, the 0th entry in the vector will be mapped at the base address,
+        //then the 1st at (base address + page size), and so on
+        void mapAddresses(PartialHandle, Vector<mm::phys_addr>&, mm::virt_addr base, mm::PageSize,
+                          mm::PageMappingPermissions permissions,
+                          mm::PageMappingCacheType cacheType = mm::PageMappingCacheType::FULLY_CACHED);
+        void unmapAddresses(PartialHandle handle, mm::virt_addr base, size_t rangeSize);
+
+        void addStructureToComposite(CompositeHandle, PartialHandle);
+        void removeStructureFromComposite(CompositeHandle, PartialHandle);
+
+        bool isPagePresent(PartialHandle handle, mm::virt_addr addr);
+        bool isPagePresent(CompositeHandle handle, mm::virt_addr addr);
+        bool wasPageAccessed(PartialHandle handle, mm::virt_addr addr);
+        bool wasPageAccessed(CompositeHandle handle, mm::virt_addr addr);
+        mm::PageSize getPageSize(PartialHandle handle, mm::virt_addr addr);
+        mm::PageSize getPageSize(CompositeHandle handle, mm::virt_addr addr);
+        mm::PageMappingPermissions getPagePermissions(PartialHandle handle, mm::virt_addr addr);
+        mm::PageMappingPermissions getPagePermissions(CompositeHandle handle, mm::virt_addr addr);
+        mm::PageMappingCacheType getPageCachingPolicy(PartialHandle handle, mm::virt_addr addr);
+        mm::PageMappingCacheType getPageCachingPolicy(CompositeHandle handle, mm::virt_addr addr);
+
+        //Only VirtualAddressZones should be modifying their mappings, so we only expose methods to modify mappings
+        //using the PartialHandle
+        void resetAccessFlag(PartialHandle handle, mm::virt_addr addr);
+        void setAccessFlag(PartialHandle handle, mm::virt_addr addr);
+        void setPagePermissions(PartialHandle handle, mm::virt_addr addr, mm::PageMappingPermissions);
+        void setPageCachingPolicy(PartialHandle handle, mm::virt_addr addr, mm::PageMappingCacheType);
+        void setPagePermissions(PartialHandle handle, mm::virt_addr base, size_t rangeSize, mm::PageMappingPermissions);
+        void setPageCachingPolicy(PartialHandle handle, mm::virt_addr base, size_t rangeSize, mm::PageMappingCacheType);
+
+        //Installs the page structure in the current running processor
+        void installPageStructure(CompositeHandle handle);
+        CompositeHandle getCurrentPageStructure();
+
+        //Changes the flush planner for the current running processor only
+        void pushFlushPlanner(mm::FlushPlanner& planner);
+        void popFlushPlanner();
+
+        //Exposing various ways of flushing the TLB with differing degrees of granularity
+        void invltlb(bool flushGlobalTlb);
+        void invlpg(mm::virt_addr addr);
+        void invlpcid(uint32_t pcid);
+
+        //Runs processor-local cleanup on the overflow pool. May perform page flushes, so this is not necessarily
+        //a cheap operation
+        void processOverflowPool();
     }
 }
 

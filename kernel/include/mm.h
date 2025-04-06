@@ -32,11 +32,6 @@ namespace kernel::mm{
         size_t getSize();
     };
 
-    enum PageSize{
-        BIG,
-        SMALL
-    };
-
     namespace PageAllocator{
 #ifdef __x86_64__
         constexpr size_t smallPageSize = 0x1000; //4KiB
@@ -64,6 +59,7 @@ namespace kernel::mm{
         void freeSmallPage(phys_addr);
         void freeBigPage(phys_addr);
         bool allocatePages(size_t requestedCapacityInBytes, Vector<phys_addr>& smallPages, Vector<phys_addr>& bigPages);
+        void freePages(Vector<phys_addr>& smallPages, Vector<phys_addr>& bigPages);
         void freeLocalPages(Vector<phys_addr>& smallPages, Vector<phys_addr>& bigPages);
     }
 
@@ -79,23 +75,10 @@ namespace kernel::mm{
             WRITE_FAULT
         };
 
-        enum RegionPermissions : uint8_t {
-            READ  = 1 << 0,
-            WRITE = 1 << 1,
-            EXEC  = 1 << 2
-        };
-
-        enum CacheType {
-            CACHED,
-            UNCACHED,
-            WRITE_THROUGH,
-            WRITE_COMBINE
-        };
-
         class BackingRegion {
         protected:
             char *name;
-            CacheType cacheType;
+            PageMappingCacheType cacheType;
         public:
             const char *getName();
 
@@ -105,7 +88,7 @@ namespace kernel::mm{
             [[nodiscard]]
             virtual PageFaultHandleResult handlePageFault(virt_addr faulting_addr, virt_addr faulting_ip, PageFaultType) const = 0;
             virtual ~BackingRegion() = default;
-            virtual CacheType getCacheType();
+            virtual PageMappingCacheType getCacheType();
         };
 
         class PhysicalBackingRegion : public BackingRegion {
@@ -151,11 +134,11 @@ namespace kernel::mm{
             BackingRegion &backingRegion;
             char *name;
             virt_addr base;
-            RegionPermissions permissions;
+            PageMappingPermissions permissions;
 
             friend VirtualAddressZone;
         public:
-            RegionMapping(BackingRegion &, RegionPermissions, char *name = (char *) "");
+            RegionMapping(BackingRegion &, PageMappingPermissions, char *name = (char *) "");
 
             [[nodiscard]]
             const char *getName();

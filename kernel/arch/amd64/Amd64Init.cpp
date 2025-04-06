@@ -11,7 +11,6 @@
 #include <lib/math.h>
 #include <assert.h>
 #include "multiboot.h"
-#include "PageTableManager.h"
 
 extern uint32_t mboot_magic;
 extern uint32_t mboot_table;
@@ -297,6 +296,7 @@ namespace kernel::amd64{
         //Find the memory range where the kernel resides and reserve it so we don't overwrite anything!
         mm::phys_memory_range range{.start=mm::phys_addr(nullptr), .end=mm::phys_addr(&phys_end)};
         kernel::mm::PageAllocator::reservePhysicalRange(range);
+
         kernel::amd64::PageTableManager::init(processorCount);
     }
 }

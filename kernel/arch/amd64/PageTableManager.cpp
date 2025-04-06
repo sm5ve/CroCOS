@@ -2,7 +2,6 @@
 // Created by Spencer Martin on 3/9/25.
 //
 
-#include "PageTableManager.h"
 #include "kernel.h"
 #include <arch/hal.h>
 #include <arch/amd64.h>
@@ -31,10 +30,9 @@ extern volatile uint64_t boot_page_directory_pointer_table[ENTRIES_PER_TABLE];
 #define TABLE_LOCK_OFFSET 0
 #define TABLE_HAS_SUPPLEMENTARY_TABLE GLOBAL_INFO_BIT, 1, 1
 #define TABLE_ALLOCATED_COUNT GLOBAL_INFO_BIT, 10, 2
-#define TABLE_SUPPLEMENT_OFFSET GLOBAL_INFO_BIT, 20, 12
+#define TABLE_SUPPLEMENT_INDEX GLOBAL_INFO_BIT, 20, 12
 #define LOCAL_OFFSET_INDEX 52, 61
 #define LOCAL_VIRT_ADDR 12, 31
-#define LOCAL_INTERNAL_TABLE_MARKED_FULL 10, 10
 
 namespace kernel::amd64::PageTableManager{
 
@@ -169,9 +167,13 @@ namespace kernel::amd64::PageTableManager{
     volatile uint64_t freeOverflowWriteHead = 0;
     volatile uint64_t freeOverflowReadHead = 0;
 
+    void freeInternalPageTableEntry(PageDirectoryEntry& entry);
+
     void markPageTableVaddrFree(mm::virt_addr vaddr){
-        (void)vaddr;
-        //TODO implement
+        uint64_t index = (vaddr.value - (uint64_t) pageStructureVirtualBase) / mm::PageAllocator::smallPageSize;
+        auto entry = reinterpret_cast<PageDirectoryEntry*>((uint64_t)pageStructureVirtualBase
+                + index * sizeof(PageDirectoryEntry));
+        freeInternalPageTableEntry(*entry);
     }
 
     bool addPageToReservePool(PageInfo& page){
@@ -188,7 +190,11 @@ namespace kernel::amd64::PageTableManager{
             incrementedWriteHead = kernel::amd64::atomic_cmpxchg_u64(reservePoolWriteHead, prevValue, nextValue);
         } while(!incrementedWriteHead);
         ReservePoolEntry& m = reservePool[prevValue];
-        assert(!m.populated, "Reserve pool ring buffer state is insane!");
+        //if it happens that the read head was incremented but the entry is still populated, try spinning to wait
+        //for the other processor to finish copying the info from the entry
+        while(m.populated){
+            asm volatile ("pause");
+        }
         m.pageInfo = page;
         kernel::amd64::mfence();
         m.populated = true;
@@ -209,8 +215,12 @@ namespace kernel::amd64::PageTableManager{
             incrementedReadHead = kernel::amd64::atomic_cmpxchg_u64(reservePoolReadHead, prevValue, nextValue);
         } while(!incrementedReadHead);
         ReservePoolEntry& m = reservePool[prevValue];
-        assert(!m.populated, "Reserve pool ring buffer state is insane!");
-        m.pageInfo = page;
+        //if it happens that the write head was incremented but the entry is still populated, try spinning to wait
+        //for the other processor to finish copying the info to the entry
+        while(!m.populated){
+            asm volatile ("pause");
+        }
+        page = m.pageInfo;
         kernel::amd64::mfence();
         m.populated = false;
         return true;
@@ -230,6 +240,8 @@ namespace kernel::amd64::PageTableManager{
             incrementedWriteHead = kernel::amd64::atomic_cmpxchg_u64(freeOverflowWriteHead, prevValue, nextValue);
         } while(!incrementedWriteHead);
         OverflowPoolEntry& m = freeOverflowPool[prevValue];
+        //readyToProcess should be set to false before the read head is advanced, so we don't need to spin here and
+        //this assert is valid
         assert(!m.readyToProcess, "Free overflow ring buffer state is insane!");
         m.pageInfo = page;
         memcpy(m.toProcessBitmap, toProcessBitmapBlank, sizeof(toProcessBitmapBlank));
@@ -244,12 +256,11 @@ namespace kernel::amd64::PageTableManager{
         auto mask = (1ul << (pid % sizeof(uint64_t)));
         for(auto index = freeOverflowReadHead; index != freeOverflowWriteHead; index = (index + 1) % FREE_OVERFLOW_POOL_SIZE){
             auto& entry = freeOverflowPool[index];
-            if(!entry.readyToProcess)
+            while(!entry.readyToProcess){
                 //So... I could try to continue, but that makes the logic for advancing the read head a lot more complicated
-                //Thus, for the sake of simplicity, I will break. I cannot imagine a situation where one processor is in the
-                //midst of writing a single entry to the ring buffer while the buffer is filled with a large number of
-                //other entries
-                break;
+                //Thus, for the sake of simplicity, I will spin.
+                asm volatile ("pause");
+            }
             if(!(entry.toProcessBitmap[processorInd] & mask))
                 continue;
             //If we haven't processed this entry in the freeOverflowPool yet, flush the TLB entry for the corresponding page!
@@ -445,7 +456,6 @@ namespace kernel::amd64::PageTableManager{
     }
 
     void freeInternalPageTableEntry(PageDirectoryEntry& entry){
-        //assert(entry.present(), "Tried to free non-present entry");
         auto tableBase = (PageDirectoryEntry*)((uint64_t)&entry & (uint64_t)~((1 << 12) - 1));
         uint64_t entryIndex = ((uint64_t)&entry - (uint64_t)tableBase) / sizeof(PageDirectoryEntry);
         bool didFree;
@@ -465,6 +475,7 @@ namespace kernel::amd64::PageTableManager{
         auto prevWriteHead = poQueueWriteHead;
         //check if the queue is empty
         if(poQueueReadHead == prevWriteHead){
+            //TODO try to steal a table from the overflow pool
             auto nextWriteHead = static_cast<uint16_t>((prevWriteHead + 1) % ENTRIES_PER_TABLE);
             //If we can advance the write head, we're responsible for allocating a new page table and adding it to the queue!
             if(atomic_cmpxchg_u16(poQueueWriteHead, prevWriteHead, nextWriteHead)){
@@ -565,21 +576,7 @@ namespace kernel::amd64::PageTableManager{
         //install the page directory
         boot_page_directory_pointer_table[509] = amd64::early_boot_virt_to_phys(mm::virt_addr(bootstrapPageDir)).value | 3;
 
-
-
         //Now that the directory's mapped in where we expect it to be, initialize the metadata!
         initializeInternalPageDirectoryFreeMetadata(pageMappingDirectory);
-
-        kernel::DbgOut << "allocating page table entry at " << allocateInternalPageTableEntry() << "\n";
-        PageDirectoryEntry* entries[3000];
-        for(auto i = 0; i < 3000; i++){
-            entries[i] = allocateInternalPageTableEntry();
-        }
-        for(auto i = 0; i < 3000; i++){
-            freeInternalPageTableEntry(*entries[i]);
-        }
-        kernel::DbgOut << "allocating page table entry at " << allocateInternalPageTableEntry() << "\n";
-        kernel::DbgOut << "poQueueReadHead is " << poQueueReadHead << "\n";
-        kernel::DbgOut << "poQueueWrittenLimit is " << poQueueWrittenLimit << "\n";
     }
 }
