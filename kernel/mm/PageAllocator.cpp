@@ -149,11 +149,18 @@ namespace kernel::mm::PageAllocator{
         }
 
         inline SmallPoolIndex& smallPageFreeMapBottom(BigPageIndex bi){
+#ifdef ALLOCATOR_DEBUG
+            assert(smallPageFreeOffset(bi) < smallPagesPerBigPage, "Tried to get free map bottom for full big page");
+#endif
             return small_page_free_map[(size_t)bi * smallPagesPerBigPage + smallPageFreeOffset(bi)];
         }
 
         inline SmallPageIndex& smallPagePoolFreeBottom(BigPageIndex bi){
             return smallPageAtIndex(bi, (SmallPoolIndex) smallPageFreeOffset(bi));
+        }
+
+        inline SmallPageIndex& smallPagePoolUsedTop(BigPageIndex bi){
+            return smallPageAtIndex(bi, (SmallPoolIndex) (smallPageFreeOffset(bi) - 1));
         }
 
         inline BigPageIndex& bigPageAtIndex(BigPoolIndex i, BigPageIndex* pool){
@@ -446,13 +453,12 @@ namespace kernel::mm::PageAllocator{
 
         void freeSmallPageInternal(BigPageIndex bi, SmallPageIndex si){
             SmallPoolIndex& toSwapFreeMap = smallPageFreeMapEntry(bi, si);
-            SmallPoolIndex& usedTopFreeMap = smallPageFreeMapEntry(bi,
-                                           (SmallPageIndex)(small_page_free_index[(size_t)bi] - 1));
+            SmallPageIndex& usedTop = smallPagePoolUsedTop(bi);
+            SmallPoolIndex& usedTopFreeMap = smallPageFreeMapEntry(bi,usedTop);
             SmallPageIndex& toSwap = smallPageAtIndex(bi, toSwapFreeMap);
-            SmallPageIndex& usedTop = smallPageAtIndex(bi, usedTopFreeMap);
             swap(toSwapFreeMap, usedTopFreeMap);
             swap(toSwap, usedTop);
-            small_page_free_index[(size_t)bi]--;
+            smallPageFreeOffset(bi)--;
         }
 
     public:
@@ -594,6 +600,7 @@ namespace kernel::mm::PageAllocator{
             }
             BigPageIndex& bi = bigPagePoolPartiallyUsedTop(pid);
             SmallPageIndex si = allocateSmallPage(bi, pid);
+
             return getSmallPageAddress(bi, si, range);
         }
 
@@ -625,7 +632,9 @@ namespace kernel::mm::PageAllocator{
         void freeSmallPage(phys_addr addr, hal::ProcessorID pid){
             BigPageIndex bi = getBigPageIndexFromAddress(addr, range);
             SmallPageIndex si = getSmallPageIndexFromAddress(addr);
-#ifdef ALLOCATOR_DEBUG
+ #ifdef ALLOCATOR_DEBUG
+            assert(addr.value % smallPageSize == 0, "Tried to free misaligned small page");
+            assert(getSmallPageAddress(bi, si, range).value == addr.value, "page index computations or address computation were incorrect");
             assert(bigPageFreeMapEntry(bi).bufferId == fromProcID(pid), "PID mismatch");
             assert((size_t)smallPageFreeOffset(bi) > (size_t)smallPageFreeMapEntry(bi, si), "Tried to free unallocated small page");
 #endif
@@ -740,6 +749,7 @@ namespace kernel::mm::PageAllocator{
                 if(allocator.getFreeLocalSmallPages(pid) > 0){
                     out = allocator.allocateSmallPage(pid);
                     hal::release_spinlock(local_locks[pid]);
+                    //kernel::DbgOut << "allocated page at address " << (void*) out.value << "\n";
                     return out;
                 }
             }
@@ -815,9 +825,11 @@ namespace kernel::mm::PageAllocator{
 #endif
                 auto pid = (hal::ProcessorID)(bid - 1);
                 hal::acquire_spinlock(local_locks[pid]);
+                //kernel::DbgOut << "freeing page at address " << (void*) page.value << "\n";
                 allocator.freeSmallPage(page, pid);
                 tryDonatePagesIfNecessary(pid);
                 hal::release_spinlock(local_locks[pid]);
+                return;
             }
         }
         assertNotReached("Tried to free page outside of range of allocators");
@@ -836,6 +848,7 @@ namespace kernel::mm::PageAllocator{
                 allocator.freeBigPage(page, pid);
                 tryDonatePagesIfNecessary(pid);
                 hal::release_spinlock(local_locks[pid]);
+                return;
             }
         }
         assertNotReached("Tried to free page outside of range of allocators");
