@@ -10,6 +10,7 @@
 #ifdef DEBUG_BUILD
 #define assert(condition, message) if(!(condition)) PANIC("Assert failed: " message)
 #define assertNotReached(message) assert(false, message)
+#define assertUnimplemented(message) assert(false, "Unimplemented: " message)
 #else
 #define assert(condition, message)
 #define assertNotReached(message)

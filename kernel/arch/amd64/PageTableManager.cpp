@@ -29,9 +29,6 @@ extern volatile uint64_t boot_page_directory_pointer_table[ENTRIES_PER_TABLE];
 
 #define GLOBAL_INFO_BIT 11
 #define TABLE_LOCK_OFFSET 0
-#define TABLE_HAS_SUPPLEMENTARY_TABLE GLOBAL_INFO_BIT, 1, 1
-#define TABLE_ALLOCATED_COUNT GLOBAL_INFO_BIT, 10, 2
-#define TABLE_SUPPLEMENT_INDEX GLOBAL_INFO_BIT, 20, 12
 #define LOCAL_OFFSET_INDEX 52, 61
 #define LOCAL_VIRT_ADDR 12, 31
 
@@ -42,6 +39,8 @@ namespace kernel::amd64::PageTableManager{
     PageDirectoryEntry* pageMappingDirectory;
     PageDirectoryEntry* pageStructureVirtualBase;
     uint64_t* pageTableGlobalMetadataBase;
+
+    mm::FlushPlanner** flushPlanners;
 
     // PageDirectoryEntry is a trivial wrapper around uint64_t.
     struct alignas(8) PageDirectoryEntry {
@@ -152,6 +151,7 @@ namespace kernel::amd64::PageTableManager{
         kernel::mm::virt_addr virtualAddress;
 
         constexpr PageInfo() = default;
+        constexpr PageInfo(mm::phys_addr paddr, mm::virt_addr vaddr) : physicalAddress(paddr), virtualAddress(vaddr){}
     };
 
     struct ReservePoolEntry{
@@ -186,7 +186,7 @@ namespace kernel::amd64::PageTableManager{
         freeInternalPageTableEntry(*entry);
     }
 
-    bool addPageToReservePool(PageInfo& page){
+    bool addPageToReservePool(PageInfo page){
         bool incrementedWriteHead = false;
         uint64_t prevValue;
         //Try to advance the write head atomically.
@@ -236,7 +236,7 @@ namespace kernel::amd64::PageTableManager{
         return true;
     }
 
-    bool addPageToOverflowPool(PageInfo& page){
+    bool addPageToOverflowPool(PageInfo page){
         bool incrementedWriteHead = false;
         uint64_t prevValue;
         //Try to advance the write head atomically.
@@ -302,6 +302,31 @@ namespace kernel::amd64::PageTableManager{
                 }
             }
         }
+    }
+
+    bool stealFromOverflowPool(PageInfo& info){
+        bool incrementedReadHead = false;
+        uint64_t prevValue;
+        //Try to advance the read head atomically.
+        do{
+            prevValue = freeOverflowReadHead;
+            uint64_t nextValue = (prevValue + 1) % FREE_OVERFLOW_POOL_SIZE;
+            if(prevValue == freeOverflowWriteHead){
+                //If the ring buffer's empty, abort!!!
+                return false;
+            }
+            incrementedReadHead = kernel::amd64::atomic_cmpxchg_u64(freeOverflowReadHead, prevValue, nextValue);
+        } while(!incrementedReadHead);
+        OverflowPoolEntry& m = freeOverflowPool[prevValue];
+        //if it happens that the write head was incremented but the entry is still populated, try spinning to wait
+        //for the other processor to finish copying the info to the entry
+        while(!m.readyToProcess){
+            asm volatile ("pause");
+        }
+        info = m.pageInfo;
+        kernel::amd64::mfence();
+        m.readyToProcess = false;
+        return true;
     }
 
     //Initializes the metadata in the page table entries to encode a linked list allowing O(1) free virtual address
@@ -395,7 +420,7 @@ namespace kernel::amd64::PageTableManager{
         poQueueWrittenLimit = 1;
         poQueueReadHead = 0;
         unpopulatedHead = 3;
-        partiallyOccupiedRingBuffer[0] = 1; //the first partially occupied page on initialization is in index 1
+        partiallyOccupiedRingBuffer[0] = 2; //the first partially occupied page on initialization is in index 2
         markFullState(0, true); //let's mark the 0th page as full since it's special.
         markPartiallyOccupiedState(0, false); //let's mark the 0th page as not partially occupied since it's special.
     }
@@ -544,22 +569,118 @@ namespace kernel::amd64::PageTableManager{
         }
     }
 
+    mm::virt_addr internalPageMappingToPTAddr(PageDirectoryEntry* entry){
+        auto index = ((uint64_t)entry - (uint64_t)pageStructureVirtualBase) / sizeof(PageDirectoryEntry);
+        return mm::virt_addr((uint64_t)pageStructureVirtualBase + index * mm::PageAllocator::smallPageSize);
+    }
+
+    hal::spinlock_t reserveRefillLock;
+
+    PageInfo allocateAndMapInternalPage() {
+        auto entry = allocateInternalPageTableEntry();
+        auto backingPage = mm::PageAllocator::allocateSmallPage();
+        entry->setAndPreserveMetadata(PageDirectoryEntry(backingPage.value | 3 | (1 << 8)));
+        return PageInfo(backingPage, internalPageMappingToPTAddr(entry));
+    }
+
+    void ensureReservePoolNotEmpty(){
+        if(reservePoolReadHead == reservePoolWriteHead){
+            if(hal::try_acquire_spinlock(reserveRefillLock)){
+                for(auto i = 0; i < RESERVE_POOL_DEFAULT_FILL; i++){
+                    //TODO handle failure - could happen under extreme contention
+                    addPageToReservePool(allocateAndMapInternalPage());
+                }
+                hal::release_spinlock(reserveRefillLock);
+            }
+        }
+    }
+
+    void topUpReservePool(){
+        size_t reservePoolPopulatedEntries =
+                (reservePoolWriteHead + RESERVE_POOL_SIZE - reservePoolReadHead) % RESERVE_POOL_SIZE;
+        if(reservePoolPopulatedEntries < RESERVE_POOL_LAZY_FILL_THRESHOLD){
+            if(hal::try_acquire_spinlock(reserveRefillLock)){
+                for(size_t i = 0; i < RESERVE_POOL_DEFAULT_FILL - reservePoolPopulatedEntries; i++){
+                    //TODO handle failure - could happen under extreme contention
+                    addPageToReservePool(allocateAndMapInternalPage());
+                }
+                hal::release_spinlock(reserveRefillLock);
+            }
+        }
+    }
+
+    PageInfo allocatePage(){
+        PageInfo out;
+        //first try to grab a page from the reserve pool
+        if(readPageFromReservePool(out)){
+            return out;
+        }
+        //if the reserve pool is empty, try to steal a page from the overflow pool
+        if(stealFromOverflowPool(out)){
+            //if we were able to steal a page, we have to be sure to remap it in the internal page table.
+            auto index = (out.virtualAddress.value - (uint64_t)pageStructureVirtualBase) / mm::PageAllocator::smallPageSize;
+            PageDirectoryEntry* entry = (PageDirectoryEntry*)((uint64_t)pageStructureVirtualBase + index * sizeof(PageDirectoryEntry));
+            entry -> setAndPreserveMetadata(PageDirectoryEntry(out.physicalAddress.value | 3 | (1 << 8)));
+            return out;
+        }
+        //finally if all else fails, allocate a page by hand and refill the reserve pool
+        out = allocateAndMapInternalPage();
+        ensureReservePoolNotEmpty();
+        return out;
+    }
+
+    void freePage(PageInfo pi){
+        if(addPageToReservePool(pi)){
+            return;
+        }
+        if(addPageToOverflowPool(pi)){
+            return;
+        }
+        //FIXME trigger an IPI or something to make room
+        assertUnimplemented("need to trigger an IPI");
+    }
+
     void runSillyTest(){
         kernel::DbgOut << "allocating page table entry at " << allocateInternalPageTableEntry() << "\n";
-        PageDirectoryEntry* entries[3000];
-        for(auto i = 0; i < 3000; i++){
-            entries[i] = allocateInternalPageTableEntry();
-        }
-        for(auto i = 0; i < 3000; i++){
-            allocateInternalPageTableEntry();
-            freeInternalPageTableEntry(*entries[i]);
+        const auto testScale = 13;
+        const size_t testSize = 1 << testScale;
+        PageDirectoryEntry* entries[testSize];
+        for(size_t a = 1; a < 30; a += 2) {
+            for(size_t b = 1; b < 30; b += 2) {
+                for (size_t i = 0; i < testSize; i++) {
+                    entries[(i * a) % testSize] = allocateInternalPageTableEntry();
+                }
+                for (size_t i = 0; i < testSize; i++) {
+                    freeInternalPageTableEntry(*entries[(i * b) % testSize]);
+                }
+            }
         }
         kernel::DbgOut << "allocating page table entry at " << allocateInternalPageTableEntry() << "\n";
         kernel::DbgOut << "poQueueReadHead is " << poQueueReadHead << "\n";
         kernel::DbgOut << "poQueueWrittenLimit is " << poQueueWrittenLimit << "\n";
     }
 
+    void pushFlushPlanner(mm::FlushPlanner& planner){
+        auto pid = hal::getCurrentProcessorID();
+        planner._ptmInternal_setPreviousPlanner(flushPlanners[pid]);
+        flushPlanners[pid] = &planner;
+    }
+
+    void popFlushPlanner(){
+        auto pid = hal::getCurrentProcessorID();
+        assert(flushPlanners[pid] != nullptr, "Tried to pop flush planner from empty stack");
+        flushPlanners[pid] = flushPlanners[pid] -> _ptmInternal_getPreviousPlanner();
+    }
+
+    /*PartialHandle makePartialPageStructure(mm::virt_addr base, size_t size){
+
+    }*/
+
     void init(size_t processorCount){
+        reserveRefillLock = hal::SPINLOCK_INITIALIZER;
+        flushPlanners = new mm::FlushPlanner* [processorCount];
+        memset(flushPlanners, 0, sizeof (mm::FlushPlanner*) * processorCount);
+
         auto index = 0;
         meaningfulBitmapPages = divideAndRoundUp(processorCount, sizeof(uint64_t));
         auto count = processorCount;
@@ -596,7 +717,7 @@ namespace kernel::amd64::PageTableManager{
 
         //Populate the entries by hand
         entryInMappingPT_for_PTMap -> setAndPreserveMetadata(PageDirectoryEntry(amd64::early_boot_virt_to_phys(mm::virt_addr(internalPageTableMapping)).value | 3 | (1 << 8)));
-        entryInMappingPT_for_PTMetadataMap -> setAndPreserveMetadata(PageDirectoryEntry(amd64::early_boot_virt_to_phys(mm::virt_addr(internalPageTableMapping)).value | 3 | (1 << 8)));
+        entryInMappingPT_for_PTMetadataMap -> setAndPreserveMetadata(PageDirectoryEntry(amd64::early_boot_virt_to_phys(mm::virt_addr(internalTableMetadataMapping)).value | 3 | (1 << 8)));
         entryInMappingPT_for_initialPT -> setAndPreserveMetadata(PageDirectoryEntry(amd64::early_boot_virt_to_phys(mm::virt_addr(initialInternalPageTable)).value | 3 | (1 << 8)));
         entryInInitialPT_for_PDir -> setAndPreserveMetadata(PageDirectoryEntry(amd64::early_boot_virt_to_phys(mm::virt_addr(bootstrapPageDir)).value | 3 | (1 << 8)));
 
@@ -622,7 +743,7 @@ namespace kernel::amd64::PageTableManager{
         //Now that the directory's mapped in where we expect it to be, initialize the metadata!
         initializeInternalPageDirectoryFreeMetadata(pageMappingDirectory);
         memset(pageTableGlobalMetadataBase, 0, mm::PageAllocator::smallPageSize * 3);
-        //ensureReservePoolNotEmpty();
+        topUpReservePool();
 
         runSillyTest();
     }

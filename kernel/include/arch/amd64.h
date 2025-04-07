@@ -205,7 +205,7 @@ namespace kernel::amd64 {
         //a cheap operation
         void processOverflowPool();
         //Preallocate some page tables if necessary - potentially expensive operation.
-        void ensureReservePoolNotEmpty();
+        void topUpReservePool();
     }
 }
 
