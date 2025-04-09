@@ -89,6 +89,8 @@ namespace kernel::mm::PageAllocator{
                 verifyMapSanity(t);
                 verifyMapSanity(s);
 #endif
+                //It's important that we grab these references before doing the swaps, otherwise
+                //getSubpageFreeStackIndex may yield unexpected results
                 auto& sit = getSubpageIndex(t);
                 auto& sis = getSubpageIndex(s);
                 auto& sft = getSubpageFreeStackIndex(t);
@@ -311,6 +313,8 @@ namespace kernel::mm::PageAllocator{
                 verifyMapSanity(s);
                 assert(hal::writer_lock_taken(lock), "It is unsafe to call this method without acquiring the writer lock on the pool");
 #endif
+                //It's important that we grab these references before doing the swaps, otherwise
+                //getFreeStackIndex may yield unexpected results
                 auto& spt = getSuperpageIndex(t);
                 auto& sps = getSuperpageIndex(s);
                 auto& sft = getFreeStackIndex(t);
@@ -333,6 +337,8 @@ namespace kernel::mm::PageAllocator{
                 verifyMapSanity(r);
                 assert(hal::writer_lock_taken(lock), "It is unsafe to call this method without acquiring the writer lock on the pool");
 #endif
+                //It's important that we grab these references before doing the swaps, otherwise
+                //getFreeStackIndex may yield unexpected results
                 auto& spt = getSuperpageIndex(t);
                 auto& sps = getSuperpageIndex(s);
                 auto& spr = getSuperpageIndex(r);
@@ -357,6 +363,8 @@ namespace kernel::mm::PageAllocator{
                 verifyMapSanity(r);
                 assert(hal::writer_lock_taken(lock), "It is unsafe to call this method without acquiring the writer lock on the pool");
 #endif
+                //It's important that we grab these references before doing the swaps, otherwise
+                //getFreeStackIndex may yield unexpected results
                 auto& spt = getSuperpageIndex(t);
                 auto& sps = getSuperpageIndex(s);
                 auto& spr = getSuperpageIndex(r);
@@ -467,9 +475,6 @@ namespace kernel::mm::PageAllocator{
             }
 
             SuperpageStackMarker fullyOccupiedZoneTop(){
-#ifdef ALLOCATOR_DEBUG
-                assert(fullyOccupiedZoneStart != freeZoneStart, "fully occupied zone is empty");
-#endif
                 return freeZoneStart - 1;
             }
 
@@ -873,6 +878,8 @@ namespace kernel::mm::PageAllocator{
             range = phys_memory_range(rangeBottom, rangeTop);
 
             reserveOverlap(info.range);
+
+            kernel::DbgOut << "globalPool located at " << globalPool << "\n";
         }
 
         phys_addr allocateSmallPage(){
@@ -896,7 +903,6 @@ namespace kernel::mm::PageAllocator{
 
     void init(Vector<page_allocator_range_info>& regions, size_t processor_count){
         allocators = new Vector<ContiguousRangeAllocator>(regions.getSize());
-        kernel::DbgOut << "initializing page allocators\n";
 
         for(auto region : regions){
             allocators->push(ContiguousRangeAllocator(region, processor_count));
