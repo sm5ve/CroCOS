@@ -8,7 +8,7 @@
 #include <kernel.h>
 #include <lib/math.h>
 
-#define ALLOCATOR_DEBUG
+//#define ALLOCATOR_DEBUG
 
 namespace kernel::mm::PageAllocator{
 
@@ -669,7 +669,8 @@ namespace kernel::mm::PageAllocator{
                 //Make sure the
                 localPool.acquireLock();
                 if(!localPool.hasFreeSuperpages()){
-                    assert(localPool.stealPageFrom(globalPool), "Global pool out of memory");
+                    bool didSteal = localPool.stealPageFrom(globalPool);
+                    assert(didSteal, "Global pool out of memory");
                 }
                 auto out = localPool.allocateSuperpage();
                 localPool.releaseLock();
@@ -681,7 +682,8 @@ namespace kernel::mm::PageAllocator{
             phys_addr allocateSmallPage(){
                 localPool.acquireLock();
                 if(!(localPool.hasFreeSuperpages() || localPool.hasPartiallyAllocatedSuperpages())){
-                    assert(localPool.stealPageFrom(globalPool), "Global pool out of memory");
+                    auto didSteal = localPool.stealPageFrom(globalPool);
+                    assert(didSteal, "Global pool out of memory");
                 }
                 phys_addr superPage = localPool.getPageForSubpageAllocation();
                 localPool.releaseLock();
