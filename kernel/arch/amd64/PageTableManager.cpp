@@ -31,16 +31,20 @@ extern volatile uint64_t boot_page_directory_pointer_table[ENTRIES_PER_TABLE];
 #define TABLE_LOCK_OFFSET 0
 #define LOCAL_OFFSET_INDEX 52, 61
 #define LOCAL_VIRT_ADDR 12, 31
+#define LOCAL_OCCUPIED_BIT 9, 9
 
 namespace kernel::amd64::PageTableManager{
 
     struct PageDirectoryEntry;
+    struct PTMetadata;
 
     PageDirectoryEntry* pageMappingDirectory;
     PageDirectoryEntry* pageStructureVirtualBase;
     uint64_t* pageTableGlobalMetadataBase;
 
     mm::FlushPlanner** flushPlanners;
+
+    bool singleProcessorMode;
 
     // PageDirectoryEntry is a trivial wrapper around uint64_t.
     struct alignas(8) PageDirectoryEntry {
@@ -81,6 +85,10 @@ namespace kernel::amd64::PageTableManager{
             return value & 1;
         }
 
+        void setPresentState(bool present){
+            value = (value & ~(1ul)) | (present ? 1 : 0);
+        }
+
         void setAndPreserveMetadata(PageDirectoryEntry entry){
             uint64_t mask = (0xfl << 8) | (0x7ffl << 52);
             this -> value = (this -> value & mask) | (entry.value & ~mask);
@@ -113,34 +121,122 @@ namespace kernel::amd64::PageTableManager{
             }
         }
 
-        static uint64_t& fast_global_metadata(PageDirectoryEntry* table){
-            assert((uint64_t)table % mm::PageAllocator::smallPageSize == 0, "Page table improperly aligned");
+        static PTMetadata& fast_global_metadata(PageDirectoryEntry* table){
+            assert((uint64_t)table % mm::PageAllocator::smallPageSize == 0, "misaligned page table");
             auto absolutePageIndex = ((uint64_t)table - (uint64_t)pageStructureVirtualBase) / mm::PageAllocator::smallPageSize;
-            return pageTableGlobalMetadataBase[absolutePageIndex];
-        }
-
-        static void acquire_table_lock(PageDirectoryEntry* table){
-            bool acquired_lock;
-            do{
-                PageDirectoryEntry previousEntry = table[TABLE_LOCK_OFFSET];
-                while(previousEntry.get_local_metadata<GLOBAL_INFO_BIT, GLOBAL_INFO_BIT>()){
-                    asm volatile("pause");
-                    previousEntry = table[TABLE_LOCK_OFFSET];
-                };
-                PageDirectoryEntry lockedEntry = previousEntry;
-                lockedEntry.set_local_metadata<GLOBAL_INFO_BIT, GLOBAL_INFO_BIT>(true);
-                acquired_lock = amd64::atomic_cmpxchg_u64(table[TABLE_LOCK_OFFSET].value,
-                                                          previousEntry.value,
-                                                          lockedEntry.value);
-            } while(!acquired_lock);
-        }
-
-        static void release_table_lock(PageDirectoryEntry* table){
-            table[TABLE_LOCK_OFFSET].set_local_metadata<GLOBAL_INFO_BIT, GLOBAL_INFO_BIT>(false);
+            return (PTMetadata&)pageTableGlobalMetadataBase[absolutePageIndex];
         }
     };
 
+    struct alignas(8) PTMetadata{
+        uint64_t value = 0;  // Raw metadata entry.
+
+        static const uint64_t writerLockRequestMask = 0b10;
+        static const uint64_t writerLockHeldMask = 0b01;
+        static const uint64_t writerLockMask = writerLockRequestMask | writerLockHeldMask;
+        static const uint64_t readerLockMask = 0b111111 << 2;
+
+        void acquire_table_reader_lock() {
+            // Spin until no writer is holding the lock and no writer is waiting
+            while (true) {
+                // Wait for writer lock to be released (0b00)
+                while ((value & writerLockMask) != 0) {
+                    asm volatile("pause");
+                }
+
+                uint64_t count;
+
+                // Check if we have space for more readers (reader count < 63)
+                while ((count = ((value & readerLockMask) >> 2)) == (readerLockMask >> 2)) {
+                    asm volatile("pause");
+                }
+
+                // Prepare the new metadata with incremented reader count
+                uint64_t maskedMetadata = value & ~(writerLockMask | readerLockMask);
+                uint64_t expectedOldMetadata = maskedMetadata | (count << 2);
+                uint64_t newMetadata = maskedMetadata | ((count + 1) << 2);
+
+                // Try to acquire the lock with atomic compare and exchange
+                if (amd64::atomic_cmpxchg_u64(value, expectedOldMetadata, newMetadata)) {
+                    return; // Reader successfully acquired the lock
+                }
+            }
+        }
+
+        void release_table_reader_lock() {
+            // Continuously try to release the lock until successful
+            while (true) {
+                uint64_t oldMetadata = value;
+                uint64_t count = (oldMetadata & readerLockMask) >> 2;
+
+                // Ensure that there are readers holding the lock before releasing it
+                assert(count > 0, "Tried to release reader lock when no reader held lock");
+
+                // Decrement the reader count
+                count--;
+
+                // Prepare the new metadata with the decremented reader count
+                uint64_t newMetadata = (value & ~readerLockMask) | (count << 2);
+
+                // Try to release the lock with atomic compare and exchange
+                if (atomic_cmpxchg_u64(value, oldMetadata, newMetadata)) {
+                    return; // Reader lock successfully released
+                }
+            }
+        }
+
+        void acquire_table_writer_lock() {
+            while (true) {
+                // Wait until no one else is requesting the writer lock
+                while (value & writerLockRequestMask) {
+                    asm volatile("pause");
+                }
+
+                uint64_t oldValue = value;
+                uint64_t expectedNoRequest = oldValue & ~writerLockRequestMask;
+                uint64_t requestSet = expectedNoRequest | writerLockRequestMask;
+
+                if (atomic_cmpxchg_u64(value, expectedNoRequest, requestSet)) {
+                    // We've successfully set the request bit
+                    while (true) {
+                        // Wait for readers and writers to clear
+                        while ((value & (readerLockMask | writerLockHeldMask)) != 0) {
+                            asm volatile("pause");
+                        }
+
+                        uint64_t current = value;
+                        uint64_t base = current & ~(readerLockMask | writerLockMask);
+
+                        uint64_t expected = base | writerLockRequestMask;
+                        uint64_t acquired = base | writerLockHeldMask;
+
+                        if (atomic_cmpxchg_u64(value, expected, acquired)) {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
+        void release_table_writer_lock() {
+            while(true) {
+                uint64_t oldMetadata = value;
+                uint64_t newMetadata = (value & ~writerLockHeldMask);
+                if(atomic_cmpxchg_u64(value, oldMetadata, newMetadata)){
+                    return;
+                }
+            }
+        }
+    };
+
+    uint64_t& internalPageTableFreeIndex(PageDirectoryEntry* table){
+        assert(((uint64_t)table >= (uint64_t)pageStructureVirtualBase) && ((uint64_t)table < (uint64_t)pageTableGlobalMetadataBase),
+               "internalPageTableFreeIndex may only be called on *internal* page tables");
+        return PageDirectoryEntry::fast_global_metadata(table).value;
+    }
+
     static_assert(sizeof(PageDirectoryEntry) == 8, "PageDirectoryEntry of wrong size");
+    static_assert(sizeof(PTMetadata) == 8, "PTMetadata of wrong size");
     static_assert(sizeof(PageDirectoryEntry[512]) == 4096, "PageDirectoryEntry improperly packed");
 
     uint64_t toProcessBitmapBlank[divideAndRoundUp(kernel::hal::MAX_PROCESSOR_COUNT,sizeof(uint64_t))];
@@ -179,11 +275,19 @@ namespace kernel::amd64::PageTableManager{
 
     void freeInternalPageTableEntry(PageDirectoryEntry& entry);
 
-    void markPageTableVaddrFree(mm::virt_addr vaddr){
+    PageDirectoryEntry& getInternalPDEntryForVaddr(mm::virt_addr vaddr){
         uint64_t index = (vaddr.value - (uint64_t) pageStructureVirtualBase) / mm::PageAllocator::smallPageSize;
-        auto entry = reinterpret_cast<PageDirectoryEntry*>((uint64_t)pageStructureVirtualBase
-                + index * sizeof(PageDirectoryEntry));
-        freeInternalPageTableEntry(*entry);
+        return *reinterpret_cast<PageDirectoryEntry*>((uint64_t)pageStructureVirtualBase
+                                                           + index * sizeof(PageDirectoryEntry));
+    }
+
+    mm::virt_addr internalPageMappingToPTAddr(PageDirectoryEntry* entry){
+        auto index = ((uint64_t)entry - (uint64_t)pageStructureVirtualBase) / sizeof(PageDirectoryEntry);
+        return mm::virt_addr((uint64_t)pageStructureVirtualBase + index * mm::PageAllocator::smallPageSize);
+    }
+
+    void markPageTableVaddrFree(mm::virt_addr vaddr){
+        freeInternalPageTableEntry(getInternalPDEntryForVaddr(vaddr));
     }
 
     bool addPageToReservePool(PageInfo page){
@@ -239,6 +343,7 @@ namespace kernel::amd64::PageTableManager{
     bool addPageToOverflowPool(PageInfo page){
         bool incrementedWriteHead = false;
         uint64_t prevValue;
+        getInternalPDEntryForVaddr(page.virtualAddress).setPresentState(false);
         //Try to advance the write head atomically.
         do{
             prevValue = freeOverflowWriteHead;
@@ -250,6 +355,7 @@ namespace kernel::amd64::PageTableManager{
             incrementedWriteHead = kernel::amd64::atomic_cmpxchg_u64(freeOverflowWriteHead, prevValue, nextValue);
         } while(!incrementedWriteHead);
         OverflowPoolEntry& m = freeOverflowPool[prevValue];
+
         //readyToProcess should be set to false before the read head is advanced, so we don't need to spin here and
         //this assert is valid
         assert(!m.readyToProcess, "Free overflow ring buffer state is insane!");
@@ -257,6 +363,9 @@ namespace kernel::amd64::PageTableManager{
         memcpy(m.toProcessBitmap, toProcessBitmapBlank, sizeof(toProcessBitmapBlank));
         kernel::amd64::mfence();
         m.readyToProcess = true;
+        if(singleProcessorMode){
+            processOverflowPool();
+        }
         return true;
     }
 
@@ -271,7 +380,7 @@ namespace kernel::amd64::PageTableManager{
                 //Thus, for the sake of simplicity, I will spin.
                 asm volatile ("pause");
             }
-            if(!(entry.toProcessBitmap[processorInd] & mask))
+            if((entry.toProcessBitmap[processorInd] & mask) == 0)
                 continue;
             //If we haven't processed this entry in the freeOverflowPool yet, flush the TLB entry for the corresponding page!
             kernel::amd64::invlpg(entry.pageInfo.virtualAddress.value);
@@ -285,7 +394,7 @@ namespace kernel::amd64::PageTableManager{
                     clearBitmaps++;
                 }
             }
-            if(clearBitmaps == meaningfulBitmapPages){
+            if(singleProcessorMode || (clearBitmaps == meaningfulBitmapPages)){
                 //This makes sure that we don't increment the freeOverflowReadHead twice if two processors simultaneously
                 //determine that all others have completed their TLB flushes
                 auto pageAddress = entry.pageInfo.physicalAddress;
@@ -293,7 +402,7 @@ namespace kernel::amd64::PageTableManager{
                 //No need to process this anymore!
                 kernel::amd64::mfence();
                 entry.readyToProcess = false;
-                auto didIncrementReadHead = kernel::amd64::atomic_cmpxchg_u64(freeOverflowReadHead, index, index + 1);
+                auto didIncrementReadHead = kernel::amd64::atomic_cmpxchg_u64(freeOverflowReadHead, index, (index + 1) % FREE_OVERFLOW_POOL_SIZE);
                 //If we were the ones to increment the read head, then we can release the page back to the page allocator
                 //without fear of a double-free!
                 if(didIncrementReadHead) {
@@ -345,14 +454,30 @@ namespace kernel::amd64::PageTableManager{
     //Note that this is only to be used internally by the page table manager – in the broader kernel, the higher level
     //abstraction of VirtualMemoryZones will solve virtual address allocation using an augmented AVL tree.
     void initializeInternalPageTableFreeMetadata(PageDirectoryEntry* table){
+        assert((uint64_t) table % mm::PageAllocator::smallPageSize == 0, "misaligned page table");
         for(uint64_t i = 0; i < ENTRIES_PER_TABLE; i++){
             //We will say any offset with the highest bit set is invalid - in particular this enforces that there is
             //no "next" free entry after the last one, and this is recorded by the fact that the next entry offset
             //in the last entry is 512, which has bit 9 set.
             table[i].set_local_metadata<LOCAL_VIRT_ADDR, true>(i + 1);
+            table[i].set_local_metadata<LOCAL_OCCUPIED_BIT>(false);
         }
-        table[0].set_local_metadata<LOCAL_OFFSET_INDEX>(0);
+        internalPageTableFreeIndex(table) = 0;
     }
+
+    void initializeSetupInternalPageTableFreeMetadata(PageDirectoryEntry* table){
+        assert((uint64_t) table % mm::PageAllocator::smallPageSize == 0, "misaligned page table");
+        uint64_t firstUnoccupied = ENTRIES_PER_TABLE;
+        for(int i = ENTRIES_PER_TABLE - 1; i >= 0; i--){
+            if(table[i].value == 0){
+                table[i].set_local_metadata<LOCAL_VIRT_ADDR, true>(firstUnoccupied);
+                table[i].set_local_metadata<LOCAL_OCCUPIED_BIT>(false);
+                firstUnoccupied = (uint64_t) i;
+            }
+        }
+        internalPageTableFreeIndex(table) = firstUnoccupied;
+    }
+
 
     void initializeInternalPageDirectoryFreeMetadata(PageDirectoryEntry* table){
         for(uint64_t i = 0; i < ENTRIES_PER_TABLE; i++){
@@ -459,7 +584,7 @@ namespace kernel::amd64::PageTableManager{
             markFullState(index, false);
             mfence();
             while(true){
-                if(atomic_cmpxchg_u16(poQueueWrittenLimit, prevWriteHead, prevWriteHead + 1)){
+                if(atomic_cmpxchg_u16(poQueueWrittenLimit, prevWriteHead, static_cast<uint16_t>((prevWriteHead + 1) % ENTRIES_PER_TABLE))){
                     break;
                 }
             };
@@ -476,31 +601,41 @@ namespace kernel::amd64::PageTableManager{
         uint64_t index;
         do{
             PageDirectoryEntry prevEntry = table[0];
-            index = prevEntry.get_local_metadata<LOCAL_OFFSET_INDEX>();
+            index = internalPageTableFreeIndex(table);
             if(index >= ENTRIES_PER_TABLE){
                 //FIXME this should be like... an ErrorOr sort of thing. This isn't technically incorrect
                 return nullptr;
             }
             PageDirectoryEntry newEntry = prevEntry;
             uint64_t nextIndex = table[index].get_local_metadata<LOCAL_VIRT_ADDR, true>();
-            newEntry.set_local_metadata<LOCAL_OFFSET_INDEX>(nextIndex);
+            assert(nextIndex != index, "free pointer points to self");
+            assert(nextIndex == ENTRIES_PER_TABLE || !table[nextIndex].present(), "free pointer points to currently occupied entry");
+            internalPageTableFreeIndex(table) = nextIndex;
             didAllocate = atomic_cmpxchg_u64(table[0].value, prevEntry.value, newEntry.value);
         } while(!didAllocate);
         assert(!table[index].present(), "Tried to allocate a page table entry that was already present");
+        assert(!table[index].get_local_metadata<LOCAL_OCCUPIED_BIT>(), "Tried to allocate a page table entry that was already occupied");
+        table[index].set_local_metadata<LOCAL_OCCUPIED_BIT>(true);
         return &table[index];
     }
 
     void freeInternalPageTableEntry(PageDirectoryEntry& entry){
         auto tableBase = (PageDirectoryEntry*)((uint64_t)&entry & (uint64_t)~((1 << 12) - 1));
+        assert(((uint64_t)tableBase - (uint64_t)pageStructureVirtualBase)/mm::PageAllocator::smallPageSize < unpopulatedHead, "Tried to free entry in nonexistent page table");
         uint64_t entryIndex = ((uint64_t)&entry - (uint64_t)tableBase) / sizeof(PageDirectoryEntry);
+        assert(entry.get_local_metadata<LOCAL_OCCUPIED_BIT>(), "Tried to free a page table entry that was already freed");
         bool didFree;
         do{
-            auto priorHead = tableBase[0];
+            //Save the state of the prior head of the page table. We'll want to update this since it has
+            //the beginning of the free list, but we want to modify it atomically using cmpxchg
+            uint64_t priorHeadIndex = internalPageTableFreeIndex(tableBase);
+            //Since we're freeing the entry, we zero it out, then retain the old index stored in the head as metadata
             entry = PageDirectoryEntry(0);
-            entry.set_local_metadata<LOCAL_VIRT_ADDR, true>(priorHead.get_local_metadata<LOCAL_OFFSET_INDEX>());
-            auto newHead = priorHead;
-            newHead.set_local_metadata<LOCAL_OFFSET_INDEX>(entryIndex);
-            didFree = atomic_cmpxchg_u64(tableBase[0].value, priorHead.value, newHead.value);
+            entry.set_local_metadata<LOCAL_VIRT_ADDR, true>(priorHeadIndex);
+            entry.set_local_metadata<LOCAL_OCCUPIED_BIT>(false);
+            //Now we construct a new head whose index points to the newly freed entry
+            entry.set_local_metadata<LOCAL_OCCUPIED_BIT>(false);
+            didFree = atomic_cmpxchg_u64(internalPageTableFreeIndex(tableBase), priorHeadIndex, entryIndex);
         } while(!didFree);
         //Mark the table as partially occupied - if it used to be full, move it to the queue
         markTableAsPartiallyOccupied(tableBase);
@@ -513,7 +648,6 @@ namespace kernel::amd64::PageTableManager{
             auto nextWriteHead = static_cast<uint16_t>((prevWriteHead + 1) % ENTRIES_PER_TABLE);
             //If we can advance the write head, we're responsible for allocating a new page table and adding it to the queue!
             if(atomic_cmpxchg_u16(poQueueWriteHead, prevWriteHead, nextWriteHead)){
-                //TODO for the fast global metadata, I will have to allocate and map in a second page here...
                 //In particular, only one processor at a time can possibly be running this code
                 auto backingPageAddr = mm::PageAllocator::allocateSmallPage();
                 //Map the table into memory with R/W and as global
@@ -559,6 +693,9 @@ namespace kernel::amd64::PageTableManager{
                     //if the allocation failed, mark the table as full
                     markTableAsFull(table);
                 }
+                else{
+                    asm volatile("pause");
+                }
             }
             else{
                 //if the queue is empty (or there are writes to the queue still pending) allocate a new page table
@@ -567,11 +704,6 @@ namespace kernel::amd64::PageTableManager{
                 asm volatile("pause");
             }
         }
-    }
-
-    mm::virt_addr internalPageMappingToPTAddr(PageDirectoryEntry* entry){
-        auto index = ((uint64_t)entry - (uint64_t)pageStructureVirtualBase) / sizeof(PageDirectoryEntry);
-        return mm::virt_addr((uint64_t)pageStructureVirtualBase + index * mm::PageAllocator::smallPageSize);
     }
 
     hal::spinlock_t reserveRefillLock;
@@ -640,24 +772,30 @@ namespace kernel::amd64::PageTableManager{
         assertUnimplemented("need to trigger an IPI");
     }
 
+    const auto testScale = 12;
+    const size_t testSize = 1 << testScale;
+    PageInfo entries[testSize];
+
     void runSillyTest(){
         kernel::DbgOut << "allocating page table entry at " << allocateInternalPageTableEntry() << "\n";
-        const auto testScale = 13;
-        const size_t testSize = 1 << testScale;
-        PageDirectoryEntry* entries[testSize];
+
+        //PageDirectoryEntry* entries[testSize];
         for(size_t a = 1; a < 30; a += 2) {
             for(size_t b = 1; b < 30; b += 2) {
                 for (size_t i = 0; i < testSize; i++) {
-                    entries[(i * a) % testSize] = allocateInternalPageTableEntry();
+                    entries[(i * a) % testSize] = allocatePage();
+                    //entries[(i * a) % testSize] = allocateInternalPageTableEntry();
                 }
                 for (size_t i = 0; i < testSize; i++) {
-                    freeInternalPageTableEntry(*entries[(i * b) % testSize]);
+                    freePage(entries[(i * b) % testSize]);
+                    //freeInternalPageTableEntry(*entries[(i * b) % testSize]);
                 }
             }
         }
         kernel::DbgOut << "allocating page table entry at " << allocateInternalPageTableEntry() << "\n";
         kernel::DbgOut << "poQueueReadHead is " << poQueueReadHead << "\n";
         kernel::DbgOut << "poQueueWrittenLimit is " << poQueueWrittenLimit << "\n";
+        kernel::DbgOut << "poQueueWriteHead is " << poQueueWriteHead << "\n";
     }
 
     void pushFlushPlanner(mm::FlushPlanner& planner){
@@ -677,6 +815,7 @@ namespace kernel::amd64::PageTableManager{
     }*/
 
     void init(size_t processorCount){
+        singleProcessorMode = true;
         reserveRefillLock = hal::SPINLOCK_INITIALIZER;
         flushPlanners = new mm::FlushPlanner* [processorCount];
         memset(flushPlanners, 0, sizeof (mm::FlushPlanner*) * processorCount);
@@ -704,16 +843,22 @@ namespace kernel::amd64::PageTableManager{
         memset(internalTableMetadataMapping, 0, sizeof(internalTableMetadataMapping));
         memset(initialInternalPageTable, 0, sizeof(initialInternalPageTable));
         //Initialize the free list metadata
-        initializeInternalPageTableFreeMetadata((PageDirectoryEntry*)internalPageTableMapping);
-        initializeInternalPageTableFreeMetadata((PageDirectoryEntry*)initialInternalPageTable);
+        //initializeInternalPageTableFreeMetadata((PageDirectoryEntry*)internalPageTableMapping);
+        //initializeInternalPageTableFreeMetadata((PageDirectoryEntry*)initialInternalPageTable);
 
         //Initialize the metadata for the internal page directory - this is done by hand
         initializePartiallyOccupiedRingBuffer();
         //Allocate the page table entries to map in our two startup page tables and map the page directory 2 MiB into our window
+        /*
         auto entryInMappingPT_for_PTMap= allocateInternalPageTableEntryForTable((PageDirectoryEntry*)internalPageTableMapping);
         auto entryInMappingPT_for_PTMetadataMap= allocateInternalPageTableEntryForTable((PageDirectoryEntry*)internalPageTableMapping);
         auto entryInMappingPT_for_initialPT= allocateInternalPageTableEntryForTable((PageDirectoryEntry*)internalPageTableMapping);
         auto entryInInitialPT_for_PDir = allocateInternalPageTableEntryForTable((PageDirectoryEntry*)initialInternalPageTable);
+        */
+        auto entryInMappingPT_for_PTMap = (PageDirectoryEntry*)&internalPageTableMapping[0];
+        auto entryInMappingPT_for_PTMetadataMap = (PageDirectoryEntry*)&internalPageTableMapping[1];
+        auto entryInMappingPT_for_initialPT = (PageDirectoryEntry*)&internalPageTableMapping[2];
+        auto entryInInitialPT_for_PDir = (PageDirectoryEntry*)&initialInternalPageTable[0];
 
         //Populate the entries by hand
         entryInMappingPT_for_PTMap -> setAndPreserveMetadata(PageDirectoryEntry(amd64::early_boot_virt_to_phys(mm::virt_addr(internalPageTableMapping)).value | 3 | (1 << 8)));
@@ -736,13 +881,19 @@ namespace kernel::amd64::PageTableManager{
         pageStructureVirtualBase = reinterpret_cast<PageDirectoryEntry *>(-3ul << 30); //-3 GiB
         pageTableGlobalMetadataBase = reinterpret_cast<uint64_t *>((uint64_t)pageStructureVirtualBase + (1ul << 21));
         pageMappingDirectory = (PageDirectoryEntry*)((uint64_t)pageTableGlobalMetadataBase + (1ul << 21));
+        //initializeSetupInternalPageTableFreeMetadata(getPageTableForIndex(0));
 
         //install the page directory
         boot_page_directory_pointer_table[509] = amd64::early_boot_virt_to_phys(mm::virt_addr(bootstrapPageDir)).value | 3;
-
+        memset(pageTableGlobalMetadataBase, 0, mm::PageAllocator::smallPageSize * 3);
+        //Since we're now storing the free list head metadata in the metadata pages, we have to initialize things in
+        //a rather particular order. Namely, we have to map everything in and clear out the metadata pages, and only
+        //later can we actually initialize the metadata on our first page.
+        //Notably we don't need to initialize the metadata for the metadata table itself, nor the internal mapping table
+        //since those are handled with special logic.
+        initializeSetupInternalPageTableFreeMetadata(getPageTableForIndex(2));
         //Now that the directory's mapped in where we expect it to be, initialize the metadata!
         initializeInternalPageDirectoryFreeMetadata(pageMappingDirectory);
-        memset(pageTableGlobalMetadataBase, 0, mm::PageAllocator::smallPageSize * 3);
         topUpReservePool();
 
         runSillyTest();

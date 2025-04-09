@@ -15,4 +15,8 @@ namespace kernel::mm{
     size_t virt_memory_range::getSize() {
         return this -> end.value - this -> start.value;
     }
+
+    bool phys_memory_range::contains(kernel::mm::phys_addr addr) {
+        return (addr.value >= this -> start.value) && (addr.value < this -> end.value);
+    }
 }

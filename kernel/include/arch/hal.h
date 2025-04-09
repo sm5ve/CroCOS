@@ -34,6 +34,14 @@ namespace kernel::hal{
     bool try_acquire_spinlock(kernel::hal::spinlock_t& lock);
     void release_spinlock(kernel::hal::spinlock_t& lock);
 
+    void acquire_reader_lock(kernel::hal::rwlock_t& lock);
+    void acquire_writer_lock(kernel::hal::rwlock_t& lock);
+    bool try_acquire_reader_lock(kernel::hal::rwlock_t& lock);
+    bool try_acquire_writer_lock(kernel::hal::rwlock_t& lock);
+    void release_writer_lock(kernel::hal::rwlock_t& lock);
+    void release_reader_lock(kernel::hal::rwlock_t& lock);
+    bool writer_lock_taken(kernel::hal::rwlock_t& lock);
+
 #ifdef __x86_64__
     using ProcessorID = uint8_t;
     const size_t MAX_PROCESSOR_COUNT = 256;
@@ -48,6 +56,8 @@ namespace kernel::hal{
     inline void compiler_fence(){
         asm volatile("" ::: "memory");
     };
+
+    bool atomic_cmpxchg_u64(volatile uint64_t &var, volatile uint64_t &expected, uint64_t desired);
 }
 
 #endif //CROCOS_HAL_H

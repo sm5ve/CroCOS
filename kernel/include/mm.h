@@ -23,6 +23,7 @@ namespace kernel::mm{
         phys_addr end;
         [[nodiscard]]
         size_t getSize();
+        bool contains(phys_addr);
     };
 
     struct virt_memory_range {

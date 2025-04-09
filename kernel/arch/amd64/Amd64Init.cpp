@@ -297,6 +297,7 @@ namespace kernel::amd64{
         mm::phys_memory_range range{.start=mm::phys_addr(nullptr), .end=mm::phys_addr(&phys_end)};
         kernel::mm::PageAllocator::reservePhysicalRange(range);
 
+        kernel::DbgOut << "Finished initializing page allocator\n";
         kernel::amd64::PageTableManager::init(processorCount);
     }
 }

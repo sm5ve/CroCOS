@@ -40,6 +40,48 @@ namespace kernel::hal{
 #endif
     }
 
+    void acquire_reader_lock(kernel::hal::rwlock_t& lock){
+#ifdef __x86_64__
+        kernel::amd64::acquire_reader_lock(lock);
+#endif
+    }
+
+    void acquire_writer_lock(kernel::hal::rwlock_t& lock){
+#ifdef __x86_64__
+        kernel::amd64::acquire_writer_lock(lock);
+#endif
+    }
+
+    bool try_acquire_reader_lock(kernel::hal::rwlock_t& lock){
+#ifdef __x86_64__
+        return kernel::amd64::try_acquire_reader_lock(lock);
+#endif
+    }
+
+    bool try_acquire_writer_lock(kernel::hal::rwlock_t& lock){
+#ifdef __x86_64__
+        return kernel::amd64::try_acquire_writer_lock(lock);
+#endif
+    }
+
+    void release_writer_lock(kernel::hal::rwlock_t& lock){
+#ifdef __x86_64__
+        kernel::amd64::release_writer_lock(lock);
+#endif
+    }
+
+    void release_reader_lock(kernel::hal::rwlock_t& lock){
+#ifdef __x86_64__
+        kernel::amd64::release_reader_lock(lock);
+#endif
+    }
+
+    bool writer_lock_taken(kernel::hal::rwlock_t& lock){
+#ifdef __x86_64__
+        return kernel::amd64::writer_lock_taken(lock);
+#endif
+    }
+
     size_t processorCount(){
         return archProcessorCount;
     }
@@ -49,5 +91,9 @@ namespace kernel::hal{
         //This will require some sort of processor-local memory page to implement efficiently. But that's okay!
         //We'll cross that bridge when we get to it :)
         return 0;
+    }
+
+    bool atomic_cmpxchg_u64(volatile uint64_t &var, volatile uint64_t &expected, uint64_t desired){
+        return amd64::atomic_cmpxchg_u64(var, expected, desired);
     }
 }
