@@ -12,10 +12,22 @@ set(KERNEL_SRC
         arch/amd64/Spinlock.cpp
         arch/amd64/multiboot1.asm
         KernelMain.cpp
-        lib/PrintStream.cpp include/lib/PrintStream.h include/lib/TypeTraits.h include/lib/str.h lib/str.cpp arch/hal/hal.cpp include/arch/hal.h include/kernel.h mm/BumpAllocator.cpp lib/panic.cpp mm/kmalloc.cpp mm/allocators.h include/acpi.h include/mm.h acpi/ACPIFixedTables.cpp include/lib/ds/Vector.h include/assert.h include/panic.h include/utility.h include/lib/ds/SmartPointer.h mm/MemoryManager.cpp include/lib/math.h arch/amd64/memops.cpp
-        include/arch/spinlock.h
+        lib/PrintStream.cpp include/lib/PrintStream.h include/lib/TypeTraits.h include/lib/str.h lib/str.cpp arch/hal/hal.cpp include/arch/hal/hal.h include/kernel.h mm/BumpAllocator.cpp lib/panic.cpp mm/kmalloc.cpp mm/allocators.h include/acpi.h include/mm.h acpi/ACPIFixedTables.cpp include/lib/ds/Vector.h include/assert.h include/panic.h include/utility.h include/lib/ds/SmartPointer.h mm/MemoryManager.cpp include/lib/math.h arch/amd64/memops.cpp
+        include/arch/hal/spinlock.h
         arch/amd64/PageTableManager.cpp
         include/FlushPlanner.h
+        timing/TimerManager.cpp
+        include/timers.h
+        include/arch/hal/interrupts.h
+        arch/amd64/interrupts/APIC.cpp
+        include/arch/amd64/interrupts/APIC.h
+        arch/amd64/interrupts/LegacyPIC.cpp
+        include/arch/amd64/interrupts/LegacyPIC.h
+        include/lib/ds/HashMap.h
+        include/lib/ds/Tuple.h
+        include/lib/Comparator.h
+        arch/amd64/smp/smp.cpp
+        include/arch/amd64/smp.h
 )
 
 add_executable(Kernel ${KERNEL_SRC})
