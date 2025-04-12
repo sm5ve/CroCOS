@@ -24,7 +24,7 @@ private:
                 new_data[i] = data[i];
             }
             else{
-                new(new_data + i) T(std::move(data[i]));  // Move each element into the new buffer
+                new(&new_data[i]) T(std::move(data[i]));  // Move each element into the new buffer
                 data[i].~T();  // Explicitly call the destructor of old element
             }
         }
@@ -121,7 +121,12 @@ public:
 
     void push(const T& value) {
         reallocate_if_necessary();
-        new (data + size) T(value);  // Placement new for the new element
+        if constexpr (is_trivially_copyable_v<T>) {
+            data[size] = value;
+        }
+        else{
+            new (&data[size]) T(value);  // Placement new for the new element
+        }
         ++size;
     }
 
@@ -131,7 +136,7 @@ public:
             data[size] = value;
         }
         else{
-            new (data + size) T(std::move(value));  // Placement new for the new element
+            new (&data[size]) T(std::move(value));  // Placement new for the new element
         }
         ++size;
     }
@@ -155,6 +160,10 @@ public:
     void insert(size_t index, const T& value) {
         assert(index <= size, "Index out of bounds");
         reallocate_if_necessary();
+        if(index == size){
+            push(value);
+            return;
+        }
         // Move elements to make room for the new element
         for (size_t i = size; i > index; --i) {
             if constexpr (is_trivially_copyable_v<T>) {
@@ -171,6 +180,10 @@ public:
     void insert(size_t index, T&& value) {
         assert(index <= size, "Index out of bounds");
         reallocate_if_necessary();
+        if(index == size){
+            push(value);
+            return;
+        }
         // Move elements to make room for the new element
         for (size_t i = size; i > index; --i) {
             if constexpr (is_trivially_copyable_v<T>) {

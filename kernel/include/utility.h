@@ -57,6 +57,24 @@ namespace std{
         static_assert(!std::is_lvalue_reference<T>::value, "bad forward");
         return static_cast<T&&>(arg);
     }
+
+    template<typename T> struct is_integral { static constexpr bool value = false; };
+
+    template<> struct is_integral<bool>              { static constexpr bool value = true; };
+    template<> struct is_integral<char>              { static constexpr bool value = true; };
+    template<> struct is_integral<signed char>       { static constexpr bool value = true; };
+    template<> struct is_integral<unsigned char>     { static constexpr bool value = true; };
+    template<> struct is_integral<short>             { static constexpr bool value = true; };
+    template<> struct is_integral<unsigned short>    { static constexpr bool value = true; };
+    template<> struct is_integral<int>               { static constexpr bool value = true; };
+    template<> struct is_integral<unsigned int>      { static constexpr bool value = true; };
+    template<> struct is_integral<long>              { static constexpr bool value = true; };
+    template<> struct is_integral<unsigned long>     { static constexpr bool value = true; };
+    template<> struct is_integral<long long>         { static constexpr bool value = true; };
+    template<> struct is_integral<unsigned long long>{ static constexpr bool value = true; };
+
+    template<typename T>
+    constexpr bool is_integral_v = is_integral<T>::value;
 }
 
 // Non-allocating placement new
@@ -101,4 +119,34 @@ template <typename T>
 inline T max(T t1, T t2){
     return t1 > t2 ? t1 : t2;
 }
+
+template <typename>
+class FunctionRef;
+
+template<typename Ret, typename... Args>
+class FunctionRef<Ret(Args...)> {
+    using CallbackFn = Ret (*)(void*, Args...);
+
+    void* obj = nullptr;
+    CallbackFn callback = nullptr;
+
+public:
+    FunctionRef() = default;
+
+    template<typename Callable>
+    FunctionRef(Callable& f) {
+        obj = static_cast<void*>(&f);
+        callback = [](void* o, Args... args) -> Ret {
+            return (*static_cast<Callable*>(o))(args...);
+        };
+    }
+
+    Ret operator()(Args... args) const {
+        return callback(obj, args...);
+    }
+
+    explicit operator bool() const {
+        return callback != nullptr;
+    }
+};
 #endif //CROCOS_UTILITY_H
