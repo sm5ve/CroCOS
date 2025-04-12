@@ -25,4 +25,31 @@ constexpr T roundDownToNearestMultiple(T toRound, T divisor){
     return divideAndRoundDown(toRound, divisor) * divisor;
 }
 
+template <typename T>
+constexpr T log2floor(T value){
+    size_t log = 0;
+    while(value >>= 1) log++;
+    return log;
+}
+
+constexpr uint64_t log2floor(uint64_t value){
+#ifdef __x86_64__
+    return static_cast<uint64_t>(63 - __builtin_clzl(value));
+#else
+    size_t log = 0;
+    while(value >>= 1) log++;
+    return log;
+#endif
+}
+
+constexpr uint32_t log2floor(uint32_t value){
+#ifdef __x86_64__
+    return static_cast<uint32_t>(63 - __builtin_clz(value));
+#else
+    size_t log = 0;
+    while(value >>= 1) log++;
+    return log;
+#endif
+}
+
 #endif //CROCOS_MATH_H

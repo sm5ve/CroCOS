@@ -149,4 +149,19 @@ public:
         return callback != nullptr;
     }
 };
+
+template<typename From, typename To>
+concept convertible_to = requires(From f) {
+    static_cast<To>(f);
+};
+
+template<typename T>
+concept comparable_less_than = requires(T a, T b) {
+    { a < b } -> convertible_to<bool>;
+};
+
+template<typename T>
+concept comparable_equality = requires(T a, T b) {
+    { a == b } -> convertible_to<bool>;
+};
 #endif //CROCOS_UTILITY_H
