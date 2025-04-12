@@ -5,12 +5,12 @@
 #ifndef CROCOS_AMD64_TABLES_H
 #define CROCOS_AMD64_TABLES_H
 
-#include <arch/hal.h>
-#include <arch/spinlock.h>
-#include <kconfig.h>
-#include <kernel.h>
-#include <lib/ds/Vector.h>
-#include <FlushPlanner.h>
+#include "arch/hal/hal.h"
+#include "arch/hal/spinlock.h"
+#include "kconfig.h"
+#include "kernel.h"
+#include "lib/ds/Vector.h"
+#include "FlushPlanner.h"
 
 namespace kernel::amd64 {
     //Derived from https://wiki.osdev.org/CPUID, or tables 3-19 and 3-20 in volume 2 of the Intel manual.
@@ -214,6 +214,8 @@ namespace kernel::amd64 {
         void processOverflowPool();
         //Preallocate some page tables if necessary - potentially expensive operation.
         void topUpReservePool();
+
+        void runSillyTest();
     }
 }
 

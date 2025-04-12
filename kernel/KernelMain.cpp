@@ -1,10 +1,12 @@
 //
 // Created by Spencer Martin on 2/13/25.
 //
-#include <arch/hal.h>
+#include "arch/hal/hal.h"
 #include <kernel.h>
 #include <lib/ds/Vector.h>
 #include <lib/ds/SmartPointer.h>
+
+#include <lib/ds/HashMap.h>
 
 namespace kernel{
     SerialPrintStream EarlyBootStream;

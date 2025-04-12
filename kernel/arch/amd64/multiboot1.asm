@@ -111,13 +111,13 @@ _start:
     # Zero out the tables pml4 - boot_page_directory2
     lea (boot_pml4 - VMEM_OFFSET), %edi
     mov $0, %eax
-    mov $4096, %ecx  # 4096 bytes = 512 entries * 8 bytes each
+    mov $4096, %ecx  # 4096 bytes = 512 entryBuffer * 8 bytes each
     zero_loop:
         mov %eax, (%edi)
         add $4, %edi
         loop zero_loop
 
-    # Set the top and bottom entries in the PML4
+    # Set the top and bottom entryBuffer in the PML4
     mov $(boot_page_directory_pointer_table - VMEM_OFFSET), %eax
     or $3, %eax
     mov %eax, (boot_pml4 - VMEM_OFFSET)

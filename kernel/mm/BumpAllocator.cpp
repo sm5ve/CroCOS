@@ -5,7 +5,7 @@
 #include <kconfig.h>
 #include <kernel.h>
 #include "allocators.h"
-#include <arch/hal.h>
+#include "arch/hal/hal.h"
 #include <assert.h>
 
 uint8_t buffer[KERNEL_BUMP_ALLOC_SIZE];

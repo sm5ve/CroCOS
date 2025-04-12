@@ -2,10 +2,11 @@
 // Created by Spencer Martin on 2/15/25.
 //
 
-#include <arch/hal.h>
+#include "arch/hal/hal.h"
 
 #ifdef __x86_64__
-#include <arch/amd64.h>
+#include "arch/amd64/amd64.h"
+#include <arch/amd64/smp.h>
 #endif
 extern size_t archProcessorCount;
 
@@ -87,10 +88,7 @@ namespace kernel::hal{
     }
 
     ProcessorID getCurrentProcessorID(){
-        //TODO IMPLEMENT
-        //This will require some sort of processor-local memory page to implement efficiently. But that's okay!
-        //We'll cross that bridge when we get to it :)
-        return 0;
+        return amd64::smp::getLogicalProcessorID();
     }
 
     bool atomic_cmpxchg_u64(volatile uint64_t &var, volatile uint64_t &expected, uint64_t desired){

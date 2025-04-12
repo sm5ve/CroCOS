@@ -3,12 +3,12 @@
 //
 
 #include <mm.h>
-#include <arch/hal.h>
+#include "arch/hal/hal.h"
 #include <lib/ds/Vector.h>
 #include <kernel.h>
 #include <lib/math.h>
 
-//#define ALLOCATOR_DEBUG
+#define ALLOCATOR_DEBUG
 
 namespace kernel::mm::PageAllocator{
 
@@ -880,8 +880,6 @@ namespace kernel::mm::PageAllocator{
             range = phys_memory_range(rangeBottom, rangeTop);
 
             reserveOverlap(info.range);
-
-            kernel::DbgOut << "globalPool located at " << globalPool << "\n";
         }
 
         phys_addr allocateSmallPage(){
@@ -934,8 +932,6 @@ namespace kernel::mm::PageAllocator{
     }
 
     void reservePhysicalRange(phys_memory_range range){
-        //assertUnimplemented("reservePhysicalRange");
-        //(void)range;
         //temporary just to confirm things are working okay
         //We will have to replace this by an iteration over the vector in time.
         (*allocators)[0].reservePhysMemoryRange(range);

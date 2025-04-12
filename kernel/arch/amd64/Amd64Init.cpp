@@ -2,7 +2,7 @@
 // Created by Spencer Martin on 2/12/25.
 //
 
-#include <arch/amd64.h>
+#include "arch/amd64/amd64.h"
 #include <kernel.h>
 #include <kconfig.h>
 #include <lib/str.h>
@@ -11,6 +11,9 @@
 #include <lib/math.h>
 #include <assert.h>
 #include "multiboot.h"
+#include <arch/amd64/interrupts/LegacyPIC.h>
+#include <arch/amd64/interrupts/APIC.h>
+#include <arch/amd64/smp.h>
 
 extern uint32_t mboot_magic;
 extern uint32_t mboot_table;
@@ -245,6 +248,27 @@ namespace kernel::amd64{
         return buffer_base_virt;
     }
 
+    bool supportsFSGSBASE() {
+        uint32_t eax, ebx, ecx, edx;
+        eax = 0x07;
+        ecx = 0;
+        asm volatile("cpuid"
+                : "+a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+                : "c"(ecx));
+        return (ebx & (1 << 0)) != 0;
+    }
+
+    void enableFSGSBase(){
+        //TODO implement a fallback method
+        //really I ought to just do this with a proper GDT or whatever... but this should be enough
+        //to get the rudiments of SMP working.
+        assert(supportsFSGSBASE(), "Your CPU doesn't support FSGSBASE");
+        uint64_t cr4;
+        asm volatile ("mov %%cr4, %0" : "=r"(cr4));
+        cr4 |= (1 << 16);
+        asm volatile ("mov %0, %%cr4" :: "r"(cr4));
+    }
+
     void hwinit(){
         assert(mboot_magic == 0x2BADB002, "Somehow the multiboot magic number is wrong. How did we get here?");
 
@@ -262,14 +286,18 @@ namespace kernel::amd64{
         }
         archProcessorCount = processorCount;
 
-        //If for some reason ACPI initialization failed, assume as a fallback that we've only got one core
-        //Without ACPI we don't have the information to spin up the other cores anyways
+        //We don't support the legacy 8259 PIC, so without the ACPI tables we should just abort
         if(processorCount == 0){
-            kernel::DbgOut << "ACPI table discovery failed, running in single processor mode\n";
-            processorCount = 1;
+            assertNotReached("ACPI table discovery failed");
         }
 
+        kernel::amd64::interrupts::disableLegacyPIC();
+        kernel::amd64::interrupts::buildApicTopology(*madts[0]); //Temporary ACPI initialization stuff...
+
+
         kernel::DbgOut << "Processor count: " << processorCount << "\n";
+        enableFSGSBase();
+        smp::setLogicalProcessorID(0);
 
         Vector<mm::PageAllocator::page_allocator_range_info> free_memory_regions;
 
@@ -278,6 +306,7 @@ namespace kernel::amd64{
 
         //Extract a list of free memory regions from the multiboot header, reserve the buffers requested by
         //the page allocator, and package that up to pass along to the page allocator
+        //TODO make sure we double-check that the LAPIC/IOAPIC address ranges are completely reserved
         for(mboot_mmap_entry* mbootMmapEntry = mbootMmapBase;
             (uint64_t)mbootMmapEntry < (uint64_t)mbootMmapBase + mbootInfo -> mmap_len; mbootMmapEntry++){
             if(mbootMmapEntry -> type == 0x1){ //If the memory region is free, we'll add it to the list!
@@ -286,6 +315,7 @@ namespace kernel::amd64{
                 if(range.getSize() > (mm::PageAllocator::bigPageSize * 2)){
                     uint64_t* buff = (uint64_t*)reservePageAllocatorBufferForRange(range, processorCount);
                     free_memory_regions.push({range, buff});
+                    kernel::DbgOut << "memory region top is " << (void*)range.end.value << "\n";
                 }
             }
         }
@@ -298,6 +328,8 @@ namespace kernel::amd64{
         kernel::mm::PageAllocator::reservePhysicalRange(range);
 
         kernel::DbgOut << "Finished initializing page allocator\n";
+
         kernel::amd64::PageTableManager::init(processorCount);
+        //kernel::amd64::PageTableManager::runSillyTest();
     }
 }

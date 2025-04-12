@@ -2,7 +2,7 @@
 // Created by Spencer Martin on 2/12/25.
 //
 
-#include <arch/amd64.h>
+#include "arch/amd64/amd64.h"
 #include <panic.h>
 
 namespace kernel::amd64{

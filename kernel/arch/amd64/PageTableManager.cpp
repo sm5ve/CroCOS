@@ -3,8 +3,8 @@
 //
 
 #include "kernel.h"
-#include <arch/hal.h>
-#include <arch/amd64.h>
+#include "arch/hal/hal.h"
+#include "arch/amd64/amd64.h"
 #include <mm.h>
 #include <lib/math.h>
 #include <utility.h>
@@ -16,6 +16,7 @@
 #define RESERVE_POOL_DEFAULT_FILL 48
 #define RESERVE_POOL_LAZY_FILL_THRESHOLD 16
 
+//Unused for now
 #define BULK_FREE_POOL_SIZE 1024
 
 #define ENTRIES_PER_TABLE 512
@@ -59,7 +60,7 @@ namespace kernel::amd64::PageTableManager{
         [[nodiscard]]
         constexpr uint64_t get_local_metadata() const {
             //Make sure we're only using bits marked "available" by the x86 paging spec
-            //This check is only valid for entries pointing to other tables. This is notably invalid for big pages
+            //This check is only valid for entryBuffer pointing to other tables. This is notably invalid for big pages
             static_assert((!freeEntry && ((start >= 8 && end <= 11) || (start >= 52 && end <= 62) || (start == 6 && end == 6))) || (freeEntry && (start >= 1 && end <= 62)),
                           "Metadata out of bounds");
             return (value >> start) & ((1ul << (end - start + 1)) - 1);
@@ -68,7 +69,7 @@ namespace kernel::amd64::PageTableManager{
         template <size_t start, size_t end, bool freeEntry = false>
         void set_local_metadata(uint64_t metadata) {
             //Make sure we're only using bits marked "available" by the x86 paging spec
-            //This check is only valid for entries pointing to other tables. This is notably invalid for big pages
+            //This check is only valid for entryBuffer pointing to other tables. This is notably invalid for big pages
             static_assert((!freeEntry && ((start >= 8 && end <= 11) || (start >= 52 && end <= 62) || (start == 6 && end == 6))) || (freeEntry && (start >= 1 && end <= 62)),
                           "Metadata out of bounds");
             uint64_t mask = ((1ul << (end - start + 1)) - 1) << start;
@@ -98,7 +99,7 @@ namespace kernel::amd64::PageTableManager{
         [[nodiscard]]
         static uint64_t get_inline_global_metadata(const PageDirectoryEntry* table) {
             assert((uint64_t)table % mm::PageAllocator::smallPageSize == 0, "Page table improperly aligned");
-            //global metadata should support both big page entries and entries mapping to page tables, hence the
+            //global metadata should support both big page entryBuffer and entryBuffer mapping to page tables, hence the
             //more restrictive assert.
             static_assert((bitIndex >= 9 && bitIndex <= 11) || (bitIndex >= 52 && bitIndex <= 58),
                           "Metadata out of bounds");
@@ -438,18 +439,18 @@ namespace kernel::amd64::PageTableManager{
         return true;
     }
 
-    //Initializes the metadata in the page table entries to encode a linked list allowing O(1) free virtual address
+    //Initializes the metadata in the page table entryBuffer to encode a linked list allowing O(1) free virtual address
     //discovery. The free metadata makes use of 2 primary "global" table variables, and one local metadata entry per free
     //entry.
     //
-    //The first is a counter for the number of *present* entries. Note that this is not the same as
-    //(512 - free entries) as certain entries may not be present, but may still be used to store virtual
-    //address metadata for linked tables. However, the number of present entries will either be (512 - free entries)
+    //The first is a counter for the number of *present* entryBuffer. Note that this is not the same as
+    //(512 - free entryBuffer) as certain entryBuffer may not be present, but may still be used to store virtual
+    //address metadata for linked tables. However, the number of present entryBuffer will either be (512 - free entryBuffer)
     //or half this quantity, depending on a bit indicating the absence or presence of a supplementary virtual address
     //table.
     //
     //The second global variable is the index of the first "free" entry. This is the head of the linked list of free
-    //entries in our table.
+    //entryBuffer in our table.
     //
     //Note that this is only to be used internally by the page table manager – in the broader kernel, the higher level
     //abstraction of VirtualMemoryZones will solve virtual address allocation using an augmented AVL tree.
@@ -772,23 +773,22 @@ namespace kernel::amd64::PageTableManager{
         assertUnimplemented("need to trigger an IPI");
     }
 
-    const auto testScale = 12;
-    const size_t testSize = 1 << testScale;
+    const auto testScale = 13;
+    const size_t testSize = (1 << testScale);
+    const size_t sqrtTestItr = 30;
     PageInfo entries[testSize];
 
     void runSillyTest(){
         kernel::DbgOut << "allocating page table entry at " << allocateInternalPageTableEntry() << "\n";
 
-        //PageDirectoryEntry* entries[testSize];
-        for(size_t a = 1; a < 30; a += 2) {
-            for(size_t b = 1; b < 30; b += 2) {
+        //PageDirectoryEntry* entryBuffer[testSize];
+        for(size_t a = 1; a < sqrtTestItr; a += 2) {
+            for(size_t b = 1; b < sqrtTestItr; b += 2) {
                 for (size_t i = 0; i < testSize; i++) {
                     entries[(i * a) % testSize] = allocatePage();
-                    //entries[(i * a) % testSize] = allocateInternalPageTableEntry();
                 }
                 for (size_t i = 0; i < testSize; i++) {
                     freePage(entries[(i * b) % testSize]);
-                    //freeInternalPageTableEntry(*entries[(i * b) % testSize]);
                 }
             }
         }
@@ -842,25 +842,16 @@ namespace kernel::amd64::PageTableManager{
         memset(internalPageTableMapping, 0, sizeof(internalPageTableMapping));
         memset(internalTableMetadataMapping, 0, sizeof(internalTableMetadataMapping));
         memset(initialInternalPageTable, 0, sizeof(initialInternalPageTable));
-        //Initialize the free list metadata
-        //initializeInternalPageTableFreeMetadata((PageDirectoryEntry*)internalPageTableMapping);
-        //initializeInternalPageTableFreeMetadata((PageDirectoryEntry*)initialInternalPageTable);
 
         //Initialize the metadata for the internal page directory - this is done by hand
         initializePartiallyOccupiedRingBuffer();
-        //Allocate the page table entries to map in our two startup page tables and map the page directory 2 MiB into our window
-        /*
-        auto entryInMappingPT_for_PTMap= allocateInternalPageTableEntryForTable((PageDirectoryEntry*)internalPageTableMapping);
-        auto entryInMappingPT_for_PTMetadataMap= allocateInternalPageTableEntryForTable((PageDirectoryEntry*)internalPageTableMapping);
-        auto entryInMappingPT_for_initialPT= allocateInternalPageTableEntryForTable((PageDirectoryEntry*)internalPageTableMapping);
-        auto entryInInitialPT_for_PDir = allocateInternalPageTableEntryForTable((PageDirectoryEntry*)initialInternalPageTable);
-        */
+        //Allocate the page table entryBuffer to map in our two startup page tables and map the page directory 2 MiB into our window
         auto entryInMappingPT_for_PTMap = (PageDirectoryEntry*)&internalPageTableMapping[0];
         auto entryInMappingPT_for_PTMetadataMap = (PageDirectoryEntry*)&internalPageTableMapping[1];
         auto entryInMappingPT_for_initialPT = (PageDirectoryEntry*)&internalPageTableMapping[2];
         auto entryInInitialPT_for_PDir = (PageDirectoryEntry*)&initialInternalPageTable[0];
 
-        //Populate the entries by hand
+        //Populate the entryBuffer by hand
         entryInMappingPT_for_PTMap -> setAndPreserveMetadata(PageDirectoryEntry(amd64::early_boot_virt_to_phys(mm::virt_addr(internalPageTableMapping)).value | 3 | (1 << 8)));
         entryInMappingPT_for_PTMetadataMap -> setAndPreserveMetadata(PageDirectoryEntry(amd64::early_boot_virt_to_phys(mm::virt_addr(internalTableMetadataMapping)).value | 3 | (1 << 8)));
         entryInMappingPT_for_initialPT -> setAndPreserveMetadata(PageDirectoryEntry(amd64::early_boot_virt_to_phys(mm::virt_addr(initialInternalPageTable)).value | 3 | (1 << 8)));
@@ -896,6 +887,6 @@ namespace kernel::amd64::PageTableManager{
         initializeInternalPageDirectoryFreeMetadata(pageMappingDirectory);
         topUpReservePool();
 
-        runSillyTest();
+        //runSillyTest();
     }
 }

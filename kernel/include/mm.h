@@ -7,7 +7,7 @@
 
 #include "stddef.h"
 #include <lib/TypeTraits.h>
-#include <arch/hal.h>
+#include "arch/hal/hal.h"
 #include <lib/ds/Vector.h>
 #include <kernel.h>
 

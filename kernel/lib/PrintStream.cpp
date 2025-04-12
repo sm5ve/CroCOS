@@ -4,7 +4,7 @@
 
 #include <lib/PrintStream.h>
 #include <lib/str.h>
-#include <arch/hal.h>
+#include "arch/hal/hal.h"
 
 namespace kernel{
 

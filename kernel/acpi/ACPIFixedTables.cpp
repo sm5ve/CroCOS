@@ -9,7 +9,7 @@
 #include <lib/str.h>
 
 #ifdef __x86_64__
-#include <arch/amd64.h>
+#include "arch/amd64/amd64.h"
 #endif
 
 namespace kernel::acpi{
@@ -95,15 +95,10 @@ namespace kernel::acpi{
 
     size_t MADT::getEnabledProcessorCount() {
         size_t procCount = 0;
-        for(acpi::MADTEntryHeader* header = &(this->tableEntries);
-        (uint64_t)header < (uint64_t)this + this -> h.length;
-        header = (acpi::MADTEntryHeader*)((uint64_t)header + header -> length)){
-            if(header -> type == 0){
-                MADT_LAPIC_Entry* entry = (MADT_LAPIC_Entry*)header;
-                //TODO handle processors that are not yet enabled but still present
-                if((entry -> flags & 3) == 1){
-                    procCount++;
-                }
+        for(auto& entry : this ->entries<acpi::MADT_LAPIC_Entry>()){
+            //TODO handle processors that are not yet enabled but still present
+            if((entry.flags & 3) == 1){
+                procCount++;
             }
         }
         return procCount;

@@ -7,10 +7,10 @@
 
 #include "stdint.h"
 #include "stddef.h"
-#include <arch/spinlock.h>
+#include "spinlock.h"
 
 #ifdef __x86_64__
-#include <arch/amd64.h>
+#include "arch/amd64/amd64.h"
 #endif
 
 #define TOCTOU_LOCK_CHECK(lock, condition, action, failure) \
