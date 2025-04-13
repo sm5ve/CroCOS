@@ -52,6 +52,6 @@ constexpr bool before(int y, int m, int d) {
 #define assertNotReached(message)
 #define assertUnimplemented(message)
 #endif
-#define temporaryHack(d, m, y, ...) assert_base(before(y, m, d), "Hack expired: ", __VA_ARGS__)
+#define temporaryHack(d, m, y, message) static_assert(before(y, m, d), "Hack expired: " message)
 
 #endif //CROCOS_ASSERT_H
