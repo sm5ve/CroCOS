@@ -6,6 +6,7 @@
 #define CROCOS_PRINTSTREAM_H
 
 #include "stdint.h"
+#include <utility.h>
 
 namespace kernel{
     class PrintStream{

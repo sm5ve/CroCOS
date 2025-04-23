@@ -28,6 +28,8 @@ set(KERNEL_SRC
         include/lib/Comparator.h
         arch/amd64/smp/smp.cpp
         include/arch/amd64/smp.h
+        include/lib/ds/Variant.h
+        include/lib/ds/Optional.h
 )
 
 add_executable(Kernel ${KERNEL_SRC})

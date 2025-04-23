@@ -49,6 +49,16 @@ namespace kernel{
             SMALL
         };
     }
+
+    class PrintStream;
+}
+
+inline kernel::PrintStream& operator<<(kernel::PrintStream& ps, kernel::mm::phys_addr paddr){
+    return ps << "phys_addr(" << (void*)paddr.value << ")";
+}
+
+inline kernel::PrintStream& operator<<(kernel::PrintStream& ps, kernel::mm::virt_addr vaddr){
+    return ps << "virt_addr(" << (void*)vaddr.value << ")";
 }
 
 extern "C" void* memset(void* dest, int value, size_t len);

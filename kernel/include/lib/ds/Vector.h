@@ -26,7 +26,7 @@ private:
                 new_data[i] = data[i];
             }
             else{
-                new(&new_data[i]) T(std::move(data[i]));  // Move each element into the new buffer
+                new(&new_data[i]) T(move(data[i]));  // Move each element into the new buffer
                 data[i].~T();  // Explicitly call the destructor of old element
             }
         }
@@ -52,13 +52,13 @@ private:
     template <typename Comparator>
     void insertionSort(size_t low, size_t high, Comparator& comp) {
         for (size_t i = low + 1; i <= high; i++) {
-            T key = std::move(data[i]);
+            T key = move(data[i]);
             size_t j = i;
             while (j > low && comp(key, data[j - 1])) {
-                data[j] = std::move(data[j - 1]);
+                data[j] = move(data[j - 1]);
                 j--;
             }
-            data[j] = std::move(key);
+            data[j] = move(key);
         }
     }
 
@@ -262,7 +262,7 @@ public:
             data[size] = value;
         }
         else{
-            new (&data[size]) T(std::move(value));  // Placement new for the new element
+            new (&data[size]) T(move(value));  // Placement new for the new element
         }
         ++size;
     }
@@ -276,7 +276,7 @@ public:
                 data[i] = data[i + 1];
             }
             else{
-                data[i] = std::move(data[i + 1]);
+                data[i] = move(data[i + 1]);
             }
         }
         --size;
@@ -296,7 +296,7 @@ public:
                 data[i] = data[i - 1];
             }
             else{
-                data[i] = std::move(data[i - 1]);
+                data[i] = move(data[i - 1]);
             }
         }
         new (data + index) T(value);  // Placement new for the new element
@@ -316,7 +316,7 @@ public:
                 data[i] = data[i - 1];
             }
             else{
-                data[i] = std::move(data[i - 1]);
+                data[i] = move(data[i - 1]);
             }
         }
 
@@ -324,7 +324,7 @@ public:
             data[index] = value;
         }
         else{
-            new (data + index) T(std::move(value));  // Placement new for the new element
+            new (data + index) T(move(value));  // Placement new for the new element
         }
         ++size;
     }

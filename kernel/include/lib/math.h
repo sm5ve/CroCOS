@@ -52,4 +52,25 @@ constexpr uint32_t log2floor(uint32_t value){
 #endif
 }
 
+constexpr size_t gcd(size_t a, size_t b) {
+    return b == 0 ? a : gcd(b, a % b);
+}
+
+constexpr size_t lcm(size_t a, size_t b) {
+    return (a / gcd(a, b)) * b;
+}
+
+constexpr size_t max(size_t a) {
+    return a;
+}
+
+constexpr size_t max(size_t a, size_t b) {
+    return a > b ? a : b;
+}
+
+template <typename... Rest>
+constexpr size_t max(size_t a, size_t b, Rest... rest) {
+    return max(max(a, b), rest...);
+}
+
 #endif //CROCOS_MATH_H

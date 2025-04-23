@@ -4,6 +4,7 @@
 
 #include <lib/PrintStream.h>
 #include <lib/str.h>
+#include <kernel.h>
 #include "arch/hal/hal.h"
 
 namespace kernel{
@@ -67,11 +68,10 @@ namespace kernel{
         return *this << strbuff;
     }
 
-    PrintStream& PrintStream::operator<<(const bool x){
-        if(x){
+    PrintStream& PrintStream::operator<<(const bool x) {
+        if (x) {
             *this << "true";
-        }
-        else{
+        } else {
             *this << "false";
         }
         return *this;

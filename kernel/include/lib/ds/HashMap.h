@@ -13,7 +13,7 @@
 template<typename K>
 struct DefaultHasher {
     size_t operator()(const K& key) const {
-        static_assert(std::is_integral_v<K>, "No default hash for this type");
+        static_assert(is_integral_v<K>, "No default hash for this type");
         return static_cast<size_t>(key);
     }
 };
@@ -106,14 +106,14 @@ private:
                 newEntry.key = entry.key;
             }
             else{
-                new(&newEntry.key) K(std::move(entry.key));  // Move each element into the new buffer
+                new(&newEntry.key) K(move(entry.key));  // Move each element into the new buffer
                 entry.key.~K();  // Explicitly call the destructor of old element
             }
             if constexpr (is_trivially_copyable_v<V>) {
                 newEntry.value = entry.value;
             }
             else{
-                new(&newEntry.value) V(std::move(entry.value));  // Move each element into the new buffer
+                new(&newEntry.value) V(move(entry.value));  // Move each element into the new buffer
                 entry.value.~V();  // Explicitly call the destructor of old element
             }
             newEntry.state = EntryState::occupied;
@@ -221,14 +221,14 @@ public:
             if constexpr (is_trivially_copyable_v<V>) {
                 entry.value = value;
             } else {
-                new(&entry.value) V(std::move(value));
+                new(&entry.value) V(move(value));
             }
         } else {
             if constexpr (is_trivially_copyable_v<V>) {
                 entry.value = value;
             } else {
                 entry.value.~V();
-                new(&entry.value) V(std::move(value));
+                new(&entry.value) V(move(value));
             }
         }
     }
@@ -245,7 +245,7 @@ public:
     bool take(const K& key, V& outValue){
         auto& entry = probeIndex(key);
         if(entry.state == EntryState::occupied){
-            outValue = std::move(entry.value);
+            outValue = move(entry.value);
             entry.key.~K();
             entry.value.~V();
             entry.state = EntryState::tombstone;

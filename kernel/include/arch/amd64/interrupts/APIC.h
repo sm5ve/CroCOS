@@ -15,12 +15,17 @@ namespace kernel::amd64::interrupts{
     void buildApicTopology(acpi::MADT& madt);
 
     namespace Lapic {
-        void initializeLapic(mm::phys_addr lapic_addr);
+        void initializeLapic();
     };
 
-    class IOapic : public topology::IConfigurableGlobalCPUAffinityInterruptController{
+    class IOapic{
+    private:
+        uint8_t apicID;
+        void* mmio_base;
+        uint32_t gsi_base;
     public:
-        IOapic(uint8_t id, void* ioapic_addr, uint32_t gsi_base);
+        IOapic(uint8_t id, void* mmio_window, uint32_t gsi_base);
+
     };
 }
 

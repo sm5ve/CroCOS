@@ -4,78 +4,260 @@
 
 #ifndef CROCOS_UTILITY_H
 #define CROCOS_UTILITY_H
-namespace std{
-    template <typename T, T v>
-    struct integral_constant {
-        static constexpr T value = v;
-        using value_type = T;
-        using type = integral_constant;  // The type of the trait
-        constexpr operator T() const noexcept { return value; }
-    };
 
-    using true_type = integral_constant<bool, true>;
-    using false_type = integral_constant<bool, false>;
+#include <lib/TypeTraits.h>
 
-    template <typename T>
-    struct remove_reference {
-        using type = T;  // Default case: T is not a reference, so the type is just T
-    };
+template <typename T, T v>
+struct integral_constant {
+    static constexpr T value = v;
+    using value_type = T;
+    using type = integral_constant;  // The type of the trait
+    constexpr operator T() const noexcept { return value; }
+};
 
-    template <typename T>
-    struct remove_reference<T&> {
-        using type = T;  // If T is a reference, remove the reference part
-    };
+using true_type = integral_constant<bool, true>;
+using false_type = integral_constant<bool, false>;
 
-    template <typename T>
-    struct remove_reference<T&&> {
-        using type = T;  // If T is an rvalue reference, remove the reference part
-    };
+template <typename T>
+struct remove_reference {
+    using type = T;  // Default case: T is not a reference, so the type is just T
+};
 
-    // Helper alias template to make usage easier
-    template <typename T>
-    using remove_reference_t = typename remove_reference<T>::type;
+template <typename T>
+struct remove_reference<T&> {
+    using type = T;  // If T is a reference, remove the reference part
+};
 
-    template <typename T>
-    struct is_lvalue_reference : std::false_type {};  // Default case: T is not an lvalue reference
+template <typename T>
+struct remove_reference<T&&> {
+    using type = T;  // If T is an rvalue reference, remove the reference part
+};
 
-    template <typename T>
-    struct is_lvalue_reference<T&> : std::true_type {};  // Specialization: T is an lvalue reference
+// Helper alias template to make usage easier
+template <typename T>
+using remove_reference_t = typename remove_reference<T>::type;
 
+template <typename T>
+struct is_lvalue_reference : false_type {};  // Default case: T is not an lvalue reference
 
-    template <typename T>
-    constexpr T&& move(T& t) noexcept {
-        return static_cast<T&&>(t);
-    }
+template <typename T>
+struct is_lvalue_reference<T&> : true_type {};  // Specialization: T is an lvalue reference
 
-    template <typename T>
-    T&& forward(std::remove_reference_t<T>& arg) noexcept {
-        return static_cast<T&&>(arg);
-    }
-
-    template <typename T>
-    T&& forward(std::remove_reference_t<T>&& arg) noexcept {
-        static_assert(!std::is_lvalue_reference<T>::value, "bad forward");
-        return static_cast<T&&>(arg);
-    }
-
-    template<typename T> struct is_integral { static constexpr bool value = false; };
-
-    template<> struct is_integral<bool>              { static constexpr bool value = true; };
-    template<> struct is_integral<char>              { static constexpr bool value = true; };
-    template<> struct is_integral<signed char>       { static constexpr bool value = true; };
-    template<> struct is_integral<unsigned char>     { static constexpr bool value = true; };
-    template<> struct is_integral<short>             { static constexpr bool value = true; };
-    template<> struct is_integral<unsigned short>    { static constexpr bool value = true; };
-    template<> struct is_integral<int>               { static constexpr bool value = true; };
-    template<> struct is_integral<unsigned int>      { static constexpr bool value = true; };
-    template<> struct is_integral<long>              { static constexpr bool value = true; };
-    template<> struct is_integral<unsigned long>     { static constexpr bool value = true; };
-    template<> struct is_integral<long long>         { static constexpr bool value = true; };
-    template<> struct is_integral<unsigned long long>{ static constexpr bool value = true; };
-
-    template<typename T>
-    constexpr bool is_integral_v = is_integral<T>::value;
+template <typename T>
+constexpr T&& move(T& t) noexcept {
+    return static_cast<T&&>(t);
 }
+
+template <typename T>
+T&& forward(remove_reference_t<T>& arg) noexcept {
+    return static_cast<T&&>(arg);
+}
+
+template <typename T>
+T&& forward(remove_reference_t<T>&& arg) noexcept {
+    static_assert(!is_lvalue_reference<T>::value, "bad forward");
+    return static_cast<T&&>(arg);
+}
+
+template<typename T> struct is_integral { static constexpr bool value = false; };
+
+template<> struct is_integral<bool>              { static constexpr bool value = true; };
+template<> struct is_integral<char>              { static constexpr bool value = true; };
+template<> struct is_integral<signed char>       { static constexpr bool value = true; };
+template<> struct is_integral<unsigned char>     { static constexpr bool value = true; };
+template<> struct is_integral<short>             { static constexpr bool value = true; };
+template<> struct is_integral<unsigned short>    { static constexpr bool value = true; };
+template<> struct is_integral<int>               { static constexpr bool value = true; };
+template<> struct is_integral<unsigned int>      { static constexpr bool value = true; };
+template<> struct is_integral<long>              { static constexpr bool value = true; };
+template<> struct is_integral<unsigned long>     { static constexpr bool value = true; };
+template<> struct is_integral<long long>         { static constexpr bool value = true; };
+template<> struct is_integral<unsigned long long>{ static constexpr bool value = true; };
+
+template<typename T>
+constexpr bool is_integral_v = is_integral<T>::value;
+
+template <bool C, typename A, typename B>
+struct conditional;
+
+template <typename A, typename B>
+struct conditional<true, A, B>{
+    using type = A;
+};
+
+template <typename A, typename B>
+struct conditional<false, A, B>{
+    using type = B;
+};
+
+template <bool C, typename A, typename B>
+using conditional_t = conditional<C, A, B>::type;
+
+template<typename T, typename S>
+struct is_same {
+    static constexpr bool value = false;
+};
+
+template<typename T>
+struct is_same<T, T> {
+    static constexpr bool value = true;
+};
+
+template<typename T, typename S>
+constexpr bool is_same_v = is_same<T, S>::value;
+
+template <typename T, typename... Ts>
+struct IndexOfHelper {
+    static constexpr size_t value = static_cast<size_t>(-1);
+};
+
+template <typename T, typename First, typename... Rest>
+struct IndexOfHelper<T, First, Rest...> {
+    static constexpr size_t value = is_same_v<T, First>
+                                    ? 0
+                                    : (IndexOfHelper<T, Rest...>::value == static_cast<size_t>(-1)
+                                       ? static_cast<size_t>(-1)
+                                       : 1 + IndexOfHelper<T, Rest...>::value);
+};
+
+template <typename T, typename... Ts>
+using IndexOf = IndexOfHelper<T, Ts...>;
+
+template <size_t Index, typename... Ts>
+struct TypeAt;
+
+template <size_t Index, typename First, typename... Rest>
+struct TypeAt<Index, First, Rest...> {
+    using type = typename TypeAt<Index - 1, Rest...>::type;
+};
+
+template <typename First, typename... Rest>
+struct TypeAt<0, First, Rest...> {
+    using type = First;
+};
+
+template<bool B, typename T = void>
+struct enable_if {};
+
+template<typename T>
+struct enable_if<true, T> {
+    using type = T;
+};
+
+template<bool B, typename T = void>
+using enable_if_t = typename enable_if<B, T>::type;
+
+template<typename F, typename Arg>
+constexpr auto invoke(F&& f, Arg&& arg) -> decltype(f(arg)) {
+    return f(arg);
+}
+
+template<size_t... Is>
+struct index_sequence { };
+
+template<size_t N, size_t... Is>
+struct make_index_sequence_impl : make_index_sequence_impl<N - 1, N - 1, Is...> { };
+
+template<size_t... Is>
+struct make_index_sequence_impl<0, Is...> {
+    using type = index_sequence<Is...>;
+};
+
+template <typename T>
+T&& declval() noexcept;
+
+template<typename...> using void_t = void;
+
+// Primary template — not defined (intentionally incomplete)
+template<typename, typename F, typename... Args>
+struct invoke_result_impl;
+
+// Specialization — only defined when F(Args...) is well-formed
+template<typename F, typename... Args>
+struct invoke_result_impl<void_t<decltype(declval<F>()(declval<Args>()...))>, F, Args...> {
+    using type = decltype(declval<F>()(declval<Args>()...));
+};
+
+template<typename F, typename... Args>
+using invoke_result = invoke_result_impl<void, F, Args...>;
+
+template<typename F, typename... Args>
+using invoke_result_t = typename invoke_result<F, Args...>::type;
+
+template<size_t N>
+using make_index_sequence = typename make_index_sequence_impl<N>::type;
+
+// remove_cv
+template<typename T> struct remove_cv                { using type = T; };
+template<typename T> struct remove_cv<const T>       { using type = T; };
+template<typename T> struct remove_cv<volatile T>    { using type = T; };
+template<typename T> struct remove_cv<const volatile T> { using type = T; };
+
+// decay
+template<typename T>
+struct decay {
+    using U = typename remove_reference<T>::type;
+    using type = typename remove_cv<U>::type;
+};
+
+template<typename... Ts>
+struct type_list {};
+
+template<typename List>
+struct unique_type_list;
+
+template<>
+struct unique_type_list<type_list<>> {
+    using type = type_list<>;
+};
+
+template<typename T, typename List>
+struct prepend;
+
+template<typename T, typename... Ts>
+struct prepend<T, type_list<Ts...>> {
+    using type = type_list<T, Ts...>;
+};
+
+template<typename T, typename... Rest>
+struct unique_type_list<type_list<T, Rest...>> {
+private:
+using tail = typename unique_type_list<type_list<Rest...>>::type;
+static constexpr bool exists = (is_same_v<T, Rest> || ...);
+
+public:
+using type = conditional_t<
+        exists,
+        tail,
+        typename prepend<T, tail>::type
+>;
+};
+
+template<typename T>
+using decay_t = typename decay<T>::type;
+
+template <typename... Ts>
+struct overload : Ts... {
+    using Ts::operator()...;
+};
+
+template<typename F, typename Arg, typename = void>
+struct is_invocable : false_type {};
+
+template<typename F, typename Arg>
+struct is_invocable<F, Arg, void_t<decltype(void(declval<F&>()(declval<Arg>())) )>>
+        : true_type {};
+
+template<typename TypeList, typename F>
+struct transform_result_types;
+
+template<typename... Ts, typename F>
+struct transform_result_types<type_list<Ts...>, F> {
+    using type = type_list<invoke_result_t<F, Ts>...>;
+};
+
+template <typename... Ts>
+overload(Ts...) -> overload<Ts...>;
 
 // Non-allocating placement new
 inline void* operator new(size_t, void* ptr) noexcept {
@@ -87,27 +269,27 @@ inline void operator delete(void*, void*) noexcept {}
 
 template <typename T>
 inline void swap(T& t1, T& t2){
-    T temp = std::move(t1);
-    t1 = std::move(t2);
-    t2 = std::move(temp);
+    T temp = move(t1);
+    t1 = move(t2);
+    t2 = move(temp);
 }
 
 template <typename T>
 //Sets t2 to t1, t3 to t2, and t1 to t3
 inline void rotateRight(T& t1, T& t2, T& t3){
-    T temp = std::move(t3);
-    t3 = std::move(t2);
-    t2 = std::move(t1);
-    t1 = std::move(temp);
+    T temp = move(t3);
+    t3 = move(t2);
+    t2 = move(t1);
+    t1 = move(temp);
 }
 
 template <typename T>
 //Sets t1 to t2, t2 to t3, and t3 to t1
 inline void rotateLeft(T& t1, T& t2, T& t3){
-    T temp = std::move(t1);
-    t1 = std::move(t2);
-    t2 = std::move(t3);
-    t3 = std::move(temp);
+    T temp = move(t1);
+    t1 = move(t2);
+    t2 = move(t3);
+    t3 = move(temp);
 }
 
 template <typename T>
@@ -163,5 +345,41 @@ concept comparable_less_than = requires(T a, T b) {
 template<typename T>
 concept comparable_equality = requires(T a, T b) {
     { a == b } -> convertible_to<bool>;
+};
+
+template<typename... Ts>
+struct TypeSetComparator{
+private:
+    template<typename R>
+    static constexpr bool exists(){
+        return (is_same_v<R, Ts> || ...);
+    }
+public:
+    template<typename... Rs>
+    static constexpr bool contains(){
+        return (exists<Rs>() && ...);
+    }
+};
+
+template<typename Stream, typename T, typename = void>
+struct is_streamable : false_type {};
+
+template<typename Stream, typename T>
+struct is_streamable<Stream, T,
+        decltype(void(declval<Stream&>() << declval<T>()))> : true_type {};
+
+template<typename Stream, typename... Ts>
+constexpr bool all_streamable_v = (is_streamable<Stream, Ts>::value && ...);
+
+struct monostate {
+    constexpr monostate() noexcept = default;
+
+    friend bool operator==(const monostate&, const monostate&) noexcept {
+        return true;
+    }
+
+    friend bool operator!=(const monostate&, const monostate&) noexcept {
+        return false;
+    }
 };
 #endif //CROCOS_UTILITY_H

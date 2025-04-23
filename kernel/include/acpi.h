@@ -97,6 +97,12 @@ namespace kernel::acpi{
         uint8_t lintNo;
     } __attribute__ ((packed));
 
+    struct MADT_LAPIC_Address_Override_Entry{
+        struct MADTEntryHeader h;
+        uint16_t rsv;
+        uint64_t lapicAddr;
+    } __attribute__ ((packed));
+
     template <typename TableType>
     struct MADTEntryType {
         static_assert(false, "Unsupported ACPI table type");
@@ -125,6 +131,11 @@ namespace kernel::acpi{
     template <>
     struct MADTEntryType<MADT_LAPIC_NMI_Entry> {
         static constexpr uint8_t type = 4;
+    };
+
+    template <>
+    struct MADTEntryType<MADT_LAPIC_Address_Override_Entry> {
+        static constexpr uint8_t type = 5;
     };
 
     template <typename T>

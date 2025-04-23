@@ -262,6 +262,7 @@ namespace kernel::amd64{
         //TODO implement a fallback method
         //really I ought to just do this with a proper GDT or whatever... but this should be enough
         //to get the rudiments of SMP working.
+        temporaryHack(1, 5, 2025, "Implement a proper GDT");
         assert(supportsFSGSBASE(), "Your CPU doesn't support FSGSBASE");
         uint64_t cr4;
         asm volatile ("mov %%cr4, %0" : "=r"(cr4));
@@ -273,31 +274,21 @@ namespace kernel::amd64{
         assert(mboot_magic == 0x2BADB002, "Somehow the multiboot magic number is wrong. How did we get here?");
 
         unmapIdentity();
+        enableFSGSBase();
+        smp::setLogicalProcessorID(0);
 
         flushTLB();
         //Our first goal is to find the MADT, so we will have the right info to properly init the
         //page allocator.
         kernel::acpi::tryFindACPI();
         auto madts = kernel::acpi::getTables<acpi::MADT>();
+        assert(madts.getSize() == 1, "Malformed ACPI tables have wrong number of MADTs - ", madts.getSize());
+        auto& madt = *madts[0];
 
-        size_t processorCount = 0;
-        for(auto madt : madts){
-            processorCount += madt->getEnabledProcessorCount();
-        }
-        archProcessorCount = processorCount;
+        archProcessorCount = madt.getEnabledProcessorCount();
+        assert(archProcessorCount > 0, "MADT has no LAPIC entry");
 
-        //We don't support the legacy 8259 PIC, so without the ACPI tables we should just abort
-        if(processorCount == 0){
-            assertNotReached("ACPI table discovery failed");
-        }
-
-        kernel::amd64::interrupts::disableLegacyPIC();
-        kernel::amd64::interrupts::buildApicTopology(*madts[0]); //Temporary ACPI initialization stuff...
-
-
-        kernel::DbgOut << "Processor count: " << processorCount << "\n";
-        enableFSGSBase();
-        smp::setLogicalProcessorID(0);
+        kernel::DbgOut << "Processor count: " << archProcessorCount << "\n";
 
         Vector<mm::PageAllocator::page_allocator_range_info> free_memory_regions;
 
@@ -313,23 +304,25 @@ namespace kernel::amd64{
                 mm::phys_memory_range range = {mm::phys_addr(mbootMmapEntry -> addr),
                                                mm::phys_addr(mbootMmapEntry -> addr + mbootMmapEntry -> len)};
                 if(range.getSize() > (mm::PageAllocator::bigPageSize * 2)){
-                    uint64_t* buff = (uint64_t*)reservePageAllocatorBufferForRange(range, processorCount);
+                    uint64_t* buff = (uint64_t*)reservePageAllocatorBufferForRange(range, archProcessorCount);
                     free_memory_regions.push({range, buff});
-                    kernel::DbgOut << "memory region top is " << (void*)range.end.value << "\n";
                 }
             }
         }
 
         unmapTemporaryWindow();
 
-        kernel::mm::PageAllocator::init(free_memory_regions, processorCount);
+        kernel::mm::PageAllocator::init(free_memory_regions, archProcessorCount);
         //Find the memory range where the kernel resides and reserve it so we don't overwrite anything!
         mm::phys_memory_range range{.start=mm::phys_addr(nullptr), .end=mm::phys_addr(&phys_end)};
         kernel::mm::PageAllocator::reservePhysicalRange(range);
 
         kernel::DbgOut << "Finished initializing page allocator\n";
 
-        kernel::amd64::PageTableManager::init(processorCount);
+        kernel::amd64::PageTableManager::init(archProcessorCount);
+
+        kernel::amd64::interrupts::disableLegacyPIC();
+        kernel::amd64::interrupts::buildApicTopology(*madts[0]); //Temporary ACPI initialization stuff...
         //kernel::amd64::PageTableManager::runSillyTest();
     }
 }

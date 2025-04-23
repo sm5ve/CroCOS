@@ -192,12 +192,12 @@ public:
 
 template <typename T, typename... Args>
 UniquePtr<T> make_unique(Args&&... args) {
-    return UniquePtr<T>(new T(std::forward<Args>(args)...));
+    return UniquePtr<T>(new T(forward<Args>(args)...));
 }
 
 template <typename T, typename... Args>
 UniquePtr<T> make_shared(Args&&... args) {
-    return SharedPtr<T>(new T(std::forward<Args>(args)...));
+    return SharedPtr<T>(new T(forward<Args>(args)...));
 }
 
 #endif //CROCOS_SMARTPOINTER_H

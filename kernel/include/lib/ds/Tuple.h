@@ -46,6 +46,6 @@ struct Tuple<T, Rest...> : Tuple<Rest...> {
 
 template<typename... Ts>
 Tuple<Ts...> makeTuple(Ts&&... args) {
-    return Tuple<Ts...>(std::forward<Ts>(args)...);
+    return Tuple<Ts...>(forward<Ts>(args)...);
 }
 #endif //CROCOS_TUPLE_H

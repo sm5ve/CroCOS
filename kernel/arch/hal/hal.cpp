@@ -88,7 +88,9 @@ namespace kernel::hal{
     }
 
     ProcessorID getCurrentProcessorID(){
+#ifdef __x86_64__
         return amd64::smp::getLogicalProcessorID();
+#endif
     }
 
     bool atomic_cmpxchg_u64(volatile uint64_t &var, volatile uint64_t &expected, uint64_t desired){

@@ -216,6 +216,9 @@ namespace kernel::amd64 {
         void topUpReservePool();
 
         void runSillyTest();
+
+        //EVIL HACK (Okay it's not that evil, but it's inefficient and we should use a more proper mapping mechanism)
+        void* temporaryHackMapMMIOPage(mm::phys_addr paddr);
     }
 }
 

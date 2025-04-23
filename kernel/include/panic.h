@@ -15,7 +15,7 @@ namespace kernel{
     [[noreturn]]
     void panic(const char* filename, const uint32_t line, Args&&... args){
         kernel::DbgOut << "Panic: ";
-        (kernel::DbgOut << ... << std::forward<Args>(args));
+        (kernel::DbgOut << ... << forward<Args>(args));
         kernel::DbgOut << "\nIn file " << filename << " line " << line << "\n";
         print_stacktrace();
 #ifdef __x86_64__
