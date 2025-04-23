@@ -27,7 +27,7 @@ constexpr T roundDownToNearestMultiple(T toRound, T divisor){
 
 template <typename T>
 constexpr T log2floor(T value){
-    size_t log = 0;
+    T log = 0;
     while(value >>= 1) log++;
     return log;
 }

@@ -78,8 +78,7 @@ namespace kernel::amd64::interrupts{
             assert(((uint64_t)ioapicEntry.ioapicAddress % 4096) == 0, "This temporary initialization assumes the IOAPIC MMIO range is page aligned");
             kernel::DbgOut << "IOAPIC at " << mm::phys_addr(ioapicEntry.ioapicAddress) << "\n";
             void* ioapic_mmio = amd64::PageTableManager::temporaryHackMapMMIOPage(mm::phys_addr(ioapicEntry.ioapicAddress));;
-            //ioapics -> push(new IOapic(ioapicEntry.ioapicID, ioapic_mmio, ioapicEntry.gsiBase));
-            (void)ioapic_mmio;
+            ioapics -> push(new IOapic(ioapicEntry.ioapicID, ioapic_mmio, ioapicEntry.gsiBase));
         }
     }
 

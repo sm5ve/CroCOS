@@ -11,6 +11,7 @@ set(KERNEL_SRC
         arch/amd64/SerialPort.cpp
         arch/amd64/Spinlock.cpp
         arch/amd64/multiboot1.asm
+        arch/amd64/interrupts/InterruptVectorTrampolines.asm
         KernelMain.cpp
         lib/PrintStream.cpp include/lib/PrintStream.h include/lib/TypeTraits.h include/lib/str.h lib/str.cpp arch/hal/hal.cpp include/arch/hal/hal.h include/kernel.h mm/BumpAllocator.cpp lib/panic.cpp mm/kmalloc.cpp mm/allocators.h include/acpi.h include/mm.h acpi/ACPIFixedTables.cpp include/lib/ds/Vector.h include/assert.h include/panic.h include/utility.h include/lib/ds/SmartPointer.h mm/MemoryManager.cpp include/lib/math.h arch/amd64/memops.cpp
         include/arch/hal/spinlock.h
@@ -30,6 +31,8 @@ set(KERNEL_SRC
         include/arch/amd64/smp.h
         include/lib/ds/Variant.h
         include/lib/ds/Optional.h
+        arch/amd64/interrupts/InterruptSetup.cpp
+        arch/amd64/lgdt.asm
 )
 
 add_executable(Kernel ${KERNEL_SRC})

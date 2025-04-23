@@ -270,10 +270,35 @@ namespace kernel::amd64{
         asm volatile ("mov %0, %%cr4" :: "r"(cr4));
     }
 
+    const uint64_t kernel_code_descriptor =
+            (1ul << 53) |                                 //marks long mode in flags
+            (1ul << 7 | 1ul << 4 | 1ul << 3 | 3ul) << 40; //Present, non-system segment, executable, RW, and accessed
+    const uint64_t kernel_data_descriptor =
+            (1ul << 53) |                                 //marks long mode in flags
+            (1ul << 7 | 1ul << 4 | 0ul << 3 | 3ul) << 40; //Present, non-system segment, executable, RW, and accessed
+
+    __attribute__((aligned(16)))
+    static uint64_t gdt[] = {
+            0x0000000000000000, // Null descriptor
+            kernel_code_descriptor,
+            kernel_data_descriptor
+    };
+
+    struct {
+        uint16_t size;
+        uint64_t base;
+    } __attribute__((packed)) gdtr = {
+            .size = sizeof(gdt) - 1,
+            .base = (uint64_t)&gdt
+    };
+
+    extern "C" void load_gdt(void*);
+
     void hwinit(){
         assert(mboot_magic == 0x2BADB002, "Somehow the multiboot magic number is wrong. How did we get here?");
 
         unmapIdentity();
+        load_gdt(&gdtr);
         enableFSGSBase();
         smp::setLogicalProcessorID(0);
 
@@ -323,6 +348,8 @@ namespace kernel::amd64{
 
         kernel::amd64::interrupts::disableLegacyPIC();
         kernel::amd64::interrupts::buildApicTopology(*madts[0]); //Temporary ACPI initialization stuff...
+
+        interrupts::init();
         //kernel::amd64::PageTableManager::runSillyTest();
     }
 }
