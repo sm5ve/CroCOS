@@ -6,9 +6,9 @@
 #define CROCOS_HASHMAP_H
 
 #include "stddef.h"
-#include <lib/math.h>
-#include <utility.h>
-#include <lib/ds/Tuple.h>
+#include "../math.h"
+#include "../utility.h"
+#include "Tuple.h"
 
 template<typename K>
 struct DefaultHasher {

@@ -8,7 +8,7 @@
 #include "arch/hal/spinlock.h"
 #include "kconfig.h"
 #include "kernel.h"
-#include "lib/ds/Vector.h"
+#include <core/ds/Vector.h>
 #include "FlushPlanner.h"
 
 namespace kernel::amd64 {

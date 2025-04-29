@@ -13,7 +13,19 @@ set(KERNEL_SRC
         arch/amd64/multiboot1.asm
         arch/amd64/interrupts/InterruptVectorTrampolines.asm
         KernelMain.cpp
-        lib/PrintStream.cpp include/lib/PrintStream.h include/lib/TypeTraits.h include/lib/str.h lib/str.cpp arch/hal/hal.cpp include/arch/hal/hal.h include/kernel.h mm/BumpAllocator.cpp lib/panic.cpp mm/kmalloc.cpp mm/allocators.h include/acpi.h include/mm.h acpi/ACPIFixedTables.cpp include/lib/ds/Vector.h include/assert.h include/panic.h include/utility.h include/lib/ds/SmartPointer.h mm/MemoryManager.cpp include/lib/math.h arch/amd64/memops.cpp
+        arch/hal/hal.cpp
+        include/arch/hal/hal.h
+        include/kernel.h mm/BumpAllocator.cpp
+        panic.cpp
+        mm/kmalloc.cpp
+        mm/allocators.h
+        include/acpi.h
+        include/mm.h
+        acpi/ACPIFixedTables.cpp
+        include/assert.h
+        include/panic.h
+        mm/MemoryManager.cpp
+        arch/amd64/memops.cpp
         include/arch/hal/spinlock.h
         arch/amd64/PageTableManager.cpp
         include/FlushPlanner.h
@@ -24,20 +36,14 @@ set(KERNEL_SRC
         include/arch/amd64/interrupts/APIC.h
         arch/amd64/interrupts/LegacyPIC.cpp
         include/arch/amd64/interrupts/LegacyPIC.h
-        include/lib/ds/HashMap.h
-        include/lib/ds/Tuple.h
-        include/lib/Comparator.h
         arch/amd64/smp/smp.cpp
         include/arch/amd64/smp.h
-        include/lib/ds/Variant.h
-        include/lib/ds/Optional.h
         arch/amd64/interrupts/InterruptSetup.cpp
         arch/amd64/lgdt.asm
         arch/hal/InterruptManager.cpp
-        include/lib/ds/Handle.h
-        include/lib/Atomics.h
 )
 
 add_executable(Kernel ${KERNEL_SRC})
 target_link_options(Kernel PUBLIC -O0 -ffreestanding -mcmodel=kernel -nostdlib -T ${CMAKE_SOURCE_DIR}/kernel/linker.ld)
 target_include_directories(Kernel PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(Kernel PRIVATE Core)

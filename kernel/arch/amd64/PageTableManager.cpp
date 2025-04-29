@@ -6,8 +6,9 @@
 #include "arch/hal/hal.h"
 #include "arch/amd64/amd64.h"
 #include <mm.h>
-#include <lib/math.h>
-#include <utility.h>
+#include <assert.h>
+#include <core/math.h>
+#include <core/utility.h>
 
 //I just set these constants arbitrarily. They feel right, but I should experiment with other values at some point
 #define FREE_OVERFLOW_POOL_SIZE 128

@@ -5,10 +5,10 @@
 #include "arch/amd64/amd64.h"
 #include <kernel.h>
 #include <kconfig.h>
-#include <lib/str.h>
+#include <core/str.h>
 #include <acpi.h>
 #include <assert.h>
-#include <lib/math.h>
+#include <core/math.h>
 #include "multiboot.h"
 #include <arch/amd64/interrupts/LegacyPIC.h>
 #include <arch/amd64/interrupts/APIC.h>

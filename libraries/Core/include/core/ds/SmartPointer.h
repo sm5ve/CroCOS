@@ -6,7 +6,7 @@
 #define CROCOS_SMARTPOINTER_H
 
 #include "stddef.h"
-#include <utility.h>
+#include "../utility.h"
 
 template <typename T>
 class UniquePtr {

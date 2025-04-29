@@ -4,8 +4,8 @@
 
 #ifndef CROCOS_VARIANT_H
 #define CROCOS_VARIANT_H
-#include <utility.h>
-#include <lib/math.h>
+#include "../utility.h"
+#include "../math.h"
 #include <stddef.h>
 
 template <typename... Ts>

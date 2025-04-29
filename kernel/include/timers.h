@@ -6,7 +6,7 @@
 #define CROCOS_TIMERS_H
 
 #include "arch/hal/interrupts.h"
-#include <lib/ds/Vector.h>
+#include <core/ds/Vector.h>
 
 class Timer{
 public:

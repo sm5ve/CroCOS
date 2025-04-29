@@ -2,10 +2,8 @@
 // Created by Spencer Martin on 2/15/25.
 //
 
-#include <lib/PrintStream.h>
-#include <lib/str.h>
-#include <kernel.h>
-#include "arch/hal/hal.h"
+#include "include/core/PrintStream.h"
+#include "include/core/str.h"
 
 namespace kernel{
 
@@ -75,9 +73,5 @@ namespace kernel{
             *this << "false";
         }
         return *this;
-    }
-
-    void SerialPrintStream::putString(const char * str){
-        kernel::hal::serialOutputString(str);
     }
 }

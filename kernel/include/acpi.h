@@ -6,9 +6,9 @@
 #define CROCOS_ACPI_H
 
 #include "stdint.h"
-#include <lib/ds/Vector.h>
+#include <core/ds/Vector.h>
 #include <mm.h>
-#include <lib/str.h>
+#include <core/str.h>
 
 #ifdef __x86_64__
 #include "arch/amd64/amd64.h"

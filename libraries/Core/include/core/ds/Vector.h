@@ -6,11 +6,11 @@
 #define CROCOS_VECTOR_H
 
 #include "stddef.h"
-#include "lib/Comparator.h"
-#include <assert.h>
-#include <lib/math.h>
-#include <utility.h>
-#include <lib/TypeTraits.h>
+#include "../Comparator.h"
+#include "assert.h"
+#include "../math.h"
+#include "../utility.h"
+#include "../TypeTraits.h"
 
 template <typename T>
 class Vector {

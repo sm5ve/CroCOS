@@ -5,8 +5,8 @@
 #include <acpi.h>
 #include <kconfig.h>
 #include <kernel.h>
-#include <lib/ds/Vector.h>
-#include <lib/str.h>
+#include <core/ds/Vector.h>
+#include <core/str.h>
 
 #ifdef __x86_64__
 #include "arch/amd64/amd64.h"

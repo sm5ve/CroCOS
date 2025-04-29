@@ -5,8 +5,8 @@
 #ifndef CROCOS_PRINTSTREAM_H
 #define CROCOS_PRINTSTREAM_H
 
-#include "stdint.h"
-#include <utility.h>
+#include <stdint.h>
+#include "utility.h"
 
 namespace kernel{
     class PrintStream{
@@ -25,11 +25,6 @@ namespace kernel{
         PrintStream& operator<<(const int32_t);
         PrintStream& operator<<(const int64_t);
         PrintStream& operator<<(const bool);
-    };
-
-    class SerialPrintStream : public PrintStream{
-    protected:
-        void putString(const char*) override;
     };
 }
 

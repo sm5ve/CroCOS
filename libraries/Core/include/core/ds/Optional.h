@@ -5,10 +5,10 @@
 #ifndef CROCOS_OPTIONAL_H
 #define CROCOS_OPTIONAL_H
 
-#include <utility.h>
-#include <lib/ds/Variant.h>
-#include <assert.h>
-#include <lib/TypeTraits.h>
+#include "../utility.h"
+#include "Variant.h"
+#include "assert.h"
+#include "../TypeTraits.h"
 
 template <typename T>
 class Optional;

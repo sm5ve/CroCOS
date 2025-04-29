@@ -5,9 +5,9 @@
 #ifndef CROCOS_KERNEL_H
 #define CROCOS_KERNEL_H
 
-#include <lib/PrintStream.h>
+#include <core/PrintStream.h>
 #include "stddef.h"
-#include <utility.h>
+#include <core/utility.h>
 
 namespace kernel{
     extern PrintStream& klog;

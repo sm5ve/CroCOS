@@ -3,16 +3,9 @@
 //
 #include <arch/hal/hal.h>
 #include <kernel.h>
-#include <lib/ds/Vector.h>
-#include <lib/ds/SmartPointer.h>
-#include <utility.h>
-#include <lib/ds/Variant.h>
-#include <lib/ds/Optional.h>
-
-#include <lib/ds/HashMap.h>
 
 namespace kernel{
-    SerialPrintStream EarlyBootStream;
+    hal::SerialPrintStream EarlyBootStream;
     PrintStream& klog = EarlyBootStream;
 
     extern "C" void kernel_main(){

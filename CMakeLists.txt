@@ -20,6 +20,7 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Debug CACHE STRING "Choose the type of build." FORCE)
 endif()
 
+add_subdirectory(libraries)
 add_subdirectory(kernel)
 
 add_custom_target(run

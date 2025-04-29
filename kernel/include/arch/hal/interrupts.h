@@ -5,12 +5,12 @@
 #ifndef CROCOS_INTERRUPTS_H
 #define CROCOS_INTERRUPTS_H
 
-#include <lib/ds/Vector.h>
-#include <lib/ds/Tuple.h>
+#include <core/ds/Vector.h>
+#include <core/ds/Tuple.h>
 #include <arch/hal/hal.h>
-#include <lib/ds/Variant.h>
-#include "lib/ds/Optional.h"
-#include <lib/ds/HashMap.h>
+#include <core/ds/Variant.h>
+#include <core/ds/Optional.h>
+#include <core/ds/HashMap.h>
 
 
 namespace kernel::hal::interrupts{

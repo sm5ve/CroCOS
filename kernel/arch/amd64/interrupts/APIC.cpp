@@ -2,7 +2,7 @@
 // Created by Spencer Martin on 4/11/25.
 //
 #include <arch/amd64/interrupts/APIC.h>
-#include <lib/ds/HashMap.h>
+#include <core/ds/HashMap.h>
 #include <arch/amd64/smp.h>
 #include <arch/amd64/amd64.h>
 

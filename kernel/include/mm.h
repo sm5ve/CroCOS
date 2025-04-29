@@ -6,9 +6,9 @@
 #define CROCOS_MM_H
 
 #include "stddef.h"
-#include <lib/TypeTraits.h>
+#include <core/TypeTraits.h>
 #include "arch/hal/hal.h"
-#include <lib/ds/Vector.h>
+#include <core/ds/Vector.h>
 #include <kernel.h>
 
 namespace kernel::mm{

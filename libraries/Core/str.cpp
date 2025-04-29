@@ -2,7 +2,7 @@
 // Created by Spencer Martin on 2/15/25.
 //
 
-#include <lib/str.h>
+#include "include/core/str.h"
 
 const char* digits = "0123456789abcdefghijklmnopqrstuvwxyz";
 

@@ -5,7 +5,7 @@
 #ifndef CROCOS_UTILITY_H
 #define CROCOS_UTILITY_H
 
-#include <lib/TypeTraits.h>
+#include "TypeTraits.h"
 
 template <typename T, T v>
 struct integral_constant {

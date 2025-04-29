@@ -4,9 +4,9 @@
 
 #include <mm.h>
 #include "arch/hal/hal.h"
-#include <lib/ds/Vector.h>
+#include <core/ds/Vector.h>
 #include <kernel.h>
-#include <lib/math.h>
+#include <core/math.h>
 
 #define ALLOCATOR_DEBUG
 
