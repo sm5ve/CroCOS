@@ -42,7 +42,6 @@ namespace kernel::amd64{
         return succeeded;
     }
 
-
     void release_spinlock(kernel::hal::spinlock_t& lock){
         //TODO add a safeguard for a CPU core releasing a lock it doesn't own
         lock.lock_bit = 0; //In x86/amd64, uint32_t-aligned writes are atomic! So no need to do weird inline assembly

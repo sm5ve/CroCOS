@@ -9,7 +9,6 @@
 #include <acpi.h>
 #include <assert.h>
 #include <lib/math.h>
-#include <assert.h>
 #include "multiboot.h"
 #include <arch/amd64/interrupts/LegacyPIC.h>
 #include <arch/amd64/interrupts/APIC.h>
@@ -81,9 +80,6 @@ extern uint32_t phys_end;
 size_t archProcessorCount;
 
 namespace kernel::amd64{
-    //TODO list:
-    //Set up page allocator data structures
-    //Set up GDT, TSS, IDT. Remember to flush the GDT!
 
     void flushTLB(){
         asm volatile("mov %cr3, %rax\n"
@@ -262,7 +258,7 @@ namespace kernel::amd64{
         //TODO implement a fallback method
         //really I ought to just do this with a proper GDT or whatever... but this should be enough
         //to get the rudiments of SMP working.
-        temporaryHack(1, 5, 2025, "Implement a proper GDT");
+        temporaryHack(10, 5, 2025, "Implement a proper GDT");
         assert(supportsFSGSBASE(), "Your CPU doesn't support FSGSBASE");
         uint64_t cr4;
         asm volatile ("mov %%cr4, %0" : "=r"(cr4));
@@ -271,10 +267,10 @@ namespace kernel::amd64{
     }
 
     const uint64_t kernel_code_descriptor =
-            (1ul << 53) |                                 //marks long mode in flags
+            (1ul << 53) |                                 //Marks long mode in flags
             (1ul << 7 | 1ul << 4 | 1ul << 3 | 3ul) << 40; //Present, non-system segment, executable, RW, and accessed
     const uint64_t kernel_data_descriptor =
-            (1ul << 53) |                                 //marks long mode in flags
+            (1ul << 53) |                                 //Marks long mode in flags
             (1ul << 7 | 1ul << 4 | 0ul << 3 | 3ul) << 40; //Present, non-system segment, executable, RW, and accessed
 
     __attribute__((aligned(16)))
@@ -306,14 +302,12 @@ namespace kernel::amd64{
         //Our first goal is to find the MADT, so we will have the right info to properly init the
         //page allocator.
         kernel::acpi::tryFindACPI();
-        auto madts = kernel::acpi::getTables<acpi::MADT>();
-        assert(madts.getSize() == 1, "Malformed ACPI tables have wrong number of MADTs - ", madts.getSize());
-        auto& madt = *madts[0];
+        auto& madt = kernel::acpi::the<acpi::MADT>();
 
         archProcessorCount = madt.getEnabledProcessorCount();
         assert(archProcessorCount > 0, "MADT has no LAPIC entry");
 
-        kernel::DbgOut << "Processor count: " << archProcessorCount << "\n";
+        kernel::klog << "Processor count: " << archProcessorCount << "\n";
 
         Vector<mm::PageAllocator::page_allocator_range_info> free_memory_regions;
 
@@ -342,12 +336,12 @@ namespace kernel::amd64{
         mm::phys_memory_range range{.start=mm::phys_addr(nullptr), .end=mm::phys_addr(&phys_end)};
         kernel::mm::PageAllocator::reservePhysicalRange(range);
 
-        kernel::DbgOut << "Finished initializing page allocator\n";
+        kernel::klog << "Finished initializing page allocator\n";
 
         kernel::amd64::PageTableManager::init(archProcessorCount);
 
         kernel::amd64::interrupts::disableLegacyPIC();
-        kernel::amd64::interrupts::buildApicTopology(*madts[0]); //Temporary ACPI initialization stuff...
+        kernel::amd64::interrupts::buildApicTopology(madt); //Temporary ACPI initialization stuff...
 
         interrupts::init();
         //kernel::amd64::PageTableManager::runSillyTest();

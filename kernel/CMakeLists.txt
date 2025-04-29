@@ -33,6 +33,9 @@ set(KERNEL_SRC
         include/lib/ds/Optional.h
         arch/amd64/interrupts/InterruptSetup.cpp
         arch/amd64/lgdt.asm
+        arch/hal/InterruptManager.cpp
+        include/lib/ds/Handle.h
+        include/lib/Atomics.h
 )
 
 add_executable(Kernel ${KERNEL_SRC})

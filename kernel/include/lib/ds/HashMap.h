@@ -134,7 +134,7 @@ private:
         }
     }
 
-    Entry& probeIndex(const K& key){
+    Entry& probeIndex(const K& key) const {
         auto startIndex = hasher(key) % capacity;
         auto index = startIndex;
         Entry* firstSeenTombstone = nullptr;

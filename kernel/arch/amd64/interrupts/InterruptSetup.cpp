@@ -21,7 +21,7 @@ namespace kernel::amd64::interrupts{
         uint32_t zero;
     } __attribute__((packed));
 
-    alignas(2048) IDTEntry idt[256];
+    IDTEntry idt[256];
 
     struct {
         uint16_t limit;
@@ -57,25 +57,39 @@ namespace kernel::amd64::interrupts{
     }
 
     void init(){
-        DbgOut << "ISR0 is at " << (void*)isr_0 << "\n";
         //actually populate the IDT using the auto-generated macro file
         #include "isr_set.inc"
         asm volatile("lidt %0" : : "m"(idtr));
         //Probably we should defer calling sti until the system is in a more stable state.
         asm volatile("sti");
-        DbgOut << "About to test the interrupt handler int 0" << "\n";
-        //for(;;);
-        asm volatile("int $0");
-        asm volatile("int $1");
-        asm volatile("int $45");
-        asm volatile("int $30");
-        asm volatile("int $178");
-
-        DbgOut << "Done" << "\n";
-        //DbgOut << *((int*) (1 - 1)) << "\n";
     }
 }
 
+kernel::PrintStream& operator<<(kernel::PrintStream& ps, kernel::amd64::interrupts::InterruptFrame& iframe){
+    kernel::klog << "Interrupt frame for vector " << iframe.vector_index << " error code " << iframe.error_code << "\n";
+    kernel::klog << "RIP " << (void*)iframe.rip << "    ";
+    kernel::klog << "FLG " << (void*)iframe.rflags << "    ";
+    kernel::klog << "CS  " << (void*)iframe.cs << "    ";
+    kernel::klog << "SS  " << (void*)iframe.ss << "    " << "\n";
+    kernel::klog << "RAX " << (void*)iframe.rax << "    ";
+    kernel::klog << "RBX " << (void*)iframe.rbx << "    ";
+    kernel::klog << "RCX " << (void*)iframe.rcx << "    ";
+    kernel::klog << "RDX " << (void*)iframe.rdx << "    " << "\n";
+    kernel::klog << "RDI " << (void*)iframe.rdi << "    ";
+    kernel::klog << "RSI " << (void*)iframe.rsi << "    ";
+    kernel::klog << "RBP " << (void*)iframe.rbp << "    ";
+    kernel::klog << "RSP " << (void*)iframe.rsp << "    " << "\n";
+    kernel::klog << "R8  " << (void*)iframe.r8 << "    ";
+    kernel::klog << "R9  " << (void*)iframe.r9 << "    ";
+    kernel::klog << "R10 " << (void*)iframe.r10 << "    ";
+    kernel::klog << "R11 " << (void*)iframe.r11 << "    " << "\n";
+    kernel::klog << "R12 " << (void*)iframe.r12 << "    ";
+    kernel::klog << "R13 " << (void*)iframe.r13 << "    ";
+    kernel::klog << "R14 " << (void*)iframe.r14 << "    ";
+    kernel::klog << "R15 " << (void*)iframe.r15 << "    " << "\n";
+    return ps;
+}
+
 extern "C" void interrupt_common_handler(kernel::amd64::interrupts::InterruptFrame& test){
-    kernel::DbgOut << "The vector index is " << test.vector_index << "\n";
+    kernel::klog << test;
 }

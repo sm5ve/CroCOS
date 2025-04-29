@@ -48,4 +48,17 @@ template<typename... Ts>
 Tuple<Ts...> makeTuple(Ts&&... args) {
     return Tuple<Ts...>(forward<Ts>(args)...);
 }
+
+template<typename Stream, typename Tuple, size_t... Is>
+void print_tuple(Stream& ps, const Tuple& t, index_sequence<Is...>) {
+    ((ps << (Is == 0 ? "(" : ", ") << t.template get<Is>()), ...);
+    ps << ")";
+}
+
+
+template<typename... Ts>
+kernel::PrintStream& operator <<(kernel::PrintStream& ps, const Tuple<Ts...>& var) requires(all_streamable_v<kernel::PrintStream, Ts...>){
+    print_tuple(ps, var, make_index_sequence<sizeof...(Ts)>());
+    return ps;
+}
 #endif //CROCOS_TUPLE_H

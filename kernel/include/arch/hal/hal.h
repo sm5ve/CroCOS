@@ -13,19 +13,6 @@
 #include "arch/amd64/amd64.h"
 #endif
 
-#define TOCTOU_LOCK_CHECK(lock, condition, action, failure) \
-if (condition) { \
-acquire_spinlock(lock); \
-if (condition) { \
-action; \
-} else { \
-release_spinlock(lock); \
-failure;\
-} \
-}\
-else {\
-failure;\
-}
 namespace kernel::hal{
     void serialOutputString(const char* str);
     void hwinit();
@@ -43,10 +30,10 @@ namespace kernel::hal{
     bool writer_lock_taken(kernel::hal::rwlock_t& lock);
 
 #ifdef __x86_64__
-    using ProcessorID = uint8_t;
+    using ProcessorID = kernel::amd64::ProcessorID;
     const size_t MAX_PROCESSOR_COUNT = 256;
     const size_t CACHE_LINE_SIZE = 64;
-    //using GeneralRegisterFile = kernel::amd64::GeneralRegisterFile;
+    using InterruptFrame = kernel::amd64::interrupts::InterruptFrame;
 #endif
 
     //Guaranteed to be between 0 and (the total number of logical processors - 1)

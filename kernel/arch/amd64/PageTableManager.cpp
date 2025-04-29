@@ -779,7 +779,7 @@ namespace kernel::amd64::PageTableManager{
     PageInfo entries[testSize];
 
     void runSillyTest(){
-        kernel::DbgOut << "allocating page table entry at " << allocateInternalPageTableEntry() << "\n";
+        kernel::klog << "allocating page table entry at " << allocateInternalPageTableEntry() << "\n";
 
         //PageDirectoryEntry* entryBuffer[testSize];
         for(size_t a = 1; a < sqrtTestItr; a += 2) {
@@ -792,10 +792,10 @@ namespace kernel::amd64::PageTableManager{
                 }
             }
         }
-        kernel::DbgOut << "allocating page table entry at " << allocateInternalPageTableEntry() << "\n";
-        kernel::DbgOut << "poQueueReadHead is " << poQueueReadHead << "\n";
-        kernel::DbgOut << "poQueueWrittenLimit is " << poQueueWrittenLimit << "\n";
-        kernel::DbgOut << "poQueueWriteHead is " << poQueueWriteHead << "\n";
+        kernel::klog << "allocating page table entry at " << allocateInternalPageTableEntry() << "\n";
+        kernel::klog << "poQueueReadHead is " << poQueueReadHead << "\n";
+        kernel::klog << "poQueueWrittenLimit is " << poQueueWrittenLimit << "\n";
+        kernel::klog << "poQueueWriteHead is " << poQueueWriteHead << "\n";
     }
 
     void pushFlushPlanner(mm::FlushPlanner& planner){

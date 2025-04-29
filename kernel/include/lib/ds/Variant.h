@@ -186,27 +186,12 @@ public:
     }
 
     template <typename T>
-    const T& get() const {
-        auto typeIndex = IndexOf<T, Ts...>::value;
-        assert(index == typeIndex, "Variant did not hold data of type ", type_name<T>());
-        return *reinterpret_cast<const T*>(storage.raw());
-    }
-
-    template <typename T>
     bool holds() const{
         return (index != (size_t)-1) && (IndexOf<T, Ts...>::value == index);
     }
 
     template <typename T>
-    T* get_if() const{
-        if(holds<T>()){
-            return &get<T>();
-        }
-        return nullptr;
-    }
-
-    template <typename T>
-    const T* get_if() const{
+    T* get_if() {
         if(holds<T>()){
             return &get<T>();
         }

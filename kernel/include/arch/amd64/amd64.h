@@ -5,7 +5,6 @@
 #ifndef CROCOS_AMD64_TABLES_H
 #define CROCOS_AMD64_TABLES_H
 
-#include "arch/hal/hal.h"
 #include "arch/hal/spinlock.h"
 #include "kconfig.h"
 #include "kernel.h"
@@ -79,9 +78,7 @@ namespace kernel::amd64 {
         EDX_PBE          = 1 << 31
     };
 
-    struct GeneralRegisterFile{
-
-    };
+    using ProcessorID = uint8_t;
 
     //Wrapper for the CPUID instruction. The first four parameters are references to uint32_t's corresponding to
     //the registers EAX-EDX. The last parameter is the value to load into EAX (the "leaf" per the
@@ -255,5 +252,7 @@ namespace kernel::amd64 {
         void init();
     }
 }
+
+kernel::PrintStream& operator<<(kernel::PrintStream& ps, kernel::amd64::interrupts::InterruptFrame& iframe);
 
 #endif //CROCOS_AMD64_TABLES_H

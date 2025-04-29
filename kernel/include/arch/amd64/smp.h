@@ -5,7 +5,8 @@
 #ifndef CROCOS_SMP_H
 #define CROCOS_SMP_H
 
-#include "amd64.h"
+#include <arch/amd64/amd64.h>
+#include <arch/hal/hal.h>
 
 namespace kernel::amd64::smp{
     struct ProcessorInfo{

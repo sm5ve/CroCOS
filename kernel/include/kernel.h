@@ -10,7 +10,7 @@
 #include <utility.h>
 
 namespace kernel{
-    extern PrintStream& DbgOut;
+    extern PrintStream& klog;
     void* kmalloc(size_t size, std::align_val_t = std::align_val_t{1});
     void kfree(void* ptr);
 
