@@ -9,6 +9,7 @@
 #include <assert.h>
 #include <core/math.h>
 #include <core/utility.h>
+#include <core/atomic.h>
 
 //I just set these constants arbitrarily. They feel right, but I should experiment with other values at some point
 #define FREE_OVERFLOW_POOL_SIZE 128
@@ -708,7 +709,7 @@ namespace kernel::amd64::PageTableManager{
         }
     }
 
-    hal::spinlock_t reserveRefillLock;
+    WITH_GLOBAL_CONSTRUCTOR(Spinlock, reserveRefillLock);
 
     PageInfo allocateAndMapInternalPage() {
         auto entry = allocateInternalPageTableEntry();
@@ -719,12 +720,12 @@ namespace kernel::amd64::PageTableManager{
 
     void ensureReservePoolNotEmpty(){
         if(reservePoolReadHead == reservePoolWriteHead){
-            if(hal::try_acquire_spinlock(reserveRefillLock)){
+            if(reserveRefillLock.try_lock()){
                 for(auto i = 0; i < RESERVE_POOL_DEFAULT_FILL; i++){
                     //TODO handle failure - could happen under extreme contention
                     addPageToReservePool(allocateAndMapInternalPage());
                 }
-                hal::release_spinlock(reserveRefillLock);
+                reserveRefillLock.unlock();
             }
         }
     }
@@ -733,12 +734,12 @@ namespace kernel::amd64::PageTableManager{
         size_t reservePoolPopulatedEntries =
                 (reservePoolWriteHead + RESERVE_POOL_SIZE - reservePoolReadHead) % RESERVE_POOL_SIZE;
         if(reservePoolPopulatedEntries < RESERVE_POOL_LAZY_FILL_THRESHOLD){
-            if(hal::try_acquire_spinlock(reserveRefillLock)){
+            if(reserveRefillLock.try_lock()){
                 for(size_t i = 0; i < RESERVE_POOL_DEFAULT_FILL - reservePoolPopulatedEntries; i++){
                     //TODO handle failure - could happen under extreme contention
                     addPageToReservePool(allocateAndMapInternalPage());
                 }
-                hal::release_spinlock(reserveRefillLock);
+                reserveRefillLock.unlock();
             }
         }
     }
@@ -817,7 +818,6 @@ namespace kernel::amd64::PageTableManager{
 
     void init(size_t processorCount){
         singleProcessorMode = true;
-        reserveRefillLock = hal::SPINLOCK_INITIALIZER;
         flushPlanners = new mm::FlushPlanner* [processorCount];
         memset(flushPlanners, 0, sizeof (mm::FlushPlanner*) * processorCount);
 

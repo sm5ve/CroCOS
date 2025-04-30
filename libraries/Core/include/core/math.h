@@ -5,6 +5,9 @@
 #ifndef CROCOS_MATH_H
 #define CROCOS_MATH_H
 
+#include <stdint.h>
+#include <stddef.h>
+
 template <typename T>
 constexpr T divideAndRoundUp(T numerator, T denominator){
     return (numerator + (denominator - 1)) / denominator;

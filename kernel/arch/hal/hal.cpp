@@ -23,24 +23,6 @@ namespace kernel::hal{
 #endif
     }
 
-    void acquire_spinlock(kernel::hal::spinlock_t& lock){
-#ifdef __x86_64__
-        kernel::amd64::acquire_spinlock(lock);
-#endif
-    }
-
-    bool try_acquire_spinlock(kernel::hal::spinlock_t& lock){
-#ifdef __x86_64__
-        return kernel::amd64::try_acquire_spinlock(lock);
-#endif
-    }
-
-    void release_spinlock(kernel::hal::spinlock_t& lock){
-#ifdef __x86_64__
-        kernel::amd64::release_spinlock(lock);
-#endif
-    }
-
     void acquire_reader_lock(kernel::hal::rwlock_t& lock){
 #ifdef __x86_64__
         kernel::amd64::acquire_reader_lock(lock);

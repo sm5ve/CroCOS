@@ -107,10 +107,6 @@ namespace kernel::amd64 {
 
     void hwinit();
 
-    void acquire_spinlock(kernel::hal::spinlock_t& lock);
-    bool try_acquire_spinlock(kernel::hal::spinlock_t& lock);
-    void release_spinlock(kernel::hal::spinlock_t& lock);
-
     void acquire_reader_lock(kernel::hal::rwlock_t& lock);
     void acquire_writer_lock(kernel::hal::rwlock_t& lock);
     bool try_acquire_reader_lock(kernel::hal::rwlock_t& lock);

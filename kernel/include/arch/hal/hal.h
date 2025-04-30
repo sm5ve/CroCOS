@@ -16,10 +16,6 @@
 namespace kernel::hal{
     void serialOutputString(const char* str);
     void hwinit();
-    void acquire_spinlock(kernel::hal::spinlock_t& lock);
-    //Returns true if we were able to acquire the lock, and false otherwise
-    bool try_acquire_spinlock(kernel::hal::spinlock_t& lock);
-    void release_spinlock(kernel::hal::spinlock_t& lock);
 
     void acquire_reader_lock(kernel::hal::rwlock_t& lock);
     void acquire_writer_lock(kernel::hal::rwlock_t& lock);
