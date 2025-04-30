@@ -10,7 +10,7 @@ extern "C" void (*__init_array_end[])(void) __attribute__((weak));
 
 namespace kernel{
     hal::SerialPrintStream EarlyBootStream;
-    PrintStream& klog = EarlyBootStream;
+    Core::PrintStream& klog = EarlyBootStream;
 
     WITH_GLOBAL_CONSTRUCTOR(Spinlock, lock);
 

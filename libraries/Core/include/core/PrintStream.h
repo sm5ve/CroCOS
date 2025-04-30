@@ -8,7 +8,7 @@
 #include <stdint.h>
 #include "utility.h"
 
-namespace kernel{
+namespace Core{
     class PrintStream{
     protected:
         virtual void putString(const char*) = 0;  // Make it pure virtual if meant to be overridden

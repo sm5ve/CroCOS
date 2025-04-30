@@ -42,7 +42,7 @@ namespace kernel::hal{
 
     bool atomic_cmpxchg_u64(volatile uint64_t &var, volatile uint64_t &expected, uint64_t desired);
 
-    class SerialPrintStream : public PrintStream{
+class SerialPrintStream : public Core::PrintStream{
     protected:
         void putString(const char*) override;
     };

@@ -154,7 +154,7 @@ struct DefaultHasher<kernel::hal::interrupts::InterruptReceiver>{
     }
 };
 
-kernel::PrintStream& operator<<(kernel::PrintStream& ps, kernel::hal::interrupts::NontargetedAffinityTypes& affinityType);
+Core::PrintStream& operator<<(Core::PrintStream& ps, kernel::hal::interrupts::NontargetedAffinityTypes& affinityType);
 
 
 #endif //CROCOS_INTERRUPTS_H

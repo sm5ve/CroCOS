@@ -57,7 +57,7 @@ void print_tuple(Stream& ps, const Tuple& t, index_sequence<Is...>) {
 
 
 template<typename... Ts>
-kernel::PrintStream& operator <<(kernel::PrintStream& ps, const Tuple<Ts...>& var) requires(all_streamable_v<kernel::PrintStream, Ts...>){
+Core::PrintStream& operator <<(Core::PrintStream& ps, const Tuple<Ts...>& var) requires(all_streamable_v<Core::PrintStream, Ts...>){
     print_tuple(ps, var, make_index_sequence<sizeof...(Ts)>());
     return ps;
 }

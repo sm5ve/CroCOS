@@ -249,6 +249,6 @@ namespace kernel::amd64 {
     }
 }
 
-kernel::PrintStream& operator<<(kernel::PrintStream& ps, kernel::amd64::interrupts::InterruptFrame& iframe);
+Core::PrintStream& operator<<(Core::PrintStream& ps, kernel::amd64::interrupts::InterruptFrame& iframe);
 
 #endif //CROCOS_AMD64_TABLES_H

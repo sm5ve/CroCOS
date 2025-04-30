@@ -156,12 +156,12 @@ public:
     }
 };
 
-namespace kernel{
+namespace Core{
     class PrintStream;
 }
 
 template<typename T>
-kernel::PrintStream& operator <<(kernel::PrintStream& ps, Optional<T>& var) requires(is_streamable<kernel::PrintStream, T>::value){
+Core::PrintStream& operator <<(Core::PrintStream& ps, Optional<T>& var) requires(is_streamable<Core::PrintStream, T>::value){
     ps << "Optional<" << type_name<T>() << ">(";
     if(var.occupied()){
         ps << *var;
@@ -170,7 +170,7 @@ kernel::PrintStream& operator <<(kernel::PrintStream& ps, Optional<T>& var) requ
 }
 
 template<typename T>
-kernel::PrintStream& operator <<(kernel::PrintStream& ps, const Optional<T>& var) requires(is_streamable<kernel::PrintStream, T>::value){
+Core::PrintStream& operator <<(Core::PrintStream& ps, const Optional<T>& var) requires(is_streamable<Core::PrintStream, T>::value){
     ps << "Optional<" << type_name<T>() << ">(";
     if(var.occupied()){
         ps << *var;

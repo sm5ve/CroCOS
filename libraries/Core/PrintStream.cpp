@@ -5,7 +5,7 @@
 #include "include/core/PrintStream.h"
 #include "include/core/str.h"
 
-namespace kernel{
+namespace Core{
 
     PrintStream& PrintStream::operator<<(const char c){
         char str[2] = {c, 0};

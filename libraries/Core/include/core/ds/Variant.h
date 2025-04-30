@@ -236,12 +236,12 @@ public:
     }
 };
 
-namespace kernel{
+namespace Core{
     class PrintStream;
 }
 
 template<typename ... Ts, size_t ... Is>
-void print_impl(kernel::PrintStream& ps, Variant<Ts...>& var, index_sequence<Is...>){
+void print_impl(Core::PrintStream& ps, Variant<Ts...>& var, index_sequence<Is...>){
     if(var.which() == (size_t)-1){
         ps << "Variant<>()";
     }
@@ -255,7 +255,7 @@ void print_impl(kernel::PrintStream& ps, Variant<Ts...>& var, index_sequence<Is.
 }
 
 template<typename ... Ts>
-kernel::PrintStream& operator <<(enable_if_t<all_streamable_v<kernel::PrintStream, Ts...>, kernel::PrintStream&> ps, Variant<Ts...>& var){
+Core::PrintStream& operator <<(enable_if_t<all_streamable_v<Core::PrintStream, Ts...>, Core::PrintStream&> ps, Variant<Ts...>& var){
     print_impl(ps, var, make_index_sequence<sizeof...(Ts)>());
     return ps;
 }

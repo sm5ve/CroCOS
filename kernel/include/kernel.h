@@ -10,7 +10,7 @@
 #include <core/utility.h>
 
 namespace kernel{
-    extern PrintStream& klog;
+    extern Core::PrintStream& klog;
     void* kmalloc(size_t size, std::align_val_t = std::align_val_t{1});
     void kfree(void* ptr);
 
@@ -49,15 +49,13 @@ namespace kernel{
             SMALL
         };
     }
-
-    class PrintStream;
 }
 
-inline kernel::PrintStream& operator<<(kernel::PrintStream& ps, kernel::mm::phys_addr paddr){
+inline Core::PrintStream& operator<<(Core::PrintStream& ps, kernel::mm::phys_addr paddr){
     return ps << "phys_addr(" << (void*)paddr.value << ")";
 }
 
-inline kernel::PrintStream& operator<<(kernel::PrintStream& ps, kernel::mm::virt_addr vaddr){
+inline Core::PrintStream& operator<<(Core::PrintStream& ps, kernel::mm::virt_addr vaddr){
     return ps << "virt_addr(" << (void*)vaddr.value << ")";
 }
 

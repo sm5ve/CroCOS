@@ -12,7 +12,7 @@ namespace kernel::hal::interrupts{
 }
 
 using namespace kernel::hal::interrupts;
-kernel::PrintStream& operator<<(kernel::PrintStream& ps, NontargetedAffinityTypes& affinityType){
+Core::PrintStream& operator<<(Core::PrintStream& ps, NontargetedAffinityTypes& affinityType){
     switch (affinityType) {
         case NontargetedAffinityTypes::Global: ps << "Global"; break;
         case NontargetedAffinityTypes::RoundRobin: ps << "Round Robin"; break;

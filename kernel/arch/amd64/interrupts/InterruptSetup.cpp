@@ -65,7 +65,7 @@ namespace kernel::amd64::interrupts{
     }
 }
 
-kernel::PrintStream& operator<<(kernel::PrintStream& ps, kernel::amd64::interrupts::InterruptFrame& iframe){
+Core::PrintStream& operator<<(Core::PrintStream& ps, kernel::amd64::interrupts::InterruptFrame& iframe){
     kernel::klog << "Interrupt frame for vector " << iframe.vector_index << " error code " << iframe.error_code << "\n";
     kernel::klog << "RIP " << (void*)iframe.rip << "    ";
     kernel::klog << "FLG " << (void*)iframe.rflags << "    ";
