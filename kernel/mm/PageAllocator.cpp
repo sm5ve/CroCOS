@@ -923,13 +923,11 @@ namespace kernel::mm::PageAllocator{
         static const size_t superpageFreeStackIndex = sizeof(SuperpagePool::SuperpageFreeStackIndex);
     };
 
-    Vector<ContiguousRangeAllocator>* allocators;
+    WITH_GLOBAL_CONSTRUCTOR(Vector<ContiguousRangeAllocator>, allocators);
 
     void init(Vector<page_allocator_range_info>& regions, size_t processor_count){
-        allocators = new Vector<ContiguousRangeAllocator>(regions.getSize());
-
         for(auto region : regions){
-            allocators->push(ContiguousRangeAllocator(region, processor_count));
+            allocators.push(ContiguousRangeAllocator(region, processor_count));
         }
     }
 
@@ -958,15 +956,15 @@ namespace kernel::mm::PageAllocator{
     void reservePhysicalRange(phys_memory_range range){
         //temporary just to confirm things are working okay
         //We will have to replace this by an iteration over the vector in time.
-        (*allocators)[0].reservePhysMemoryRange(range);
+        allocators[0].reservePhysMemoryRange(range);
     }
 
     phys_addr allocateSmallPage(){
-        auto out = (*allocators)[0].allocateSmallPage();
+        auto out = allocators[0].allocateSmallPage();
         return out;
     }
 
     void freeSmallPage(phys_addr addr){
-        (*allocators)[0].freeSmallPage(addr);
+        allocators[0].freeSmallPage(addr);
     }
 }
