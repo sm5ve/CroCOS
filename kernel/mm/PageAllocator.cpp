@@ -257,9 +257,9 @@ namespace kernel::mm::PageAllocator{
 #ifdef ALLOCATOR_DEBUG
             template <typename T>
             void verifyMapSanity(T t){
-                assert(getSuperpageIndex(t) == getSuperpageIndex(getFreeStackIndex(t)), "Superpage pool state insane");
-                assert(getFreeStackIndex(t) == getFreeStackIndex(getSuperpageIndex(t)), "Superpage pool state insane");
-                assert(getFreeStackIndex(t).bufferId == bufferId, "Superpage pool state insane");
+                assert(getSuperpageIndex(t) == getSuperpageIndex(getFreeStackIndex(t)), "Superpage pool state insane 1");
+                assert(getFreeStackIndex(t) == getFreeStackIndex(getSuperpageIndex(t)), "Superpage pool state insane 2");
+                assert(getFreeStackIndex(t).bufferId == bufferId, "Superpage pool state insane 3");
             }
 #endif
 
@@ -345,10 +345,13 @@ namespace kernel::mm::PageAllocator{
                 auto& sft = getFreeStackIndex(t);
                 auto& sfs = getFreeStackIndex(s);
                 auto& sfr = getFreeStackIndex(r);
+
                 rotateLeft(spt, sps, spr);
-                rotateLeft(sft, sfs, sfr);
+                //You need to do the inverse permutation for the inverse mapping, you dummy!
+                rotateRight(sft, sfs, sfr);
+
 #ifdef ALLOCATOR_DEBUG
-                verifyMapSanity(t);
+                verifyMapSanity(t); //asserts here
                 verifyMapSanity(s);
                 verifyMapSanity(r);
 #endif
@@ -372,7 +375,7 @@ namespace kernel::mm::PageAllocator{
                 auto& sfs = getFreeStackIndex(s);
                 auto& sfr = getFreeStackIndex(r);
                 rotateRight(spt, sps, spr);
-                rotateRight(sft, sfs, sfr);
+                rotateLeft(sft, sfs, sfr);
 #ifdef ALLOCATOR_DEBUG
                 verifyMapSanity(t);
                 verifyMapSanity(s);
@@ -484,6 +487,10 @@ namespace kernel::mm::PageAllocator{
 #endif
                 spp.swapPages(spp.fromAddress(addr), spp.fromMarker(freeZoneStart));
                 freeZoneStart++;
+#ifdef ALLOCATOR_DEBUG
+                assert(spp.isAtOrAboveMarker(addr, fullyOccupiedZoneStart), "movePageFromFreeToFull failed");
+                assert(spp.isBelowMarker(addr, freeZoneStart), "movePageFromFreeToFull failed");
+#endif
             }
 
             void movePageFromFullToFree(phys_addr addr){
@@ -493,6 +500,9 @@ namespace kernel::mm::PageAllocator{
 #endif
                 spp.swapPages(spp.fromAddress(addr), spp.fromMarker(fullyOccupiedZoneTop()));
                 freeZoneStart--;
+#ifdef ALLOCATOR_DEBUG
+                assert(spp.isAtOrAboveMarker(addr, freeZoneStart), "movePageFromFullToFree failed");
+#endif
             }
 
             void movePageFromFullToPartiallyOccupied(phys_addr addr){
@@ -502,6 +512,9 @@ namespace kernel::mm::PageAllocator{
 #endif
                 spp.swapPages(spp.fromAddress(addr), spp.fromMarker(fullyOccupiedZoneStart));
                 fullyOccupiedZoneStart++;
+#ifdef ALLOCATOR_DEBUG
+                assert(spp.isBelowMarker(addr, fullyOccupiedZoneStart), "movePageFromFullToPartiallyOccupied failed");
+#endif
             }
 
             void movePageFromPartiallyOccupiedToFull(phys_addr addr){
@@ -510,6 +523,10 @@ namespace kernel::mm::PageAllocator{
 #endif
                 spp.swapPages(spp.fromAddress(addr), spp.fromMarker(partiallyOccupiedZoneTop()));
                 fullyOccupiedZoneStart--;
+#ifdef ALLOCATOR_DEBUG
+                assert(spp.isBelowMarker(addr, freeZoneStart), "movePageFromPartiallyOccupiedToFull failed");
+                assert(spp.isAtOrAboveMarker(addr, fullyOccupiedZoneStart), "movePageFromPartiallyOccupiedToFull failed");
+#endif
             }
 
             void movePageFromFreeToPartiallyOccupied(phys_addr addr){
@@ -520,6 +537,9 @@ namespace kernel::mm::PageAllocator{
                                      spp.fromMarker(freeZoneStart));
                 freeZoneStart++;
                 fullyOccupiedZoneStart++;
+#ifdef ALLOCATOR_DEBUG
+                assert(spp.isBelowMarker(addr, fullyOccupiedZoneStart), "movePageFromPartiallyOccupiedToFull failed");
+#endif
             }
 
             void movePageFromPartiallyOccupiedToFree(phys_addr addr){
@@ -530,6 +550,10 @@ namespace kernel::mm::PageAllocator{
                                     spp.fromMarker(fullyOccupiedZoneTop()));
                 freeZoneStart--;
                 fullyOccupiedZoneStart--;
+
+#ifdef ALLOCATOR_DEBUG
+                assert(spp.isAtOrAboveMarker(addr, freeZoneStart), "movePageFromPartiallyOccupiedToFree failed");
+#endif
             }
 
             void moveFreePageToTopOfPartiallyAllocated(){
