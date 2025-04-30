@@ -2,6 +2,7 @@ add_library(Core STATIC
         PrintStream.cpp
         str.cpp
         atomic/atomic.cpp
+        include/core/atomic/RingBuffer.h
 )
 
 #TODO change the flags depending on whether or not we're building for the kernel or userspace

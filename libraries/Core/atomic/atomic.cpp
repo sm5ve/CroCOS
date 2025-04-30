@@ -17,34 +17,6 @@ bool Spinlock::try_acquire() {
     return locked.compare_exchange_v(false, true, ACQUIRE);
 }
 
-/*
- *
-
-    bool try_acquire_writer_lock(kernel::hal::rwlock_t& lock){
-    }
-
-    void release_writer_lock(kernel::hal::rwlock_t& lock){
-        atomic_and(lock.lock_bit, ~write_lock_acquired_bit);
-    }
-
-    void release_reader_lock(kernel::hal::rwlock_t& lock){
-        assert((lock.lock_bit & ~write_lock_mask) != 0, "tried to release reader lock when no reader held acquire");
-        while(true){
-            uint64_t oldLock = lock.lock_bit;
-            uint64_t newValue = lock.lock_bit & write_lock_mask;
-            uint64_t oldCount = oldLock >> read_lock_count_shift;
-            newValue |= (oldCount - 1) << read_lock_count_shift;
-            if(atomic_cmpxchg_u64(lock.lock_bit, oldLock, newValue)){
-                return;
-            }
-        }
-    }
-
-    bool writer_lock_taken(kernel::hal::rwlock_t& lock){
-        return (lock.lock_bit & write_lock_acquired_bit) != 0;
-    }
- */
-
 const uint64_t write_lock_queued_bit = 1 << 1;
 const uint64_t write_lock_acquired_bit = 1 << 0;
 const uint64_t write_lock_mask = write_lock_acquired_bit | write_lock_queued_bit;
