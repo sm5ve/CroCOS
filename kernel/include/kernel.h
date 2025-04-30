@@ -71,9 +71,12 @@ extern "C" void* memcpy(void* dest, const void* src, size_t len);
 //This is a seemingly necessary hack to prevent having to recompile crtstart/end with the kernel memory model
 //and linking it in with the kernel as suggested by https://forum.osdev.org/viewtopic.php?t=28066
 #define WITH_GLOBAL_CONSTRUCTOR(Type, name, ...)                                  \
-    __attribute__((used)) static Type name(__VA_ARGS__);                          \
+    __attribute__((used)) static Type name __VA_ARGS__;                           \
     static void name##_init() {                                                   \
-        new (&name) Type(__VA_ARGS__);                                            \
+        static bool initialized = false;                                          \
+        assert(!initialized, "Double-initialized ", #name);                       \
+        initialized = true;                                                       \
+        new (& name) Type(__VA_ARGS__);                                           \
     }                                                                             \
     static void (*name##_ctor)(void) __attribute__((used, section(".init_array"))) = name##_init;
 

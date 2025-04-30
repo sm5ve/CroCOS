@@ -3,6 +3,7 @@
 //
 #include <arch/hal/hal.h>
 #include <kernel.h>
+#include <core/atomic.h>
 
 extern "C" void (*__init_array_start[])(void) __attribute__((weak));
 extern "C" void (*__init_array_end[])(void) __attribute__((weak));
@@ -10,6 +11,8 @@ extern "C" void (*__init_array_end[])(void) __attribute__((weak));
 namespace kernel{
     hal::SerialPrintStream EarlyBootStream;
     PrintStream& klog = EarlyBootStream;
+
+    WITH_GLOBAL_CONSTRUCTOR(Spinlock, lock);
 
     void run_global_constructors(){
         for (void (**ctor)() = __init_array_start; ctor != __init_array_end; ctor++) {
