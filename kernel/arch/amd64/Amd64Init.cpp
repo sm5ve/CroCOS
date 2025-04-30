@@ -344,6 +344,6 @@ namespace kernel::amd64{
         kernel::amd64::interrupts::buildApicTopology(madt); //Temporary ACPI initialization stuff...
 
         interrupts::init();
-        kernel::amd64::PageTableManager::runSillyTest();
+        //kernel::amd64::PageTableManager::runSillyTest();
     }
 }

@@ -217,6 +217,26 @@ public:
     T operator &=(T mask) requires is_integral_v<T> {
         return atomic_and_fetch(value, mask);
     }
+
+    T operator |=(T mask) requires is_integral_v<T> {
+        return atomic_or_fetch(value, mask);
+    }
+
+    T operator +=(T val) requires is_integral_v<T> {
+        return atomic_add_fetch(value, val);
+    }
+
+    T operator -=(T val) requires is_integral_v<T> {
+        return atomic_sub_fetch(value, val);
+    }
+
+    T add_fetch(T val, MemoryOrder mem_order = SEQ_CST){
+        return atomic_and_fetch(value, val, mem_order);
+    }
+
+    T sub_fetch(T val, MemoryOrder mem_order = SEQ_CST){
+        return atomic_sub_fetch(value, val, mem_order);
+    }
 };
 
 class Spinlock {

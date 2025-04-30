@@ -892,7 +892,7 @@ namespace kernel::amd64::PageTableManager{
     }
 
     void* temporaryHackMapMMIOPage(mm::phys_addr paddr){
-        temporaryHack(1, 5, 2025, "Use a proper MMIO mapping function!");
+        temporaryHack(10, 5, 2025, "Use a proper MMIO mapping function!");
         assert(paddr.value % mm::PageAllocator::smallPageSize == 0, "Misaligned physical page address");
         auto entry = allocateInternalPageTableEntry();
         //Map page as global, R/W permissions, and uncachable
