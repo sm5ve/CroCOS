@@ -38,6 +38,13 @@ SECTIONS
 		*(.data)
 	}
 
+    .init_array : {
+        PROVIDE_HIDDEN(__init_array_start = .);
+        KEEP (*(.init_array))
+        KEEP (*(SORT_BY_INIT_PRIORITY(.init_array.*)))
+        PROVIDE_HIDDEN (__init_array_end = .);
+    }
+
 	/* Read-write data (uninitialized) and stack */
 	.bss ALIGN(4K) : AT(ADDR(.bss) - 0xffffffff80000000)
 	{

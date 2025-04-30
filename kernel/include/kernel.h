@@ -65,4 +65,16 @@ extern "C" void* memset(void* dest, int value, size_t len);
 extern "C" void* memswap(void* dest, const void* src, size_t len);
 extern "C" void* memcpy(void* dest, const void* src, size_t len);
 
+//Kinda hacky - what appears to be a call to the constructor name(__VA_ARGS__) does nothing
+//but it tricks the compiler into going forward with compilation. The name##_init() is what actually
+//calls the constructor.
+//This is a seemingly necessary hack to prevent having to recompile crtstart/end with the kernel memory model
+//and linking it in with the kernel as suggested by https://forum.osdev.org/viewtopic.php?t=28066
+#define WITH_GLOBAL_CONSTRUCTOR(Type, name, ...)                                  \
+    __attribute__((used)) static Type name(__VA_ARGS__);                          \
+    static void name##_init() {                                                   \
+        new (&name) Type(__VA_ARGS__);                                            \
+    }                                                                             \
+    static void (*name##_ctor)(void) __attribute__((used, section(".init_array"))) = name##_init;
+
 #endif //CROCOS_KERNEL_H

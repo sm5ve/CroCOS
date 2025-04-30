@@ -4,14 +4,25 @@
 #include <arch/hal/hal.h>
 #include <kernel.h>
 
+extern "C" void (*__init_array_start[])(void) __attribute__((weak));
+extern "C" void (*__init_array_end[])(void) __attribute__((weak));
+
 namespace kernel{
     hal::SerialPrintStream EarlyBootStream;
     PrintStream& klog = EarlyBootStream;
+
+    void run_global_constructors(){
+        for (void (**ctor)() = __init_array_start; ctor != __init_array_end; ctor++) {
+            (*ctor)();
+        }
+    }
 
     extern "C" void kernel_main(){
         klog << "\n"; // newline to separate from the "Booting from ROM.." message from qemu
 
         klog << "Hello amd64 kernel world!\n";
+
+        run_global_constructors();
 
         hal::hwinit();
 

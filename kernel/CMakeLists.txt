@@ -1,7 +1,7 @@
 #TODO enable SSE and SSE2, and remove -mno-sse(2)
 set(CMAKE_ASM_FLAGS "-ffreestanding -mcmodel=kernel  -fno-exceptions -nostdlib -Wall -Wextra -x assembler-with-cpp -masm=att")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mno-sse -mno-sse2 -mno-avx -ffreestanding -fno-rtti -fno-exceptions -fno-sized-deallocation -fconcepts -nostdlib -Wall -Wextra -pedantic -Wshadow -Wcast-align -Wwrite-strings -Wredundant-decls -Winline -Wno-long-long -Wconversion -Werror -mno-red-zone -mcmodel=kernel  -std=gnu++2a -masm=att")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mno-sse -mno-sse2 -mno-avx -ffreestanding -fno-rtti -fno-exceptions -nostdlib -Wall -Wextra -pedantic -Wshadow -Wcast-align -Wwrite-strings -Wredundant-decls -Winline -Wno-long-long -Wconversion -Werror -mno-red-zone -mcmodel=kernel  -masm=att")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-use-cxa-atexit -mno-sse -mno-sse2 -mno-avx -ffreestanding -fno-rtti -fno-exceptions -fno-sized-deallocation -fconcepts -nostdlib -Wall -Wextra -pedantic -Wshadow -Wcast-align -Wwrite-strings -Wredundant-decls -Winline -Wno-long-long -Wconversion -Werror -mno-red-zone -mcmodel=kernel  -std=gnu++2a -masm=att")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-use-cxa-atexit -mno-sse -mno-sse2 -mno-avx -ffreestanding -fno-rtti -fno-exceptions -nostdlib -Wall -Wextra -pedantic -Wshadow -Wcast-align -Wwrite-strings -Wredundant-decls -Winline -Wno-long-long -Wconversion -Werror -mno-red-zone -mcmodel=kernel  -masm=att")
 
 
 set(KERNEL_SRC
@@ -41,6 +41,19 @@ set(KERNEL_SRC
         arch/amd64/interrupts/InterruptSetup.cpp
         arch/amd64/lgdt.asm
         arch/hal/InterruptManager.cpp
+        ../libraries/Core/include/core/atomic.h
+)
+
+execute_process(
+        COMMAND ${CMAKE_C_COMPILER} -print-file-name=crtbegin.o
+        OUTPUT_VARIABLE CRTBEGIN_PATH
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+
+execute_process(
+        COMMAND ${CMAKE_C_COMPILER} -print-file-name=crtend.o
+        OUTPUT_VARIABLE CRTEND_PATH
+        OUTPUT_STRIP_TRAILING_WHITESPACE
 )
 
 add_executable(Kernel ${KERNEL_SRC})
