@@ -5,7 +5,6 @@
 #ifndef CROCOS_AMD64_TABLES_H
 #define CROCOS_AMD64_TABLES_H
 
-#include "arch/hal/spinlock.h"
 #include "kconfig.h"
 #include "kernel.h"
 #include <core/ds/Vector.h>
@@ -106,14 +105,6 @@ namespace kernel::amd64 {
     void invlpg(uint64_t addr);
 
     void hwinit();
-
-    void acquire_reader_lock(kernel::hal::rwlock_t& lock);
-    void acquire_writer_lock(kernel::hal::rwlock_t& lock);
-    bool try_acquire_reader_lock(kernel::hal::rwlock_t& lock);
-    bool try_acquire_writer_lock(kernel::hal::rwlock_t& lock);
-    void release_writer_lock(kernel::hal::rwlock_t& lock);
-    void release_reader_lock(kernel::hal::rwlock_t& lock);
-    bool writer_lock_taken(kernel::hal::rwlock_t& lock);
 
     inline void mfence() {
         asm volatile("mfence" ::: "memory");

@@ -4,6 +4,7 @@
 
 #include <mm.h>
 #include "arch/hal/hal.h"
+#include "core/atomic.h"
 #include <core/ds/Vector.h>
 #include <kernel.h>
 #include <core/math.h>
@@ -285,7 +286,7 @@ namespace kernel::mm::PageAllocator{
                 fsi.value = newPosition;
             }
         public:
-            kernel::hal::rwlock_t lock;
+            RWSpinlock lock;
             const phys_addr base;
 
             SuperpagePool(void* spp, void* spim, phys_addr b, SuperpageStackMarker initSize, uint64_t maxSize, BufferId bid) :
@@ -293,7 +294,6 @@ namespace kernel::mm::PageAllocator{
                 superpagePool = (SuperpageIndex*) spp;
                 superpagePoolIndexMap = (SuperpageFreeStackIndex*) spim;
                 poolSize = initSize;
-                lock = hal::RWLOCK_INITIALIZER;
                 assert(b.value % bigPageSize == 0, "misaligned superpage pool base");
                 //If we're the global pool, we're in charge of initializing all our data
                 if(bid == GLOBAL_POOL){
@@ -311,7 +311,7 @@ namespace kernel::mm::PageAllocator{
                 //This is a very paranoid check, but since the old allocator was having issues, I'd rather be paranoid.
                 verifyMapSanity(t);
                 verifyMapSanity(s);
-                assert(hal::writer_lock_taken(lock), "It is unsafe to call this method without acquiring the writer lock on the pool");
+                assert(lock.writer_lock_taken(), "It is unsafe to call this method without acquiring the writer acquire on the pool");
 #endif
                 //It's important that we grab these references before doing the swaps, otherwise
                 //getFreeStackIndex may yield unexpected results
@@ -335,7 +335,7 @@ namespace kernel::mm::PageAllocator{
                 verifyMapSanity(t);
                 verifyMapSanity(s);
                 verifyMapSanity(r);
-                assert(hal::writer_lock_taken(lock), "It is unsafe to call this method without acquiring the writer lock on the pool");
+                assert(lock.writer_lock_taken(), "It is unsafe to call this method without acquiring the writer acquire on the pool");
 #endif
                 //It's important that we grab these references before doing the swaps, otherwise
                 //getFreeStackIndex may yield unexpected results
@@ -364,7 +364,7 @@ namespace kernel::mm::PageAllocator{
                 verifyMapSanity(t);
                 verifyMapSanity(s);
                 verifyMapSanity(r);
-                assert(hal::writer_lock_taken(lock), "It is unsafe to call this method without acquiring the writer lock on the pool");
+                assert(lock.writer_lock_taken(), "It is unsafe to call this method without acquiring the writer acquire on the pool");
 #endif
                 //It's important that we grab these references before doing the swaps, otherwise
                 //getFreeStackIndex may yield unexpected results
@@ -387,15 +387,15 @@ namespace kernel::mm::PageAllocator{
                 return poolSize == 0;
             }
 
-            //To be used for taking a high number of superpages. The caller is required to acquire the writer lock on
+            //To be used for taking a high number of superpages. The caller is required to acquire the writer acquire on
             //both this pool and the argument pool
             void takePageFromExclusive(SuperpagePool& pool){
 #ifdef ALLOCATOR_DEBUG
                 assert(!pool.isEmpty(), "Tried to steal page from empty pool");
-                assert(hal::writer_lock_taken(pool.lock),
-                       "It is unsafe to call this method without acquiring the writer lock on the source pool");
-                assert(hal::writer_lock_taken(lock),
-                       "It is unsafe to call this method without acquiring the writer lock on the target pool");
+                assert(pool.lock.writer_lock_taken(),
+                       "It is unsafe to call this method without acquiring the writer acquire on the source pool");
+                assert(lock.writer_lock_taken(),
+                       "It is unsafe to call this method without acquiring the writer acquire on the target pool");
 #endif
                 auto newPage = pool.poolTop();
                 pool.poolSize--;
@@ -411,20 +411,20 @@ namespace kernel::mm::PageAllocator{
             //Useful in grabbing pages from the global pool
             bool tryStealPage(SuperpagePool& pool){
 #ifdef ALLOCATOR_DEBUG
-                assert(hal::writer_lock_taken(lock),
-                       "It is unsafe to call this method without acquiring the writer lock on the target pool");
+                assert(lock.writer_lock_taken(),
+                       "It is unsafe to call this method without acquiring the writer acquire on the target pool");
 #endif
-                hal::acquire_reader_lock(pool.lock);
+                pool.lock.acquire_reader();
                 SuperpageIndex newPage;
                 while(true){
                     auto oldSize = pool.poolSize;
                     if(oldSize == 0){
-                        hal::release_reader_lock(pool.lock);
+                        pool.lock.release_reader();
                         return false;
                     }
                     newPage = pool.poolTop();
                     if(hal::atomic_cmpxchg_u64(pool.poolSize, oldSize, oldSize - 1)){
-                        hal::release_reader_lock(pool.lock);
+                        pool.lock.release_reader();
                         break;
                     }
                 }
@@ -568,11 +568,11 @@ namespace kernel::mm::PageAllocator{
             }
 
             void acquireLock(){
-                hal::acquire_writer_lock(spp.lock);
+                spp.lock.acquire_writer();
             }
 
             void releaseLock(){
-                hal::release_writer_lock(spp.lock);
+                spp.lock.release_writer();
             }
 
             size_t remainingFreeSuperpages(){
@@ -790,9 +790,9 @@ namespace kernel::mm::PageAllocator{
             assert(bid != GLOBAL_POOL, "Tried to move big page to global pool");
 
             localPools[bid].acquireLock();
-            hal::acquire_writer_lock(globalPool -> lock);
+            globalPool -> lock.acquire_writer();
             globalPool->movePageToTop(addr);
-            hal::release_writer_lock(globalPool -> lock);
+            globalPool -> lock.release_writer();
             localPools[bid].stealPageFrom(*globalPool);
             localPools[bid].releaseLock();
         }

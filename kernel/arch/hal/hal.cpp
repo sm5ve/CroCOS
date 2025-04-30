@@ -23,48 +23,6 @@ namespace kernel::hal{
 #endif
     }
 
-    void acquire_reader_lock(kernel::hal::rwlock_t& lock){
-#ifdef __x86_64__
-        kernel::amd64::acquire_reader_lock(lock);
-#endif
-    }
-
-    void acquire_writer_lock(kernel::hal::rwlock_t& lock){
-#ifdef __x86_64__
-        kernel::amd64::acquire_writer_lock(lock);
-#endif
-    }
-
-    bool try_acquire_reader_lock(kernel::hal::rwlock_t& lock){
-#ifdef __x86_64__
-        return kernel::amd64::try_acquire_reader_lock(lock);
-#endif
-    }
-
-    bool try_acquire_writer_lock(kernel::hal::rwlock_t& lock){
-#ifdef __x86_64__
-        return kernel::amd64::try_acquire_writer_lock(lock);
-#endif
-    }
-
-    void release_writer_lock(kernel::hal::rwlock_t& lock){
-#ifdef __x86_64__
-        kernel::amd64::release_writer_lock(lock);
-#endif
-    }
-
-    void release_reader_lock(kernel::hal::rwlock_t& lock){
-#ifdef __x86_64__
-        kernel::amd64::release_reader_lock(lock);
-#endif
-    }
-
-    bool writer_lock_taken(kernel::hal::rwlock_t& lock){
-#ifdef __x86_64__
-        return kernel::amd64::writer_lock_taken(lock);
-#endif
-    }
-
     size_t processorCount(){
         return archProcessorCount;
     }

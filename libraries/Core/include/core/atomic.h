@@ -6,6 +6,7 @@
 #define CROCOS_ATOMIC_H
 #include <stddef.h>
 #include <core/TypeTraits.h>
+#include <core/utility.h>
 
 const size_t _atomic_global_lock_count = (1 << 4);
 
@@ -26,7 +27,7 @@ constexpr bool _use_intrinsic_atomic_ops = (is_trivially_copyable_v<T>) && ((siz
 template<typename T>
 inline void atomic_store(T& dest, T val, MemoryOrder mem_order = SEQ_CST){
     //use __atomic_store_n if trivially copiable and right size (can I force alignment on arguments?)
-    //use lock-based fallback if not. Use C++ concepts to allow use of an object's internal lock if it has one
+    //use lock-based fallback if not. Use C++ concepts to allow use of an object's internal acquire if it has one
     if(_use_intrinsic_atomic_ops<T>){
 #ifdef __GNUC__
         __atomic_store_n(&dest, val, mem_order);
@@ -42,6 +43,78 @@ inline T atomic_load( T& src, MemoryOrder mem_order = SEQ_CST){
     if(_use_intrinsic_atomic_ops<T>){
 #ifdef __GNUC__
         return __atomic_load_n(&src, mem_order);
+#endif
+    }
+    else{
+        static_assert(_use_intrinsic_atomic_ops<T>, "Unimplemented");
+    }
+}
+
+template<typename T>
+inline T atomic_and_fetch( T& src, T mask, MemoryOrder mem_order = SEQ_CST){
+    if(_use_intrinsic_atomic_ops<T>){
+#ifdef __GNUC__
+        return __atomic_and_fetch(&src, mask, mem_order);
+#endif
+    }
+    else{
+        static_assert(_use_intrinsic_atomic_ops<T>, "Unimplemented");
+    }
+}
+
+template<typename T>
+inline T atomic_or_fetch( T& src, T mask, MemoryOrder mem_order = SEQ_CST){
+    if(_use_intrinsic_atomic_ops<T>){
+#ifdef __GNUC__
+        return __atomic_or_fetch(&src, mask, mem_order);
+#endif
+    }
+    else{
+        static_assert(_use_intrinsic_atomic_ops<T>, "Unimplemented");
+    }
+}
+
+template<typename T>
+inline T atomic_xor_fetch( T& src, T mask, MemoryOrder mem_order = SEQ_CST){
+    if(_use_intrinsic_atomic_ops<T>){
+#ifdef __GNUC__
+        return __atomic_xor_fetch(&src, mask, mem_order);
+#endif
+    }
+    else{
+        static_assert(_use_intrinsic_atomic_ops<T>, "Unimplemented");
+    }
+}
+
+template<typename T>
+inline T atomic_nand_fetch(T& src, T mask, MemoryOrder mem_order = SEQ_CST){
+    if(_use_intrinsic_atomic_ops<T>){
+#ifdef __GNUC__
+        return __atomic_nand_fetch(&src, mask, mem_order);
+#endif
+    }
+    else{
+        static_assert(_use_intrinsic_atomic_ops<T>, "Unimplemented");
+    }
+}
+
+template<typename T>
+inline T atomic_add_fetch(T& src, T val, MemoryOrder mem_order = SEQ_CST){
+    if(_use_intrinsic_atomic_ops<T>){
+#ifdef __GNUC__
+        return __atomic_add_fetch(&src, val, mem_order);
+#endif
+    }
+    else{
+        static_assert(_use_intrinsic_atomic_ops<T>, "Unimplemented");
+    }
+}
+
+template<typename T>
+inline T atomic_sub_fetch(T& src, T val, MemoryOrder mem_order = SEQ_CST){
+    if(_use_intrinsic_atomic_ops<T>){
+#ifdef __GNUC__
+        return __atomic_sub_fetch(&src, val, mem_order);
 #endif
     }
     else{
@@ -111,8 +184,39 @@ public:
         return load();
     }
 
+    struct ChangedVal{
+        T oldVal;
+        T newVal;
+    } ;
+
+    template<typename F>
+    __attribute__((always_inline)) ChangedVal update_and_get(F&& transform) {
+        T old_val, new_val;
+        do {
+            old_val = load(ACQUIRE);
+            new_val = transform(old_val);
+        } while (!compare_exchange(old_val, new_val, RELEASE, RELAXED));
+        return {old_val, new_val};
+    }
+
+    template<typename F, typename G>
+    __attribute__((always_inline)) ChangedVal update_and_get_when(G&& condition, F&& transform) {
+        T old_val, new_val;
+        do {
+            do{
+                old_val = load(ACQUIRE);
+            }while(!condition(old_val));
+            new_val = transform(old_val);
+        } while (!compare_exchange(old_val, new_val, RELEASE, RELAXED));
+        return {old_val, new_val};
+    }
+
     bool operator==(T other) const { return load() == other; }
     bool operator!=(T other) const { return load() != other; }
+
+    T operator &=(T mask) requires is_integral_v<T> {
+        return atomic_and_fetch(value, mask);
+    }
 };
 
 class Spinlock {
@@ -120,9 +224,23 @@ private:
     Atomic<bool> locked{false};
 
 public:
-    void lock();
-    void unlock();
-    bool try_lock();
+    void acquire();
+    bool try_acquire();
+    void release();
+};
+
+class RWSpinlock{
+private:
+    Atomic<uint64_t> lockstate{0};
+public:
+    void acquire_reader();
+    bool try_acquire_reader();
+    void acquire_writer();
+    bool try_acquire_writer();
+    void release_reader();
+    void release_writer();
+    bool writer_lock_taken();
+    bool reader_lock_taken();
 };
 
 template<typename LockType>
@@ -131,11 +249,11 @@ class LockGuard {
 
 public:
     explicit LockGuard(LockType& l) : lock(l) {
-        lock.lock();
+        lock.acquire();
     }
 
     ~LockGuard() {
-        lock.unlock();
+        lock.release();
     }
 
     // Non-copyable

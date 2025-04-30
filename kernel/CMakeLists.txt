@@ -9,7 +9,6 @@ set(KERNEL_SRC
         arch/amd64/InstructionWrappers.cpp
         mm/PageAllocator.cpp
         arch/amd64/SerialPort.cpp
-        arch/amd64/Spinlock.cpp
         arch/amd64/multiboot1.asm
         arch/amd64/interrupts/InterruptVectorTrampolines.asm
         KernelMain.cpp
@@ -26,7 +25,6 @@ set(KERNEL_SRC
         include/panic.h
         mm/MemoryManager.cpp
         arch/amd64/memops.cpp
-        include/arch/hal/spinlock.h
         arch/amd64/PageTableManager.cpp
         include/FlushPlanner.h
         timing/TimerManager.cpp

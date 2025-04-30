@@ -140,9 +140,9 @@ namespace kernel::amd64::PageTableManager{
         static const uint64_t readerLockMask = 0b111111 << 2;
 
         void acquire_table_reader_lock() {
-            // Spin until no writer is holding the lock and no writer is waiting
+            // Spin until no writer is holding the acquire and no writer is waiting
             while (true) {
-                // Wait for writer lock to be released (0b00)
+                // Wait for writer acquire to be released (0b00)
                 while ((value & writerLockMask) != 0) {
                     asm volatile("pause");
                 }
@@ -159,21 +159,21 @@ namespace kernel::amd64::PageTableManager{
                 uint64_t expectedOldMetadata = maskedMetadata | (count << 2);
                 uint64_t newMetadata = maskedMetadata | ((count + 1) << 2);
 
-                // Try to acquire the lock with atomic compare and exchange
+                // Try to acquire the acquire with atomic compare and exchange
                 if (amd64::atomic_cmpxchg_u64(value, expectedOldMetadata, newMetadata)) {
-                    return; // Reader successfully acquired the lock
+                    return; // Reader successfully acquired the acquire
                 }
             }
         }
 
         void release_table_reader_lock() {
-            // Continuously try to release the lock until successful
+            // Continuously try to release the acquire until successful
             while (true) {
                 uint64_t oldMetadata = value;
                 uint64_t count = (oldMetadata & readerLockMask) >> 2;
 
-                // Ensure that there are readers holding the lock before releasing it
-                assert(count > 0, "Tried to release reader lock when no reader held lock");
+                // Ensure that there are readers holding the acquire before releasing it
+                assert(count > 0, "Tried to release reader lock when no reader held acquire");
 
                 // Decrement the reader count
                 count--;
@@ -181,16 +181,16 @@ namespace kernel::amd64::PageTableManager{
                 // Prepare the new metadata with the decremented reader count
                 uint64_t newMetadata = (value & ~readerLockMask) | (count << 2);
 
-                // Try to release the lock with atomic compare and exchange
+                // Try to release the acquire with atomic compare and exchange
                 if (atomic_cmpxchg_u64(value, oldMetadata, newMetadata)) {
-                    return; // Reader lock successfully released
+                    return; // Reader acquire successfully released
                 }
             }
         }
 
         void acquire_table_writer_lock() {
             while (true) {
-                // Wait until no one else is requesting the writer lock
+                // Wait until no one else is requesting the writer acquire
                 while (value & writerLockRequestMask) {
                     asm volatile("pause");
                 }
@@ -720,12 +720,12 @@ namespace kernel::amd64::PageTableManager{
 
     void ensureReservePoolNotEmpty(){
         if(reservePoolReadHead == reservePoolWriteHead){
-            if(reserveRefillLock.try_lock()){
+            if(reserveRefillLock.try_acquire()){
                 for(auto i = 0; i < RESERVE_POOL_DEFAULT_FILL; i++){
                     //TODO handle failure - could happen under extreme contention
                     addPageToReservePool(allocateAndMapInternalPage());
                 }
-                reserveRefillLock.unlock();
+                reserveRefillLock.release();
             }
         }
     }
@@ -734,12 +734,12 @@ namespace kernel::amd64::PageTableManager{
         size_t reservePoolPopulatedEntries =
                 (reservePoolWriteHead + RESERVE_POOL_SIZE - reservePoolReadHead) % RESERVE_POOL_SIZE;
         if(reservePoolPopulatedEntries < RESERVE_POOL_LAZY_FILL_THRESHOLD){
-            if(reserveRefillLock.try_lock()){
+            if(reserveRefillLock.try_acquire()){
                 for(size_t i = 0; i < RESERVE_POOL_DEFAULT_FILL - reservePoolPopulatedEntries; i++){
                     //TODO handle failure - could happen under extreme contention
                     addPageToReservePool(allocateAndMapInternalPage());
                 }
-                reserveRefillLock.unlock();
+                reserveRefillLock.release();
             }
         }
     }
