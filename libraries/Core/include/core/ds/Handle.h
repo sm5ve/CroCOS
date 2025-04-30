@@ -7,6 +7,7 @@
 
 #include <stdint.h>
 #include <core/atomic.h>
+#include <core/ds//HashMap.h>
 
 template<typename Tag>
 class Handle {
@@ -100,5 +101,12 @@ public:
 // Static variable definition
 template<typename Tag>
 Atomic<uint64_t> Handle<Tag>::nextID = 0;
+
+template<typename T>
+struct DefaultHasher<Handle<T>> {
+    size_t operator()(const Handle<T>& key) const {
+        return static_cast<size_t>(key.raw());
+    }
+};
 
 #endif //CROCOS_HANDLE_H
