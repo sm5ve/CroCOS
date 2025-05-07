@@ -26,7 +26,7 @@ namespace kernel::amd64::interrupts{
         Lapic();
     };
 
-    class IOapic : public IInterruptController, ITerminalController{
+    class IOapic : public IInterruptController, ITerminalController, IConfigurableTriggerController{
     private:
         Tuple<VectorIndex, InterruptCPUAffinity>* mappings;
         size_t redirectionTableSize;
@@ -44,6 +44,7 @@ namespace kernel::amd64::interrupts{
         virtual bool getInterruptMaskState(InterruptReceiver receiver) override;
         virtual Optional<Tuple<VectorIndex, Optional<InterruptCPUAffinity>>> getMapping(InterruptReceiver r) override;
         virtual bool setMapping(InterruptReceiver r, VectorIndex, Optional<InterruptCPUAffinity>) override;
+        virtual ActivationType getTriggerMode(InterruptReceiver receiver) override;
 
         InterruptReceiver getReceiverForGSI(uint32_t gsi);
         void setActivationMode(uint32_t gsi, ActivationType at);

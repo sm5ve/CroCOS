@@ -266,7 +266,7 @@ namespace kernel::amd64::interrupts{
     InterruptReceiver IOapic::getReceiverForGSI(uint32_t gsi){
         return InterruptReceiver{
             .owner = this,
-            .metadata = gsi - gsi_base
+            .metadata = gsi
         };
     }
 
@@ -322,4 +322,25 @@ namespace kernel::amd64::interrupts{
         }
         return {};
     }
+
+    ActivationType IOapic::getTriggerMode(InterruptReceiver receiver) {
+        auto gsiOffset = indexForInterruptReceiver(receiver);
+        assert(gsiOffset.occupied(), "GSI out of bounds for IOAPIC");
+        auto index = static_cast<uint8_t>(0x10 + *gsiOffset * 2);
+        auto reg = regRead(index);
+        reg &= (1 << 13) | (1 << 15);
+        reg >>= 13;
+        switch (reg) {
+            case 0:
+                return ActivationType::EdgeHigh;
+            case 1:
+                return ActivationType::EdgeLow;
+            case 4:
+                return ActivationType::LevelHigh;
+            case 5:
+                return ActivationType::LevelLow;
+            default: assertNotReached("Switch case is insane???");
+        }
+    }
+
 }

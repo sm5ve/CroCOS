@@ -281,4 +281,38 @@ public:
     LockGuard& operator=(const LockGuard&) = delete;
 };
 
+class WriterLockGuard {
+    RWSpinlock& lock;
+
+public:
+    explicit WriterLockGuard(RWSpinlock& l) : lock(l) {
+        lock.acquire_writer();
+    }
+
+    ~WriterLockGuard() {
+        lock.release_writer();
+    }
+
+    // Non-copyable
+    WriterLockGuard(const WriterLockGuard&) = delete;
+    WriterLockGuard& operator=(const WriterLockGuard&) = delete;
+};
+
+class ReaderLockGuard {
+    RWSpinlock& lock;
+
+public:
+    explicit ReaderLockGuard(RWSpinlock& l) : lock(l) {
+        lock.acquire_reader();
+    }
+
+    ~ReaderLockGuard() {
+        lock.release_reader();
+    }
+
+    // Non-copyable
+    ReaderLockGuard(const ReaderLockGuard&) = delete;
+    ReaderLockGuard& operator=(const ReaderLockGuard&) = delete;
+};
+
 #endif //CROCOS_ATOMIC_H

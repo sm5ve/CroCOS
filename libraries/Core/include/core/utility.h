@@ -330,6 +330,10 @@ public:
     explicit operator bool() const {
         return callback != nullptr;
     }
+
+    bool operator==(FunctionRef<Ret(Args ...)> other) const {
+        return (other.callback == callback) && (other.obj == obj);
+    }
 };
 
 template<typename From, typename To>
@@ -382,4 +386,15 @@ struct monostate {
         return false;
     }
 };
+
+template<typename T>
+    struct TypeID {
+    constexpr static uint64_t value() {
+        static const uint64_t id = reinterpret_cast<uint64_t>(&id);
+        return id;
+    }
+};
+
+template<typename T>
+inline constexpr uint64_t TypeID_v = TypeID<T>::value();
 #endif //CROCOS_UTILITY_H

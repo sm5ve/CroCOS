@@ -7,6 +7,6 @@
 
 #define VMEM_OFFSET 0xffffffff80000000
 #define KERNEL_STACK_SIZE (64 * 1024)
-#define KERNEL_BUMP_ALLOC_SIZE (4 * 1024) // a small buffer for the bump allocator before we have a proper heap
+#define KERNEL_BUMP_ALLOC_SIZE (8 * 1024) // a small buffer for the bump allocator before we have a proper heap
 
 #endif //CROCOS_KCONFIG_H
