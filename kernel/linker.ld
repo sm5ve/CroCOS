@@ -45,6 +45,13 @@ SECTIONS
         PROVIDE_HIDDEN (__init_array_end = .);
     }
 
+    .crocos_presort_array : {
+        . = ALIGN(8);
+        __crocos_presort_array_start = .;
+        KEEP(*(.crocos_presort_array))
+        __crocos_presort_array_end = .;
+    }
+
 	/* Read-write data (uninitialized) and stack */
 	.bss ALIGN(4K) : AT(ADDR(.bss) - 0xffffffff80000000)
 	{

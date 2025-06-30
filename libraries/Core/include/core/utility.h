@@ -203,6 +203,14 @@ struct decay {
 template<typename... Ts>
 struct type_list {};
 
+template<typename A, typename B>
+struct concat;
+
+template<typename... As, typename... Bs>
+struct concat<type_list<As...>, type_list<Bs...>> {
+    using type = type_list<As..., Bs...>;
+};
+
 template<typename List>
 struct unique_type_list;
 
@@ -388,7 +396,7 @@ struct monostate {
 };
 
 template<typename T>
-    struct TypeID {
+struct TypeID {
     constexpr static uint64_t value() {
         static const uint64_t id = reinterpret_cast<uint64_t>(&id);
         return id;
@@ -397,4 +405,22 @@ template<typename T>
 
 template<typename T>
 inline constexpr uint64_t TypeID_v = TypeID<T>::value();
+
+template<typename Base, typename Derived>
+struct is_base_of {
+private:
+    // Try to convert Derived* to Base*.
+    static char test(Base*);
+    static long test(...);
+
+public:
+    static constexpr bool value = sizeof(test(static_cast<Derived*>(nullptr))) == sizeof(char);
+};
+
+template<typename Base, typename Derived>
+inline constexpr bool is_base_of_v = is_base_of<Base, Derived>::value;
+
+template<typename Base, typename Derived>
+concept IsBaseOf = is_base_of_v<Base, Derived>;
+
 #endif //CROCOS_UTILITY_H

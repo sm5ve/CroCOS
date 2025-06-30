@@ -6,11 +6,12 @@
 #define CROCOS_VECTOR_H
 
 #include "stddef.h"
-#include "../Comparator.h"
+#include "core/Comparator.h"
 #include "assert.h"
-#include "../math.h"
-#include "../utility.h"
-#include "../TypeTraits.h"
+#include "core/math.h"
+#include "core/utility.h"
+#include "core/TypeTraits.h"
+#include <core/algo/sort.h>
 
 template <typename T>
 class Vector {
@@ -47,130 +48,6 @@ private:
             // Ensure we don't shrink too much (e.g., to a 1-element buffer)
             reallocate(capacity / 2);
         }
-    }
-
-    template <typename Comparator>
-    void insertionSort(size_t low, size_t high, Comparator& comp) {
-        for (size_t i = low + 1; i <= high; i++) {
-            T key = move(data[i]);
-            size_t j = i;
-            while (j > low && comp(key, data[j - 1])) {
-                data[j] = move(data[j - 1]);
-                j--;
-            }
-            data[j] = move(key);
-        }
-    }
-
-    //Takes a slice of the data array (from heap_base to heap_base + heap_size) and interprets it as a binary tree where
-    //the root lies at heap_base, and the two children of a given node i lie at heap_base + 2i + 1 and heap_base + 2i + 2
-    //given the assumption that the binary tree has root A with subtrees T1 and T2 where each Ti satisfies the heap
-    //property, it reorders the entire tree to satisfy the heap property
-    template <typename Comparator>
-    void heapify(size_t heap_size, size_t heap_base, size_t index, Comparator& comp) {
-        //start by ensuring the heap property holds at the root of the heap. We begin by assuming the root is the largest
-        size_t largest = index;
-
-        while (true) {
-            //find the two children for the potential non-heap
-            size_t left = 2 * index + 1;
-            size_t right = 2 * index + 2;
-
-            //Determine the largest of the three nodes
-            //recall comp(A,B) returns whether A < B
-            if (left < heap_size && comp(data[largest + heap_base], data[left + heap_base])) {
-                largest = left;
-            }
-            if (right < heap_size && comp(data[largest + heap_base], data[right + heap_base])) {
-                largest = right;
-            }
-
-            if (largest != index) {
-                //If the root is not the largest, swap the largest node to become the root. Now the
-                //subtree whose root now contains the old root of the main tree could fail to
-                //satisfy the heap property
-                swap(data[index + heap_base], data[largest + heap_base]);
-                index = largest; // continue heapifying down the tree
-            } else {
-                break; // heap property is satisfied
-            }
-        }
-    }
-
-    template <typename Comparator>
-    void heapsort(size_t low, size_t high, Comparator& comp) {
-        auto slice_size = static_cast<int64_t>((high - low) + 1);
-
-        //Iteratively go through each non-leaf node from the highest level down to the root and heapify
-        for(int64_t i = slice_size / 2 - 1; i >= 0; i--){
-            heapify(slice_size, low, i, comp);
-        }
-
-        for (size_t i = high; i > low; i--) {
-            //Swap the root (largest element) with the last element in the heap
-            swap(data[low], data[i]);
-            //Now exclude this last element from our tree and heapify
-            heapify(i - low, low, 0, comp);
-        }
-    }
-
-    template <typename Comparator>
-    size_t medianOfThree(size_t low, size_t high, Comparator& comp) {
-        size_t mid = low + (high - low) / 2;
-
-        if (comp(data[high], data[low])) swap(data[low], data[high]);
-        if (comp(data[mid], data[low])) swap(data[mid], data[low]);
-        if (comp(data[high], data[mid])) swap(data[high], data[mid]);
-
-        // After sorting: data[low] <= data[mid] <= data[high]
-        // Use the median value (data[mid]) as the pivot by swapping it to the front
-        swap(data[low], data[mid]);
-        return low;
-    }
-
-    template <typename Comparator>
-    size_t partitionHoare(size_t low, size_t high, Comparator& comp) {
-        medianOfThree(low, high, comp);
-        T& pivot = data[low]; // Note: pivot is chosen as the first element
-        size_t i = low - 1;
-        size_t j = high + 1;
-
-        while (true) {
-            do {
-                i++;
-            } while (comp(data[i], pivot));  // Move right until data[i] >= pivot
-
-            do {
-                j--;
-            } while (comp(pivot, data[j]));  // Move left until data[j] <= pivot
-
-            if (i >= j)
-                return j;  // return the last element of the left partition
-
-            swap(data[i], data[j]);
-        }
-    }
-
-#define INSERTION_SORT_THRESHOLD 16
-
-    template <typename Comparator>
-    void introsort(size_t low, size_t high, size_t depth_limit, Comparator& comp){
-        size_t slice_size = high - low + 1;
-
-        if (slice_size <= INSERTION_SORT_THRESHOLD) {
-            insertionSort(low, high, comp);
-            return;
-        }
-
-        if (depth_limit == 0) {
-            heapsort(low, high, comp);
-            return;
-        }
-
-        size_t pivotIndex = partitionHoare(low, high, comp);
-
-        introsort(low, pivotIndex, depth_limit - 1, comp);        // Note: include pivotIndex
-        introsort(pivotIndex + 1, high, depth_limit - 1, comp);   // Right side
     }
 public:
     //Default constructor
@@ -372,8 +249,7 @@ public:
 
     template <typename Comparator = DefaultComparator<T>>
     void sort(Comparator comp = Comparator{}){
-        auto depth_limit = log2floor(size) * 2;
-        introsort( 0, size - 1, depth_limit, comp);
+        algorithm::sort(data, size, comp);
     }
 };
 

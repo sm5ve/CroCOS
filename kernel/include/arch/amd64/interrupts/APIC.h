@@ -10,7 +10,7 @@
 #include <arch/amd64/amd64.h>
 
 using namespace kernel::hal::interrupts;
-using namespace hardware;
+using namespace platform;
 
 namespace kernel::amd64::interrupts{
     enum BusType : uint8_t {

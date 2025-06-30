@@ -5,6 +5,7 @@
 #include <core/ds/HashMap.h>
 #include <arch/amd64/smp.h>
 #include <arch/amd64/amd64.h>
+#include <arch/hal/interrupts.h>
 
 namespace kernel::amd64::smp{
     Vector<ProcessorInfo>* processors;
@@ -29,7 +30,7 @@ namespace kernel::amd64::smp{
 }
 
 namespace kernel::amd64::interrupts{
-    using namespace kernel::hal::interrupts::hardware;
+    using namespace kernel::hal::interrupts::platform;
 
     HashMap<uint16_t, uint32_t>* irqOverrideMap;
 
@@ -136,11 +137,11 @@ namespace kernel::amd64::interrupts{
         //The version register contains the highest index addressable in the redirection table, not its size. To get
         //the size, we add 1
         redirectionTableSize = ((regRead(0x01) >> 16) & 0xff) + 1;
-        mappings = (Tuple<hardware::VectorIndex, InterruptCPUAffinity>*)
-                (void*) new uint8_t[sizeof(Tuple<hardware::VectorIndex, InterruptCPUAffinity>) * redirectionTableSize];
+        mappings = (Tuple<platform::VectorIndex, InterruptCPUAffinity>*)
+                (void*) new uint8_t[sizeof(Tuple<platform::VectorIndex, InterruptCPUAffinity>) * redirectionTableSize];
         klog << "IOAPIC ID " << apicID << " has redirection table size " << redirectionTableSize << "\n";
         for(size_t i = 0; i < redirectionTableSize; i++){
-            mappings[i] = Tuple<hardware::VectorIndex, InterruptCPUAffinity>(0, NontargetedAffinityTypes::Global);
+            mappings[i] = Tuple<platform::VectorIndex, InterruptCPUAffinity>(0, NontargetedAffinityTypes::Global);
         }
     }
 
@@ -180,7 +181,7 @@ namespace kernel::amd64::interrupts{
     }
 
     bool
-    IOapic::setMapping(kernel::hal::interrupts::InterruptReceiver r, kernel::hal::interrupts::hardware::VectorIndex vi,
+    IOapic::setMapping(kernel::hal::interrupts::InterruptReceiver r, kernel::hal::interrupts::platform::VectorIndex vi,
                        Optional<kernel::hal::interrupts::InterruptCPUAffinity> aff) {
         auto index = indexForInterruptReceiver(r);
         if(!index.occupied()){
@@ -343,4 +344,10 @@ namespace kernel::amd64::interrupts{
         }
     }
 
+}
+
+namespace kernel::hal::interrupts::platform {
+    void issueEOI(VectorIndex vector) {
+        (void)vector;
+    }
 }

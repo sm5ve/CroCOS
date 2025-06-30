@@ -258,7 +258,7 @@ namespace kernel::amd64{
         //TODO implement a fallback method
         //really I ought to just do this with a proper GDT or whatever... but this should be enough
         //to get the rudiments of SMP working.
-        temporaryHack(10, 5, 2025, "Implement a proper GDT");
+        temporaryHack(10, 9, 2025, "Implement a proper GDT");
         assert(supportsFSGSBASE(), "Your CPU doesn't support FSGSBASE");
         uint64_t cr4;
         asm volatile ("mov %%cr4, %0" : "=r"(cr4));

@@ -4,6 +4,7 @@
 #include <arch/hal/hal.h>
 #include <kernel.h>
 #include <core/atomic.h>
+#include <core/Object.h>
 
 extern "C" void (*__init_array_start[])(void) __attribute__((weak));
 extern "C" void (*__init_array_end[])(void) __attribute__((weak));
@@ -20,12 +21,37 @@ namespace kernel{
         }
     }
 
+    class A : public Object<A, Vector<int>> {
+
+    };
+
+    class B : public Object<B, A> {
+
+    };
+
+    class C : public Object<C, A> {
+
+    };
+
     extern "C" void kernel_main(){
         klog << "\n"; // newline to separate from the "Booting from ROM.." message from qemu
 
         klog << "Hello amd64 kernel world!\n";
 
+        presort_object_parent_lists();
         run_global_constructors();
+
+        A* a = new B();
+        (void)a;
+
+        klog << ( a -> instanceof(TypeID_v<B>)) << "\n";
+        klog << ( a -> instanceof(TypeID_v<A>)) << "\n";
+        klog << ( a -> instanceof(TypeID_v<C>)) << "\n";
+        klog << ( a -> instanceof(TypeID_v<int>)) << "\n";
+        klog << ( a -> instanceof(TypeID_v<ObjectBase>)) << "\n";
+        klog << ( a -> instanceof(TypeID_v<Vector<int>>)) << "\n";
+        klog << ( a -> instanceof(TypeID_v<Vector<bool>>)) << "\n";
+
 
         hal::hwinit();
 

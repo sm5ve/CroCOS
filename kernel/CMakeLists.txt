@@ -42,19 +42,7 @@ set(KERNEL_SRC
         ../libraries/Core/include/core/atomic.h
 )
 
-execute_process(
-        COMMAND ${CMAKE_C_COMPILER} -print-file-name=crtbegin.o
-        OUTPUT_VARIABLE CRTBEGIN_PATH
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-)
-
-execute_process(
-        COMMAND ${CMAKE_C_COMPILER} -print-file-name=crtend.o
-        OUTPUT_VARIABLE CRTEND_PATH
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-)
-
 add_executable(Kernel ${KERNEL_SRC})
 target_link_options(Kernel PUBLIC -O0 -ffreestanding -mcmodel=kernel -nostdlib -T ${CMAKE_SOURCE_DIR}/kernel/linker.ld)
 target_include_directories(Kernel PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(Kernel PRIVATE Core)
+target_link_libraries(Kernel PRIVATE CoreKernel)

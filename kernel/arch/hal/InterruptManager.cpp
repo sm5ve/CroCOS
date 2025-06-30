@@ -14,13 +14,13 @@ namespace kernel::hal::interrupts{
         using InterruptSourceGroups = HashMap<InterruptGroupHandle, Vector<InterruptSource>>;
         using InterruptReceiverToSourcesMap = HashMap<InterruptReceiver, Vector<InterruptSource>>;
 
-        WITH_GLOBAL_CONSTRUCTOR(Vector<hardware::IInterruptController*>, controllers);
+        WITH_GLOBAL_CONSTRUCTOR(Vector<platform::IInterruptController*>, controllers);
         WITH_GLOBAL_CONSTRUCTOR(SourceInfoMapType, sourceInfo);
         WITH_GLOBAL_CONSTRUCTOR(InterruptSourceGroups, sourceGroups);
         WITH_GLOBAL_CONSTRUCTOR(RWSpinlock, topologyLock);
         WITH_GLOBAL_CONSTRUCTOR(InterruptReceiverToSourcesMap, receiverToSourcesMap);
 
-        void registerController(hardware::IInterruptController& c){
+        void registerController(platform::IInterruptController& c){
             WriterLockGuard guard(topologyLock);
             controllers.push(&c);
             //I'm not really sure what logic to put in here yet. But it seems good to keep track of all of our
@@ -49,15 +49,15 @@ namespace kernel::hal::interrupts{
             receiverToSourcesMap.at(r).push(s);
         }
 
-        using InterruptMapping = Optional<Tuple<hardware::VectorIndex, Optional<InterruptCPUAffinity>>>;
+        using InterruptMapping = Optional<Tuple<platform::VectorIndex, Optional<InterruptCPUAffinity>>>;
 
         InterruptMapping findVectorForSource(InterruptSource s){
             ReaderLockGuard guard(topologyLock);
-            //Prevent infinite loops when resolving a vector mapping
+            //Prevent infinite loops when resolving a vector mapping.
             //An acyclic route will go through a sequence of pairwise distinct interrupt sources, so the total
-            //number of interrupts is a conservative upper bound for the length of an acyclic route
-            //In practice cycles should never be possible - it would make no sense from a hardware perspective to loop
-            //the output of an interrupt controller back into itself
+            //number of interrupts is a conservative upper bound for the length of an acyclic route.
+            //In practice, cycles should never be possible - it would make no sense from a hardware perspective to loop
+            //the output of an interrupt controller back into itself.
             InterruptSource traversedSource = s;
             for(size_t i = 0; i < sourceInfo.size(); i++){
                 auto r = sourceInfo.at(traversedSource).receiver;
@@ -65,17 +65,17 @@ namespace kernel::hal::interrupts{
                 auto& c = *(r -> owner);
                 //If this is a cascaded controller, then the controller maps each of its receivers to another
                 //interrupt source, which is then connected to another controller
-                if(hardware::hasFeature(c.getFeatureSet(), hardware::InterruptControllerFeature::CascadedController)){
-                    auto& sub = reinterpret_cast<hardware::ISubordinateController&>(c);
+                if(platform::hasFeature(c.getFeatureSet(), platform::InterruptControllerFeature::CascadedController)){
+                    auto& sub = reinterpret_cast<platform::ISubordinateController&>(c);
                     auto mapped = sub.getMapping(*r);
                     //If no mapping was set for the subordinate controller, return empty
                     if(!mapped.occupied()) return {};
-                    //Otherwise update our traversed source to the corresponding output of the interrupt controller and repeat
+                    //Otherwise, update our traversed source to the corresponding output of the interrupt controller and repeat
                     traversedSource = *mapped;
                 }
-                //Otherwise if it's a terminal controller,
-                else if(hardware::hasFeature(c.getFeatureSet(), hardware::terminalController)){
-                    auto& term = reinterpret_cast<hardware::ITerminalController&>(c);
+                //Otherwise, if it's a terminal controller, get the vector and return
+                else if(platform::hasFeature(c.getFeatureSet(), platform::terminalController)){
+                    auto& term = reinterpret_cast<platform::ITerminalController&>(c);
                     return term.getMapping(*r);
                 }
                 else{
@@ -89,7 +89,15 @@ namespace kernel::hal::interrupts{
 
     namespace managed{
         using HandlerMap = HashMap<InterruptSource, IInterruptHandler*>;
+
+        struct AffinityData {
+            AffinityRequestData requestData;
+            Optional<InterruptCPUAffinity> requestedAffinity;
+        };
+
+        using AffinityRequestMap = HashMap<InterruptSource, AffinityData>;
         WITH_GLOBAL_CONSTRUCTOR(HandlerMap, interuptHandlers);
+        WITH_GLOBAL_CONSTRUCTOR(AffinityRequestMap, affinityRequestMap);
         WITH_GLOBAL_CONSTRUCTOR(RWSpinlock, handlerLock);
 
         bool registerHandler(InterruptSource s, IInterruptHandler& h){
@@ -107,16 +115,42 @@ namespace kernel::hal::interrupts{
             return true;
         }
 
-        /*bool setCPUAffinity(InterruptSource, InterruptCPUAffinity);
-        InterruptCPUAffinity getAffinity(InterruptSource);
-        InterruptMaskState getInterruptMaskState(InterruptSource);
-        bool isInterruptRaised(InterruptSource);
-        bool acknowledge(InterruptSource);
+        bool acknowledge(InterruptSource s) {
+            auto v = topology::findVectorForSource(s);
+            if (!v.occupied()) return false;
+            //Affinity shouldn't matter, we just need the vector
+            platform::issueEOI(v -> get<0>());
+            return true;
+        }
 
+        AffinityRequest requestCPUAffinity(InterruptSource s, InterruptCPUAffinity aff) {
+            if (!affinityRequestMap.contains(s)) {
+                affinityRequestMap.insert(s, {});
+            }
+            auto& r = affinityRequestMap.at(s);
+            r.requestedAffinity = aff;
+            return r.requestData;
+        }
+
+        Optional<InterruptCPUAffinity> getAffinity(InterruptSource s) {
+            auto m = topology::findVectorForSource(s);
+            if (!m.occupied()) {
+                return {};
+            }
+            return m -> get<1>();
+        }
+
+        void commitVectorReassignment() {
+
+        }
+
+        /*InterruptMaskState requestInterruptMask(InterruptSource, bool masked);
+        InterruptMaskState getInterruptMaskState(InterruptSource);
         void recomputeVectorAssignments();
         //Used on x86 for reserving vectors 0-31 for exceptions, as well as a vector for syscalls
-        Vector<Tuple<InterruptSource, hardware::VectorIndex>> reserveVectorRange(hardware::VectorIndex start, hardware::VectorIndex end, EOIHandler = doNothing);
-        void handleInterrupt(hal::InterruptFrame& frame);*/
+        Vector<Tuple<InterruptSource, platform::VectorIndex>> reserveVectorRange(platform::VectorIndex start, platform::VectorIndex end);
+        void handleInterrupt(hal::InterruptFrame& frame);
+        */
     }
 }
 

@@ -13,8 +13,10 @@
 #include <core/ds/HashMap.h>
 #include "core/ds/Handle.h"
 #include <core/utility.h>
+#include <core/Object.h>
 
 namespace kernel::hal::interrupts{
+
     enum NontargetedAffinityTypes{
         Global,
         RoundRobin,
@@ -36,27 +38,25 @@ namespace kernel::hal::interrupts{
         Masked //Interrupts are masked in the controller
     };
 
-    namespace hardware{
+    namespace platform{
         class IInterruptController;
     };
 
     struct InterruptReceiver{
-        hardware::IInterruptController* owner;
+        platform::IInterruptController* owner;
         uint64_t metadata;
 
         bool operator==(const InterruptReceiver& other) const {return owner == other.owner && metadata == other.metadata;}
     };
 
     struct InterruptSource{
-        hardware::IInterruptController* owner;
+        platform::IInterruptController* owner;
         uint64_t metadata;
 
         bool operator==(const InterruptSource& other) const {return owner == other.owner && metadata == other.metadata;}
     };
 
-    bool doNothing(InterruptReceiver);
-
-    namespace hardware{
+    namespace platform{
         using VectorIndex = uint32_t;
 
         enum class InterruptControllerFeature : uint32_t {
@@ -115,20 +115,24 @@ namespace kernel::hal::interrupts{
             virtual Optional<Tuple<VectorIndex, Optional<InterruptCPUAffinity>>> getMapping(InterruptReceiver r) = 0;
             virtual bool setMapping(InterruptReceiver r, VectorIndex, Optional<InterruptCPUAffinity>) = 0;
         };
+
+        void issueEOI(VectorIndex vector); //To be implemented separately for each architecture
     }
 
     namespace managed{
         enum InterruptHandlerResult{
-            Serviced,
-            Deferred,
+            Serviced, //OK to issue an EOI
+            Deferred, //Maybe mask the interrupt, then send EOI?
             Unmatched
         };
 
         class IInterruptHandler {
         public:
+            virtual ~IInterruptHandler() = default;
+
             virtual InterruptHandlerResult operator()(hal::InterruptFrame&) = 0;
             virtual bool operator==(IInterruptHandler& h) const = 0;
-            virtual uint64_t getTypeID() const = 0;
+            [[nodiscard]] virtual uint64_t getTypeID() const = 0;
         };
 
         class InterruptHandler : public IInterruptHandler{
@@ -152,17 +156,37 @@ namespace kernel::hal::interrupts{
             }
         };
 
+        enum class AffinityStatus {
+            Pending,
+            Honored,
+            Revoked,
+        };
+
+        struct AffinityRequestData {
+            AffinityStatus* st;
+            FunctionRef<void(AffinityStatus)> cb;
+        };
+
+        class AffinityRequest {
+        private:
+            AffinityRequestData& data;
+        public:
+            AffinityRequest(AffinityRequestData& d) : data(d){}
+            [[nodiscard]]
+            AffinityStatus status() const;
+            void onTransition(FunctionRef<void(AffinityStatus, InterruptCPUAffinity)> callback);
+        };
+
         bool registerHandler(InterruptSource, IInterruptHandler&);
         bool unregisterHandler(InterruptSource, IInterruptHandler&);
-        bool setCPUAffinity(InterruptSource, InterruptCPUAffinity);
-        InterruptCPUAffinity getAffinity(InterruptSource);
+        AffinityRequest requestCPUAffinity(InterruptSource, InterruptCPUAffinity);
+        Optional<InterruptCPUAffinity> getAffinity(InterruptSource);
+        InterruptMaskState requestInterruptMask(InterruptSource, bool masked);
         InterruptMaskState getInterruptMaskState(InterruptSource);
-        bool isInterruptRaised(InterruptSource);
         bool acknowledge(InterruptSource);
-
         void recomputeVectorAssignments();
         //Used on x86 for reserving vectors 0-31 for exceptions, as well as a vector for syscalls
-        Vector<Tuple<InterruptSource, hardware::VectorIndex>> reserveVectorRange(hardware::VectorIndex start, hardware::VectorIndex end);
+        Vector<Tuple<InterruptSource, platform::VectorIndex>> reserveVectorRange(platform::VectorIndex start, platform::VectorIndex end);
         void handleInterrupt(hal::InterruptFrame& frame);
     }
 
@@ -170,7 +194,7 @@ namespace kernel::hal::interrupts{
         struct InterruptGroupHandleTag{};
         using InterruptGroupHandle = Handle<InterruptGroupHandleTag>;
 
-        void registerController(hardware::IInterruptController&);
+        void registerController(platform::IInterruptController&);
         void registerSource(InterruptSource, Optional<InterruptGroupHandle> = {});
         void bindSourceToLine(InterruptSource, InterruptReceiver);
     }
