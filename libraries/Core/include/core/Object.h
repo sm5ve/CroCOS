@@ -93,11 +93,7 @@ class ObjectSortedParentIDs {
 };
 
 template <typename T, typename... Bases>
-class Object : public virtual ObjectBase, public Bases... {
-private:
-    template<typename S, typename... Bs>
-    friend class Object;
-
+class ObjectImpl : public virtual ObjectBase, public Bases... {
 public:
     using _CROCOS_FLATTENED_TYPES = typename unique_type_list<
         typename concat<type_list<T, ObjectBase>, typename FlattenedObjectBaseList<Bases...>::type>::type
@@ -144,7 +140,10 @@ public:
 };
 
 template <typename T, typename... Bases>
-typename Object<T, Bases...>::_sorted_type Object<T, Bases...>::_crocos_sorted_parents = {};
+typename ObjectImpl<T, Bases...>::_sorted_type ObjectImpl<T, Bases...>::_crocos_sorted_parents = {};
+
+#define CRClass(Name, ...) \
+class Name : public ObjectImpl<Name, __VA_ARGS__>
 
 void presort_object_parent_lists();
 

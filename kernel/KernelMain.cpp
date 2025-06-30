@@ -21,15 +21,15 @@ namespace kernel{
         }
     }
 
-    class A : public Object<A, Vector<int>> {
+    CRClass(A, Vector<int>) {
 
     };
 
-    class B : public Object<B, A> {
+    CRClass(B, A) {
 
     };
 
-    class C : public Object<C, A> {
+    CRClass(C, A) {
 
     };
 
@@ -52,6 +52,7 @@ namespace kernel{
         klog << ( a -> instanceof(TypeID_v<Vector<int>>)) << "\n";
         klog << ( a -> instanceof(TypeID_v<Vector<bool>>)) << "\n";
 
+        klog << a -> type_name() << "\n";
 
         hal::hwinit();
 
