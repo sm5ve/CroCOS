@@ -82,16 +82,6 @@ constexpr size_t get_type_array_size(type_list<Ts...>){
 // Main Object Class
 // ============================
 
-template<size_t N>
-class ObjectSortedParentIDs {
-    public:
-    uint64_t ids[N];
-    ObjectSortedParentIDs(uint64_t* unsortedIDs) {
-        memcpy(ids, unsortedIDs, N * sizeof(uint64_t));
-        algorithm::sort(ids, N);
-    }
-};
-
 template <typename T, typename... Bases>
 class ObjectImpl : public virtual ObjectBase, public Bases... {
 public:
@@ -143,7 +133,7 @@ template <typename T, typename... Bases>
 typename ObjectImpl<T, Bases...>::_sorted_type ObjectImpl<T, Bases...>::_crocos_sorted_parents = {};
 
 #define CRClass(Name, ...) \
-class Name : public ObjectImpl<Name, __VA_ARGS__>
+class Name : public ObjectImpl<Name, ##__VA_ARGS__>
 
 void presort_object_parent_lists();
 
