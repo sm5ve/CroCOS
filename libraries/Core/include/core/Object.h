@@ -8,15 +8,20 @@
 #include <core/utility.h>
 #include <core/TypeTraits.h>
 #include <core/algo/sort.h>
+#include "preprocessor.h"
 
 class ObjectBase {
 public:
     virtual ~ObjectBase() = default;
-    virtual uint64_t type_id() = 0;
-    virtual const char* type_name() = 0;
+    [[nodiscard]]
+    virtual uint64_t type_id() const = 0;
+    [[nodiscard]]
+    virtual const char* type_name() const = 0;
+    [[nodiscard]]
     virtual bool instanceof(uint64_t) const = 0;
 
     template <typename T>
+    [[nodiscard]]
     bool instanceof() const {
         return instanceof(TypeID_v<T>);
     }
@@ -83,7 +88,7 @@ constexpr size_t get_type_array_size(type_list<Ts...>){
 // ============================
 
 template <typename T, typename... Bases>
-class ObjectImpl : public virtual ObjectBase, public Bases... {
+class _ObjectInheritanceImpl {
 public:
     using _CROCOS_FLATTENED_TYPES = typename unique_type_list<
         typename concat<type_list<T, ObjectBase>, typename FlattenedObjectBaseList<Bases...>::type>::type
@@ -108,15 +113,15 @@ public:
 //#endif
 
 
-    uint64_t type_id() override {
+    static uint64_t type_id() {
         return TypeID_v<T>;
     }
 
-    const char* type_name() override {
+    static const char* type_name() {
         return TypeName<T>::name();
     }
 
-    bool instanceof(uint64_t id) const override {
+    static bool instanceof(uint64_t id) {
         const auto& arr = _crocos_sorted_parents;
         size_t left = 0, right = _crocos_obj_base_count;
         while (left < right) {
@@ -130,10 +135,22 @@ public:
 };
 
 template <typename T, typename... Bases>
-typename ObjectImpl<T, Bases...>::_sorted_type ObjectImpl<T, Bases...>::_crocos_sorted_parents = {};
+typename _ObjectInheritanceImpl<T, Bases...>::_sorted_type _ObjectInheritanceImpl<T, Bases...>::_crocos_sorted_parents = {};
+
+#define _CRClass_IMPL(Name, AuxName, ...) \
+class Name; \
+class AuxName : public virtual ObjectBase __VA_OPT__(,) __VA_ARGS__ { \
+using _impl = _ObjectInheritanceImpl<Name __VA_OPT__(, STRIP(__VA_ARGS__))>; \
+public: \
+static _impl::_CROCOS_FLATTENED_TYPES _crocos_flattened_types; \
+virtual uint64_t type_id() const override { return _impl::type_id(); } \
+virtual const char* type_name() const override { return _impl::type_name(); } \
+virtual bool instanceof(uint64_t id) const override { return _impl::instanceof(id); } \
+};\
+class Name : public AuxName
 
 #define CRClass(Name, ...) \
-class Name : public ObjectImpl<Name, ##__VA_ARGS__>
+_CRClass_IMPL(Name, _CRClass_IMPL_ ## Name ## _ ## __LINE__ ## _ ## __COUNTER__, __VA_ARGS__)
 
 void presort_object_parent_lists();
 

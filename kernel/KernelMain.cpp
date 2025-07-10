@@ -21,18 +21,6 @@ namespace kernel{
         }
     }
 
-    CRClass(A, Vector<int>) {
-
-    };
-
-    CRClass(B, A) {
-
-    };
-
-    CRClass(C, A) {
-
-    };
-
     extern "C" void kernel_main(){
         klog << "\n"; // newline to separate from the "Booting from ROM.." message from qemu
 
@@ -40,19 +28,6 @@ namespace kernel{
 
         presort_object_parent_lists();
         run_global_constructors();
-
-        A* a = new B();
-        (void)a;
-
-        klog << ( a -> instanceof(TypeID_v<B>)) << "\n";
-        klog << ( a -> instanceof(TypeID_v<A>)) << "\n";
-        klog << ( a -> instanceof(TypeID_v<C>)) << "\n";
-        klog << ( a -> instanceof(TypeID_v<int>)) << "\n";
-        klog << ( a -> instanceof(TypeID_v<ObjectBase>)) << "\n";
-        klog << ( a -> instanceof(TypeID_v<Vector<int>>)) << "\n";
-        klog << ( a -> instanceof(TypeID_v<Vector<bool>>)) << "\n";
-
-        klog << a -> type_name() << "\n";
 
         hal::hwinit();
 

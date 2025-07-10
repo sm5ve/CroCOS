@@ -10,7 +10,8 @@ set(CORE_SOURCES
 
 #Special version of Core meant to be linked with the kernel
 
-add_library(CoreKernel STATIC ${CORE_SOURCES})
+add_library(CoreKernel STATIC ${CORE_SOURCES}
+        include/core/preprocessor.h)
 
 target_include_directories(CoreKernel PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
