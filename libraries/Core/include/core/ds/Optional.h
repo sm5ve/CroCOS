@@ -7,7 +7,6 @@
 
 #include "../utility.h"
 #include "Variant.h"
-#include "assert.h"
 #include "../TypeTraits.h"
 
 template <typename T>
@@ -158,6 +157,11 @@ public:
 
 namespace Core{
     class PrintStream;
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wredundant-decls"
+    PrintStream& operator <<(PrintStream& ps, char* message);
+
+#pragma GCC diagnostic pop
 }
 
 template<typename T>

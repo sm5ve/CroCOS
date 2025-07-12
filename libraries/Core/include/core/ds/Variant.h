@@ -238,6 +238,7 @@ public:
 
 namespace Core{
     class PrintStream;
+    PrintStream& operator <<(PrintStream& ps, char* message);
 }
 
 template<typename ... Ts, size_t ... Is>

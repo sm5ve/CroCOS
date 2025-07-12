@@ -8,7 +8,9 @@
 #include <core/utility.h>
 #include <core/TypeTraits.h>
 #include <core/algo/sort.h>
+#include <core/ds/Optional.h>
 #include "preprocessor.h"
+#include "../../../../kernel/include/kernel.h"
 
 class ObjectBase {
 public:
@@ -25,6 +27,8 @@ public:
     bool instanceof() const {
         return instanceof(TypeID_v<T>);
     }
+protected:
+    virtual Optional<int64_t> getOffset(uint64_t id) = 0;
 };
 
 // ============================
@@ -72,23 +76,46 @@ public:
     using type = typename unique_type_list<typename concat<T_flat, Tail_flat>::type>::type;
 };
 
-template<typename... Ts>
-constexpr uint64_t const (&make_type_id_array(type_list<Ts...>))[sizeof...(Ts)] {
-    static constexpr uint64_t arr[sizeof...(Ts)] = { TypeID_v<Ts>... };
-    return arr;
+template <typename Derived, typename Base>
+int64_t _computeCastingOffset() requires StaticCastable<Derived*, Base*> {
+    // Use null pointer arithmetic instead of fake object addresses
+    constexpr uintptr_t null_derived = 0x1000;  // Use a non-zero "fake" address
+    Derived* derived = reinterpret_cast<Derived*>(null_derived);
+    Base* base = static_cast<Base*>(derived);
+    int64_t offset = reinterpret_cast<uintptr_t>(base) - reinterpret_cast<uintptr_t>(derived);
+    return offset;
 }
 
-template<typename... Ts>
-constexpr size_t get_type_array_size(type_list<Ts...>){
-    return sizeof...(Ts);
-}
+struct _InheritanceInfo {
+    uint64_t id;
+    int64_t offset;
+    bool supports_dynamic_cast;
+};
 
-// ============================
-// Main Object Class
-// ============================
+struct _InheritanceInfoComparator{
+    bool operator() (const _InheritanceInfo& a, const _InheritanceInfo& b) const{
+        return a.id < b.id;
+    }
+};
+
+template<typename Base>
+constexpr _InheritanceInfo _computeInheritanceInfo(){
+    return _InheritanceInfo {.id = TypeID_v<Base>, .offset = 0, .supports_dynamic_cast = false};
+}
 
 template <typename T, typename... Bases>
 class _ObjectInheritanceImpl {
+private:
+    template<typename... Ts>
+    static constexpr _InheritanceInfo const (&make_type_id_array(type_list<Ts...>))[sizeof...(Ts)] {
+    static constexpr _InheritanceInfo arr[sizeof...(Ts)] = { _computeInheritanceInfo<Ts>()... };
+    return arr;
+    }
+
+    template<typename... Ts>
+    static constexpr size_t get_type_array_size(type_list<Ts...>){
+        return sizeof...(Ts);
+    }
 public:
     using _CROCOS_FLATTENED_TYPES = typename unique_type_list<
         typename concat<type_list<T, ObjectBase>, typename FlattenedObjectBaseList<Bases...>::type>::type
@@ -98,13 +125,41 @@ public:
     static const size_t _crocos_obj_base_count = get_type_array_size(_crocos_flattened_types);
     static constexpr auto _crocos_const_flattened_ids = make_type_id_array(_crocos_flattened_types); //convert the _CROCOS_FLATTENED_TYPES type into a static array
 
-    using _sorted_type = uint64_t[_crocos_obj_base_count];
+    using _sorted_type = _InheritanceInfo[_crocos_obj_base_count];
 //#ifdef CORE_LINKED_WITH_KERNEL
     __attribute__((used)) static _sorted_type _crocos_sorted_parents;
 
-    __attribute__((used)) static void _crocos_presort() {
-        memcpy(_crocos_sorted_parents, _crocos_const_flattened_ids, _crocos_obj_base_count * sizeof(uint64_t));
-        algorithm::sort(_crocos_sorted_parents);
+    template <typename R, typename... Rs>
+    static void _crocos_populate_offset(type_list<R, Rs...>, int index) requires StaticCastable<T*, R*>{
+        _crocos_sorted_parents[index].offset = _computeCastingOffset<T, R>();
+        _crocos_sorted_parents[index].supports_dynamic_cast = true;
+
+        if constexpr (sizeof...(Rs) > 0) {
+            _crocos_populate_offset(type_list<Rs...>{}, index + 1);
+        }
+    }
+
+    template <typename R, typename... Rs>
+    static void _crocos_populate_offset(type_list<R, Rs...>, int index) requires (!StaticCastable<T*, R*>){
+        _crocos_sorted_parents[index].offset = 0;
+        _crocos_sorted_parents[index].supports_dynamic_cast = false;
+
+        if constexpr (sizeof...(Rs) > 0) {
+            _crocos_populate_offset(type_list<Rs...>{}, index + 1);
+        }
+
+        static_assert(false);
+    }
+
+    // Base case for empty type list
+    static void _crocos_populate_offset(type_list<>, int) {
+
+    }
+
+    __attribute__((used)) static void _crocos_presort(){
+        memcpy(_crocos_sorted_parents, _crocos_const_flattened_ids, sizeof(_InheritanceInfo) * _crocos_obj_base_count);
+        _crocos_populate_offset(_crocos_flattened_types, 0);
+        algorithm::sort(_crocos_sorted_parents, _InheritanceInfoComparator{});
     }
 
     inline static void (*_crocos_presort_init)(void) __attribute__((used, section(".crocos_presort_array"))) = _crocos_presort;
@@ -126,11 +181,27 @@ public:
         size_t left = 0, right = _crocos_obj_base_count;
         while (left < right) {
             size_t mid = (left + right) / 2;
-            if (arr[mid] == id) return true;
-            if (arr[mid] < id) left = mid + 1;
+            if (arr[mid].id == id) return true;
+            if (arr[mid].id < id) left = mid + 1;
             else right = mid;
         }
         return false;
+    }
+
+    static Optional<int64_t> getOffset(uint64_t id) {
+        const auto& arr = _crocos_sorted_parents;
+        size_t left = 0, right = _crocos_obj_base_count;
+        while (left < right) {
+            size_t mid = (left + right) / 2;
+            if (arr[mid].id == id) {
+                if (arr[mid].supports_dynamic_cast)
+                    return arr[mid].offset;
+                return {};
+            }
+            if (arr[mid].id < id) left = mid + 1;
+            else right = mid;
+        }
+        return {};
     }
 };
 
@@ -146,11 +217,32 @@ static _impl::_CROCOS_FLATTENED_TYPES _crocos_flattened_types; \
 virtual uint64_t type_id() const override { return _impl::type_id(); } \
 virtual const char* type_name() const override { return _impl::type_name(); } \
 virtual bool instanceof(uint64_t id) const override { return _impl::instanceof(id); } \
+virtual Optional<int64_t> getOffset(uint64_t id) override { return _impl::getOffset(id); }\
 };\
 class Name : public AuxName
 
 #define CRClass(Name, ...) \
 _CRClass_IMPL(Name, _CRClass_IMPL_ ## Name ## _ ## __LINE__ ## _ ## __COUNTER__, __VA_ARGS__)
+
+template<typename Type>
+concept DynamicCastable = requires(Type from) {
+    from.getOffset(0ul);
+};
+
+template <typename Dest, typename Source>
+Dest crocos_dynamic_cast(Source s) requires (is_pointer_v<Dest> && is_pointer_v<Source>)
+{
+    auto destOffset = s -> getOffset(TypeID_v<typename remove_pointer<Dest>::type>);
+    auto sourceOffset = s -> getOffset(TypeID_v<typename remove_pointer<Source>::type>);
+    if (destOffset.occupied() && sourceOffset.occupied()) {
+        int64_t offset = *destOffset - *sourceOffset;
+        auto ptr = reinterpret_cast<char*>(s);
+        ptr += offset;
+        return reinterpret_cast<Dest>(ptr);
+    }
+
+    return nullptr;
+}
 
 void presort_object_parent_lists();
 

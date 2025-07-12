@@ -423,4 +423,84 @@ inline constexpr bool is_base_of_v = is_base_of<Base, Derived>::value;
 template<typename Base, typename Derived>
 concept IsBaseOf = is_base_of_v<Base, Derived>;
 
+template<typename From, typename To>
+concept StaticCastable = requires(From from) {
+    static_cast<To>(from);
+};
+
+template<typename From, typename To>
+constexpr bool is_static_castable_v = StaticCastable<From, To>;
+
+// Primary template - not a pointer
+template<typename T>
+struct is_pointer : false_type {};
+
+// Specializations for pointer types
+template<typename T>
+struct is_pointer<T*> : true_type {};
+
+template<typename T>
+struct is_pointer<T* const> : true_type {};
+
+template<typename T>
+struct is_pointer<T* volatile> : true_type {};
+
+template<typename T>
+struct is_pointer<T* const volatile> : true_type {};
+
+// Variable template for convenience
+template<typename T>
+constexpr bool is_pointer_v = is_pointer<T>::value;
+
+template<typename T>
+concept IsPointer = is_pointer_v<T>;
+
+// Primary template - not a reference
+template<typename T>
+struct is_reference : false_type {};
+
+// Specializations for reference types
+template<typename T>
+struct is_reference<T&> : true_type {};
+
+template<typename T>
+struct is_reference<T const&> : true_type {};
+
+template<typename T>
+struct is_reference<T volatile&> : true_type {};
+
+template<typename T>
+struct is_reference<T const volatile&> : true_type {};
+
+// Variable template for convenience
+template<typename T>
+constexpr bool is_reference_v = is_reference<T>::value;
+
+template<typename T>
+concept IsReference = is_reference_v<T>;
+
+template<typename T>
+struct remove_pointer;
+
+// Specializations for pointer types
+template<typename T>
+struct remove_pointer<T*> {
+    using type = T;
+};
+
+template<typename T>
+struct remove_pointer<T* const> {
+    using type = T;
+};
+
+template<typename T>
+struct remove_pointer<T* volatile> {
+    using type = T;
+};
+
+template<typename T>
+struct remove_pointer<T* const volatile> {
+    using type = T;
+};
+
 #endif //CROCOS_UTILITY_H
