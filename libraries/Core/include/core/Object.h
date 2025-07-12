@@ -10,7 +10,6 @@
 #include <core/algo/sort.h>
 #include <core/ds/Optional.h>
 #include "preprocessor.h"
-#include "../../../../kernel/include/kernel.h"
 
 class ObjectBase {
 public:
@@ -147,8 +146,6 @@ public:
         if constexpr (sizeof...(Rs) > 0) {
             _crocos_populate_offset(type_list<Rs...>{}, index + 1);
         }
-
-        static_assert(false);
     }
 
     // Base case for empty type list
@@ -229,6 +226,7 @@ concept DynamicCastable = requires(Type from) {
     from.getOffset(0ul);
 };
 
+//Not guaranteed to work for virtual inheritance
 template <typename Dest, typename Source>
 Dest crocos_dynamic_cast(Source s) requires (is_pointer_v<Dest> && is_pointer_v<Source>)
 {
