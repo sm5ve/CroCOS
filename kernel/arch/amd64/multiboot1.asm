@@ -159,7 +159,7 @@ _start:
 
     # Disable paging just in case
     mov %cr0, %ebx
-    and ~(1 << 31), %ebx
+    and $(~(1 << 31)), %ebx
     mov %ebx, %cr0
 
     # Load the base address of PML4 into CR3
