@@ -431,6 +431,14 @@ concept StaticCastable = requires(From from) {
 template<typename From, typename To>
 constexpr bool is_static_castable_v = StaticCastable<From, To>;
 
+template <typename Base, typename Derived>
+#ifdef __GNUC__
+concept IsVirtuallyDerivedBy = __builtin_is_virtual_base_of(Base, Derived);
+#else
+#error "Unsupported compiler"
+#endif
+
+
 // Primary template - not a pointer
 template<typename T>
 struct is_pointer : false_type {};

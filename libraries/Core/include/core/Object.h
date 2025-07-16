@@ -77,7 +77,6 @@ public:
 
 template <typename Derived, typename Base>
 int64_t _computeCastingOffset() requires StaticCastable<Derived*, Base*> {
-    // Use null pointer arithmetic instead of fake object addresses
     constexpr uintptr_t null_derived = 0x1000;  // Use a non-zero "fake" address
     Derived* derived = reinterpret_cast<Derived*>(null_derived);
     Base* base = static_cast<Base*>(derived);
@@ -129,7 +128,7 @@ public:
     __attribute__((used)) static _sorted_type _crocos_sorted_parents;
 
     template <typename R, typename... Rs>
-    static void _crocos_populate_offset(type_list<R, Rs...>, int index) requires StaticCastable<T*, R*>{
+    static void _crocos_populate_offset(type_list<R, Rs...>, int index) requires (!IsVirtuallyDerivedBy<R, T>){
         _crocos_sorted_parents[index].offset = _computeCastingOffset<T, R>();
         _crocos_sorted_parents[index].supports_dynamic_cast = true;
 
@@ -139,7 +138,7 @@ public:
     }
 
     template <typename R, typename... Rs>
-    static void _crocos_populate_offset(type_list<R, Rs...>, int index) requires (!StaticCastable<T*, R*>){
+    static void _crocos_populate_offset(type_list<R, Rs...>, int index) requires IsVirtuallyDerivedBy<R, T>{
         _crocos_sorted_parents[index].offset = 0;
         _crocos_sorted_parents[index].supports_dynamic_cast = false;
 
@@ -219,7 +218,7 @@ virtual Optional<int64_t> getOffset(uint64_t id) override { return _impl::getOff
 class Name : public AuxName
 
 #define CRClass(Name, ...) \
-_CRClass_IMPL(Name, _CRClass_IMPL_ ## Name ## _ ## __LINE__ ## _ ## __COUNTER__, __VA_ARGS__)
+_CRClass_IMPL(Name, _CRClass_IMPL_ ## Name ## _ ## __LINE__, __VA_ARGS__)
 
 template<typename Type>
 concept DynamicCastable = requires(Type from) {
