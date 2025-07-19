@@ -26,7 +26,7 @@ struct Tuple<T, Rest...> : Tuple<Rest...> {
 
     // Get element by index
     template<size_t N>
-    decltype(auto) get() {
+    [[nodiscard]] auto& get() {
         if constexpr (N == 0) {
             return (value);
         } else {
@@ -35,12 +35,24 @@ struct Tuple<T, Rest...> : Tuple<Rest...> {
     }
 
     template<size_t N>
-    decltype(auto) get() const {
+    [[nodiscard]] decltype(auto) get() const {
         if constexpr (N == 0) {
             return (value);
         } else {
             return Tuple<Rest...>::template get<N - 1>();
         }
+    }
+
+    auto& first() {
+        return value;
+    }
+
+    auto& second() requires(sizeof...(Rest) >= 1) {
+        return get<1>();
+    }
+
+    auto& third() requires(sizeof...(Rest) >= 2) {
+        return get<2>();
     }
 };
 

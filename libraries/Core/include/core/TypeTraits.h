@@ -8,17 +8,20 @@
 #include "stddef.h"
 
 template <typename T>
-struct is_void {
+struct is_void_t {
     static const bool value = false;
 };
 
 template <>
-struct is_void<void> {
+struct is_void_t<void> {
     static const bool value = true;
 };
 
 template <typename T>
-constexpr bool is_void_v = is_void<T>::value;
+constexpr bool is_void_v = is_void_t<T>::value;
+
+template <typename T>
+concept is_void = is_void_v<T>;
 
 constexpr size_t RequiredBits(size_t value) {
     size_t bits = 0;

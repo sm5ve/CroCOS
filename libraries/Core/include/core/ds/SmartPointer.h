@@ -6,7 +6,7 @@
 #define CROCOS_SMARTPOINTER_H
 
 #include "stddef.h"
-#include "../utility.h"
+#include <core/utility.h>
 
 template <typename T>
 class UniquePtr {
@@ -136,7 +136,6 @@ public:
 
             // Move new data
             control_block = other.control_block;
-            other.ptr = nullptr;
             other.control_block = nullptr;
         }
         return *this;

@@ -511,4 +511,22 @@ struct remove_pointer<T* const volatile> {
     using type = T;
 };
 
+template<typename T>
+void copy_assign_or_construct(T& dest, const T& src) {
+    if constexpr (is_trivially_copyable_v<T>) {
+        dest = src;
+    } else {
+        new(&dest) T(src);
+    }
+}
+
+template<typename T>
+void move_assign_or_construct(T& dest, T&& src) {
+    if constexpr (is_trivially_copyable_v<T>) {
+        dest = move(src);
+    } else {
+        new(&dest) T(move(src));
+    }
+}
+
 #endif //CROCOS_UTILITY_H

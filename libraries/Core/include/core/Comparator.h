@@ -15,8 +15,4 @@ struct DefaultComparator{
     }
 };
 
-
-
-
-
 #endif //CROCOS_COMPARATOR_H
