@@ -46,7 +46,7 @@ protected:
             advanceToNextOccupied();
         }
 
-        decltype(auto) operator*() const { return transform(entries[index]); }
+        decltype(auto) operator*() const { return transform(entries[index].value); }
 
         TransformingIterator& operator++() {
             index++;
@@ -152,6 +152,8 @@ protected:
         memset(entryBuffer, 0, sizeof(Entry) * init_capacity);
     }
 
+    IndexedHashTable(Entry* buffer, size_t cap, size_t ct) : entryBuffer(buffer), capacity(cap), count(ct) {}
+
     ~IndexedHashTable(){
         if(entryBuffer == nullptr) return;
         for(size_t i = 0; i < capacity; i++){
@@ -178,6 +180,7 @@ protected:
     }
 
     bool _remove(const Key& key){
+        if (entryBuffer == nullptr) return false;
         auto& entry = probeEntry(key);
         if(entry.state == EntryState::occupied){
             entry.value.~EntryType();
@@ -188,9 +191,15 @@ protected:
         }
         return false;
     }
+
+    size_t getEntryIndex(const Entry& entry) const {
+        return &entry - entryBuffer;
+    }
+
 public:
     [[nodiscard]]
     bool contains(const Key& key) const{
+        if (entryBuffer == nullptr) return false;
         auto& entry = probeEntry(key);
         return entry.state == EntryState::occupied;
     }

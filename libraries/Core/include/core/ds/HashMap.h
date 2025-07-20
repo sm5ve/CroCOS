@@ -116,29 +116,31 @@ public:
     }
 
     struct KVPTransform {
-        Tuple<const K&, V&> operator()(typename ParentTable::Entry& e) const {
-            return makeTuple(static_cast<const K &>(e.value.first()), e.value.second());
+        Tuple<const K&, V&> operator()(typename ParentTable::InternalEntryType& e) const {
+            return makeTuple(static_cast<const K &>(e.first()), e.second());
         }
     };
 
     struct KeyTransform {
-        const K& operator()(typename ParentTable::Entry& e) const {
-            return e.value.first();
+        const K& operator()(typename ParentTable::InternalEntryType& e) const {
+            return e.first();
         }
     };
 
     struct ValueTransform {
-        V& operator()(typename ParentTable::Entry& e) const {
-            return e.value.second();
+        V& operator()(typename ParentTable::InternalEntryType& e) const {
+            return e.second();
         }
     };
 
     auto begin(){
-        return TransformingIterator(this -> entryBuffer, this -> capacity, 0, KVPTransform{});
+        using It = typename ParentTable::template TransformingIterator<KVPTransform>;
+        return It(this -> entryBuffer, this -> capacity, 0, KVPTransform{});
     }
 
     auto end(){
-        return TransformingIterator(this -> entryBuffer, this -> capacity, this -> capacity, KVPTransform{});
+        using It = typename ParentTable::template TransformingIterator<KVPTransform>;
+        return It(this -> entryBuffer, this -> capacity, this -> capacity, KVPTransform{});
     }
 
     auto entries() {
@@ -149,7 +151,7 @@ public:
     }
 
     auto keys() {
-        using It = typename ParentTable::template TransformingIterator<FunctionRef<const K&(typename ParentTable::Entry&)>>;
+        using It = typename ParentTable::template TransformingIterator<KeyTransform>;
         return IteratorRange<It>(
                 It(this -> entryBuffer, this -> capacity, 0, KeyTransform{}),
                 It(this -> entryBuffer, this -> capacity, this -> capacity, KeyTransform{})
@@ -157,7 +159,7 @@ public:
     }
 
     auto values() {
-        using It = typename ParentTable::template TransformingIterator<FunctionRef<V&(typename ParentTable::Entry&)>>;
+        using It = typename ParentTable::template TransformingIterator<ValueTransform>;
         return IteratorRange<It>(
                 It(this -> entryBuffer, this -> capacity, 0, ValueTransform{}),
                 It(this -> entryBuffer, this -> capacity, this -> capacity, ValueTransform{})
