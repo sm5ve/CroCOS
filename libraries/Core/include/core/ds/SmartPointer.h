@@ -165,6 +165,10 @@ public:
         return *(control_block -> ptr);
     }
 
+    T& operator[](size_t index) const {
+        return (control_block -> ptr)[index];
+    }
+
     // Arrow operator
     T* operator->() const {
         if(!control_block){
