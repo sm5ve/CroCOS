@@ -16,7 +16,9 @@ add_library(CoreKernel STATIC ${CORE_SOURCES}
         include/core/ds/Graph.h
         include/core/Hasher.h
         include/core/Iterator.h
-        include/core/ds/HashSet.h)
+        include/core/ds/HashSet.h
+        include/core/GraphBuilder.h
+)
 
 target_include_directories(CoreKernel PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
