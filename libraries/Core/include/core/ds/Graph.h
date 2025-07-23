@@ -58,10 +58,9 @@ namespace GraphProperties {
     template<typename Predicate>
     struct contains_predicate<Predicate, type_list<>> : false_type {};
 
-    template<typename Predicate, typename First, typename... Rest>
-    struct contains_predicate<Predicate, type_list<First, Rest...>> {
-        static constexpr bool value = is_same_v<Predicate, First> || 
-                                     contains_predicate<Predicate, type_list<Rest...>>::value;
+    template<typename Predicate, typename... Types>
+    struct contains_predicate<Predicate, type_list<Types...>> {
+        static constexpr bool value = (is_same_v<Predicate, Types> || ...);
     };
 
     template<typename Predicate, typename TypeList>
@@ -100,58 +99,7 @@ namespace _GraphBuilder {
 }
 
 namespace _GraphInternal {
-    template <bool Labeled, typename GraphType>
-    struct VertexIteratorState;
-
-    template <typename GraphType>
-    struct VertexIteratorState<true, GraphType> {
-        using type = decltype(GraphType::vertexLabels->begin());
-    };
-
-    template <typename GraphType>
-    struct VertexIteratorState<false, GraphType> {
-        using type = typename GraphType::VertexIndex;
-    };
-
-    template <bool Labeled, typename GraphType>
-    struct EdgeIteratorState;
-
-    template <typename GraphType>
-    struct EdgeIteratorState<true, GraphType> {
-        using type = decltype(GraphType::edgeLabels->begin());
-    };
-
-    template <typename GraphType>
-    struct EdgeIteratorState<false, GraphType> {
-        using type = typename GraphType::EdgeIndex;
-    };
-}
-
-template <typename T, typename G>
-class VertexAnnotation;
-template <typename T, typename G>
-class EdgeAnnotation;
-
-template <typename VertexDecorator_t, typename EdgeDecorator_t, typename StructureModifier_t>
-class Graph{
-public:
-    class Vertex;
-    class Edge;
-
-    template <typename T, typename G>
-    friend class VertexAnnotation;
-    template <typename T, typename G>
-    friend class EdgeAnnotation;
-
-    using VertexDecorator = VertexDecorator_t;
-    using EdgeDecorator = EdgeDecorator_t;
-    using StructureModifier = StructureModifier_t;
-private:
-    friend Vertex;
-    friend Edge;
-    friend _GraphInternal::VertexIteratorState<VertexDecorator::is_labeled, Graph>;
-    friend _GraphInternal::EdgeIteratorState<EdgeDecorator::is_labeled, Graph>;
-
+    // Common types used across all graph types
     using BasicIndex = size_t;
     using VertexIndex = BasicIndex;
     using EdgeIndex = BasicIndex;
@@ -215,12 +163,68 @@ private:
         }
     };
 
-    using VertexMetadata = conditional_t<StructureModifier::is_directed, DirectedVertexMetadata, UndirectedVertexMetadata>;
-
     struct EdgeMetadata {
         VertexIndex from;
         VertexIndex to;
     };
+
+    template <bool Labeled, typename GraphType>
+    struct VertexIteratorState;
+
+    template <typename GraphType>
+    struct VertexIteratorState<true, GraphType> {
+        using type = decltype(GraphType::vertexLabels->begin());
+    };
+
+    template <typename GraphType>
+    struct VertexIteratorState<false, GraphType> {
+        using type = VertexIndex;
+    };
+
+    template <bool Labeled, typename GraphType>
+    struct EdgeIteratorState;
+
+    template <typename GraphType>
+    struct EdgeIteratorState<true, GraphType> {
+        using type = decltype(GraphType::edgeLabels->begin());
+    };
+
+    template <typename GraphType>
+    struct EdgeIteratorState<false, GraphType> {
+        using type = EdgeIndex;
+    };
+}
+
+template <typename T, typename G>
+class VertexAnnotation;
+template <typename T, typename G>
+class EdgeAnnotation;
+
+template <typename VertexDecorator_t, typename EdgeDecorator_t, typename StructureModifier_t>
+class Graph{
+public:
+    class Vertex;
+    class Edge;
+
+    template <typename T, typename G>
+    friend class VertexAnnotation;
+    template <typename T, typename G>
+    friend class EdgeAnnotation;
+
+    using VertexDecorator = VertexDecorator_t;
+    using EdgeDecorator = EdgeDecorator_t;
+    using StructureModifier = StructureModifier_t;
+private:
+    friend Vertex;
+    friend Edge;
+    friend _GraphInternal::VertexIteratorState<VertexDecorator::is_labeled, Graph>;
+    friend _GraphInternal::EdgeIteratorState<EdgeDecorator::is_labeled, Graph>;
+
+    using BasicIndex = _GraphInternal::BasicIndex;
+    using VertexIndex = _GraphInternal::VertexIndex;
+    using EdgeIndex = _GraphInternal::EdgeIndex;
+    using VertexMetadata = conditional_t<StructureModifier::is_directed, _GraphInternal::DirectedVertexMetadata, _GraphInternal::UndirectedVertexMetadata>;
+    using EdgeMetadata = _GraphInternal::EdgeMetadata;
 
     struct Empty{};
     template<bool condition, typename T>
@@ -250,6 +254,10 @@ private:
                           EdgeIndex> edgeCount;
 
     friend class _GraphBuilder::GraphBuilderImpl<Graph<VertexDecorator, EdgeDecorator, StructureModifier>>;
+    
+    // Allow promotion methods to access private members of different graph types
+    template <typename VD, typename ED, typename SM>
+    friend class Graph;
 
     // Private default constructor - only GraphBuilder can create Graph instances
     Graph() = default;
@@ -698,6 +706,48 @@ public:
             }
             return {};
         }
+    }
+
+    // Graph promotion: attempt to add a predicate to the graph type
+    template<typename NewPredicate>
+    using PromotedGraph = Graph<VertexDecorator, EdgeDecorator,
+        typename StructureModifier::predicates::template append<NewPredicate>::template apply<
+            GraphProperties::StructureModifier, 
+            typename StructureModifier::directionPolicy,
+            typename StructureModifier::multigraphPolicy>>;
+
+    template<typename NewPredicate>
+    auto tryPromoteTo() const -> Optional<PromotedGraph<NewPredicate>> {
+        
+        // Check if the new predicate is satisfied
+        if (!NewPredicate::check(*this)) {
+            return {};
+        }
+        
+        // Create a new graph instance by sharing the data
+        PromotedGraph<NewPredicate> promoted;
+        promoted.vertexMetadata = vertexMetadata;
+        promoted.incidenceLists = incidenceLists;
+        promoted.edgeMetadata = edgeMetadata;
+        
+        if constexpr (VertexDecorator::is_colored) {
+            promoted.vertexColors = vertexColors;
+        }
+        if constexpr (VertexDecorator::is_labeled) {
+            promoted.vertexLabels = vertexLabels;
+        } else {
+            promoted.vertexCount = vertexCount;
+        }
+        if constexpr (EdgeDecorator::is_weighted) {
+            promoted.edgeWeights = edgeWeights;
+        }
+        if constexpr (EdgeDecorator::is_labeled) {
+            promoted.edgeLabels = edgeLabels;
+        } else {
+            promoted.edgeCount = edgeCount;
+        }
+        
+        return promoted;
     }
 };
 

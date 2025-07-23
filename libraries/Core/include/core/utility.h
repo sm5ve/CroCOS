@@ -201,7 +201,14 @@ struct decay {
 };
 
 template<typename... Ts>
-struct type_list {};
+struct type_list {
+    template<typename T>
+    using append = type_list<Ts..., T>;
+    
+    // Helper to apply the types to a template with additional parameters
+    template<template<typename...> typename Template, typename... ExtraArgs>
+    using apply = Template<ExtraArgs..., Ts...>;
+};
 
 template<typename A, typename B>
 struct concat;
