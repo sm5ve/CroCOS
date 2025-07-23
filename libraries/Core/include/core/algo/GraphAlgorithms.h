@@ -8,7 +8,7 @@
 #include <core/ds/Graph.h>
 #include <core/ds/Vector.h>
 
-#include "GraphPredicates.h"
+#include <core/algo/GraphPredicates.h>
 
 namespace algorithm::graph {
     
@@ -21,11 +21,8 @@ namespace algorithm::graph {
         Vector<typename G::Vertex> result;
         Vector<typename G::Vertex> queue;
         
-        // We need a mutable reference for vertex annotations
-        auto& mutableGraph = const_cast<G&>(graph);
-        
         // Track in-degrees using vertex annotation
-        VertexAnnotation<size_t, G> inDegree(mutableGraph, 0);
+        VertexAnnotation<size_t, G> inDegree(graph, 0);
         
         // Initialize in-degrees
         for (auto vertex : graph.vertices()) {

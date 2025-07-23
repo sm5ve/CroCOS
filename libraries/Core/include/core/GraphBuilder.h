@@ -919,6 +919,85 @@ public:
         return this->buildGraph();
     }
     
+    // Reset the builder to its initial state
+    void reset() {
+        // Clear vertex info and reallocate
+        this->vertexInfo.~Vector();
+        new(&this->vertexInfo) Vector<_GraphBuilder::PartialVertexInfo<Graph>>();
+        
+        // Clear edge info and reallocate  
+        this->edgeInfo.~Vector();
+        new(&this->edgeInfo) Vector<_GraphBuilder::PartialEdgeInfo<Graph>>();
+        
+        // Clear label maps if they exist
+        if constexpr (VertexDecorator::is_labeled) {
+            this->vertexLabelMap.~HashMap();
+            new(&this->vertexLabelMap) HashMap<typename VertexDecorator::LabelType, size_t>();
+        }
+        if constexpr (EdgeDecorator::is_labeled) {
+            this->edgeLabelMap.~HashMap();
+            new(&this->edgeLabelMap) HashMap<typename EdgeDecorator::LabelType, size_t>();
+        }
+    }
+    
+    // Populate the builder from an existing graph
+    void populateFromGraph(const Graph& graph) {
+        // First reset to ensure clean state
+        reset();
+        
+        // Create a mapping from graph vertex objects to builder vertex indices
+        HashMap<typename Graph::Vertex, size_t> vertexToBuilderMap;
+        
+        // Add all vertices from the graph
+        for (auto vertex : graph.vertices()) {
+            auto& partialVertex = this->createVertex();
+            size_t builderIndex = partialVertex.index;
+            
+            // Store the mapping from graph vertex to builder vertex
+            vertexToBuilderMap.insert(vertex, builderIndex);
+            
+            // Set vertex properties if they exist
+            if constexpr (VertexDecorator::is_labeled) {
+                const auto& label = graph.getVertexLabel(vertex);
+                auto builderHandle = this->getVertexHandle(builderIndex);
+                this->_setVertexLabel(builderHandle, label);
+            }
+            if constexpr (VertexDecorator::is_colored) {
+                const auto& color = graph.getVertexColor(vertex);
+                auto builderHandle = this->getVertexHandle(builderIndex);
+                this->_setVertexColor(builderHandle, color);
+            }
+        }
+        
+        // Add all edges from the graph
+        for (auto edge : graph.edges()) {
+            auto source = graph.getSource(edge);
+            auto target = graph.getTarget(edge);
+            
+            // Find the corresponding builder vertices
+            size_t sourceBuilderIndex = vertexToBuilderMap.at(source);
+            size_t targetBuilderIndex = vertexToBuilderMap.at(target);
+            
+            auto& sourceVertex = this->vertexInfo[sourceBuilderIndex];
+            auto& targetVertex = this->vertexInfo[targetBuilderIndex];
+            
+            // Create the edge
+            auto& partialEdge = this->createEdge(sourceVertex, targetVertex);
+            
+            // Set edge properties if they exist
+            if constexpr (EdgeDecorator::is_labeled) {
+                const auto& label = graph.getEdgeLabel(edge);
+                auto builderHandle = this->getEdgeHandle(partialEdge.index);
+                this->_setEdgeLabel(builderHandle, label);
+            }
+            if constexpr (EdgeDecorator::is_weighted) {
+                const auto& weight = graph.getEdgeWeight(edge);
+                auto builderHandle = this->getEdgeHandle(partialEdge.index);
+                this->_setEdgeWeight(builderHandle, weight);
+            }
+        }
+    }
+    
     // Inherit all query methods from base class
     using Base::getCurrentVertexCount;
     using Base::getCurrentEdgeCount;

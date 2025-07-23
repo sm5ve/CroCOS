@@ -8,6 +8,7 @@
 #include "SmartPointer.h"
 #include "Tuple.h"
 #include "core/Iterator.h"
+#include "core/Hasher.h"
 
 namespace GraphProperties {
     struct None{};
@@ -274,6 +275,13 @@ public:
         bool operator==(const Vertex & v) const {
             return graphIdentifier == v.graphIdentifier && index == v.index;
         }
+        
+        [[nodiscard]] size_t hash() const {
+            // Hash based on graph identifier (pointer) and vertex index
+            auto graphHash = reinterpret_cast<size_t>(graphIdentifier);
+            auto indexHash = static_cast<size_t>(index);
+            return graphHash ^ (indexHash << 1);
+        }
     };
 
     class Edge {
@@ -293,6 +301,13 @@ public:
     public:
         bool operator==(const Edge & e) const {
             return graphIdentifier == e.graphIdentifier && index == e.index;
+        }
+        
+        [[nodiscard]] size_t hash() const {
+            // Hash based on graph identifier (pointer) and edge index
+            auto graphHash = reinterpret_cast<size_t>(graphIdentifier);
+            auto indexHash = static_cast<size_t>(index);
+            return graphHash ^ (indexHash << 2);
         }
     };
 
@@ -814,9 +829,9 @@ template <typename T, typename G>
 class VertexAnnotation {
 private:
     T* data;
-    G& g;
+    const G& g;
 public:
-    VertexAnnotation(G& graph, T init = T()) : g(graph) {
+    explicit VertexAnnotation(const G& graph, T init = T()) : g(graph) {
         size_t dataSize;
         if constexpr (G::VertexDecorator::is_labeled) {
             dataSize = graph.vertexLabels->capacity();
@@ -849,9 +864,9 @@ template <typename T, typename G>
 class EdgeAnnotation {
 private:
     T* data;
-    G& g;
+    const G& g;
 public:
-    EdgeAnnotation(G& graph, T init = T()) : g(graph) {
+    explicit EdgeAnnotation(const G& graph, T init = T()) : g(graph) {
         size_t dataSize;
         if constexpr (G::EdgeDecorator::is_labeled) {
             dataSize = graph.edgeLabels->capacity();
@@ -879,5 +894,6 @@ public:
         return data[e.index];
     }
 };
+
 
 #endif //GRAPH_H

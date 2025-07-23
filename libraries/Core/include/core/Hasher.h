@@ -8,8 +8,13 @@
 template<typename K>
 struct DefaultHasher {
     size_t operator()(const K& key) const {
-        static_assert(is_integral_v<K>, "No default hash for this type");
-        return static_cast<size_t>(key);
+        if constexpr (requires { key.hash(); }) {
+            // Type has a hash() method - use it
+            return key.hash();
+        } else {
+            static_assert(is_integral_v<K>, "No default hash for this type");
+            return static_cast<size_t>(key);
+        }
     }
 };
 
