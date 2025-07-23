@@ -51,6 +51,23 @@ namespace GraphProperties {
             { T::check(graph) } -> convertible_to<bool>;
     };
 
+    // Helper template to check if a predicate exists in a type_list
+    template<typename Predicate, typename TypeList>
+    struct contains_predicate;
+
+    template<typename Predicate>
+    struct contains_predicate<Predicate, type_list<>> : false_type {};
+
+    template<typename Predicate, typename First, typename... Rest>
+    struct contains_predicate<Predicate, type_list<First, Rest...>> {
+        static constexpr bool value = is_same_v<Predicate, First> || 
+                                     contains_predicate<Predicate, type_list<Rest...>>::value;
+    };
+
+    template<typename Predicate, typename TypeList>
+    constexpr bool contains_predicate_v = contains_predicate<Predicate, TypeList>::value;
+
+
     struct DirectionPolicy {};
     struct Directed : DirectionPolicy {};
     struct Undirected : DirectionPolicy {};
@@ -110,11 +127,21 @@ namespace _GraphInternal {
     };
 }
 
+template <typename T, typename G>
+class VertexAnnotation;
+template <typename T, typename G>
+class EdgeAnnotation;
+
 template <typename VertexDecorator_t, typename EdgeDecorator_t, typename StructureModifier_t>
 class Graph{
 public:
     class Vertex;
     class Edge;
+
+    template <typename T, typename G>
+    friend class VertexAnnotation;
+    template <typename T, typename G>
+    friend class EdgeAnnotation;
 
     using VertexDecorator = VertexDecorator_t;
     using EdgeDecorator = EdgeDecorator_t;
@@ -229,7 +256,9 @@ private:
 public:
     class Vertex {
     private:
-        friend class Graph<VertexDecorator, EdgeDecorator, StructureModifier>;
+        friend class Graph;
+        template <typename T, typename G>
+        friend class VertexAnnotation;
         VertexMetadata* graphIdentifier;
         VertexIndex index;
         Vertex(VertexMetadata* gi, VertexIndex ind) : graphIdentifier(gi), index(ind) {}
@@ -241,7 +270,9 @@ public:
 
     class Edge {
     private:
-        friend class Graph<VertexDecorator, EdgeDecorator, StructureModifier>;
+        friend class Graph;
+        template <typename T, typename G>
+        friend class EdgeAnnotation;
         EdgeMetadata* graphIdentifier;
         EdgeIndex index;
         [[no_unique_address]]
@@ -710,4 +741,93 @@ template <typename WeightType, typename EdgeLabelType>
 using WeightedLabeledDirectedGraph = Graph<GraphProperties::PlainVertex, GraphProperties::WeightedLabelledEdge<WeightType, EdgeLabelType>, GraphProperties::StructureModifier<GraphProperties::Directed, GraphProperties::SimpleGraph>>;
 template <typename WeightType, typename EdgeLabelType>
 using WeightedLabeledUndirectedGraph = Graph<GraphProperties::PlainVertex, GraphProperties::WeightedLabelledEdge<WeightType, EdgeLabelType>, GraphProperties::StructureModifier<GraphProperties::Undirected, GraphProperties::SimpleGraph>>;
+
+// Graph concept utilities - must be after Graph class definition
+namespace GraphProperties {
+    // Helper template to detect Graph specializations
+    template<typename T>
+    struct is_graph : false_type {};
+
+    template<typename VertexDecorator, typename EdgeDecorator, typename StructureModifier>
+    struct is_graph<Graph<VertexDecorator, EdgeDecorator, StructureModifier>> : true_type {};
+
+    template<typename T>
+    constexpr bool is_graph_v = is_graph<T>::value;
+
+    // Concept to check if a type is a Graph specialization and has a specific predicate
+    template<typename GraphType, typename Predicate>
+    concept GraphHasPredicate = is_graph_v<GraphType> && 
+                               contains_predicate_v<Predicate, typename GraphType::StructureModifier::predicates>;
+}
+
+template <typename T, typename G>
+class VertexAnnotation {
+private:
+    T* data;
+    G& g;
+public:
+    VertexAnnotation(G& graph, T init = T()) : g(graph) {
+        size_t dataSize;
+        if constexpr (G::VertexDecorator::is_labeled) {
+            dataSize = graph.vertexLabels->capacity();
+        }
+        else {
+            dataSize = graph.getVertexCount();
+        }
+        data = new T[dataSize];
+        for (size_t i = 0; i < dataSize; ++i) {
+            data[i] = init;
+        }
+    }
+
+    ~VertexAnnotation() {
+        delete data;
+    }
+
+    T& operator[](typename G::Vertex v) {
+        if constexpr (G::VertexDecorator::is_labeled) {
+            assert(g.vertexLabels -> fromIndex(v.index) != nullptr, "Vertex index out of bounds");
+        }
+        else {
+            assert(v.index < g.getVertexCount(), "Vertex index out of bounds");
+        }
+        return data[v.index];
+    }
+};
+
+template <typename T, typename G>
+class EdgeAnnotation {
+private:
+    T* data;
+    G& g;
+public:
+    EdgeAnnotation(G& graph, T init = T()) : g(graph) {
+        size_t dataSize;
+        if constexpr (G::EdgeDecorator::is_labeled) {
+            dataSize = graph.edgeLabels->capacity();
+        }
+        else {
+            dataSize = graph.getEdgeCount();
+        }
+        data = new T[dataSize];
+        for (size_t i = 0; i < dataSize; ++i) {
+            data[i] = init;
+        }
+    }
+
+    ~EdgeAnnotation() {
+        delete data;
+    }
+
+    T& operator[](typename G::Edge e) {
+        if constexpr (G::EdgeDecorator::is_labeled) {
+            assert(g.edgeLabels -> fromIndex(e.index) != nullptr, "Vertex index out of bounds");
+        }
+        else {
+            assert(e.index < g.getEdgeCount(), "Vertex index out of bounds");
+        }
+        return data[e.index];
+    }
+};
+
 #endif //GRAPH_H

@@ -7,7 +7,6 @@
 
 #include "stddef.h"
 #include <core/ds/IndexedHashTable.h>
-#include <core/math.h>
 #include <core/utility.h>
 #include <core/ds/Tuple.h>
 
@@ -71,7 +70,6 @@ public:
         auto& entry = this -> probeEntry(key);
         if(entry.state == ParentTable::EntryState::occupied){
             outValue = move(entry.value);
-            entry.key.~K();
             entry.value.~EntryType();
             entry.state = ParentTable::EntryState::tombstone;
             --(this -> count);

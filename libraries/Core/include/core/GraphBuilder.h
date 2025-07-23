@@ -10,7 +10,9 @@
 #include <core/ds/Graph.h>
 #include <core/ds/SmartPointer.h>
 #include <core/ds/HashSet.h>
+#include <core/ds/HashMap.h>
 #include <core/math.h>
+#include <core/Iterator.h>
 
 namespace _GraphBuilder {
     template <bool HasLabel, bool HasColor, typename G>
@@ -145,22 +147,211 @@ namespace _GraphBuilder {
 
     template <typename Graph>
     class GraphBuilderImpl {
+    public:
+        // Opaque handles for vertices and edges during construction with validation
+        class VertexHandle {
+        private:
+            size_t index;
+            const Vector<PartialVertexInfo<Graph>>* builderVector; // Validates handle belongs to this builder
+            friend class GraphBuilderImpl<Graph>;
+            explicit VertexHandle(size_t i, const Vector<PartialVertexInfo<Graph>>* vector) 
+                : index(i), builderVector(vector) {}
+        public:
+            bool operator==(const VertexHandle& other) const { 
+                return index == other.index && builderVector == other.builderVector; 
+            }
+            bool operator!=(const VertexHandle& other) const { return !(*this == other); }
+        };
+
+        class EdgeHandle {
+        private:
+            size_t index;
+            const Vector<PartialEdgeInfo<Graph>>* builderVector;
+            friend class GraphBuilderImpl<Graph>;
+            explicit EdgeHandle(size_t i, const Vector<PartialEdgeInfo<Graph>>* vector) 
+                : index(i), builderVector(vector) {}
+        public:
+            bool operator==(const EdgeHandle& other) const { 
+                return index == other.index && builderVector == other.builderVector; 
+            }
+            bool operator!=(const EdgeHandle& other) const { return !(*this == other); }
+        };
+
+        class UnpopulatedVertexIterator;
+        class UnpopulatedEdgeIterator;
+
     protected:
         //The index in the PartialVertexInfo must match its index in this vector
         Vector<PartialVertexInfo<Graph>> vertexInfo;
         Vector<PartialEdgeInfo<Graph>> edgeInfo;
+        
+        // Optional HashMap for fast label lookups (only created if graph has labels)
+        using VertexDecorator = typename Graph::VertexDecorator;
+        using EdgeDecorator = typename Graph::EdgeDecorator;
+
+        friend UnpopulatedVertexIterator;
+        friend UnpopulatedEdgeIterator;
+
+        struct None {};
+        
+        [[no_unique_address]]
+        conditional_t<VertexDecorator::is_labeled,
+                      HashMap<typename VertexDecorator::LabelType, size_t>,
+                      None> vertexLabelMap;
+        [[no_unique_address]]                      
+        conditional_t<EdgeDecorator::is_labeled,
+                      HashMap<typename EdgeDecorator::LabelType, size_t>,
+                      None> edgeLabelMap;
 
         PartialVertexInfo<Graph>& createVertex() {
             vertexInfo.push(PartialVertexInfo<Graph>(vertexInfo.getSize()));
-            return vertexInfo[vertexInfo.getSize() - 1];
+            PartialVertexInfo<Graph>& vertex = vertexInfo[vertexInfo.getSize() - 1];
+            return vertex;
         }
 
         PartialEdgeInfo<Graph>& createEdge(PartialVertexInfo<Graph>& source, PartialVertexInfo<Graph>& target) {
+            using StructureModifier = typename Graph::StructureModifier;
+            
+            // For simple graphs, check if edge already exists
+            if constexpr (StructureModifier::is_simple_graph) {
+                for (const auto& existingEdge : edgeInfo) {
+                    if constexpr (StructureModifier::is_directed) {
+                        // For directed simple graphs, check for exact match
+                        if (existingEdge.fromVertexId == source.index && existingEdge.toVertexId == target.index) {
+                            assert(false, "Duplicate edge in simple graph not allowed");
+                        }
+                    } else {
+                        // For undirected simple graphs, check both directions
+                        if ((existingEdge.fromVertexId == source.index && existingEdge.toVertexId == target.index) ||
+                            (existingEdge.fromVertexId == target.index && existingEdge.toVertexId == source.index)) {
+                            assert(false, "Duplicate edge in simple graph not allowed");
+                        }
+                    }
+                }
+            }
+
             PartialEdgeInfo<Graph> edge(edgeInfo.getSize(), source.index, target.index);
             edgeInfo.push(move(edge));
             ++source.outgoingEdgeCount;
             ++target.incomingEdgeCount;
             return edgeInfo[edgeInfo.getSize() - 1];
+        }
+        
+        // Helper to validate vertex handle
+        void validateVertexHandle(const VertexHandle& handle) const {
+            assert(handle.builderVector == &vertexInfo, "Vertex handle must belong to this builder");
+            assert(handle.index < vertexInfo.getSize(), "Vertex handle index out of bounds");
+        }
+        
+        // Helper to validate edge handle
+        void validateEdgeHandle(const EdgeHandle& handle) const {
+            assert(handle.builderVector == &edgeInfo, "Edge handle must belong to this builder");
+            assert(handle.index < edgeInfo.getSize(), "Edge handle index out of bounds");
+        }
+
+        static size_t getIndexForEdgeHandle(const EdgeHandle& h) {
+            return h.index;
+        }
+
+        static size_t getIndexForVertexHandle(const VertexHandle& h) {
+            return h.index;
+        }
+
+        // Private helper methods for setting vertex/edge properties
+        
+        // Set vertex label - checks for duplicates and updates label map
+        template<typename T = typename VertexDecorator::LabelType>
+        requires VertexDecorator::is_labeled
+        bool _setVertexLabel(const VertexHandle& handle, const T& label) {
+            validateVertexHandle(handle);
+            if (vertexLabelMap.contains(label)) {
+                return false; // Duplicate label
+            }
+
+            // Remove old label from map if vertex was already labeled
+            auto& vertex = vertexInfo[handle.index];
+            if (vertex.label.occupied()) {
+                vertexLabelMap.remove(*vertex.label);
+            }
+
+            // Set new label and update map
+            vertex.label = label;
+            vertexLabelMap.insert(label, handle.index);
+            return true;
+        }
+        
+        // Set vertex color
+        template<typename T = typename VertexDecorator::ColorType>
+        requires VertexDecorator::is_colored
+        void _setVertexColor(const VertexHandle& handle, const T& color) {
+            validateVertexHandle(handle);
+            vertexInfo[handle.index].color = color;
+        }
+        
+        // Set edge label - checks for duplicates and updates label map
+        template<typename T = typename EdgeDecorator::LabelType>
+        requires EdgeDecorator::is_labeled
+        bool _setEdgeLabel(const EdgeHandle& handle, const T& label) {
+            validateEdgeHandle(handle);
+            // Check for duplicate labels
+            if (edgeLabelMap.contains(label)) {
+                return false; // Duplicate label
+            }
+
+            // Remove old label from map if edge was already labeled
+            auto& edge = edgeInfo[handle.index];
+            if (edge.label.occupied()) {
+                edgeLabelMap.remove(*edge.label);
+            }
+
+            // Set new label and update map
+            edge.label = label;
+            edgeLabelMap.insert(label, handle.index);
+            return true;
+        }
+        
+        // Set edge weight
+        template<typename T = typename EdgeDecorator::WeightType>
+        requires EdgeDecorator::is_weighted
+        void _setEdgeWeight(const EdgeHandle& handle, const T& weight) {
+            validateEdgeHandle(handle);
+            edgeInfo[handle.index].weight = weight;
+        }
+        
+        // Helper to check if vertex is fully populated
+        bool _isVertexFullyPopulated(const VertexHandle& handle) const {
+            validateVertexHandle(handle);
+            return vertexInfo[handle.index].fullyPopulated();
+        }
+        
+        // Helper to check if edge is fully populated
+        bool _isEdgeFullyPopulated(const EdgeHandle& handle) const {
+            validateEdgeHandle(handle);
+            return edgeInfo[handle.index].fullyPopulated();
+        }
+        
+        // Helper to clear vertex label (removes from map)
+        template<typename T = typename VertexDecorator::LabelType>
+        requires VertexDecorator::is_labeled
+        void _clearVertexLabel(const VertexHandle& handle) {
+            validateVertexHandle(handle);
+            auto& vertex = vertexInfo[handle.index];
+            if (vertex.label.occupied()) {
+                vertexLabelMap.remove(*vertex.label);
+                vertex.label = {};
+            }
+        }
+        
+        // Helper to clear edge label (removes from map)
+        template<typename T = typename EdgeDecorator::LabelType>
+        requires EdgeDecorator::is_labeled
+        void _clearEdgeLabel(const EdgeHandle& handle) {
+            validateEdgeHandle(handle);
+            auto& edge = edgeInfo[handle.index];
+            if (edge.label.occupied()) {
+                edgeLabelMap.remove(*edge.label);
+                edge.label = {};
+            }
         }
 
         //TODO create ErrorOr abstraction a la SerenityOS to give more useful failure info
@@ -178,8 +369,6 @@ namespace _GraphBuilder {
             }
 
             // Build up the buffers/sets of vertex labels/colors, edge labels/weights as needed
-            using VertexDecorator = typename Graph::VertexDecorator;
-            using EdgeDecorator = typename Graph::EdgeDecorator;
             using StructureModifier = typename Graph::StructureModifier;
             using VertexIndex = typename Graph::VertexIndex;
             using EdgeIndex = typename Graph::EdgeIndex;
@@ -192,12 +381,18 @@ namespace _GraphBuilder {
                 for (const auto& vinfo : vertexInfo) {
                     labelSet.insert(*(vinfo.label));
                 }
+                if (labelSet.size() != vertexInfo.getSize()) {
+                    return {}; // Duplicate labels
+                }
                 vertexLabels = make_shared<ImmutableIndexedHashSet<typename VertexDecorator::LabelType>>(move(labelSet));
             }
             if constexpr (EdgeDecorator::is_labeled) {
                 HashSet<typename EdgeDecorator::LabelType> labelSet;
                 for (const auto& einfo : edgeInfo) {
                     labelSet.insert(*(einfo.label));
+                }
+                if (labelSet.size() != edgeInfo.getSize()) {
+                    return {}; // Duplicate labels
                 }
                 edgeLabels = make_shared<ImmutableIndexedHashSet<typename EdgeDecorator::LabelType>>(move(labelSet));
             }
@@ -361,9 +556,389 @@ namespace _GraphBuilder {
             }
             return graph;
         }
+
+        VertexHandle getVertexHandle(size_t index) const {
+            assert(index < vertexInfo.getSize(), "Vertex index out of bounds");
+            return VertexHandle(index, &vertexInfo);
+        }
+
+        EdgeHandle getEdgeHandle(size_t index) const {
+            assert(index < edgeInfo.getSize(), "Edge index out of bounds");
+            return EdgeHandle(index, &edgeInfo);
+        }
     public:
 
+        // Basic state queries
+        [[nodiscard]] size_t getCurrentVertexCount() const {
+            return vertexInfo.getSize();
+        }
+
+        [[nodiscard]] size_t getCurrentEdgeCount() const {
+            return edgeInfo.getSize();
+        }
+
+        // Check if an edge exists between two vertices
+        [[nodiscard]] bool hasEdge(const VertexHandle& from, const VertexHandle& to) const {
+            validateVertexHandle(from);
+            validateVertexHandle(to);
+            for (const auto& edge : edgeInfo) {
+                if (edge.fromVertexId == from.index && edge.toVertexId == to.index) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // Get edge counts for specific vertices
+        [[nodiscard]] size_t getOutgoingEdgeCount(const VertexHandle& vertex) const {
+            validateVertexHandle(vertex);
+            return vertexInfo[vertex.index].outgoingEdgeCount;
+        }
+
+        [[nodiscard]] size_t getIncomingEdgeCount(const VertexHandle& vertex) const {
+            validateVertexHandle(vertex);
+            return vertexInfo[vertex.index].incomingEdgeCount;
+        }
+
+        // Vertex label/color queries (only available if graph has these properties)
+        template<typename T = typename VertexDecorator::LabelType>
+        requires VertexDecorator::is_labeled
+        Optional<T> getVertexLabel(const VertexHandle& vertex) const {
+            validateVertexHandle(vertex);
+            return vertexInfo[vertex.index].label;
+        }
+
+        template<typename T = typename VertexDecorator::ColorType>
+        requires VertexDecorator::is_colored
+        Optional<T> getVertexColor(const VertexHandle& vertex) const {
+            validateVertexHandle(vertex);
+            return vertexInfo[vertex.index].color;
+        }
+
+        // Edge label/weight queries (only available if graph has these properties)
+        template<typename T = typename EdgeDecorator::LabelType>
+        requires EdgeDecorator::is_labeled
+        Optional<T> getEdgeLabel(const EdgeHandle& edge) const {
+            validateEdgeHandle(edge);
+            return edgeInfo[edge.index].label;
+        }
+
+        template<typename T = typename EdgeDecorator::WeightType>
+        requires EdgeDecorator::is_weighted
+        Optional<T> getEdgeWeight(const EdgeHandle& edge) const {
+            validateEdgeHandle(edge);
+            return edgeInfo[edge.index].weight;
+        }
+
+        // Get edge endpoints
+        VertexHandle getEdgeSource(const EdgeHandle& edge) const {
+            validateEdgeHandle(edge);
+            return VertexHandle(edgeInfo[edge.index].fromVertexId, &vertexInfo);
+        }
+
+        VertexHandle getEdgeTarget(const EdgeHandle& edge) const {
+            validateEdgeHandle(edge);
+            return VertexHandle(edgeInfo[edge.index].toVertexId, &vertexInfo);
+        }
+
+        // Fast label-to-handle lookup (only available if graph has labels)
+        template<typename T = typename VertexDecorator::LabelType>
+        requires VertexDecorator::is_labeled
+        Optional<VertexHandle> getVertexByLabel(const T& label) const {
+            if (vertexLabelMap.contains(label)) {
+                size_t index = vertexLabelMap.at(label);
+                return VertexHandle(index, &vertexInfo);
+            }
+            return {};
+        }
+
+        template<typename T = typename EdgeDecorator::LabelType>
+        requires EdgeDecorator::is_labeled
+        Optional<EdgeHandle> getEdgeByLabel(const T& label) const {
+            if (edgeLabelMap.contains(label)) {
+                size_t index = edgeLabelMap.at(label);
+                return EdgeHandle(index, &edgeInfo);
+            }
+            return {};
+        }
+
+        // Iterator access to current partial state
+        class VertexIterator {
+        private:
+            size_t index;
+            const Vector<PartialVertexInfo<Graph>>* vertexVector;
+            friend GraphBuilderImpl;
+            VertexIterator(size_t i, const Vector<PartialVertexInfo<Graph>>* v) : index(i), vertexVector(v) {}
+        public:
+
+            VertexHandle operator*() const { return VertexHandle(index, vertexVector); }
+            VertexIterator& operator++() { ++index; return *this; }
+            bool operator!=(const VertexIterator& other) const { return index != other.index; }
+        };
+
+        class EdgeIterator {
+        private:
+            size_t index;
+            const Vector<PartialEdgeInfo<Graph>>* edgeVector;
+            friend GraphBuilderImpl;
+            EdgeIterator(size_t i, const Vector<PartialEdgeInfo<Graph>>* v) : index(i), edgeVector(v) {}
+        public:
+            EdgeHandle operator*() const { return EdgeHandle(index, edgeVector); }
+            EdgeIterator& operator++() { ++index; return *this; }
+            bool operator!=(const EdgeIterator& other) const { return index != other.index; }
+        };
+
+        IteratorRange<VertexIterator> currentVertices() const {
+            return IteratorRange<VertexIterator>(
+                VertexIterator(0, &vertexInfo),
+                VertexIterator(vertexInfo.getSize(), &vertexInfo)
+            );
+        }
+
+        IteratorRange<EdgeIterator> currentEdges() const {
+            return IteratorRange<EdgeIterator>(
+                EdgeIterator(0, &edgeInfo),
+                EdgeIterator(edgeInfo.getSize(), &edgeInfo)
+            );
+        }
+
+        // Validation iterators - find unpopulated vertices/edges
+        class UnpopulatedVertexIterator {
+        private:
+            VertexIterator iter;
+            VertexIterator endIter;
+            const GraphBuilderImpl& builder;
+
+            void advanceToUnpopulated() {
+                while (iter != endIter) {
+                    VertexHandle handle = *iter;
+                    if (!builder.vertexInfo[handle.index].fullyPopulated()) {
+                        return;
+                    }
+                    ++iter;
+                }
+            }
+
+        public:
+            UnpopulatedVertexIterator(VertexIterator begin, VertexIterator end, const GraphBuilderImpl& b)
+                : iter(begin), endIter(end), builder(b) {
+                advanceToUnpopulated();
+            }
+
+            VertexHandle operator*() const { return *iter; }
+            UnpopulatedVertexIterator& operator++() { ++iter; advanceToUnpopulated(); return *this; }
+            bool operator!=(const UnpopulatedVertexIterator& other) const { return iter != other.iter; }
+        };
+
+        class UnpopulatedEdgeIterator {
+        private:
+            EdgeIterator iter;
+            EdgeIterator endIter;
+            const GraphBuilderImpl& builder;
+
+            void advanceToUnpopulated() {
+                while (iter != endIter) {
+                    EdgeHandle handle = *iter;
+                    if (!builder.edgeInfo[handle.index].fullyPopulated()) {
+                        return;
+                    }
+                    ++iter;
+                }
+            }
+
+
+
+        public:
+            UnpopulatedEdgeIterator(EdgeIterator begin, EdgeIterator end, const GraphBuilderImpl& b)
+                : iter(begin), endIter(end), builder(b) {
+                advanceToUnpopulated();
+            }
+
+            EdgeHandle operator*() const { return *iter; }
+            UnpopulatedEdgeIterator& operator++() { ++iter; advanceToUnpopulated(); return *this; }
+            bool operator!=(const UnpopulatedEdgeIterator& other) const { return iter != other.iter; }
+        };
+
+        IteratorRange<UnpopulatedVertexIterator> unpopulatedVertices() const {
+            auto vertices = currentVertices();
+            return IteratorRange<UnpopulatedVertexIterator>(
+                UnpopulatedVertexIterator(vertices.begin(), vertices.end(), *this),
+                UnpopulatedVertexIterator(vertices.end(), vertices.end(), *this)
+            );
+        }
+
+        IteratorRange<UnpopulatedEdgeIterator> unpopulatedEdges() const {
+            auto edges = currentEdges();
+            return IteratorRange<UnpopulatedEdgeIterator>(
+                UnpopulatedEdgeIterator(edges.begin(), edges.end(), *this),
+                UnpopulatedEdgeIterator(edges.end(), edges.end(), *this)
+            );
+        }
     };
 }
+
+// Public GraphBuilder class - unrestricted graph construction interface
+template<typename Graph>
+class GraphBuilder : public _GraphBuilder::GraphBuilderImpl<Graph> {
+private:
+    using Base = _GraphBuilder::GraphBuilderImpl<Graph>;
+    using VertexDecorator = typename Graph::VertexDecorator;
+    using EdgeDecorator = typename Graph::EdgeDecorator;
+    
+public:
+    using VertexHandle = typename Base::VertexHandle;
+    using EdgeHandle = typename Base::EdgeHandle;
+    
+    // Vertex creation and management
+    VertexHandle addVertex() {
+        auto& vertex = this->createVertex();
+        return this->getVertexHandle(vertex.index);
+    }
+    
+    // Vertex property setters (only available if graph supports these properties)
+    template<typename T = typename VertexDecorator::LabelType>
+    requires VertexDecorator::is_labeled
+    bool setVertexLabel(const VertexHandle& vertex, const T& label) {
+        return this->_setVertexLabel(vertex, label);
+    }
+    
+    template<typename T = typename VertexDecorator::ColorType>
+    requires VertexDecorator::is_colored
+    void setVertexColor(const VertexHandle& vertex, const T& color) {
+        this->_setVertexColor(vertex, color);
+    }
+    
+    void clearVertexLabel(const VertexHandle& vertex) 
+    requires VertexDecorator::is_labeled {
+        this->_clearVertexLabel(vertex);
+    }
+    
+    // Edge creation and management
+    EdgeHandle addEdge(const VertexHandle& from, const VertexHandle& to) {
+        this->validateVertexHandle(from);
+        this->validateVertexHandle(to);
+        
+        auto& fromVertex = this->vertexInfo[this -> getIndexForVertexHandle(from)];
+        auto& toVertex = this->vertexInfo[this -> getIndexForVertexHandle(to)];
+        auto& edge = this->createEdge(fromVertex, toVertex);
+        return this->getEdgeHandle(edge.index);
+    }
+    
+    // Edge property setters (only available if graph supports these properties)
+    template<typename T = typename EdgeDecorator::LabelType>
+    requires EdgeDecorator::is_labeled
+    bool setEdgeLabel(const EdgeHandle& edge, const T& label) {
+        return this->_setEdgeLabel(edge, label);
+    }
+    
+    template<typename T = typename EdgeDecorator::WeightType>
+    requires EdgeDecorator::is_weighted
+    void setEdgeWeight(const EdgeHandle& edge, const T& weight) {
+        this->_setEdgeWeight(edge, weight);
+    }
+    
+    void clearEdgeLabel(const EdgeHandle& edge) 
+    requires EdgeDecorator::is_labeled {
+        this->_clearEdgeLabel(edge);
+    }
+    
+    // Convenience methods for creating fully specified vertices/edges
+    template<typename T = typename VertexDecorator::LabelType>
+    requires VertexDecorator::is_labeled && (!VertexDecorator::is_colored)
+    VertexHandle addVertex(const T& label) {
+        auto vertex = addVertex();
+        if (!setVertexLabel(vertex, label)) {
+            // Handle duplicate label - could throw or return invalid handle
+            assert(false, "Duplicate vertex label");
+        }
+        return vertex;
+    }
+    
+    template<typename LabelT = typename VertexDecorator::LabelType, 
+             typename ColorT = typename VertexDecorator::ColorType>
+    requires VertexDecorator::is_labeled && VertexDecorator::is_colored
+    VertexHandle addVertex(const LabelT& label, const ColorT& color) {
+        auto vertex = addVertex();
+        if (!setVertexLabel(vertex, label)) {
+            assert(false, "Duplicate vertex label");
+        }
+        setVertexColor(vertex, color);
+        return vertex;
+    }
+    
+    template<typename ColorT = typename VertexDecorator::ColorType>
+    requires (!VertexDecorator::is_labeled) && VertexDecorator::is_colored
+    VertexHandle addVertex(const ColorT& color) {
+        auto vertex = addVertex();
+        setVertexColor(vertex, color);
+        return vertex;
+    }
+    
+    template<typename T = typename EdgeDecorator::LabelType>
+    requires EdgeDecorator::is_labeled && (!EdgeDecorator::is_weighted)
+    EdgeHandle addEdge(const VertexHandle& from, const VertexHandle& to, const T& label) {
+        auto edge = addEdge(from, to);
+        if (!setEdgeLabel(edge, label)) {
+            assert(false, "Duplicate edge label");
+        }
+        return edge;
+    }
+    
+    template<typename LabelT = typename EdgeDecorator::LabelType,
+             typename WeightT = typename EdgeDecorator::WeightType>
+    requires EdgeDecorator::is_labeled && EdgeDecorator::is_weighted
+    EdgeHandle addEdge(const VertexHandle& from, const VertexHandle& to, 
+                      const LabelT& label, const WeightT& weight) {
+        auto edge = addEdge(from, to);
+        if (!setEdgeLabel(edge, label)) {
+            assert(false, "Duplicate edge label");
+        }
+        setEdgeWeight(edge, weight);
+        return edge;
+    }
+    
+    template<typename WeightT = typename EdgeDecorator::WeightType>
+    requires (!EdgeDecorator::is_labeled) && EdgeDecorator::is_weighted
+    EdgeHandle addEdge(const VertexHandle& from, const VertexHandle& to, const WeightT& weight) {
+        auto edge = addEdge(from, to);
+        setEdgeWeight(edge, weight);
+        return edge;
+    }
+    
+    // Validation and building
+    bool isVertexFullyPopulated(const VertexHandle& vertex) const {
+        return this->_isVertexFullyPopulated(vertex);
+    }
+    
+    bool isEdgeFullyPopulated(const EdgeHandle& edge) const {
+        return this->_isEdgeFullyPopulated(edge);
+    }
+    
+    // Build final graph - consumes the builder
+    Optional<Graph> build() {
+        return this->buildGraph();
+    }
+    
+    // Inherit all query methods from base class
+    using Base::getCurrentVertexCount;
+    using Base::getCurrentEdgeCount;
+    using Base::hasEdge;
+    using Base::getOutgoingEdgeCount;
+    using Base::getIncomingEdgeCount;
+    using Base::getVertexLabel;
+    using Base::getVertexColor;
+    using Base::getEdgeLabel;
+    using Base::getEdgeWeight;
+    using Base::getEdgeSource;
+    using Base::getEdgeTarget;
+    using Base::getVertexByLabel;
+    using Base::getEdgeByLabel;
+    using Base::currentVertices;
+    using Base::currentEdges;
+    using Base::unpopulatedVertices;
+    using Base::unpopulatedEdges;
+};
+
+
 
 #endif //GRAPHBUILDER_H

@@ -80,6 +80,10 @@ public:
     auto end(){
         return TransformingIterator(this -> entryBuffer, this -> capacity, this -> capacity, IdentityTransform{});
     }
+
+    size_t capacity() const {
+        return this -> capacity;
+    }
 };
 
 template <typename T, typename Hasher> requires Hashable<T, Hasher>

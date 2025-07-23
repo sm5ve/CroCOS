@@ -160,6 +160,15 @@ public:
         reallocate_if_necessary();  // Shrink the buffer if necessary
     }
 
+    T pop() {
+        assert(size > 0, "Cannot pop from empty vector");
+        --size;
+        T result = move(data[size]);  // Move the last element
+        data[size].~T();  // Explicitly call the destructor
+        reallocate_if_necessary();  // Shrink the buffer if necessary
+        return result;
+    }
+
     void insert(size_t index, const T& value) {
         assert(index <= size, "Index out of bounds");
         reallocate_if_necessary();
