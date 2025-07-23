@@ -1018,6 +1018,258 @@ public:
     using Base::unpopulatedEdges;
 };
 
+// Type aliases to make constraint definitions easier
+template<typename Graph>
+using GraphBuilderBase = _GraphBuilder::GraphBuilderImpl<Graph>;
 
+template<typename Graph>
+using BuilderVertexHandle = typename _GraphBuilder::GraphBuilderImpl<Graph>::VertexHandle;
+
+// Concept for EdgeConstraint - defines methods that a constraint must implement  
+template<typename T, typename Graph>
+concept EdgeConstraint = requires(const T& constraint, const GraphBuilderBase<Graph>& builder,
+                                 BuilderVertexHandle<Graph> from,
+                                 BuilderVertexHandle<Graph> to) {
+    // Check if an edge is allowed between two vertices
+    { constraint.isEdgeAllowed(builder, from, to) } -> convertible_to<bool>;
+    
+    // Get valid edges originating from a vertex
+    { constraint.validEdgesFrom(builder, from) } -> Iterable;
+    
+    // Get valid edges targeting a vertex
+    { constraint.validEdgesTo(builder, to) } -> Iterable;
+};
+
+// RestrictedGraphBuilder - adds constraint-based edge validation to graph construction.
+// Vertices and the constraint are set in the constructor and immutable through the lifetime of the RestrictedGraphBuilder,
+// even between calls to reset()
+template<typename Graph, typename Constraint>
+requires EdgeConstraint<Constraint, Graph>
+class RestrictedGraphBuilder : public _GraphBuilder::GraphBuilderImpl<Graph> {
+public:
+    using Base = _GraphBuilder::GraphBuilderImpl<Graph>;
+    using VertexDecorator = typename Graph::VertexDecorator;
+    using EdgeDecorator = typename Graph::EdgeDecorator;
+    using VertexHandle = typename Base::VertexHandle;
+    using EdgeHandle = typename Base::EdgeHandle;
+    
+private:
+    // Immutable constraint and vertex configuration
+    Constraint constraint;
+    Vector<VertexHandle> immutableVertices;
+    
+    // Helper to populate vertices from various sources
+    void populateVertices(size_t count) {
+        immutableVertices.ensureRoom(count);
+        for (size_t i = 0; i < count; i++) {
+            auto& vertex = this->createVertex();
+            immutableVertices.push(this->getVertexHandle(vertex.index));
+        }
+    }
+    
+    template<typename VertexContainer>
+    void populateVerticesFromContainer(const VertexContainer& vertices) {
+        // Pre-allocate space if we can determine the size
+        if constexpr (requires { vertices.getSize(); }) {
+            immutableVertices.ensureRoom(vertices.getSize());
+        }
+        
+        for (const auto& vertexSpec : vertices) {
+            auto& vertex = this->createVertex();
+            auto handle = this->getVertexHandle(vertex.index);
+            
+            // Set vertex properties if provided
+            if constexpr (VertexDecorator::is_labeled) {
+                if constexpr (requires { vertexSpec.label; }) {
+                    this->_setVertexLabel(handle, vertexSpec.label);
+                } else if constexpr (requires { vertexSpec.getLabel(); }) {
+                    this->_setVertexLabel(handle, vertexSpec.getLabel());
+                }
+            }
+            if constexpr (VertexDecorator::is_colored) {
+                if constexpr (requires { vertexSpec.color; }) {
+                    this->_setVertexColor(handle, vertexSpec.color);
+                } else if constexpr (requires { vertexSpec.getColor(); }) {
+                    this->_setVertexColor(handle, vertexSpec.getColor());
+                }
+            }
+            
+            immutableVertices.push(handle);
+        }
+    }
+    
+public:
+    // Constructor for a fixed number of plain vertices (only for graphs with unlabeled, uncolored vertices)
+    explicit RestrictedGraphBuilder(size_t vertexCount, const Constraint& edgeConstraint)
+    requires (!VertexDecorator::is_labeled) && (!VertexDecorator::is_colored)
+        : constraint(edgeConstraint) {
+        populateVertices(vertexCount);
+    }
+    
+    // Constructor taking vertex specifications and constraint
+    template<typename VertexContainer>
+    explicit RestrictedGraphBuilder(const VertexContainer& vertices, const Constraint& edgeConstraint)
+        : constraint(edgeConstraint) {
+        populateVerticesFromContainer(vertices);
+    }
+    
+    // Get immutable vertex by index
+    VertexHandle getVertex(size_t index) const {
+        assert(index < immutableVertices.getSize(), "Vertex index out of bounds");
+        return immutableVertices[index];
+    }
+    
+    // Get all vertices as an iterable
+    const Vector<VertexHandle>& getVertices() const {
+        return immutableVertices;
+    }
+    
+    // Get the constraint
+    const Constraint& getConstraint() const {
+        return constraint;
+    }
+    
+    // Constrained edge creation - uses stored constraint automatically
+    Optional<EdgeHandle> addEdge(const VertexHandle& from, const VertexHandle& to) {
+        this->validateVertexHandle(from);
+        this->validateVertexHandle(to);
+        
+        // Check if edge is allowed by the stored constraint
+        if (!constraint.isEdgeAllowed(*this, from, to)) {
+            return {}; // Edge not allowed
+        }
+        
+        auto& fromVertex = this->vertexInfo[this->getIndexForVertexHandle(from)];
+        auto& toVertex = this->vertexInfo[this->getIndexForVertexHandle(to)];
+        auto& edge = this->createEdge(fromVertex, toVertex);
+        return this->getEdgeHandle(edge.index);
+    }
+    
+    // Convenience methods for creating fully specified edges with automatic constraint checking
+    template<typename T = typename EdgeDecorator::LabelType>
+    requires EdgeDecorator::is_labeled && (!EdgeDecorator::is_weighted)
+    Optional<EdgeHandle> addEdge(const VertexHandle& from, const VertexHandle& to, const T& label) {
+        auto edge = addEdge(from, to);
+        if (!edge.occupied()) {
+            return {}; // Edge was not allowed by constraint
+        }
+        if (!this->_setEdgeLabel(*edge, label)) {
+            assert(false, "Duplicate edge label");
+        }
+        return edge;
+    }
+    
+    template<typename LabelT = typename EdgeDecorator::LabelType,
+             typename WeightT = typename EdgeDecorator::WeightType>
+    requires EdgeDecorator::is_labeled && EdgeDecorator::is_weighted
+    Optional<EdgeHandle> addEdge(const VertexHandle& from, const VertexHandle& to, 
+                                const LabelT& label, const WeightT& weight) {
+        auto edge = addEdge(from, to);
+        if (!edge.occupied()) {
+            return {}; // Edge was not allowed by constraint
+        }
+        if (!this->_setEdgeLabel(*edge, label)) {
+            assert(false, "Duplicate edge label");
+        }
+        this->_setEdgeWeight(*edge, weight);
+        return edge;
+    }
+    
+    template<typename WeightT = typename EdgeDecorator::WeightType>
+    requires (!EdgeDecorator::is_labeled) && EdgeDecorator::is_weighted
+    Optional<EdgeHandle> addEdge(const VertexHandle& from, const VertexHandle& to, const WeightT& weight) {
+        auto edge = addEdge(from, to);
+        if (!edge.occupied()) {
+            return {}; // Edge was not allowed by constraint
+        }
+        this->_setEdgeWeight(*edge, weight);
+        return edge;
+    }
+    
+    // Edge property setters (only available if graph supports these properties)
+    template<typename T = typename EdgeDecorator::LabelType>
+    requires EdgeDecorator::is_labeled
+    bool setEdgeLabel(const EdgeHandle& edge, const T& label) {
+        return this->_setEdgeLabel(edge, label);
+    }
+    
+    template<typename T = typename EdgeDecorator::WeightType>
+    requires EdgeDecorator::is_weighted
+    void setEdgeWeight(const EdgeHandle& edge, const T& weight) {
+        this->_setEdgeWeight(edge, weight);
+    }
+    
+    void clearEdgeLabel(const EdgeHandle& edge) 
+    requires EdgeDecorator::is_labeled {
+        this->_clearEdgeLabel(edge);
+    }
+    
+    // Constraint-aware validation methods
+    bool canAddEdge(const VertexHandle& from, const VertexHandle& to) const {
+        this->validateVertexHandle(from);
+        this->validateVertexHandle(to);
+        return constraint.isEdgeAllowed(*this, from, to);
+    }
+    
+    auto getValidEdgesFrom(const VertexHandle& vertex) const {
+        this->validateVertexHandle(vertex);
+        return constraint.validEdgesFrom(*this, vertex);
+    }
+    
+    auto getValidEdgesTo(const VertexHandle& vertex) const {
+        this->validateVertexHandle(vertex);
+        return constraint.validEdgesTo(*this, vertex);
+    }
+    
+    // Validation and building
+    bool isEdgeFullyPopulated(const EdgeHandle& edge) const {
+        return this->_isEdgeFullyPopulated(edge);
+    }
+    
+    // Build final graph - consumes the builder
+    Optional<Graph> build() {
+        return this->buildGraph();
+    }
+    
+    // Reset the builder to its initial state - preserves vertices and constraint
+    void reset() {
+        // Clear edge info and reallocate  
+        this->edgeInfo.~Vector();
+        new(&this->edgeInfo) Vector<_GraphBuilder::PartialEdgeInfo<Graph>>();
+        
+        // Clear edge label map if it exists
+        if constexpr (EdgeDecorator::is_labeled) {
+            this->edgeLabelMap.~HashMap();
+            new(&this->edgeLabelMap) HashMap<typename EdgeDecorator::LabelType, size_t>();
+        }
+        
+        // Reset edge counts for all vertices
+        for (auto& vertex : this->vertexInfo) {
+            vertex.incomingEdgeCount = 0;
+            vertex.outgoingEdgeCount = 0;
+        }
+        
+        // Note: vertices, vertex labels, and constraint are preserved
+    }
+
+    // Inherit all query methods from base class
+    using Base::getCurrentVertexCount;
+    using Base::getCurrentEdgeCount;
+    using Base::hasEdge;
+    using Base::getOutgoingEdgeCount;
+    using Base::getIncomingEdgeCount;
+    using Base::getVertexLabel;
+    using Base::getVertexColor;
+    using Base::getEdgeLabel;
+    using Base::getEdgeWeight;
+    using Base::getEdgeSource;
+    using Base::getEdgeTarget;
+    using Base::getVertexByLabel;
+    using Base::getEdgeByLabel;
+    using Base::currentVertices;
+    using Base::currentEdges;
+    using Base::unpopulatedVertices;
+    using Base::unpopulatedEdges;
+};
 
 #endif //GRAPHBUILDER_H

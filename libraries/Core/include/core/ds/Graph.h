@@ -846,7 +846,7 @@ public:
     }
 
     ~VertexAnnotation() {
-        delete data;
+        delete[] data;
     }
 
     T& operator[](typename G::Vertex v) {
@@ -881,7 +881,7 @@ public:
     }
 
     ~EdgeAnnotation() {
-        delete data;
+        delete[] data;
     }
 
     T& operator[](typename G::Edge e) {

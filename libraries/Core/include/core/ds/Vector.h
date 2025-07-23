@@ -251,7 +251,7 @@ public:
 
     void ensureRoom(size_t openSlots){
         size_t min_size = size + openSlots;
-        if(min_size < capacity){
+        if(min_size > capacity){
             reallocate(min_size + 4); //just add a little wiggle room in case?
         }
     }

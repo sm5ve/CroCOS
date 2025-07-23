@@ -17,4 +17,11 @@ private:
     It b, e;
 };
 
+// Concept for types that provide iteration through begin() and end()
+template<typename T>
+concept Iterable = requires(T t) {
+    { t.begin() } -> convertible_to<decltype(t.end())>;
+    { t.end() };
+};
+
 #endif //ITERATOR_H
