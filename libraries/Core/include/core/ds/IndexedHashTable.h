@@ -4,7 +4,7 @@
 
 #ifndef INDEXEDHASHTABLE_H
 #define INDEXEDHASHTABLE_H
-#include "kernel.h"
+#include "assert.h"
 #include "core/Hasher.h"
 #include "core/math.h"
 #include "core/TypeTraits.h"
