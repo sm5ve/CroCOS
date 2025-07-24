@@ -13,7 +13,7 @@
 #endif
 
 namespace kernel::acpi{
-    struct SDTHeader* rsdt = nullptr;
+    SDTHeader* rsdt = nullptr;
 
     ACPIChecksumResult verifyTableChecksum(SDTHeader* header){
         uint8_t checksum = 0;
