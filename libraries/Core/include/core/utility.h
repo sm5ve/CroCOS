@@ -536,4 +536,10 @@ void move_assign_or_construct(T& dest, T&& src) {
     }
 }
 
+template<typename T>
+concept OrderedSemigroup = requires(T a, T b) {
+    { a + b } -> convertible_to<T>;
+    { a < b } -> convertible_to<bool>;
+};
+
 #endif //CROCOS_UTILITY_H

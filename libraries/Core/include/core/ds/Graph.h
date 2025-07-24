@@ -834,7 +834,7 @@ public:
     explicit VertexAnnotation(const G& graph, T init = T()) : g(graph) {
         size_t dataSize;
         if constexpr (G::VertexDecorator::is_labeled) {
-            dataSize = graph.vertexLabels->capacity();
+            dataSize = graph.vertexLabels -> getCapacity();
         }
         else {
             dataSize = graph.getVertexCount();

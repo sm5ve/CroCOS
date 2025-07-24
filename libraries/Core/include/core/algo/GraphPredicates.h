@@ -149,6 +149,22 @@ namespace GraphPredicates {
                    isReachableFromVertex(startVertex, false);
         }
     };
+
+    struct NonnegativeWeight {
+        template<typename GraphType>
+        requires GraphType::EdgeDecorator::is_weighted && OrderedSemigroup<typename GraphType::EdgeDecorator::WeightType>
+        static bool check(const GraphType& graph) {
+            for (auto edge : graph.edges()) {
+                auto weight = graph.getEdgeWeight(edge);
+                if constexpr (requires { { 0 } -> convertible_to<typename GraphType::EdgeDecorator::WeightType>; }) {
+                    if (weight < 0) { return false; }
+                } else {
+                    //for ordered semigroups without identity, this captures the notion of negativity
+                    if (weight + weight < weight) { return false; }
+                }
+            }
+        }
+    };
 }
 
 #endif //GRAPHPREDICATES_H

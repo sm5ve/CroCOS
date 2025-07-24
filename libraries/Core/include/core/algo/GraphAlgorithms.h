@@ -55,6 +55,56 @@ namespace algorithm::graph {
         return result;
     }
 
+    template <typename G>
+    void printAsDOT(Core::PrintStream& ps, const G& graph){
+        if constexpr (G::StructureModifier::is_simple_graph) {
+            ps << "strict ";
+        }
+        if constexpr (G::StructureModifier::is_directed) {
+            ps << "digraph ";
+        }
+        else {
+            ps << "graph ";
+        }
+
+        ps << "{\n";
+
+        VertexAnnotation<size_t, G> indexedVertices(graph, 0);
+        size_t currentIndex = 0;
+        for (auto vertex : graph.vertices()) {
+            indexedVertices[vertex] = currentIndex++;
+            ps << "\t v" << indexedVertices[vertex];
+            if constexpr (G::VertexDecorator::is_labeled && Core::Printable<typename G::VertexDecorator::LabelType>) {
+               ps << " [label=\"" << graph.getVertexLabel(vertex) << "\"]";
+            }
+            ps << ";\n";
+        }
+
+        ps << "\n";
+
+        for (auto edge : graph.edges()) {
+            ps << "\t v" << indexedVertices[graph.getSource(edge)];
+            if constexpr (G::StructureModifier::is_directed) {
+                ps << " -> ";
+            } else {
+                ps << " -- ";
+            }
+            ps << indexedVertices[graph.getTarget(edge)];
+            if constexpr (G::EdgeDecorator::is_labeled && Core::Printable<typename G::EdgeDecorator::LabelType>) {
+                ps << " [label=\"" << graph.getEdgeLabel(edge) << "\"]";
+            }
+            ps << ";\n";
+        }
+
+        ps << "}\n";
+    }
+
+    template <typename G>
+    requires (!G::EdgeDecorator::is_weighted) || GraphProperties::GraphHasPredicate<G, GraphPredicates::NonnegativeWeight>
+    Optional<Vector<typename G::Vertex>> dijkstra(const typename G::Vertex source, const typename G::Vertex target, const G& graph) {
+
+        return {};
+    }
 }
 
 #endif //GRAPHALGORITHMS_H

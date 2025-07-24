@@ -81,7 +81,7 @@ public:
         return TransformingIterator(this -> entryBuffer, this -> capacity, this -> capacity, IdentityTransform{});
     }
 
-    size_t capacity() const {
+    size_t getCapacity() const {
         return this -> capacity;
     }
 };
@@ -130,6 +130,10 @@ public:
     auto end(){
         using TI = typename ParentTable::TransformingIterator<IdentityTransform>;
         return TI(this -> entryBuffer, this -> capacity, this -> capacity, IdentityTransform{});
+    }
+
+    size_t getCapacity() const {
+        return this -> capacity;
     }
 };
 

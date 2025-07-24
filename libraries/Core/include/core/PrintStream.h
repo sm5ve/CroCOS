@@ -26,6 +26,12 @@ namespace Core{
         PrintStream& operator<<(const int64_t);
         PrintStream& operator<<(const bool);
     };
+
+    template<typename T>
+    concept Printable = requires(T t, PrintStream& ps)
+    {
+        ps << t;
+    };
 }
 
 #endif //CROCOS_PRINTSTREAM_H
