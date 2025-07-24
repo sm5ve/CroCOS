@@ -30,5 +30,14 @@ add_custom_target(run
         )
 
 add_dependencies(run Kernel)
+
+# Add unit test target that builds and runs Core library tests
+add_custom_target(unit_tests
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tests
+        COMMAND cmake -B build -DCMAKE_BUILD_TYPE=Debug
+        COMMAND cmake --build build
+        COMMAND ./build/CoreLibraryTests
+        COMMENT "Building and running CroCOS Core library unit tests"
+        )
 #add_executable(CroCOS)
 #target_link_libraries(CroCOS PRIVATE Kernel)
