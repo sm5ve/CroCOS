@@ -92,10 +92,18 @@ void* _tracked_malloc(size_t size) {
     return ptr;
 }
 
+void* __tracked_malloc(size_t size) {
+    return _tracked_malloc(size);
+}
+
 void* _tracked_calloc(size_t count, size_t size) {
     void* ptr = std::calloc(count, size);
     CroCOSTest::MemoryTracker::recordAllocation(ptr, count * size);
     return ptr;
+}
+
+void* __tracked_calloc(size_t count, size_t size) {
+    return _tracked_calloc(count, size);
 }
 
 void* _tracked_realloc(void* old_ptr, size_t size) {
@@ -109,9 +117,17 @@ void* _tracked_realloc(void* old_ptr, size_t size) {
     return ptr;
 }
 
+void* __tracked_realloc(void* old_ptr, size_t size) {
+    return _tracked_realloc(old_ptr, size);
+}
+
 void _tracked_free(void* ptr) {
     CroCOSTest::MemoryTracker::recordDeallocation(ptr);
     std::free(ptr);
+}
+
+void __tracked_free(void* ptr) {
+    _tracked_free(ptr);
 }
 
 // Tracked C++ new/delete operators
@@ -122,11 +138,19 @@ void* _tracked_new(size_t size) {
     return ptr;
 }
 
+void* __tracked_new(size_t size) {
+    return _tracked_new(size);
+}
+
 void* _tracked_new_array(size_t size) {
     void* ptr = std::malloc(size);
     if (!ptr) throw std::bad_alloc();
     CroCOSTest::MemoryTracker::recordAllocation(ptr, size);
     return ptr;
+}
+
+void* __tracked_new_array(size_t size) {
+    return _tracked_new_array(size);
 }
 
 void _tracked_delete(void* ptr) {
@@ -136,11 +160,19 @@ void _tracked_delete(void* ptr) {
     }
 }
 
+void __tracked_delete(void* ptr) {
+    _tracked_delete(ptr);
+}
+
 void _tracked_delete_array(void* ptr) {
     if (ptr) {
         CroCOSTest::MemoryTracker::recordDeallocation(ptr);
         std::free(ptr);
     }
+}
+
+void __tracked_delete_array(void* ptr) {
+    _tracked_delete_array(ptr);
 }
 
 void _tracked_delete_sized(void* ptr, size_t) {
@@ -150,11 +182,19 @@ void _tracked_delete_sized(void* ptr, size_t) {
     }
 }
 
+void __tracked_delete_sized(void* ptr, size_t size) {
+    _tracked_delete_sized(ptr, size);
+}
+
 void _tracked_delete_array_sized(void* ptr, size_t) {
     if (ptr) {
         CroCOSTest::MemoryTracker::recordDeallocation(ptr);
         std::free(ptr);
     }
+}
+
+void __tracked_delete_array_sized(void* ptr, size_t size) {
+    _tracked_delete_array_sized(ptr, size);
 }
 
 } //extern "C"
