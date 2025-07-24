@@ -44,13 +44,13 @@ private:
         using ReturnT = typename AllSameReturn<VisitorT, Ts...>::type;
 
         if constexpr (is_void_v<ReturnT>) {
-            ((index == Is && ([&] {
+            ((void)(index == Is && ([&] {
                 visitor(get<typename TypeAt<Is, Ts...>::type>());
                 return true;
             }())) || ...);
         } else {
             ReturnT result{};
-            ((index == Is && ([&] {
+            ((void)(index == Is && ([&] {
                 result = visitor(get<typename TypeAt<Is, Ts...>::type>());
                 return true;
             }())) || ...);
@@ -81,7 +81,7 @@ private:
             //Initialize the output to something invalid
             memset(&result, 0xff, sizeof(OutType));
 
-            ((var.which() == Is ?
+            ((void)(var.which() == Is ?
               ([&](){
                   auto value = var.template get<typename TypeAt<Is, Ts...>::type>();
                   result = Variant<Types...>(invoke(fn, value));
@@ -102,7 +102,7 @@ private:
             index = (size_t)-1;
             return;
         }
-        ((var.which() == Is ?
+        ((void)(var.which() == Is ?
           ([&]{
               using U = TypeAt<Is, Rs...>::type;
               index = IndexOf<U, Ts...>::value;
@@ -116,7 +116,7 @@ private:
             index = (size_t)-1;
             return;
         }
-        ((var.which() == Is ?
+        ((void)(var.which() == Is ?
           ([&]{
               using U = TypeAt<Is, Rs...>::type;
               index = IndexOf<U, Ts...>::value;
@@ -254,7 +254,7 @@ void print_impl(Core::PrintStream& ps, Variant<Ts...>& var, index_sequence<Is...
         ps << "Variant<>()";
     }
     else{
-        ((var.which() == Is ?
+        ((void)(var.which() == Is ?
           ([&]{
               using U = TypeAt<Is, Ts...>::type;
               ps << "Variant<" << type_name<U>() << ">(" << var.template get<U>() << ")";
