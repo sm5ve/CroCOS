@@ -26,9 +26,9 @@ namespace GraphProperties {
     template <typename T>
     using ColoredVertex = VertexDecorator<T, None>;
     template <typename T>
-    using LabelledVertex = VertexDecorator<None, T>;
+    using LabeledVertex = VertexDecorator<None, T>;
     template <typename T, typename U>
-    using ColoredLabelledVertex = VertexDecorator<T, U>;
+    using ColoredLabeledVertex = VertexDecorator<T, U>;
 
     template <typename Weight, typename Label>
     struct EdgeDecorator {
@@ -43,9 +43,9 @@ namespace GraphProperties {
     template <typename T>
     using WeightedEdge = EdgeDecorator<T, None>;
     template <typename T>
-    using LabelledEdge = EdgeDecorator<None, T>;
+    using LabeledEdge = EdgeDecorator<None, T>;
     template <typename T, typename U>
-    using WeightedLabelledEdge = EdgeDecorator<T, U>;
+    using WeightedLabeledEdge = EdgeDecorator<T, U>;
 
     template<typename T, typename GraphType>
     concept GraphPredicate = requires(const GraphType& graph) {
@@ -767,7 +767,7 @@ public:
 };
 
 template <typename T>
-using EdgeLabeledGraph = Graph<GraphProperties::PlainVertex, GraphProperties::LabelledEdge<T>, GraphProperties::StructureModifier<GraphProperties::Undirected, GraphProperties::SimpleGraph>>;
+using EdgeLabeledGraph = Graph<GraphProperties::PlainVertex, GraphProperties::LabeledEdge<T>, GraphProperties::StructureModifier<GraphProperties::Undirected, GraphProperties::SimpleGraph>>;
 
 // Simple graph aliases
 using DirectedGraph = Graph<GraphProperties::PlainVertex, GraphProperties::PlainEdge, GraphProperties::StructureModifier<GraphProperties::Directed, GraphProperties::SimpleGraph>>;
@@ -781,19 +781,19 @@ using WeightedUndirectedGraph = Graph<GraphProperties::PlainVertex, GraphPropert
 
 // Vertex labeled graph aliases
 template <typename VertexLabelType>
-using VertexLabeledDirectedGraph = Graph<GraphProperties::LabelledVertex<VertexLabelType>, GraphProperties::PlainEdge, GraphProperties::StructureModifier<GraphProperties::Directed, GraphProperties::SimpleGraph>>;
+using VertexLabeledDirectedGraph = Graph<GraphProperties::LabeledVertex<VertexLabelType>, GraphProperties::PlainEdge, GraphProperties::StructureModifier<GraphProperties::Directed, GraphProperties::SimpleGraph>>;
 template <typename VertexLabelType>
-using VertexLabeledUndirectedGraph = Graph<GraphProperties::LabelledVertex<VertexLabelType>, GraphProperties::PlainEdge, GraphProperties::StructureModifier<GraphProperties::Undirected, GraphProperties::SimpleGraph>>;
+using VertexLabeledUndirectedGraph = Graph<GraphProperties::LabeledVertex<VertexLabelType>, GraphProperties::PlainEdge, GraphProperties::StructureModifier<GraphProperties::Undirected, GraphProperties::SimpleGraph>>;
 
 // Edge labeled graph aliases (directed version of existing)
 template <typename EdgeLabelType>
-using EdgeLabeledDirectedGraph = Graph<GraphProperties::PlainVertex, GraphProperties::LabelledEdge<EdgeLabelType>, GraphProperties::StructureModifier<GraphProperties::Directed, GraphProperties::SimpleGraph>>;
+using EdgeLabeledDirectedGraph = Graph<GraphProperties::PlainVertex, GraphProperties::LabeledEdge<EdgeLabelType>, GraphProperties::StructureModifier<GraphProperties::Directed, GraphProperties::SimpleGraph>>;
 
 // Fully labeled graph aliases
 template <typename VertexLabelType, typename EdgeLabelType>
-using LabeledDirectedGraph = Graph<GraphProperties::LabelledVertex<VertexLabelType>, GraphProperties::LabelledEdge<EdgeLabelType>, GraphProperties::StructureModifier<GraphProperties::Directed, GraphProperties::SimpleGraph>>;
+using LabeledDirectedGraph = Graph<GraphProperties::LabeledVertex<VertexLabelType>, GraphProperties::LabeledEdge<EdgeLabelType>, GraphProperties::StructureModifier<GraphProperties::Directed, GraphProperties::SimpleGraph>>;
 template <typename VertexLabelType, typename EdgeLabelType>
-using LabeledUndirectedGraph = Graph<GraphProperties::LabelledVertex<VertexLabelType>, GraphProperties::LabelledEdge<EdgeLabelType>, GraphProperties::StructureModifier<GraphProperties::Undirected, GraphProperties::SimpleGraph>>;
+using LabeledUndirectedGraph = Graph<GraphProperties::LabeledVertex<VertexLabelType>, GraphProperties::LabeledEdge<EdgeLabelType>, GraphProperties::StructureModifier<GraphProperties::Undirected, GraphProperties::SimpleGraph>>;
 
 // Colored vertex graph aliases
 template <typename ColorType>
@@ -803,9 +803,9 @@ using ColoredUndirectedGraph = Graph<GraphProperties::ColoredVertex<ColorType>, 
 
 // Weighted and labeled combinations
 template <typename WeightType, typename EdgeLabelType>
-using WeightedLabeledDirectedGraph = Graph<GraphProperties::PlainVertex, GraphProperties::WeightedLabelledEdge<WeightType, EdgeLabelType>, GraphProperties::StructureModifier<GraphProperties::Directed, GraphProperties::SimpleGraph>>;
+using WeightedLabeledDirectedGraph = Graph<GraphProperties::PlainVertex, GraphProperties::WeightedLabeledEdge<WeightType, EdgeLabelType>, GraphProperties::StructureModifier<GraphProperties::Directed, GraphProperties::SimpleGraph>>;
 template <typename WeightType, typename EdgeLabelType>
-using WeightedLabeledUndirectedGraph = Graph<GraphProperties::PlainVertex, GraphProperties::WeightedLabelledEdge<WeightType, EdgeLabelType>, GraphProperties::StructureModifier<GraphProperties::Undirected, GraphProperties::SimpleGraph>>;
+using WeightedLabeledUndirectedGraph = Graph<GraphProperties::PlainVertex, GraphProperties::WeightedLabeledEdge<WeightType, EdgeLabelType>, GraphProperties::StructureModifier<GraphProperties::Undirected, GraphProperties::SimpleGraph>>;
 
 // Graph concept utilities - must be after Graph class definition
 namespace GraphProperties {
