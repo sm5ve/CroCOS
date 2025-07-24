@@ -73,6 +73,7 @@ target_compile_options(CoreLibraryTests PRIVATE
     -fexceptions
     -Wall
     -Wextra
+    -Wno-writable-strings
     -Wno-c++23-extensions  # Allow C++23 extensions used in Core library
     -DCORE_LIBRARY_TESTING  # Define to help resolve conflicts
     # Force include test.h to inject strong allocation symbols for objcopy

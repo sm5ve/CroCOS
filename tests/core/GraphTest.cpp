@@ -193,7 +193,7 @@ TEST(GraphBuilderBuildingSimpleGraph) {
         vertexCount++;
         // Each vertex should have some edges
         size_t edgeCount = 0;
-        for (auto edge : graph->outgoingEdges(vertex)) {
+        for (auto _ : graph->outgoingEdges(vertex)) {
             edgeCount++;
         }
         // At least one vertex should have outgoing edges
@@ -224,9 +224,9 @@ TEST(GraphBuilderBuildingLabeledGraph) {
     auto v3 = builder.addVertex("Node3");
     
     // Create and weight edges
-    auto e1 = builder.addEdge(v1, v2, 15);
-    auto e2 = builder.addEdge(v2, v3, 25);
-    auto e3 = builder.addEdge(v1, v3, 10);
+    builder.addEdge(v1, v2, 15);
+    builder.addEdge(v2, v3, 25);
+    builder.addEdge(v1, v3, 10);
     
     // Build graph
     auto graph = builder.build();
