@@ -131,7 +131,10 @@ private:
     }
 
 public:
-#ifdef __GNUC__
+#if defined(__clang__)
+    static constexpr char * prefix = (char*)"[T = ";
+    static constexpr char * suffix = (char*)"]";
+#elif defined(__GNUC__)
     static constexpr char * prefix = (char*)"[with T = ";
     static constexpr char * suffix = (char*)"]";
 #else
