@@ -123,12 +123,12 @@ public:
     };
 
     auto begin(){
-        using TI = typename ParentTable::TransformingIterator<IdentityTransform>;
+        using TI = typename ParentTable::template TransformingIterator<IdentityTransform>;
         return TI(this -> entryBuffer, this -> capacity, 0, IdentityTransform{});
     }
 
     auto end(){
-        using TI = typename ParentTable::TransformingIterator<IdentityTransform>;
+        using TI = typename ParentTable::template TransformingIterator<IdentityTransform>;
         return TI(this -> entryBuffer, this -> capacity, this -> capacity, IdentityTransform{});
     }
 
