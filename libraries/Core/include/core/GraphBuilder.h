@@ -1092,12 +1092,24 @@ private:
                 } else if constexpr (requires { vertexSpec.getLabel(); }) {
                     this->_setVertexLabel(handle, vertexSpec.getLabel());
                 }
+                else if constexpr (!VertexDecorator::is_colored && convertible_to<decltype(vertexSpec), typename VertexDecorator::LabelType>) {
+                    this->_setVertexLabel(handle, vertexSpec);
+                }
+                else{
+                    static_assert(false, "Vertex label not provided");
+                }
             }
             if constexpr (VertexDecorator::is_colored) {
                 if constexpr (requires { vertexSpec.color; }) {
                     this->_setVertexColor(handle, vertexSpec.color);
                 } else if constexpr (requires { vertexSpec.getColor(); }) {
                     this->_setVertexColor(handle, vertexSpec.getColor());
+                }
+                else if constexpr (!VertexDecorator::is_labeled && convertible_to<decltype(vertexSpec), typename VertexDecorator::ColorType>) {
+                    this->_setVertexColor(handle, vertexSpec);
+                }
+                else{
+                    static_assert(false, "Vertex label not provided");
                 }
             }
             
