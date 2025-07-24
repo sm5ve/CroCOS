@@ -98,7 +98,7 @@ namespace CroCOSTest {
                                         " bytes leaked in " + 
                                         std::to_string(MemoryTracker::getActiveAllocationCount()) + 
                                         " allocations";
-                    results.emplace_back(test->name, false, leakMsg.c_str());
+                    results.emplace_back(test->name, false, leakMsg);
                     std::cout << "  ✗ FAILED: " << leakMsg << std::endl;
                     
                     // Print detailed leak report for this test
@@ -131,7 +131,7 @@ namespace CroCOSTest {
             } else {
                 failed++;
                 std::cout << "FAILED: " << result.testName;
-                if (result.errorMessage) {
+                if (result.errorMessage.length() > 0) {
                     std::cout << " - " << result.errorMessage;
                 }
                 std::cout << std::endl;

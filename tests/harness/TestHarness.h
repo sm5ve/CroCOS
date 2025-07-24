@@ -26,9 +26,9 @@ namespace CroCOSTest {
     struct TestResult {
         const char* testName;
         bool passed;
-        const char* errorMessage;
+        std::string errorMessage;
         
-        TestResult(const char* name, bool success, const char* error = nullptr)
+        TestResult(const char* name, bool success, std::string error = "")
             : testName(name), passed(success), errorMessage(error) {}
     };
     
