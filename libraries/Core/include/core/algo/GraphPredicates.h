@@ -155,7 +155,7 @@ namespace GraphPredicates {
         requires GraphType::EdgeDecorator::is_weighted && OrderedSemigroup<typename GraphType::EdgeDecorator::WeightType>
         static bool check(const GraphType& graph) {
             for (auto edge : graph.edges()) {
-                auto weight = graph.getEdgeWeight(edge);
+                auto weight = graph.template getEdgeWeight<typename GraphType::EdgeDecorator::WeightType>(edge);
                 if constexpr (requires { { 0 } -> convertible_to<typename GraphType::EdgeDecorator::WeightType>; }) {
                     if (weight < 0) { return false; }
                 } else {
@@ -163,6 +163,7 @@ namespace GraphPredicates {
                     if (weight + weight < weight) { return false; }
                 }
             }
+            return true; // All weights are non-negative
         }
     };
 }

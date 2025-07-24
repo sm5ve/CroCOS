@@ -73,6 +73,74 @@ public:
     }
 };
 
+// Specialization for arrays
+template <typename T>
+class UniquePtr<T[]> {
+private:
+    T* ptr;
+
+public:
+    // Constructor
+    explicit UniquePtr(T* p = nullptr) : ptr(p) {}
+
+    // Destructor
+    ~UniquePtr() {
+        delete[] ptr;  // Use delete[] for arrays
+    }
+
+    // Deleted Copy Constructor and Copy Assignment (unique ownership)
+    UniquePtr(const UniquePtr&) = delete;
+    UniquePtr& operator=(const UniquePtr&) = delete;
+
+    // Move Constructor
+    UniquePtr(UniquePtr&& other) noexcept : ptr(other.ptr) {
+        other.ptr = nullptr;
+    }
+
+    // Move Assignment
+    UniquePtr& operator=(UniquePtr&& other) noexcept {
+        if (this != &other) {
+            delete[] ptr;
+            ptr = other.ptr;
+            other.ptr = nullptr;
+        }
+        return *this;
+    }
+
+    // Array access operator
+    T& operator[](size_t index) const {
+        return ptr[index];
+    }
+
+    // Check if non-null
+    explicit operator bool() const {
+        return ptr != nullptr;
+    }
+
+    // Release ownership (no deletion)
+    T* release() {
+        T* temp = ptr;
+        ptr = nullptr;
+        return temp;
+    }
+
+    // Reset the pointer (deletes current)
+    void reset(T* new_ptr = nullptr) {
+        delete[] ptr;
+        ptr = new_ptr;
+    }
+
+    // Get the raw pointer
+    T* get() const {
+        return ptr;
+    }
+
+    // Static factory method for arrays
+    static UniquePtr<T[]> make(size_t count) {
+        return UniquePtr<T[]>(new T[count]);
+    }
+};
+
 template <typename T>
 class SharedPtr {
 private:
@@ -315,6 +383,11 @@ SharedPtr<T> make_shared(Args&&... args) {
 template <typename T>
 SharedPtr<T[]> make_shared_array(size_t count) {
     return SharedPtr<T[]>::make(count);
+}
+
+template <typename T>
+UniquePtr<T[]> make_unique_array(size_t count) {
+    return UniquePtr<T[]>::make(count);
 }
 
 #endif //CROCOS_SMARTPOINTER_H

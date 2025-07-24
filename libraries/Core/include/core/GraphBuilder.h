@@ -398,8 +398,8 @@ namespace _GraphBuilder {
             }
 
             // Create mappings from internal IDs for edge/vertex info to edge/vertex IDs to be used by the graph
-            VertexIndex* vertexIdMap = new VertexIndex[vertexInfo.getSize()];
-            EdgeIndex* edgeIdMap = new EdgeIndex[edgeInfo.getSize()];
+            auto vertexIdMap = UniquePtr<VertexIndex[]>::make(vertexInfo.getSize());
+            auto edgeIdMap = UniquePtr<EdgeIndex[]>::make(edgeInfo.getSize());
 
             size_t vertexMetadataSize = 0;
             size_t edgeMetadataSize = 0;
@@ -465,8 +465,14 @@ namespace _GraphBuilder {
 
             // Calculate vertex metadata (incidence list spans) using graph IDs
             // First, count edges per vertex using graph vertex IDs
-            size_t* outgoingCounts = new size_t[vertexMetadataSize]();
-            size_t* incomingCounts = new size_t[vertexMetadataSize]();
+            auto outgoingCounts = UniquePtr<size_t[]>::make(vertexMetadataSize);
+            auto incomingCounts = UniquePtr<size_t[]>::make(vertexMetadataSize);
+            
+            // Initialize arrays to zero
+            for (size_t i = 0; i < vertexMetadataSize; i++) {
+                outgoingCounts[i] = 0;
+                incomingCounts[i] = 0;
+            }
 
             for (size_t i = 0; i < vertexInfo.getSize(); i++) {
                 VertexIndex graphVertexId = vertexIdMap[i];
@@ -494,8 +500,14 @@ namespace _GraphBuilder {
             // Create the incidence list
             SharedPtr<EdgeIndex[]> incidenceLists = SharedPtr<EdgeIndex[]>::make(currentIncidenceOffset);
 
-            size_t* outgoingOffsets = new size_t[vertexMetadataSize]();
-            size_t* incomingOffsets = new size_t[vertexMetadataSize]();
+            auto outgoingOffsets = UniquePtr<size_t[]>::make(vertexMetadataSize);
+            auto incomingOffsets = UniquePtr<size_t[]>::make(vertexMetadataSize);
+            
+            // Initialize offset arrays to zero
+            for (size_t i = 0; i < vertexMetadataSize; i++) {
+                outgoingOffsets[i] = 0;
+                incomingOffsets[i] = 0;
+            }
             
             for (size_t i = 0; i < edgeInfo.getSize(); i++) {
                 const auto& edge = edgeInfo[i];
@@ -543,13 +555,8 @@ namespace _GraphBuilder {
                 graph.edgeCount = edgeMetadataSize;
             }
 
-            delete[] vertexIdMap;
-            delete[] edgeIdMap;
-            delete[] outgoingCounts;
-            delete[] incomingCounts;
-            delete[] outgoingOffsets;
-            delete[] incomingOffsets;
-
+            // UniquePtr arrays are automatically cleaned up here
+            
             // Confirm that the Graph passes the predicate check as defined in its StructureModifier type
             if (!StructureModifier::check(graph)) {
                 return {};

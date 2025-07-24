@@ -15,4 +15,16 @@ struct DefaultComparator{
     }
 };
 
+template <typename Comp>
+struct ReversedComparator {
+    template <typename T>
+    bool operator() (const T& a, const T& b) const {
+        return Comp{}(b, a);
+    }
+};
+
+// Convenience factory for default comparator
+template <typename T>
+using ReversedDefaultComparator = ReversedComparator<DefaultComparator<T>>;
+
 #endif //CROCOS_COMPARATOR_H
