@@ -10,6 +10,7 @@
 #include <core/ds/Heap.h>
 
 #include <core/algo/GraphPredicates.h>
+#include <core/PrintStream.h>
 
 namespace algorithm::graph {
     

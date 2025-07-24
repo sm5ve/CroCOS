@@ -15,50 +15,14 @@ project(CroCOSTests LANGUAGES C CXX)
 # Don't use CMAKE_CXX_STANDARD since it might not recognize C++26
 # We'll use explicit flags instead
 
-# Create a test-specific version of the Core library compiled in freestanding mode
-add_library(CoreTest STATIC)
-
-# Add Core library sources (same as CoreKernel but with host compiler)
-# Skip Object.cpp for now due to section attribute issues on macOS
-target_sources(CoreTest PRIVATE
-    ../libraries/Core/PrintStream.cpp
-    ../libraries/Core/str.cpp
-    ../libraries/Core/atomic/atomic.cpp
-)
-
-# Configure CoreTest with freestanding compilation but host compiler
-target_include_directories(CoreTest PUBLIC 
-    ../libraries/Core/include
-    ../kernel/include
-)
-
-# Use freestanding mode to match kernel compilation environment
-target_compile_options(CoreTest PRIVATE
-    -ffreestanding
-    -nostdlib++
-    -fno-exceptions  # We'll enable exceptions only for test harness
-    -fno-rtti
-    -std=c++26  # Use c++26 instead of gnu++26 for clang
-    -Wall
-    -Wextra
-    -Wno-writable-strings  # Allow string literal conversions for testing
-    -Wno-ignored-attributes  # Allow used attributes that might be ignored
-    -Wno-c++23-extensions  # Allow C++23 extensions
-    -Wno-invalid-constexpr  # Allow invalid constexpr for testing
-    -DCORE_LIBRARY_TESTING  # Define to help resolve conflicts
-    -Werror
-    # Remove x86-64 specific flags for host compilation
-)
-
-target_compile_definitions(CoreTest PRIVATE
-    CORE_LINKED_WITH_TESTS=1
-)
+# We'll instrument both Core library and test files together in the main executable
 
 # Create the test harness library (uses standard library)
 add_library(TestHarness STATIC)
 
 target_sources(TestHarness PRIVATE
     harness/TestHarness.cpp
+    harness/MemoryTracker.cpp
 )
 
 target_include_directories(TestHarness PUBLIC
@@ -87,9 +51,15 @@ target_sources(CoreLibraryTests PRIVATE
     core/GraphTest.cpp
 )
 
+# Add Core library sources directly to the test executable
+target_sources(CoreLibraryTests PRIVATE
+    ../libraries/Core/PrintStream.cpp
+    ../libraries/Core/str.cpp
+    ../libraries/Core/atomic/atomic.cpp
+)
+
 target_link_libraries(CoreLibraryTests PRIVATE
     TestHarness
-    CoreTest
 )
 
 target_include_directories(CoreLibraryTests PRIVATE
@@ -105,6 +75,15 @@ target_compile_options(CoreLibraryTests PRIVATE
     -Wextra
     -Wno-c++23-extensions  # Allow C++23 extensions used in Core library
     -DCORE_LIBRARY_TESTING  # Define to help resolve conflicts
+    # Force include test.h to inject strong allocation symbols for objcopy
+    -include ${CMAKE_CURRENT_SOURCE_DIR}/test.h
+)
+
+# Custom PRE_LINK command to instrument object files before linking
+# Major shenanigans to get around the fact that the macOS linker doesn't support --wrap
+add_custom_command(TARGET CoreLibraryTests PRE_LINK
+    COMMENT "Instrumenting object files for memory tracking before linking"
+    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/instrument_objects.sh ${CMAKE_CURRENT_BINARY_DIR}
 )
 
 # On macOS, the linker automatically creates section boundary symbols
@@ -114,6 +93,9 @@ if(NOT APPLE)
         -Wl,--keep-section=.crocos_unit_tests
     )
 endif()
+
+# Memory tracking is enabled by overriding allocation functions in MemoryTracker.cpp
+# No special linker options needed - our definitions will override system ones
 
 # Add a custom target to run tests
 add_custom_target(run_tests

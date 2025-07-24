@@ -4,6 +4,7 @@
 //
 
 #include "TestHarness.h"
+#include "MemoryTracker.h"
 #include <vector>
 
 // Cross-platform section boundary access
@@ -84,10 +85,31 @@ namespace CroCOSTest {
             
             std::cout << "Running test: " << test->name << "..." << std::endl;
             
+            // Reset memory tracking before each test
+            MemoryTracker::reset();
+            
             try {
                 test->testFunc();
-                results.emplace_back(test->name, true);
-                std::cout << "  ✓ PASSED" << std::endl;
+                
+                // Check for memory leaks after test completion
+                if (MemoryTracker::hasLeaks()) {
+                    std::string leakMsg = "Memory leak detected: " + 
+                                        std::to_string(MemoryTracker::getCurrentUsage()) + 
+                                        " bytes leaked in " + 
+                                        std::to_string(MemoryTracker::getActiveAllocationCount()) + 
+                                        " allocations";
+                    results.emplace_back(test->name, false, leakMsg.c_str());
+                    std::cout << "  ✗ FAILED: " << leakMsg << std::endl;
+                    
+                    // Print detailed leak report for this test
+                    std::cout << "  Memory leak details for " << test->name << ":" << std::endl;
+                    MemoryTracker::printLeakReport();
+                } else {
+                    results.emplace_back(test->name, true);
+                    std::cout << "  ✓ PASSED (Memory: " << MemoryTracker::getTotalAllocated() 
+                              << " bytes allocated, " << MemoryTracker::getTotalFreed() 
+                              << " bytes freed)" << std::endl;
+                }
             } catch (const AssertionFailure& e) {
                 results.emplace_back(test->name, false, e.what());
                 std::cout << "  ✗ FAILED: " << e.what() << std::endl;

@@ -4,7 +4,8 @@
 // Created by Spencer Martin on 7/24/25.
 //
 
-#include "../harness/TestHarness.h"
+#include "../test.h"
+#include <harness/TestHarness.h>
 #include <core/GraphBuilder.h>  // This includes Graph.h
 #include <core/algo/GraphAlgorithms.h>
 #include <core/algo/GraphPredicates.h>
