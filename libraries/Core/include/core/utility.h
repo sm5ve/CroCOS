@@ -274,13 +274,15 @@ struct transform_result_types<type_list<Ts...>, F> {
 template <typename... Ts>
 overload(Ts...) -> overload<Ts...>;
 
-// Non-allocating placement new
+#ifndef CORE_LIBRARY_TESTING
+// Non-allocating placement new - only define if not testing with standard library
 inline void* operator new(size_t, void* ptr) noexcept {
     return ptr;
 }
 
 // Matching placement delete (not required, but good practice)
 inline void operator delete(void*, void*) noexcept {}
+#endif
 
 template <typename T>
 inline void swap(T& t1, T& t2){

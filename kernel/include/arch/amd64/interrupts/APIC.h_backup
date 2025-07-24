@@ -10,7 +10,7 @@
 #include <arch/amd64/amd64.h>
 
 using namespace kernel::hal::interrupts;
-using namespace platform;
+using namespace backend::platform;
 
 namespace kernel::amd64::interrupts{
     enum BusType : uint8_t {
@@ -39,7 +39,6 @@ namespace kernel::amd64::interrupts{
         Optional<uint32_t> indexForInterruptReceiver(InterruptReceiver r);
     public:
         IOapic(uint8_t id, void* mmio_window, uint32_t gsi_base);
-        virtual InterruptControllerFeature getFeatureSet() override;
         virtual bool setInterruptMaskState(InterruptReceiver receiver, bool) override;
         virtual bool getInterruptMaskState(InterruptReceiver receiver) override;
         virtual Optional<Tuple<VectorIndex, Optional<InterruptCPUAffinity>>> getMapping(InterruptReceiver r) override;

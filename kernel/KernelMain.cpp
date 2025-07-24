@@ -5,15 +5,18 @@
 #include <kernel.h>
 #include <core/atomic.h>
 #include <core/Object.h>
+#include <core/GraphBuilder.h>
+#include <core/algo/GraphAlgorithms.h>
+#include <core/ds/Heap.h>
 
 extern "C" void (*__init_array_start[])(void) __attribute__((weak));
 extern "C" void (*__init_array_end[])(void) __attribute__((weak));
 
+extern void testGraph();
+
 namespace kernel{
     hal::SerialPrintStream EarlyBootStream;
     Core::PrintStream& klog = EarlyBootStream;
-
-    WITH_GLOBAL_CONSTRUCTOR(Spinlock, lock);
 
     void run_global_constructors(){
         for (void (**ctor)() = __init_array_start; ctor != __init_array_end; ctor++) {

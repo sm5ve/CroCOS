@@ -165,10 +165,6 @@ namespace kernel::amd64::interrupts{
         return getIOapicForGSI(gsi)->getReceiverForGSI(gsi);
     }
 
-    InterruptControllerFeature IOapic::getFeatureSet() {
-        return InterruptControllerFeature::AffinityLocallyConfigurable;
-    }
-
     Optional<Tuple<VectorIndex, Optional<InterruptCPUAffinity>>>
     IOapic::getMapping(kernel::hal::interrupts::InterruptReceiver r) {
         auto index = indexForInterruptReceiver(r);

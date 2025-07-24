@@ -1,2 +1,3 @@
 cmake-build-amd64-kernel-debug/
+tests/build/
 CLAUDE.md

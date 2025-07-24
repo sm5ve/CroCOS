@@ -57,6 +57,7 @@ struct is_trivially_copyable {
     static constexpr bool value = __is_trivially_copyable(T);
 };
 
+#ifndef CORE_LIBRARY_TESTING
 static constexpr size_t strlen(const char * str) {
     size_t out = 0;
     while(str[out] != 0){
@@ -64,6 +65,18 @@ static constexpr size_t strlen(const char * str) {
     }
     return out;
 }
+#else
+// When testing with standard library, use system strlen
+#include <cstring>
+static constexpr size_t strlen_impl(const char * str) {
+    size_t out = 0;
+    while(str[out] != 0){
+        out++;
+    }
+    return out;
+}
+#define strlen strlen_impl
+#endif
 
 static constexpr size_t find(const char * str, const char * substr) {
     size_t strIndex = 0;

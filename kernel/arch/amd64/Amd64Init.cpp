@@ -11,7 +11,6 @@
 #include <core/math.h>
 #include "multiboot.h"
 #include <arch/amd64/interrupts/LegacyPIC.h>
-#include <arch/amd64/interrupts/APIC.h>
 #include <arch/amd64/smp.h>
 
 extern uint32_t mboot_magic;
@@ -341,7 +340,7 @@ namespace kernel::amd64{
         kernel::amd64::PageTableManager::init(archProcessorCount);
 
         kernel::amd64::interrupts::disableLegacyPIC();
-        kernel::amd64::interrupts::buildApicTopology(madt); //Temporary ACPI initialization stuff...
+        //kernel::amd64::interrupts::buildApicTopology(madt); //Temporary ACPI initialization stuff...
 
         interrupts::init();
         //kernel::amd64::PageTableManager::runSillyTest();
