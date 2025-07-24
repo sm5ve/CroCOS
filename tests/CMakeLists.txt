@@ -81,10 +81,10 @@ target_sources(CoreLibraryTests PRIVATE
 )
 
 # Add test source files
-target_sources(CoreLibraryTests PRIVATE 
-    core/BasicTest.cpp
+target_sources(CoreLibraryTests PRIVATE
     core/VectorTest.cpp
     core/HeapTest.cpp
+    core/GraphTest.cpp
 )
 
 target_link_libraries(CoreLibraryTests PRIVATE
