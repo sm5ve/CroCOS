@@ -6,5 +6,5 @@
 #include "harness/TestHarness.h"
 
 int main() {
-    return TestHarness::TestRunner::runAllTests();
+    return CroCOSTest::TestRunner::runAllTests();
 }

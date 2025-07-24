@@ -46,7 +46,7 @@
     extern "C" const CroCOSTest::TestInfo* __crocos_unit_tests_end[] __attribute__((weak));
 #endif
 
-namespace TestHarness {
+namespace CroCOSTest {
     
     int TestRunner::runAllTests() {
         std::vector<TestResult> results;

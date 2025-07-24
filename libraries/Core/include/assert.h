@@ -20,18 +20,18 @@
 #define assert(condition, ...) \
     do { \
         if (!(condition)) { \
-            throw TestHarness::AssertionFailure(TestHarness::formatAssertMessage("Assert failed: ", __VA_ARGS__)); \
+            throw CroCOSTest::AssertionFailure(CroCOSTest::formatAssertMessage("Assert failed: ", __VA_ARGS__)); \
         } \
     } while(0)
 
 #define assertNotReached(...) \
     do { \
-        throw TestHarness::AssertionFailure(TestHarness::formatAssertMessage("Assert not reached: ", __VA_ARGS__)); \
+        throw CroCOSTest::AssertionFailure(CroCOSTest::formatAssertMessage("Assert not reached: ", __VA_ARGS__)); \
     } while(0)
 
 #define assertUnimplemented(...) \
     do { \
-        throw TestHarness::AssertionFailure(TestHarness::formatAssertMessage("Assert unimplemented: ", __VA_ARGS__)); \
+        throw CroCOSTest::AssertionFailure(CroCOSTest::formatAssertMessage("Assert unimplemented: ", __VA_ARGS__)); \
     } while(0)
 
 #else

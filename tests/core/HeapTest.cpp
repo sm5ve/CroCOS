@@ -3,12 +3,10 @@
 // Created by Spencer Martin on 7/24/25.
 //
 
-#include "../TestFramework.h"
-#include "../harness/TestHarness.h"  // Include after Core library to override assert macros
+#include "../harness/TestHarness.h"
 #include <core/ds/Heap.h>
 
 using namespace CroCOSTest;
-using namespace TestHarness;
 
 TEST(HeapDefaultConstructor) {
     MaxHeap<int> heap;

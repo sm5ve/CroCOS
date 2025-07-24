@@ -4,15 +4,12 @@
 // Created by Spencer Martin on 7/24/25.
 //
 
-#include "../TestFramework.h"
-#include "../harness/TestHarness.h"  // Include after Core library to override assert macros
+#include "../harness/TestHarness.h"
 #include <core/GraphBuilder.h>  // This includes Graph.h
 #include <core/algo/GraphAlgorithms.h>
 #include <core/algo/GraphPredicates.h>
 
 using namespace CroCOSTest;
-using namespace TestHarness;
-using namespace GraphProperties;
 
 // Graph type aliases for testing
 using StringGraph = Graph<GraphProperties::LabeledVertex<const char*>,
