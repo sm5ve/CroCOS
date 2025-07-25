@@ -52,6 +52,8 @@ namespace kernel{
     }
 }
 
+#include <assert.h>
+
 inline Core::PrintStream& operator<<(Core::PrintStream& ps, kernel::mm::phys_addr paddr){
     return ps << "phys_addr(" << (void*)paddr.value << ")";
 }
