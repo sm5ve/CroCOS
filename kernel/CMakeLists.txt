@@ -24,7 +24,6 @@ set(KERNEL_SRC
         include/kassert.h
         include/panic.h
         mm/MemoryManager.cpp
-        arch/amd64/memops.cpp
         arch/amd64/PageTableManager.cpp
         include/FlushPlanner.h
         timing/TimerManager.cpp

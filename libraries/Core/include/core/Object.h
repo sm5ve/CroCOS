@@ -9,6 +9,7 @@
 #include <core/TypeTraits.h>
 #include <core/algo/sort.h>
 #include <core/ds/Optional.h>
+#include <core/mem.h>
 #include "preprocessor.h"
 
 class ObjectBase {

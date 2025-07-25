@@ -8,6 +8,7 @@ set(CORE_SOURCES
         Object.cpp
         include/core/preprocessor.h
         include/core/ds/IndexedHashtable.h
+        mem.cpp
 )
 
 #Special version of Core meant to be linked with the kernel

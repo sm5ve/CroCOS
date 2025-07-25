@@ -7,6 +7,7 @@
 
 #include <core/PrintStream.h>
 #include "stddef.h"
+#include <core/mem.h>
 #include <core/utility.h>
 
 namespace kernel{
@@ -58,10 +59,6 @@ inline Core::PrintStream& operator<<(Core::PrintStream& ps, kernel::mm::phys_add
 inline Core::PrintStream& operator<<(Core::PrintStream& ps, kernel::mm::virt_addr vaddr){
     return ps << "virt_addr(" << (void*)vaddr.value << ")";
 }
-
-extern "C" void* memset(void* dest, int value, size_t len);
-extern "C" void* memswap(void* dest, const void* src, size_t len);
-extern "C" void* memcpy(void* dest, const void* src, size_t len);
 
 //Kinda hacky - what appears to be a call to the constructor name(__VA_ARGS__) does nothing
 //but it tricks the compiler into going forward with compilation. The name##_init() is what actually

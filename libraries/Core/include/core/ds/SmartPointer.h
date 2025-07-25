@@ -390,4 +390,21 @@ UniquePtr<T[]> make_unique_array(size_t count) {
     return UniquePtr<T[]>::make(count);
 }
 
+template<typename K>
+struct DefaultHasher;
+
+template<typename T>
+struct DefaultHasher<SharedPtr<T>> {
+    size_t operator()(const SharedPtr<T>& key) const {
+        return DefaultHasher{}(static_cast<size_t>(key.get()));
+    }
+};
+
+template<typename T>
+struct DefaultHasher<SharedPtr<T[]>> {
+    size_t operator()(const SharedPtr<T>& key) const {
+        return DefaultHasher{}(static_cast<size_t>(key.get()));
+    }
+};
+
 #endif //CROCOS_SMARTPOINTER_H
