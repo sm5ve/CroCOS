@@ -23,6 +23,7 @@ add_library(CoreKernel STATIC ${CORE_SOURCES}
 
 target_include_directories(CoreKernel PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../kernel/include
 )
 
 #target_compile_definitions(CoreKernel PRIVATE CORE_LINKED_WITH_KERNEL)

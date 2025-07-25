@@ -8,6 +8,7 @@
 #include "../utility.h"
 #include "Variant.h"
 #include "../TypeTraits.h"
+#include <assert.h>
 
 template <typename T>
 class Optional;

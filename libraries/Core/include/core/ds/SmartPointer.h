@@ -396,14 +396,14 @@ struct DefaultHasher;
 template<typename T>
 struct DefaultHasher<SharedPtr<T>> {
     size_t operator()(const SharedPtr<T>& key) const {
-        return DefaultHasher{}(static_cast<size_t>(key.get()));
+        return reinterpret_cast<size_t>(key.get()) >> 3;
     }
 };
 
 template<typename T>
 struct DefaultHasher<SharedPtr<T[]>> {
     size_t operator()(const SharedPtr<T>& key) const {
-        return DefaultHasher{}(static_cast<size_t>(key.get()));
+        return reinterpret_cast<size_t>(key.get()) >> 3;
     }
 };
 

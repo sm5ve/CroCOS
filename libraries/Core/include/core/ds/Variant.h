@@ -6,6 +6,7 @@
 #define CROCOS_VARIANT_H
 #include "../utility.h"
 #include "../math.h"
+#include <assert.h>
 #include <stddef.h>
 
 template <typename... Ts>
