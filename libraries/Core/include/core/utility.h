@@ -413,7 +413,7 @@ struct TypeID {
 };
 
 template<typename T>
-inline constexpr uint64_t TypeID_v = TypeID<T>::value();
+inline uint64_t TypeID_v = TypeID<T>::value();
 
 template<typename Base, typename Derived>
 struct is_base_of {

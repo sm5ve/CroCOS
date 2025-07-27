@@ -99,7 +99,7 @@ struct _InheritanceInfoComparator{
 
 template<typename Base>
 constexpr _InheritanceInfo _computeInheritanceInfo(){
-    return _InheritanceInfo {.id = TypeID_v<Base>, .offset = 0, .supports_dynamic_cast = false};
+    return _InheritanceInfo {.id = 0, .offset = 0, .supports_dynamic_cast = false}; // ID will be populated at runtime
 }
 
 template <typename T, typename... Bases>
@@ -129,38 +129,49 @@ public:
     __attribute__((used)) static _sorted_type _crocos_sorted_parents;
 
     template <typename R, typename... Rs>
-    static void _crocos_populate_offset(type_list<R, Rs...>, int index) requires (!IsVirtuallyDerivedBy<R, T>){
+    static void _crocos_initialize_type_metadata(type_list<R, Rs...>, int index) requires (!IsVirtuallyDerivedBy<R, T>){
+        _crocos_sorted_parents[index].id = TypeID_v<R>;
         _crocos_sorted_parents[index].offset = _computeCastingOffset<T, R>();
         _crocos_sorted_parents[index].supports_dynamic_cast = true;
 
         if constexpr (sizeof...(Rs) > 0) {
-            _crocos_populate_offset(type_list<Rs...>{}, index + 1);
+            _crocos_initialize_type_metadata(type_list<Rs...>{}, index + 1);
         }
     }
 
     template <typename R, typename... Rs>
-    static void _crocos_populate_offset(type_list<R, Rs...>, int index) requires IsVirtuallyDerivedBy<R, T>{
+    static void _crocos_initialize_type_metadata(type_list<R, Rs...>, int index) requires IsVirtuallyDerivedBy<R, T>{
+        _crocos_sorted_parents[index].id = TypeID_v<R>;
         _crocos_sorted_parents[index].offset = 0;
         _crocos_sorted_parents[index].supports_dynamic_cast = false;
 
         if constexpr (sizeof...(Rs) > 0) {
-            _crocos_populate_offset(type_list<Rs...>{}, index + 1);
+            _crocos_initialize_type_metadata(type_list<Rs...>{}, index + 1);
         }
     }
 
     // Base case for empty type list
-    static void _crocos_populate_offset(type_list<>, int) {
+    static void _crocos_initialize_type_metadata(type_list<>, int) {
 
     }
 
     __attribute__((used)) static void _crocos_presort(){
         memcpy(_crocos_sorted_parents, _crocos_const_flattened_ids, sizeof(_InheritanceInfo) * _crocos_obj_base_count);
-        _crocos_populate_offset(_crocos_flattened_types, 0);
+        _crocos_initialize_type_metadata(_crocos_flattened_types, 0);
         algorithm::sort(_crocos_sorted_parents, _InheritanceInfoComparator{});
     }
 
+#ifdef KERNEL
     inline static void (*_crocos_presort_init)(void) __attribute__((used, section(".crocos_presort_array"))) = _crocos_presort;
-//#else
+#else
+    struct _initializer {
+        _initializer() {
+            _crocos_presort();
+        }
+    };
+    static _initializer __init();
+#endif
+    //#else
     //inline static _sorted_type _crocos_sorted_parents{_crocos_const_flattened_ids};
 //#endif
 
