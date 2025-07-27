@@ -12,6 +12,12 @@
 #include <core/mem.h>
 #include "preprocessor.h"
 
+#ifdef __APPLE__
+#define CROCOS_PRESORT_SECTION __attribute__((used, section("__DATA,crocos_presort")))
+#else
+#define CROCOS_PRESORT_SECTION __attribute__((used, section(".crocos_presort_array")))
+#endif
+
 class ObjectBase {
 public:
     virtual ~ObjectBase() = default;
@@ -161,20 +167,7 @@ public:
         algorithm::sort(_crocos_sorted_parents, _InheritanceInfoComparator{});
     }
 
-#ifdef KERNEL
-    inline static void (*_crocos_presort_init)(void) __attribute__((used, section(".crocos_presort_array"))) = _crocos_presort;
-#else
-    struct _initializer {
-        _initializer() {
-            _crocos_presort();
-        }
-    };
-    static _initializer __init();
-#endif
-    //#else
-    //inline static _sorted_type _crocos_sorted_parents{_crocos_const_flattened_ids};
-//#endif
-
+    inline static void (*const _crocos_presort_init)(void) CROCOS_PRESORT_SECTION = _crocos_presort;
 
     static uint64_t type_id() {
         return TypeID_v<T>;
@@ -226,6 +219,7 @@ virtual uint64_t type_id() const override { return _impl::type_id(); } \
 virtual const char* type_name() const override { return _impl::type_name(); } \
 virtual bool instanceof(uint64_t id) const override { return _impl::instanceof(id); } \
 virtual Optional<int64_t> getOffset(uint64_t id) override { return _impl::getOffset(id); }\
+__attribute__((used)) static inline auto* _force_use_presort_init = (void(*)(void))_impl::_crocos_presort_init; \
 };\
 class Name : public AuxName
 
@@ -241,6 +235,9 @@ concept DynamicCastable = requires(Type from) {
 template <typename Dest, typename Source>
 Dest crocos_dynamic_cast(Source s) requires (is_pointer_v<Dest> && is_pointer_v<Source>)
 {
+    if (s == nullptr) {
+        return nullptr;
+    }
     auto destOffset = s -> getOffset(TypeID_v<typename remove_pointer<Dest>::type>);
     auto sourceOffset = s -> getOffset(TypeID_v<typename remove_pointer<Source>::type>);
     if (destOffset.occupied() && sourceOffset.occupied()) {
