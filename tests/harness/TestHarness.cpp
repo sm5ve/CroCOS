@@ -6,6 +6,7 @@
 #include "TestHarness.h"
 #include "MemoryTracker.h"
 #include <vector>
+#include "assert.h"
 
 // Cross-platform section boundary access
 #ifdef __APPLE__
@@ -14,16 +15,9 @@
     #include <mach-o/dyld.h>
     
     static const CroCOSTest::TestInfo** getMacOSTests(unsigned long* count) {
-        // Get the main executable's mach header
-        const struct mach_header_64* header = nullptr;
-        for (uint32_t i = 0; i < _dyld_image_count(); i++) {
-            if (_dyld_get_image_name(i)[0] == '/' && 
-                strstr(_dyld_get_image_name(i), "CoreLibraryTests")) {
-                header = (const struct mach_header_64*)_dyld_get_image_header(i);
-                break;
-            }
-        }
-        
+        // Get the main executable's mach header (index 0 is always the main executable)
+        const struct mach_header_64* header = (const struct mach_header_64*)_dyld_get_image_header(0);
+
         if (!header) {
             *count = 0;
             return nullptr;
@@ -32,7 +26,7 @@
         unsigned long size;
         const CroCOSTest::TestInfo** section_data = 
             (const CroCOSTest::TestInfo**)getsectiondata(header, "__DATA", "crocos_tests", &size);
-        
+
         if (section_data) {
             *count = size / sizeof(const CroCOSTest::TestInfo*);
             return section_data;
@@ -47,79 +41,93 @@
     extern "C" const CroCOSTest::TestInfo* __crocos_unit_tests_end[] __attribute__((weak));
 #endif
 
+__attribute__((weak))
+void presort_object_parent_lists(void);
+
 namespace CroCOSTest {
     
+    const TestInfo* const* TestRunner::getTests(size_t& testCount) {
+#ifdef __APPLE__
+        unsigned long macCount;
+        const TestInfo** tests = getMacOSTests(&macCount);
+        testCount = macCount;
+        return tests;
+#else
+        if (__crocos_unit_tests_start == nullptr || __crocos_unit_tests_end == nullptr || 
+            __crocos_unit_tests_start >= __crocos_unit_tests_end) {
+            testCount = 0;
+            return nullptr;
+        } else {
+            testCount = __crocos_unit_tests_end - __crocos_unit_tests_start;
+            return __crocos_unit_tests_start;
+        }
+#endif
+    }
+    
+    TestResult TestRunner::runSingleTest(const TestInfo* test) {
+        std::cout << "Running test: " << test->name << "..." << std::endl;
+        
+        // Reset memory tracking before each test
+        MemoryTracker::reset();
+        
+        try {
+            test->testFunc();
+            
+            // Check for memory leaks after test completion
+            if (MemoryTracker::hasLeaks()) {
+                std::string leakMsg = "Memory leak detected: " + 
+                                    std::to_string(MemoryTracker::getCurrentUsage()) + 
+                                    " bytes leaked in " + 
+                                    std::to_string(MemoryTracker::getActiveAllocationCount()) + 
+                                    " allocations";
+                std::cout << "  ✗ FAILED: " << leakMsg << std::endl;
+                
+                // Print detailed leak report for this test
+                std::cout << "  Memory leak details for " << test->name << ":" << std::endl;
+                MemoryTracker::printLeakReport();
+                return TestResult(test->name, false, leakMsg);
+            } else {
+                std::cout << "  ✓ PASSED (Memory: " << MemoryTracker::getTotalAllocated() 
+                          << " bytes allocated, " << MemoryTracker::getTotalFreed() 
+                          << " bytes freed)" << std::endl;
+                return TestResult(test->name, true);
+            }
+        } catch (const AssertionFailure& e) {
+            std::cout << "  ✗ FAILED: " << e.what() << std::endl;
+            return TestResult(test->name, false, e.what());
+        } catch (const std::exception& e) {
+            std::cout << "  ✗ FAILED: " << e.what() << std::endl;
+            return TestResult(test->name, false, e.what());
+        } catch (...) {
+            std::cout << "  ✗ FAILED: Unknown exception" << std::endl;
+            return TestResult(test->name, false, "Unknown exception");
+        }
+    }
+    
     int TestRunner::runAllTests() {
+        if (presort_object_parent_lists) {
+            presort_object_parent_lists();  // Safe call only if it exists
+        }
+
         std::vector<TestResult> results;
         
         std::cout << "Starting CroCOS Core Library Tests\n" << std::endl;
         
-        // Get tests using cross-platform approach
-        const CroCOSTest::TestInfo** tests;
+        // Get tests using helper method
         size_t testCount;
-        
-#ifdef __APPLE__
-        unsigned long macCount;
-        tests = getMacOSTests(&macCount);
-        testCount = macCount;
-#else
-        if (__crocos_unit_tests_start == nullptr || __crocos_unit_tests_end == nullptr || 
-            __crocos_unit_tests_start >= __crocos_unit_tests_end) {
-            tests = nullptr;
-            testCount = 0;
-        } else {
-            tests = __crocos_unit_tests_start;
-            testCount = __crocos_unit_tests_end - __crocos_unit_tests_start;
-        }
-#endif
+        const TestInfo* const* tests = getTests(testCount);
 
         if (!tests || testCount == 0) {
             std::cout << "No tests found!" << std::endl;
             return 0;
         }
         
-        // Run all tests using unified approach
+        // Run all tests
         for (size_t i = 0; i < testCount; ++i) {
-            const CroCOSTest::TestInfo* test = tests[i];
+            const TestInfo* test = tests[i];
             if (test == nullptr) continue;  // Skip null entries
             
-            std::cout << "Running test: " << test->name << "..." << std::endl;
-            
-            // Reset memory tracking before each test
-            MemoryTracker::reset();
-            
-            try {
-                test->testFunc();
-                
-                // Check for memory leaks after test completion
-                if (MemoryTracker::hasLeaks()) {
-                    std::string leakMsg = "Memory leak detected: " + 
-                                        std::to_string(MemoryTracker::getCurrentUsage()) + 
-                                        " bytes leaked in " + 
-                                        std::to_string(MemoryTracker::getActiveAllocationCount()) + 
-                                        " allocations";
-                    results.emplace_back(test->name, false, leakMsg);
-                    std::cout << "  ✗ FAILED: " << leakMsg << std::endl;
-                    
-                    // Print detailed leak report for this test
-                    std::cout << "  Memory leak details for " << test->name << ":" << std::endl;
-                    MemoryTracker::printLeakReport();
-                } else {
-                    results.emplace_back(test->name, true);
-                    std::cout << "  ✓ PASSED (Memory: " << MemoryTracker::getTotalAllocated() 
-                              << " bytes allocated, " << MemoryTracker::getTotalFreed() 
-                              << " bytes freed)" << std::endl;
-                }
-            } catch (const AssertionFailure& e) {
-                results.emplace_back(test->name, false, e.what());
-                std::cout << "  ✗ FAILED: " << e.what() << std::endl;
-            } catch (const std::exception& e) {
-                results.emplace_back(test->name, false, e.what());
-                std::cout << "  ✗ FAILED: " << e.what() << std::endl;
-            } catch (...) {
-                results.emplace_back(test->name, false, "Unknown exception");
-                std::cout << "  ✗ FAILED: Unknown exception" << std::endl;
-            }
+            results.push_back(runSingleTest(test));
         }
         
         // Print summary
@@ -143,5 +151,42 @@ namespace CroCOSTest {
                   << ", Failed: " << failed << std::endl;
         
         return failed > 0 ? 1 : 0;
+    }
+    
+    int TestRunner::runTest(const char* testName) {
+        if (presort_object_parent_lists) {
+            presort_object_parent_lists();  // Safe call only if it exists
+        }
+        
+        // Get tests using helper method
+        size_t testCount;
+        const TestInfo* const* tests = getTests(testCount);
+
+        if (!tests || testCount == 0) {
+            std::cout << "No tests found!" << std::endl;
+            return 1;
+        }
+        
+        // Find and run the specific test
+        for (size_t i = 0; i < testCount; ++i) {
+            const TestInfo* test = tests[i];
+            if (test == nullptr) continue;  // Skip null entries
+            
+            // Check if this is the test we're looking for
+            if (strcmp(test->name, testName) == 0) {
+                TestResult result = runSingleTest(test);
+                return result.passed ? 0 : 1;
+            }
+        }
+        
+        std::cout << "Test '" << testName << "' not found!" << std::endl;
+        std::cout << "Available tests:" << std::endl;
+        for (size_t i = 0; i < testCount; ++i) {
+            const TestInfo* test = tests[i];
+            if (test != nullptr) {
+                std::cout << "  " << test->name << std::endl;
+            }
+        }
+        return 1;
     }
 }

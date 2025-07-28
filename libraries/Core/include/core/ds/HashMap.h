@@ -24,23 +24,21 @@ private:
 
     struct CopyInserter {
         static void freshInsert(ParentTable::Entry& entry, const K& key, const V& value) {
-            copy_assign_or_construct(entry.value.first(), key);
-            copy_assign_or_construct(entry.value.second(), value);
+            new(&entry.value) Tuple<K, V>(key, value);
         }
 
         static void overwrite(ParentTable::Entry& entry, const K&, const V& value) {
-            copy_assign_or_construct(entry.value.second(), value);
+            entry.value.second() = value;
         }
     };
 
     struct MoveInserter {
         static void freshInsert(ParentTable::Entry& entry, const K& key, V&& value) {
-            copy_assign_or_construct(entry.value.first(), key);
-            move_assign_or_construct(entry.value.second(), move(value));
+            new(&entry.value) Tuple<K, V>(key, move(value));
         }
 
         static void overwrite(ParentTable::Entry& entry, const K&, V&& value) {
-            move_assign_or_construct(entry.value.second(), move(value));
+            entry.value.second() = move(value);
         }
     };
 
@@ -103,9 +101,8 @@ public:
     V& operator[](const K& key) {
         auto& entry = this -> probeEntry(key);
         if (entry.state != ParentTable::EntryState::occupied) {
-            // Inserting a new entry
-            new(&entry.value.first()) K(key);
-            new(&entry.value.second()) V(); // Default-construct the value
+            // Inserting a new entry - construct the entire Tuple at once
+            new(&entry.value) Tuple<K, V>(key, V{});
             entry.state = ParentTable::EntryState::occupied;
             ++(this -> count);
             this -> resizeIfNecessary();

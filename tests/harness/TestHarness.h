@@ -6,21 +6,12 @@
 #ifndef CROCOS_TESTHARNESS_H
 #define CROCOS_TESTHARNESS_H
 
-#include <iostream>
-#include <string>
-#include <sstream>
-#include "TestHarness.h"
+#include "../assert_support.h"
 
 namespace CroCOSTest {
     
-    // Test assertion failure exception
-    class AssertionFailure : public std::exception {
-    private:
-        std::string message;
-    public:
-        explicit AssertionFailure(const std::string& msg) : message(msg) {}
-        const char* what() const noexcept override { return message.c_str(); }
-    };
+    // Forward declarations
+    struct TestInfo;
     
     // Test result tracking
     struct TestResult {
@@ -34,8 +25,14 @@ namespace CroCOSTest {
     
     // Test runner class
     class TestRunner {
+    private:
+        // Helper methods for test discovery and execution
+        static const TestInfo* const* getTests(size_t& testCount);
+        static TestResult runSingleTest(const TestInfo* test);
+        
     public:
         static int runAllTests();
+        static int runTest(const char* testName);
     };
     
     // Assertion macros
@@ -94,14 +91,6 @@ namespace CroCOSTest {
                 throw CroCOSTest::AssertionFailure("Assertion failed: " #a " >= " #b); \
             } \
         } while(0)
-    
-    // Helper function to format assert messages with variadic args
-    template<typename... Args>
-    std::string formatAssertMessage(const Args&... args) {
-        std::ostringstream oss;
-        ((oss << args), ...);
-        return oss.str();
-    }
 
     // Test information structure stored in custom section
     struct TestInfo {

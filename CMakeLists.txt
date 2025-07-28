@@ -1,3 +1,17 @@
+# Use Homebrew clang with C++26 support, fallback to system clang
+find_program(HOMEBREW_CLANG /opt/homebrew/opt/llvm/bin/clang)
+find_program(HOMEBREW_CLANGXX /opt/homebrew/opt/llvm/bin/clang++)
+
+if(HOMEBREW_CLANG AND HOMEBREW_CLANGXX)
+    set(CMAKE_C_COMPILER ${HOMEBREW_CLANG})
+    set(CMAKE_CXX_COMPILER ${HOMEBREW_CLANGXX})
+    message(STATUS "Using Homebrew clang: ${HOMEBREW_CLANG}")
+else()
+    set(CMAKE_C_COMPILER clang)
+    set(CMAKE_CXX_COMPILER clang++)
+    message(STATUS "Using system clang (fallback)")
+endif()
+
 set(CMAKE_TOOLCHAIN_FILE ${CMAKE_SOURCE_DIR}/toolchain.cmake)
 
 set(CMAKE_C_COMPILER_WORKS 1)
@@ -36,7 +50,7 @@ add_custom_target(unit_tests
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tests
         COMMAND cmake -B build -DCMAKE_BUILD_TYPE=Debug
         COMMAND cmake --build build
-        COMMAND ./build/CoreLibraryTests
+        COMMAND ./build/CoreLibraryTestRunner
         COMMENT "Building and running CroCOS Core library unit tests"
         )
 #add_executable(CroCOS)

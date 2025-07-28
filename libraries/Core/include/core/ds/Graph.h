@@ -27,8 +27,8 @@ namespace GraphProperties {
     using ColoredVertex = VertexDecorator<T, None>;
     template <typename T>
     using LabeledVertex = VertexDecorator<None, T>;
-    template <typename T, typename U>
-    using ColoredLabeledVertex = VertexDecorator<T, U>;
+    template <typename Color, typename Label>
+    using ColoredLabeledVertex = VertexDecorator<Color, Label>;
 
     template <typename Weight, typename Label>
     struct EdgeDecorator {
@@ -263,6 +263,9 @@ private:
     // Private default constructor - only GraphBuilder can create Graph instances
     Graph() = default;
 public:
+    Graph(const Graph& other) = default;
+    Graph(Graph&& other) noexcept = default;
+
     class Vertex {
     private:
         friend class Graph;
@@ -404,12 +407,21 @@ public:
             return (vertex != other.vertex) || (index != other.index);
         }
 
+        AdjacentEdgeIterator(const AdjacentEdgeIterator<direction>& other) : vertex(other.vertex), index(other.index), graph(other.graph) {}
+
+        AdjacentEdgeIterator<direction>& operator=(const AdjacentEdgeIterator<direction>& other) {
+            assert(&graph == &other.graph, "Can't reassign iterator from different graph");
+            assert(vertex == other.vertex, "Can't reassign iterator from different vertex");
+            index = other.index;
+            return *this;
+        };
+
         AdjacentEdgeIterator<direction>& operator++() {
             ++index;
             return *this;
         }
 
-        Edge operator*() {
+        Edge operator*() const {
             if constexpr (StructureModifier::is_undirected) {
                 if constexpr (direction == In) {
                     EdgeIndex ei = graph.incidenceLists[index];
@@ -481,7 +493,7 @@ public:
             return *this;
         }
 
-        Vertex operator*() {
+        Vertex operator*() const{
             Edge e = *edgeIterator;
             auto& metadata = graph.edgeMetadata[e.index];
             

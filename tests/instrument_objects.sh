@@ -3,6 +3,13 @@
 # Created by Spencer Martin on 7/24/25.
 
 BUILD_DIR="$1"
+TARGET_DIR="$2"
+
+if [ -z "$TARGET_DIR" ]; then
+    echo "Usage: $0 <build_dir> <target_dir>"
+    echo "Example: $0 /path/to/build CoreLibraryTests"
+    exit 1
+fi
 
 # Find llvm-objcopy - check PATH first, then fallback to Homebrew location
 if command -v llvm-objcopy >/dev/null 2>&1; then
@@ -16,9 +23,10 @@ fi
 
 echo "Using objcopy: $OBJCOPY"
 echo "Instrumenting object files in: $BUILD_DIR"
+echo "Target directory: $TARGET_DIR"
 
 # Find all object files and instrument them
-find "$BUILD_DIR/CMakeFiles/CoreLibraryTests.dir" -name "*.o" | while read -r obj_file; do
+find "$BUILD_DIR/CMakeFiles/${TARGET_DIR}.dir" -name "*.o" | while read -r obj_file; do
     echo "Processing: $(basename "$obj_file")"
     
     # First pass: rename allocation symbols

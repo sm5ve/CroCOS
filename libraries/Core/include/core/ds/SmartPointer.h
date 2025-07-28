@@ -7,6 +7,7 @@
 
 #include "stddef.h"
 #include <core/utility.h>
+#include <core/TypeTraits.h>
 
 template <typename T>
 class UniquePtr {
@@ -141,35 +142,67 @@ public:
     }
 };
 
+class SharedPtrControlBlock {
+public:
+    void* original_ptr;
+    void (*deleter)(void*);
+    //TODO make atomic?
+    size_t refcount;
+
+    template<typename U>
+    SharedPtrControlBlock(U* val_ptr) : original_ptr(val_ptr), refcount(1) {
+        deleter = [](void* p) { delete static_cast<U*>(p); };
+    }
+    ~SharedPtrControlBlock() {
+        if (original_ptr && deleter) {
+            deleter(original_ptr);
+        }
+    }
+};
+
 template <typename T>
 class SharedPtr {
 private:
-    class SharedPtrControlBlock {
-    public:
-        T* ptr;
-        size_t refcount;
-
-        SharedPtrControlBlock(T* val_ptr) : ptr(val_ptr), refcount(1) {}
-        ~SharedPtrControlBlock() {
-            delete ptr;  // When the last SharedPtr is destroyed, delete the object.
-        }
-    };
     SharedPtrControlBlock* control_block;
+    T* typed_ptr;
+
+    // Internal constructor for sharing control blocks with different types
+    template<typename U>
+    SharedPtr(const SharedPtr<U>& other, T* new_typed_ptr)
+        : control_block(other.control_block), typed_ptr(new_typed_ptr) {
+        if (control_block) {
+            ++control_block->refcount;
+        }
+    }
 
 public:
     // Constructor
     explicit SharedPtr(T* ptr = nullptr) {
         if (ptr) {
             control_block = new SharedPtrControlBlock(ptr);
+            typed_ptr = ptr;
         } else {
             control_block = nullptr;
+            typed_ptr = nullptr;
         }
     }
 
     // Copy Constructor
-    SharedPtr(const SharedPtr& other) : control_block(other.control_block) {
+    SharedPtr(const SharedPtr& other) : control_block(other.control_block), typed_ptr(other.typed_ptr) {
         if (control_block) {
             ++control_block->refcount;  // Increment reference count
+        }
+    }
+
+    // Template copy constructor for compatible types
+    template<typename U>
+    SharedPtr(const SharedPtr<U>& other) requires StaticCastable<U*, T*>
+        : control_block(other.control_block) {
+        if (control_block) {
+            typed_ptr = static_cast<T*>(other.typed_ptr);
+            ++control_block->refcount;
+        } else {
+            typed_ptr = nullptr;
         }
     }
 
@@ -182,6 +215,7 @@ public:
             }
 
             control_block = other.control_block;
+            typed_ptr = other.typed_ptr;
             if (control_block) {
                 ++control_block->refcount;
             }
@@ -190,8 +224,9 @@ public:
     }
 
     // Move Constructor
-    SharedPtr(SharedPtr&& other) noexcept : control_block(other.control_block) {
+    SharedPtr(SharedPtr&& other) noexcept : control_block(other.control_block), typed_ptr(other.typed_ptr) {
         other.control_block = nullptr;
+        other.typed_ptr = nullptr;
     }
 
     // Move Assignment
@@ -204,7 +239,9 @@ public:
 
             // Move new data
             control_block = other.control_block;
+            typed_ptr = other.typed_ptr;
             other.control_block = nullptr;
+            other.typed_ptr = nullptr;
         }
         return *this;
     }
@@ -223,63 +260,104 @@ public:
         }
         if (new_ptr) {
             control_block = new SharedPtrControlBlock(new_ptr);
+            typed_ptr = new_ptr;
         } else {
             control_block = nullptr;
+            typed_ptr = nullptr;
         }
     }
 
     // Dereference operator
     T& operator*() const {
-        return *(control_block -> ptr);
+        return *typed_ptr;
     }
 
     T& operator[](size_t index) const {
-        return (control_block -> ptr)[index];
+        return typed_ptr[index];
     }
 
     // Arrow operator
     T* operator->() const {
-        if(!control_block){
-            return nullptr;
-        }
-        return control_block -> ptr;
+        return typed_ptr;
     }
 
     // Get raw pointer
     T* get() const {
-        if(!control_block){
-            return nullptr;
-        }
-        return control_block -> ptr;
+        return typed_ptr;
     }
 
     // Check if it holds a valid pointer
     operator bool() const {
-        return (control_block != nullptr) && (control_block -> ptr != nullptr);
+        return typed_ptr != nullptr;
     }
+
+    bool operator==(const SharedPtr<T>& other) const {
+        return typed_ptr == other.typed_ptr && control_block == other.control_block;
+    }
+
+    // Friend declarations for casting functions
+    template<typename U> friend class SharedPtr;
+    template<typename U, typename V> friend SharedPtr<U> static_pointer_cast(const SharedPtr<V>& ptr);
+    template<typename U, typename V> friend SharedPtr<U> dynamic_pointer_cast(const SharedPtr<V>& ptr);
 };
+
+// Casting functions
+template<typename T, typename U>
+SharedPtr<T> static_pointer_cast(const SharedPtr<U>& ptr) {
+    if (!ptr) {
+        return SharedPtr<T>();
+    }
+    T* new_ptr = static_cast<T*>(ptr.typed_ptr);
+    return SharedPtr<T>(ptr, new_ptr);
+}
+
+// Concept for types that support SharedPtr dynamic casting
+template<typename Type>
+concept SharedPtrDynamicCastable = requires(Type from) {
+    from.getOffset(0ul);
+};
+
+template<typename T, typename U>
+SharedPtr<T> dynamic_pointer_cast(const SharedPtr<U>& ptr) requires SharedPtrDynamicCastable<U> {
+    if (!ptr) {
+        return SharedPtr<T>();
+    }
+
+    // Use CRClass instanceof for type checking
+    if (!ptr.typed_ptr->template instanceof<T>()) {
+        return SharedPtr<T>();
+    }
+
+    // Use crocos_dynamic_cast for the conversion
+    T* new_ptr = crocos_dynamic_cast<T*>(ptr.typed_ptr);
+    if (!new_ptr) {
+        return SharedPtr<T>();
+    }
+
+    return SharedPtr<T>(ptr, new_ptr);
+}
 
 // Specialization for arrays
 template <typename T>
 class SharedPtr<T[]> {
 private:
-    class SharedPtrControlBlock {
+    class SharedPtrArrayControlBlock {
     public:
         T* ptr;
         size_t refcount;
 
-        SharedPtrControlBlock(T* val_ptr) : ptr(val_ptr), refcount(1) {}
-        ~SharedPtrControlBlock() {
+        SharedPtrArrayControlBlock(T* val_ptr) : ptr(val_ptr), refcount(1) {}
+        ~SharedPtrArrayControlBlock() {
             delete[] ptr;  // Use delete[] for arrays
         }
     };
-    SharedPtrControlBlock* control_block;
+    SharedPtrArrayControlBlock* control_block;
 
 public:
     // Constructor
     explicit SharedPtr(T* ptr = nullptr) {
         if (ptr) {
-            control_block = new SharedPtrControlBlock(ptr);
+            control_block = new SharedPtrArrayControlBlock(ptr);
         } else {
             control_block = nullptr;
         }
@@ -338,7 +416,7 @@ public:
             delete control_block;
         }
         if (new_ptr) {
-            control_block = new SharedPtrControlBlock(new_ptr);
+            control_block = new SharedPtrArrayControlBlock(new_ptr);
         } else {
             control_block = nullptr;
         }

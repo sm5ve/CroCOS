@@ -180,7 +180,7 @@ namespace _GraphBuilder {
         class UnpopulatedVertexIterator;
         class UnpopulatedEdgeIterator;
 
-    protected:
+    //protected:
         //The index in the PartialVertexInfo must match its index in this vector
         Vector<PartialVertexInfo<Graph>> vertexInfo;
         Vector<PartialEdgeInfo<Graph>> edgeInfo;
@@ -1109,7 +1109,7 @@ private:
                     this->_setVertexColor(handle, vertexSpec);
                 }
                 else{
-                    static_assert(false, "Vertex label not provided");
+                    static_assert(false, "Vertex color not provided");
                 }
             }
             
@@ -1121,7 +1121,7 @@ public:
     // Constructor for a fixed number of plain vertices (only for graphs with unlabeled, uncolored vertices)
     explicit RestrictedGraphBuilder(size_t vertexCount, const Constraint& edgeConstraint)
     requires (!VertexDecorator::is_labeled) && (!VertexDecorator::is_colored)
-        : constraint(edgeConstraint) {
+        : constraint(edgeConstraint), _GraphBuilder::GraphBuilderImpl<Graph>() {
         populateVertices(vertexCount);
     }
     

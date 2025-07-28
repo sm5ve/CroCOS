@@ -6,6 +6,9 @@
 #define CROCOS_TEST_H
 
 #include <stddef.h>  // For size_t
+#include "assert_support.h"
+
+#define WITH_GLOBAL_CONSTRUCTOR(a, b) a b
 
 extern volatile void* __garbage;
 

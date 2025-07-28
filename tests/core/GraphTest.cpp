@@ -9,8 +9,27 @@
 #include <core/GraphBuilder.h>  // This includes Graph.h
 #include <core/algo/GraphAlgorithms.h>
 #include <core/algo/GraphPredicates.h>
+#include <core/ds/SmartPointer.h>
 
 using namespace CroCOSTest;
+
+// Test object for SharedPtr graph testing with instance counting
+class GraphTestNode {
+private:
+    int value;
+    static int instance_count;
+public:
+    GraphTestNode(int v) : value(v) { ++instance_count; }
+    ~GraphTestNode() { --instance_count; }
+    
+    int getValue() const { return value; }
+    static int getInstanceCount() { return instance_count; }
+    static void resetInstanceCount() { instance_count = 0; }
+    
+    bool operator==(const GraphTestNode& other) const { return value == other.value; }
+};
+
+int GraphTestNode::instance_count = 0;
 
 // Graph type aliases for testing
 using StringGraph = Graph<GraphProperties::LabeledVertex<const char*>,
@@ -553,4 +572,105 @@ TEST(GraphBuilderPopulateFromGraph) {
     ASSERT_TRUE(newGraph.occupied());
     ASSERT_EQ(originalGraph->getVertexCount(), newGraph->getVertexCount());
     ASSERT_EQ(originalGraph->getEdgeCount(), newGraph->getEdgeCount());
+}
+
+// ============================================================================
+// SharedPtr Graph Tests - Testing move semantics in graph construction
+// ============================================================================
+
+// Graph type that uses SharedPtr for both vertex and edge labels
+using SharedPtrGraph = Graph<GraphProperties::LabeledVertex<SharedPtr<GraphTestNode>>,
+                            GraphProperties::LabeledEdge<SharedPtr<GraphTestNode>>,
+                            GraphProperties::StructureModifier<GraphProperties::Directed, GraphProperties::SimpleGraph>>;
+
+TEST(SharedPtrGraphConstruction) {
+    GraphTestNode::resetInstanceCount();
+    
+    {
+        GraphBuilder<SharedPtrGraph> builder;
+        
+        // Create test objects
+        auto node1 = make_shared<GraphTestNode>(1);
+        auto node2 = make_shared<GraphTestNode>(2);
+        auto node3 = make_shared<GraphTestNode>(3);
+        auto edgeLabel1 = make_shared<GraphTestNode>(10);
+        auto edgeLabel2 = make_shared<GraphTestNode>(20);
+        
+        ASSERT_EQ(GraphTestNode::getInstanceCount(), 5);
+        
+        // Create vertices with SharedPtr labels
+        auto v1 = builder.addVertex(node1);
+        auto v2 = builder.addVertex(node2);
+        auto v3 = builder.addVertex(node3);
+        
+        // Create edges with SharedPtr labels
+        auto e1 = builder.addEdge(v1, v2, edgeLabel1);
+        auto e2 = builder.addEdge(v2, v3, edgeLabel2);
+        
+        ASSERT_EQ(GraphTestNode::getInstanceCount(), 5); // Objects should still exist
+        
+        // Build the graph - this triggers the HashSet -> ImmutableIndexedHashSet move operations
+        auto graph = builder.build();
+        ASSERT_TRUE(graph.occupied());
+        
+        // Verify graph structure
+        ASSERT_EQ(graph->getVertexCount(), 3u);
+        ASSERT_EQ(graph->getEdgeCount(), 2u);
+        ASSERT_EQ(GraphTestNode::getInstanceCount(), 5); // Objects should still exist
+        
+        // Test that we can access vertex labels
+        for (auto vertex : graph->vertices()) {
+            auto label = graph->getVertexLabel(vertex);
+            ASSERT_GT(label->getValue(), 0);
+            ASSERT_LE(label->getValue(), 3);
+        }
+        
+        // Test that we can access edge labels
+        for (auto edge : graph->edges()) {
+            auto label = graph->getEdgeLabel(edge);
+            ASSERT_GE(label->getValue(), 10);
+            ASSERT_LE(label->getValue(), 20);
+        }
+        
+        // Objects should still be alive at this point
+        ASSERT_EQ(GraphTestNode::getInstanceCount(), 5);
+        
+        // graph goes out of scope here, should clean up its copies
+    }
+    
+    // All objects should be destroyed after graph destruction
+    ASSERT_EQ(GraphTestNode::getInstanceCount(), 0);
+}
+
+// Test the specific edge case: empty edge labels
+TEST(SharedPtrGraphEmptyEdgeLabels) {
+    GraphTestNode::resetInstanceCount();
+    
+    {
+        GraphBuilder<SharedPtrGraph> builder;
+        
+        // Create vertices but NO edges - this will create empty edge labels set
+        auto node1 = make_shared<GraphTestNode>(1);
+        auto node2 = make_shared<GraphTestNode>(2);
+        
+        ASSERT_EQ(GraphTestNode::getInstanceCount(), 2);
+        
+        auto v1 = builder.addVertex(node1);
+        auto v2 = builder.addVertex(node2);
+        
+        // Build graph with NO edges - this is the critical test case
+        // This will create an empty HashSet<SharedPtr<GraphTestNode>> for edge labels
+        // and then move it to ImmutableIndexedHashSet - just like in the interrupt graph case
+        auto graph = builder.build();
+        ASSERT_TRUE(graph.occupied());
+        
+        ASSERT_EQ(graph->getVertexCount(), 2u);
+        ASSERT_EQ(graph->getEdgeCount(), 0u);
+        ASSERT_EQ(GraphTestNode::getInstanceCount(), 2);
+        
+        // graph goes out of scope here
+    }
+    
+    // All objects should be destroyed
+    ASSERT_EQ(GraphTestNode::getInstanceCount(), 0);
 }

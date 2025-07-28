@@ -30,17 +30,17 @@ private:
         }
 
         static void overwrite(ParentTable::Entry& entry, const T& key) {
-            copy_assign_or_construct(entry.value, key);
+            entry.value = key;
         }
     };
 
     struct MoveInserter {
-        static void freshInsert(ParentTable::Entry& entry, const T&& key) {
+        static void freshInsert(ParentTable::Entry& entry, T&& key) {
             move_assign_or_construct(entry.value, move(key));
         }
 
-        static void overwrite(ParentTable::Entry& entry, const T&& key) {
-            move_assign_or_construct(entry.value, move(key));
+        static void overwrite(ParentTable::Entry& entry, T&& key) {
+            entry.value = move(key);
         }
     };
 public:
@@ -91,10 +91,8 @@ class ImmutableIndexedHashSet : public IndexedHashTable<T, T, HashSetKeyExtracto
 private:
     using ParentTable = IndexedHashTable<T, T, HashSetKeyExtractor<T>, Hasher>;
 public:
-    ImmutableIndexedHashSet(HashSet<T, Hasher>&& set) : ParentTable(set.entryBuffer, set.capacity, set.count){
-        set.entryBuffer = nullptr;
-        set.capacity = 0;
-        set.count = 0;
+    ImmutableIndexedHashSet(HashSet<T, Hasher>&& set) : ParentTable(move(set)) {
+        // Move constructor automatically transfers ownership and nullifies source
     }
 
     Optional<size_t> indexOf(const T& element) const {

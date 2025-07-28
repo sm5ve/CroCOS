@@ -8,6 +8,8 @@
 template<typename It>
 class IteratorRange {
 public:
+    using Iterator = It;
+
     IteratorRange(It begin, It end) : b(begin), e(end) {}
 
     It begin() const { return b; }

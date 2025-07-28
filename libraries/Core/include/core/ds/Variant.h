@@ -112,7 +112,7 @@ private:
     }
 
     template<typename... Rs, size_t... Is>
-    void copy_impl(Variant<Rs...>& var, index_sequence<Is...>){
+    void copy_impl(const Variant<Rs...>& var, index_sequence<Is...>){
         if(var.which() == (size_t)-1){
             index = (size_t)-1;
             return;
@@ -134,7 +134,6 @@ public:
     template <typename T,
             enable_if_t<(IndexOf<decay_t<T>, Ts...>::value != size_t(-1)), bool> = true>
     Variant(T&& value) {
-        destroy();
         using U = decay_t<T>;
         new (storage.raw()) U(forward<T>(value));
         index = IndexOf<U, Ts...>::value;
@@ -144,7 +143,6 @@ public:
             enable_if_t<TypeSetComparator<Ts...>::template contains<Rs...>(), bool> = true>
     Variant(Variant<Rs...>&& value) {
         if((void*)&value == (void*)this) return;
-        destroy();
         move_impl(move(value), make_index_sequence<sizeof...(Rs)>{});
         value.destroy();
     }
@@ -153,14 +151,12 @@ public:
             enable_if_t<TypeSetComparator<Ts...>::template contains<Rs...>(), bool> = true>
     Variant(Variant<Rs...>& value) {
         if((void*)&value == (void*)this) return;
-        destroy();
         copy_impl(value, make_index_sequence<sizeof...(Rs)>{});
     }
 
     template <typename T,
             enable_if_t<(IndexOf<decay_t<T>, Ts...>::value != size_t(-1)), bool> = true>
     Variant(T& value) {
-        destroy();
         using U = decay_t<T>;
         new (storage.raw()) U(value);
         index = IndexOf<U, Ts...>::value;
@@ -170,6 +166,19 @@ public:
     Variant(const char (&arr)[N]) requires(IndexOf<const char*, Ts...>::value != size_t(-1)){
         new (storage.raw()) const char*{arr};
         index = IndexOf<const char*, Ts...>::value;
+    }
+
+    // Copy constructor
+    Variant(const Variant& other) {
+        if(this == &other) return;
+        copy_impl(other, make_index_sequence<sizeof...(Ts)>{});
+    }
+
+    // Move constructor
+    Variant(Variant&& other) noexcept {
+        if(this == &other) return;
+        move_impl(move(other), make_index_sequence<sizeof...(Ts)>{});
+        other.destroy();
     }
 
     template <typename T, typename... Args>
@@ -213,6 +222,56 @@ public:
             destructors[index](storage.raw());
             index = (size_t)-1;
         }
+    }
+
+    // Assignment operators
+    template <typename T,
+            enable_if_t<(IndexOf<decay_t<T>, Ts...>::value != size_t(-1)), bool> = true>
+    Variant& operator=(T&& value) {
+        using U = decay_t<T>;
+        if (holds<U>()) {
+            // If we already hold this type, use assignment instead of destroy+construct
+            get<U>() = forward<T>(value);
+        } else {
+            destroy();
+            new (storage.raw()) U(forward<T>(value));
+            index = IndexOf<U, Ts...>::value;
+        }
+        return *this;
+    }
+
+    Variant& operator=(const Variant& other) {
+        if (this == &other) return *this;
+        destroy();
+        copy_impl(other, make_index_sequence<sizeof...(Ts)>{});
+        return *this;
+    }
+
+    Variant& operator=(Variant&& other) {
+        if (this == &other) return *this;
+        destroy();
+        move_impl(move(other), make_index_sequence<sizeof...(Ts)>{});
+        other.destroy();
+        return *this;
+    }
+
+    template <typename... Rs,
+            enable_if_t<TypeSetComparator<Ts...>::template contains<Rs...>(), bool> = true>
+    Variant& operator=(const Variant<Rs...>& other) {
+        if ((void*)this == (void*)&other) return *this;
+        destroy();
+        copy_impl(other, make_index_sequence<sizeof...(Rs)>{});
+        return *this;
+    }
+
+    template <typename... Rs,
+            enable_if_t<TypeSetComparator<Ts...>::template contains<Rs...>(), bool> = true>
+    Variant& operator=(Variant<Rs...>&& other) {
+        if ((void*)this == (void*)&other) return *this;
+        destroy();
+        move_impl(move(other), make_index_sequence<sizeof...(Rs)>{});
+        other.destroy();
+        return *this;
     }
 
     ~Variant() { destroy(); }

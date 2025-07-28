@@ -28,14 +28,14 @@ set(KERNEL_SRC
         include/FlushPlanner.h
         timing/TimerManager.cpp
         include/timers.h
-        include/arch/hal/interrupts.h
+        include/arch/hal/InterruptGraphs.h
         arch/amd64/interrupts/LegacyPIC.cpp
         include/arch/amd64/interrupts/LegacyPIC.h
         arch/amd64/smp/smp.cpp
         include/arch/amd64/smp.h
         arch/amd64/interrupts/InterruptSetup.cpp
         arch/amd64/lgdt.asm
-        arch/hal/interrupts.cpp
+        arch/hal/InterruptGraphManager.cpp
 )
 
 add_executable(Kernel ${KERNEL_SRC})

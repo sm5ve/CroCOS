@@ -154,6 +154,44 @@ protected:
 
     IndexedHashTable(Entry* buffer, size_t cap, size_t ct) : entryBuffer(buffer), capacity(cap), count(ct) {}
 
+    // Move constructor - transfers ownership of buffer
+    IndexedHashTable(IndexedHashTable&& other) noexcept 
+        : entryBuffer(other.entryBuffer), capacity(other.capacity), count(other.count), 
+          hasher(move(other.hasher)), extractor(move(other.extractor)) {
+        // Nullify the source to prevent double-delete
+        other.entryBuffer = nullptr;
+        other.capacity = 0;
+        other.count = 0;
+    }
+
+    // Move assignment operator
+    IndexedHashTable& operator=(IndexedHashTable&& other) noexcept {
+        if (this != &other) {
+            // Clean up current resources
+            if (entryBuffer != nullptr) {
+                for (size_t i = 0; i < capacity; i++) {
+                    auto& entry = entryBuffer[i];
+                    if (entry.state != EntryState::occupied) continue;
+                    entry.value.~EntryType();
+                }
+                operator delete(entryBuffer);
+            }
+            
+            // Transfer ownership from other
+            entryBuffer = other.entryBuffer;
+            capacity = other.capacity;
+            count = other.count;
+            hasher = move(other.hasher);
+            extractor = move(other.extractor);
+            
+            // Nullify the source
+            other.entryBuffer = nullptr;
+            other.capacity = 0;
+            other.count = 0;
+        }
+        return *this;
+    }
+
     ~IndexedHashTable(){
         if(entryBuffer == nullptr) return;
         for(size_t i = 0; i < capacity; i++){
