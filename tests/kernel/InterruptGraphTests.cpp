@@ -91,16 +91,10 @@ public:
     }
 };
 
-// Test basic topology registration
-TEST(TopologyBasicDomainRegistration) {
-    // Super simple test - just check that basic functionality works
-    ASSERT_TRUE(true);
-}
-
 TEST(TopologyConnectorRegistration) {
     topology::resetTopologyState();
     
-    /*auto emitter = make_shared<MockEmitterDomain>(2);
+    auto emitter = make_shared<MockEmitterDomain>(2);
     auto receiver = make_shared<MockReceiverDomain>(3);
     
     topology::registerDomain(static_pointer_cast<platform::InterruptDomain>(emitter));
@@ -111,19 +105,19 @@ TEST(TopologyConnectorRegistration) {
     connector->setMapping(0, 1); // Output 0 -> Input 1
     connector->setMapping(1, 2); // Output 1 -> Input 2
     
-    topology::registerConnector(connector);*/
+    topology::registerConnector(connector);
     
     auto graph = topology::getTopologyGraph();
     ASSERT_TRUE(graph.occupied());
     
     // Should have one edge
-    /*size_t edgeCount = 0;
+    size_t edgeCount = 0;
     for (auto vertex : graph->vertices()) {
         for (auto edge : graph->outgoingEdges(vertex)) {
             edgeCount++;
         }
     }
-    ASSERT_EQ(edgeCount, 1u);*/
+    ASSERT_EQ(edgeCount, 1u);
 }
 
 TEST(TopologyComplexGraph) {

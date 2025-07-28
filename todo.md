@@ -1,4 +1,4 @@
-1. Add unit tests for Variant and Optional – specifically stress test move and copy semantics
+1. (✅) Add unit tests for Variant and Optional – specifically stress test move and copy semantics
 2. Fix failing unit tests for InterruptGraph, figure out source of memory leaks
 3. Implement proper kmalloc to replace temporary bump allocator
 4. Unit test kmalloc with special attention to concurrency

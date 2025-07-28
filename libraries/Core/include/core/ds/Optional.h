@@ -41,6 +41,10 @@ public:
         value.template emplace<T>(t);
     }
 
+    Optional(T&& t){
+        value.template emplace<T>(forward<T>(t));
+    }
+
     template<typename ... Ts>
     void emplace(Ts... ts){
         value.template emplace<T>(ts...);

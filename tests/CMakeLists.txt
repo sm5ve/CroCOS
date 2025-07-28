@@ -58,6 +58,8 @@ target_sources(CoreLibraryTests PRIVATE
     core/GraphTest.cpp
     core/ObjectTest.cpp
     core/SmartPointerTest.cpp
+    core/OptionalTest.cpp
+    core/VariantTest.cpp
 )
 
 # Add Core library sources directly to the test library
