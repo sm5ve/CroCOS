@@ -62,7 +62,7 @@ namespace kernel::hal::interrupts {
       using TopologyGraphStructure = GraphProperties::StructureModifier<GraphProperties::Directed, GraphProperties::SimpleGraph, GraphPredicates::DirectedAcyclic>;
       using TopologyGraph = Graph<TopologyVertexLabel, TopologyEdgeLabel, TopologyGraphStructure>;
       
-      Optional<TopologyGraph> getTopologyGraph();
+      Optional<TopologyGraph>& getTopologyGraph();
       
 #ifdef CROCOS_TESTING
       void resetTopologyState();

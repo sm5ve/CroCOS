@@ -36,7 +36,7 @@ namespace kernel::hal::interrupts {
         }
 #endif
 
-        Optional<TopologyGraph> getTopologyGraph() {
+        Optional<TopologyGraph>& getTopologyGraph() {
             if (isDirty || !cachedGraph.occupied()) {
                 cachedGraph = getBuilder().build();
                 isDirty = false;
@@ -120,7 +120,7 @@ namespace kernel::hal::interrupts {
 
             //This will only ever be called if we already know the topology graph is preconstructed from createRoutingGraphBuilder
             //so it is safe to dereference
-            auto topologyGraph = *topology::getTopologyGraph();
+            auto& topologyGraph = *topology::getTopologyGraph();
 
             auto sourceTopologyVertex = topologyGraph.getVertexByLabel(sourceDomain);
             auto targetTopologyVertex = topologyGraph.getVertexByLabel(targetDomain);
@@ -149,7 +149,7 @@ namespace kernel::hal::interrupts {
             auto sourceDomain = graph.getVertexLabel(source)->domain;
             auto sourceIndex = graph.getVertexLabel(source)->index;
             
-            auto topologyGraph = *topology::getTopologyGraph();
+            auto& topologyGraph = *topology::getTopologyGraph();
             auto sourceTopologyVertex = topologyGraph.getVertexByLabel(sourceDomain);
             assert(sourceTopologyVertex.occupied(), "Source domain must exist in topology");
             
@@ -169,7 +169,7 @@ namespace kernel::hal::interrupts {
             auto targetDomain = graph.getVertexLabel(target)->domain;
             auto targetIndex = graph.getVertexLabel(target)->index;
 
-            auto topologyGraph = *topology::getTopologyGraph();
+            auto& topologyGraph = *topology::getTopologyGraph();
             auto targetTopologyVertex = topologyGraph.getVertexByLabel(targetDomain);
             assert(targetTopologyVertex.occupied(), "Source domain must exist in topology");
 
@@ -235,7 +235,7 @@ namespace kernel::hal::interrupts {
             //This will only ever be called if we already know the topology graph is preconstructed from createRoutingGraphBuilder
             //so it is safe to dereference
             currentIndex++;
-            auto topGraph = *topology::getTopologyGraph();
+            auto& topGraph = *topology::getTopologyGraph();
             auto edge = currentConnector.operator*();
             auto targetVertex = topGraph.getTarget(edge);
             const auto& targetDomain = topGraph.getVertexLabel(targetVertex);
@@ -260,7 +260,7 @@ namespace kernel::hal::interrupts {
             //This will only ever be called if we already know the topology graph is preconstructed from createRoutingGraphBuilder
             //so it is safe to dereference
             currentIndex++;
-            auto topGraph = *topology::getTopologyGraph();
+            auto& topGraph = *topology::getTopologyGraph();
             auto edge = currentConnector.operator*();
             auto sourceVertex = topGraph.getSource(edge);
             const auto& sourceDomain = topGraph.getVertexLabel(sourceVertex);
@@ -278,7 +278,7 @@ namespace kernel::hal::interrupts {
         void PotentialEdgeIterator<Forward>::advanceToValidState() {
             if constexpr (!Forward) {
                 while (currentConnector.operator!=(endConnector)) {
-                    auto topGraph = *topology::getTopologyGraph();
+                    auto& topGraph = *topology::getTopologyGraph();
                     auto edge = currentConnector.operator*();
                     auto sourceVertex = topGraph.getSource(edge);
                     const auto& sourceDomain = topGraph.getVertexLabel(sourceVertex);
@@ -318,8 +318,9 @@ namespace kernel::hal::interrupts {
 
         template<bool Forward>
         BuilderVertexHandle<RoutingGraph> PotentialEdgeIterator<Forward>::operator*() const {
+            assert(this -> currentConnector != this -> endConnector, "Tried to dereference end connector");
             // Find the target domain and create a RoutingNodeLabel for it
-            auto topologyGraph = *topology::getTopologyGraph();
+            auto& topologyGraph = *topology::getTopologyGraph();
             auto edge = currentConnector.operator*();
             
             SharedPtr<platform::InterruptDomain> targetDomain;

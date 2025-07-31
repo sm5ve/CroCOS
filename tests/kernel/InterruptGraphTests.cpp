@@ -92,8 +92,6 @@ public:
 };
 
 TEST(TopologyConnectorRegistration) {
-    topology::resetTopologyState();
-    
     auto emitter = make_shared<MockEmitterDomain>(2);
     auto receiver = make_shared<MockReceiverDomain>(3);
     
@@ -118,11 +116,10 @@ TEST(TopologyConnectorRegistration) {
         }
     }
     ASSERT_EQ(edgeCount, 1u);
+    topology::resetTopologyState();
 }
 
 TEST(TopologyComplexGraph) {
-    topology::resetTopologyState();
-    
     // Create a more complex topology: Device -> Controller -> CPU
     auto device = make_shared<MockEmitterDomain>(4);
     auto controller = make_shared<MockRoutableDomain>(4, 2);
@@ -160,12 +157,11 @@ TEST(TopologyComplexGraph) {
     }
     ASSERT_EQ(vertexCount, 3u);
     ASSERT_EQ(edgeCount, 2u);
+    topology::resetTopologyState();
 }
 
 // Test routing graph creation
 TEST(RoutingGraphBasicCreation) {
-    topology::resetTopologyState();
-    
     auto emitter = make_shared<MockEmitterDomain>(2);
     auto receiver = make_shared<MockReceiverDomain>(3);
     
@@ -193,11 +189,10 @@ TEST(RoutingGraphBasicCreation) {
         vertexCount++;
     }
     ASSERT_EQ(vertexCount, 5u);
+    topology::resetTopologyState();
 }
 
 TEST(RoutingGraphConstraintValidation) {
-    topology::resetTopologyState();
-    
     auto emitter = make_shared<MockEmitterDomain>(2);
     auto receiver = make_shared<MockReceiverDomain>(3);
     
@@ -240,11 +235,10 @@ TEST(RoutingGraphConstraintValidation) {
     ASSERT_FALSE(routingBuilder->canAddEdge(*output0, *input2)); // 0->2 not mapped
     ASSERT_FALSE(routingBuilder->canAddEdge(*output1, *input0)); // 1->0 not mapped
     ASSERT_FALSE(routingBuilder->canAddEdge(*output1, *input1)); // 1->1 not mapped
+    topology::resetTopologyState();
 }
 
 TEST(RoutingGraphMultiDomainRouting) {
-    topology::resetTopologyState();
-    
     // Test with a controller that can route between inputs and outputs
     auto device = make_shared<MockEmitterDomain>(2);
     auto controller = make_shared<MockRoutableDomain>(2, 2);
@@ -284,11 +278,10 @@ TEST(RoutingGraphMultiDomainRouting) {
         vertexCount++;
     }
     ASSERT_EQ(vertexCount, 6u);
+    topology::resetTopologyState();
 }
 
 TEST(PotentialEdgeIteratorForward) {
-    topology::resetTopologyState();
-    
     auto device = make_shared<MockEmitterDomain>(2);
     auto controller = make_shared<MockRoutableDomain>(3, 2);
     
@@ -322,11 +315,10 @@ TEST(PotentialEdgeIteratorForward) {
         ASSERT_EQ(targetLabel->getType(), managed::NodeType::Input);
     }
     ASSERT_EQ(edgeCount, 1u); // Should find exactly one valid target
+    topology::resetTopologyState();
 }
 
 TEST(PotentialEdgeIteratorBackward) {
-    topology::resetTopologyState();
-    
     auto device = make_shared<MockEmitterDomain>(2);
     auto controller = make_shared<MockRoutableDomain>(3, 2);
     
@@ -360,11 +352,10 @@ TEST(PotentialEdgeIteratorBackward) {
         ASSERT_EQ(sourceLabel->getType(), managed::NodeType::Device);
     }
     ASSERT_EQ(edgeCount, 1u); // Should find exactly one valid source
+    topology::resetTopologyState();
 }
 
 TEST(RoutingNodeLabelHashAndEquality) {
-    topology::resetTopologyState();
-    
     auto domain1 = make_shared<MockEmitterDomain>(2);
     auto domain2 = make_shared<MockReceiverDomain>(3);
     
@@ -387,11 +378,10 @@ TEST(RoutingNodeLabelHashAndEquality) {
     ASSERT_NE(label1.hash(), label3.hash());
     ASSERT_NE(label1.hash(), label4.hash());
     ASSERT_NE(label1.hash(), label5.hash());
+    topology::resetTopologyState();
 }
 
 TEST(ComplexRoutingScenario) {
-    topology::resetTopologyState();
-    
     // Create a complex interrupt routing scenario:
     // Device1 (2 outputs) -> Controller (4 inputs, 2 outputs) -> CPU (2 inputs)
     // Device2 (2 outputs) -> Controller
@@ -467,4 +457,5 @@ TEST(ComplexRoutingScenario) {
     // Test invalid connections
     ASSERT_FALSE(routingBuilder->canAddEdge(*d1_o0, *c_i3)); // Wrong mapping
     ASSERT_FALSE(routingBuilder->canAddEdge(*d2_o1, *c_i0)); // Wrong mapping
+    topology::resetTopologyState();
 }

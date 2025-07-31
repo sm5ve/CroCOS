@@ -7,6 +7,7 @@
 
 #include <stddef.h>  // For size_t
 #include "assert_support.h"
+#include "harness/MemoryTrackingGuard.h"
 
 #define WITH_GLOBAL_CONSTRUCTOR(a, b) a b
 

@@ -1,5 +1,5 @@
 1. (✅) Add unit tests for Variant and Optional – specifically stress test move and copy semantics
-2. Fix failing unit tests for InterruptGraph, figure out source of memory leaks
+2. (✅) Fix failing unit tests for InterruptGraph, figure out source of memory leaks
 3. Implement proper kmalloc to replace temporary bump allocator
 4. Unit test kmalloc with special attention to concurrency
 5. Wire up APIC, CPU interrupt vectors, legacy IRQ lines, and maybe HPET to interrupt topology graph

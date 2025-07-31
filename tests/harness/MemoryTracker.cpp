@@ -7,6 +7,7 @@
 #include <iostream>
 #include <cstdlib>
 #include <new>
+#include "MemoryTrackingGuard.h"  // For globally constructed objects invoking the memory allocator
 
 // Define the garbage pointer used by placeholder implementations in test.h
 volatile void* __garbage = nullptr;
@@ -20,9 +21,23 @@ namespace CroCOSTest {
     size_t MemoryTracker::total_freed = 0;
     size_t MemoryTracker::peak_usage = 0;
     size_t MemoryTracker::current_usage = 0;
+    bool track = true;
+
+    void pauseTracking() {
+        track = false;
+    }
+
+    void resumeTracking() {
+        track = true;
+    }
+
+    bool getTrackingStatus() {
+        return track;
+    }
 
     void MemoryTracker::recordAllocation(void* ptr, size_t size) {
         if (!ptr) return;
+        if (!track) return;
         
         std::lock_guard<std::mutex> lock(tracker_mutex);
         allocations[ptr] = {size};
@@ -35,6 +50,7 @@ namespace CroCOSTest {
 
     void MemoryTracker::recordDeallocation(void* ptr) {
         if (!ptr) return;
+        if (!track) return;
         
         std::lock_guard<std::mutex> lock(tracker_mutex);
         auto it = allocations.find(ptr);
@@ -198,3 +214,14 @@ void __tracked_delete_array_sized(void* ptr, size_t size) {
 }
 
 } //extern "C"
+
+MemoryTrackingGuard::MemoryTrackingGuard() {
+    this -> initialStatus = CroCOSTest::getTrackingStatus();
+    CroCOSTest::pauseTracking();
+}
+
+MemoryTrackingGuard::~MemoryTrackingGuard() {
+    if(this -> initialStatus) {
+        CroCOSTest::resumeTracking();
+    }
+}
