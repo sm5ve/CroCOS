@@ -33,14 +33,14 @@ target_compile_options(CoreKernel PRIVATE -mno-sse -mno-sse2 -mno-avx -ffreestan
 
 #Standard version of Core for userspace
 
-add_library(CoreUser STATIC ${CORE_SOURCES})
+#add_library(CoreUser STATIC ${CORE_SOURCES})
 
-target_include_directories(CoreUser PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-)
+#target_include_directories(CoreUser PUBLIC
+#        ${CMAKE_CURRENT_SOURCE_DIR}/include
+#)
 
-target_compile_options(CoreUser PRIVATE
-        -Wall -Wextra -pedantic -Wshadow -Wcast-align -Wwrite-strings
-        -Wredundant-decls -Winline -Wno-long-long -Wconversion -Werror
-        -std=gnu++2a
-)
+#target_compile_options(CoreUser PRIVATE
+#        -Wall -Wextra -pedantic -Wshadow -Wcast-align -Wwrite-strings
+#        -Wredundant-decls -Winline -Wno-long-long -Wconversion -Werror
+#        -std=gnu++2a
+#)
