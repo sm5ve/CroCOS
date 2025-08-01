@@ -149,9 +149,10 @@ endif()
 
 # Add subdirectory for kernel tests
 add_subdirectory(kernel)
+add_subdirectory(liballoc)
 
 # Add a custom target to run tests
-add_custom_target(run_tests
+add_custom_target(run_core_tests
     COMMAND CoreLibraryTestRunner
     DEPENDS CoreLibraryTestRunner
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
@@ -162,7 +163,8 @@ add_custom_target(run_tests
 add_custom_target(run_all_tests
     COMMAND CoreLibraryTestRunner
     COMMAND kernel/KernelTestRunner
-    DEPENDS CoreLibraryTestRunner kernel/KernelTestRunner
+    COMMAND liballoc/LibAllocTestRunner
+    DEPENDS CoreLibraryTestRunner kernel/KernelTestRunner liballoc/LibAllocTestRunner
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     COMMENT "Running all CroCOS unit tests"
 )

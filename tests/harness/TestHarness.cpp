@@ -41,8 +41,17 @@
     extern "C" const CroCOSTest::TestInfo* __crocos_unit_tests_end[] __attribute__((weak));
 #endif
 
-__attribute__((weak))
-void presort_object_parent_lists(void);
+// Function pointer approach - more reliable across platforms
+extern "C" void presort_object_parent_lists(void) __attribute__((weak));
+
+// Safe wrapper to check if the function exists
+static void call_presort_if_exists() {
+    // On some platforms, we need to check the function pointer directly
+    void (*presort_ptr)(void) = &presort_object_parent_lists;
+    if (presort_ptr && presort_ptr != (void*)0) {
+        presort_object_parent_lists();
+    }
+}
 
 namespace CroCOSTest {
     
@@ -105,9 +114,7 @@ namespace CroCOSTest {
     }
     
     int TestRunner::runAllTests() {
-        if (presort_object_parent_lists) {
-            presort_object_parent_lists();  // Safe call only if it exists
-        }
+        call_presort_if_exists();
 
         std::vector<TestResult> results;
         
@@ -154,9 +161,7 @@ namespace CroCOSTest {
     }
     
     int TestRunner::runTest(const char* testName) {
-        if (presort_object_parent_lists) {
-            presort_object_parent_lists();  // Safe call only if it exists
-        }
+        call_presort_if_exists();
         
         // Get tests using helper method
         size_t testCount;

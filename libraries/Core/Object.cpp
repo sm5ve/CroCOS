@@ -10,7 +10,7 @@
     #include <mach-o/dyld.h>
     #include <iostream>
 
-void presort_object_parent_lists() {
+extern "C" void presort_object_parent_lists() {
     // Get the main executable's mach header (index 0 is always the main executable)
     const struct mach_header_64* header = (const struct mach_header_64*)_dyld_get_image_header(0);
 
@@ -34,7 +34,7 @@ void presort_object_parent_lists() {
 extern "C" void (*__crocos_presort_array_start[])(void) __attribute__((weak));
 extern "C" void (*__crocos_presort_array_end[])(void) __attribute__((weak));
 
-void presort_object_parent_lists(){
+extern "C" void presort_object_parent_lists(){
     static bool initialized = false;
     if (initialized) return;
     for (void (**presort)() = __crocos_presort_array_start; presort != __crocos_presort_array_end; presort++) {

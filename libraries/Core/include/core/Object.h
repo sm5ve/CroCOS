@@ -250,6 +250,6 @@ Dest crocos_dynamic_cast(Source s) requires (is_pointer_v<Dest> && is_pointer_v<
     return nullptr;
 }
 
-void presort_object_parent_lists();
+extern "C" void presort_object_parent_lists();
 
 #endif //OBJECT_H
