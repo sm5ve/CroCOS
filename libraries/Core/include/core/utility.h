@@ -106,6 +106,10 @@ struct is_same<T, T> {
 template<typename T, typename S>
 constexpr bool is_same_v = is_same<T, S>::value;
 
+
+template<typename T, typename S>
+concept IsSame = is_same_v<T, S>;
+
 template <typename T, typename... Ts>
 struct IndexOfHelper {
     static constexpr size_t value = static_cast<size_t>(-1);

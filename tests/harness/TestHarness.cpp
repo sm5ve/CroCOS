@@ -117,7 +117,8 @@ namespace CroCOSTest {
         call_presort_if_exists();
 
         std::vector<TestResult> results;
-        
+
+        //TODO update this to be configurable
         std::cout << "Starting CroCOS Core Library Tests\n" << std::endl;
         
         // Get tests using helper method
