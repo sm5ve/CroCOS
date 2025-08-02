@@ -15,6 +15,7 @@ target_sources(CoreTests PRIVATE
     ObjectTest.cpp
     OptionalTest.cpp
     SmartPointerTest.cpp
+    TreeTest.cpp
     VariantTest.cpp
     VectorTest.cpp
 )
