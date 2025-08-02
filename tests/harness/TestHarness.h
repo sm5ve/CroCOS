@@ -7,6 +7,7 @@
 #define CROCOS_TESTHARNESS_H
 
 #include "../assert_support.h"
+#include "MemoryTracker.h"
 
 namespace CroCOSTest {
     
@@ -89,6 +90,13 @@ namespace CroCOSTest {
         do { \
             if (!((a) >= (b))) { \
                 throw CroCOSTest::AssertionFailure("Assertion failed: " #a " >= " #b); \
+            } \
+        } while(0)
+
+    #define ASSERT_NO_ALLOCS() \
+        do { \
+            if (MemoryTracker::getTotalAllocated() != 0) { \
+                throw CroCOSTest::AssertionFailure("Assertion failed: test should not have allocated any memory"); \
             } \
         } while(0)
 

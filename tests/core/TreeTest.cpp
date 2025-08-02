@@ -302,6 +302,8 @@ TEST(intrusiveBinarySearchTreeBasics) {
     ASSERT_EQ(bst.find(7), &n7);
     ASSERT_EQ(bst.find(1), &n1);
     ASSERT_EQ(bst.find(9), &n9);
+
+    ASSERT_NO_ALLOCS();
 }
 
 TEST(intrusiveBSTSuccessorPredecessor) {
@@ -340,6 +342,8 @@ TEST(intrusiveBSTSuccessorPredecessor) {
     ASSERT_EQ(bst.predecessor(&n4), &n3);
     ASSERT_EQ(bst.predecessor(&n3), &n1);
     ASSERT_EQ(bst.predecessor(&n1), nullptr); // Smallest element
+
+    ASSERT_NO_ALLOCS();
 }
 
 TEST(intrusiveBSTFloorCeil) {
@@ -370,5 +374,7 @@ TEST(intrusiveBSTFloorCeil) {
     ASSERT_EQ(bst.ceil(5), &n6);          // Smallest >= 5 is 6
     ASSERT_EQ(bst.ceil(8), &n8);          // Exact match
     ASSERT_EQ(bst.ceil(9), nullptr);      // No element >= 9
+
+    ASSERT_NO_ALLOCS();
 }
 
