@@ -378,3 +378,185 @@ TEST(intrusiveBSTFloorCeil) {
     ASSERT_NO_ALLOCS();
 }
 
+TEST(intrusiveBSTEraseStructuralIntegrity) {
+    IntrusiveBinarySearchTree<IntrusiveTestNode, IntrusiveTestExtractor> bst;
+    
+    // Create a more complex tree structure to stress swapNodes
+    //       50
+    //     /    \
+    //   30      70
+    //  /  \    /  \
+    // 20  40  60  80
+    //    /      \   \
+    //   35      65  90
+    //              /
+    //             85
+    
+    IntrusiveTestNode n50(50), n30(30), n70(70);
+    IntrusiveTestNode n20(20), n40(40), n60(60), n80(80);
+    IntrusiveTestNode n35(35), n65(65), n90(90), n85(85);
+    
+    bst.insert(&n50);
+    bst.insert(&n30); bst.insert(&n70);
+    bst.insert(&n20); bst.insert(&n40); bst.insert(&n60); bst.insert(&n80);
+    bst.insert(&n35); bst.insert(&n65); bst.insert(&n90);
+    bst.insert(&n85);
+    
+    // Helper lambda to verify BST property via in-order traversal
+    auto verifyBSTProperty = [&bst]() {
+        Vector<int> values;
+        bst.visitDepthFirstInOrder([&values](const IntrusiveTestNode& node) {
+            values.push(node.value);
+        });
+        
+        // Check that values are in sorted order
+        for (size_t i = 1; i < values.getSize(); i++) {
+            if (values[i-1] >= values[i]) {
+                return false;
+            }
+        }
+        return true;
+    };
+    
+    // Test 1: Erase leaf node
+    ASSERT_EQ(bst.erase(85), &n85);
+    ASSERT_TRUE(verifyBSTProperty());
+    ASSERT_EQ(bst.find(85), nullptr);
+    ASSERT_EQ(bst.find(90), &n90); // Parent should still be there
+    
+    // Test 2: Erase node with only left child
+    ASSERT_EQ(bst.erase(40), &n40);
+    ASSERT_TRUE(verifyBSTProperty());
+    ASSERT_EQ(bst.find(40), nullptr);
+    ASSERT_EQ(bst.find(35), &n35); // Child should still be there
+    ASSERT_EQ(bst.find(30), &n30); // Parent should still be there
+    
+    // Test 3: Erase node with only right child  
+    ASSERT_EQ(bst.erase(60), &n60);
+    ASSERT_TRUE(verifyBSTProperty());
+    ASSERT_EQ(bst.find(60), nullptr);
+    ASSERT_EQ(bst.find(65), &n65); // Child should still be there
+    ASSERT_EQ(bst.find(70), &n70); // Parent should still be there
+    
+    // Test 4: Erase node with both children (this should stress swapNodes)
+    ASSERT_EQ(bst.erase(30), &n30);
+    ASSERT_TRUE(verifyBSTProperty());
+    ASSERT_EQ(bst.find(30), nullptr);
+    ASSERT_EQ(bst.find(20), &n20); // Left child should still be there
+    ASSERT_EQ(bst.find(35), &n35); // Right subtree should still be there
+    
+    // Test 5: Erase root node (complex swapNodes case)
+    ASSERT_EQ(bst.erase(50), &n50);
+    ASSERT_TRUE(verifyBSTProperty());
+    ASSERT_EQ(bst.find(50), nullptr);
+    // All other nodes should still be findable
+    ASSERT_EQ(bst.find(20), &n20);
+    ASSERT_EQ(bst.find(35), &n35);
+    ASSERT_EQ(bst.find(65), &n65);
+    ASSERT_EQ(bst.find(70), &n70);
+    ASSERT_EQ(bst.find(80), &n80);
+    ASSERT_EQ(bst.find(90), &n90);
+}
+
+TEST(intrusiveBSTEraseSuccessorCases) {
+    IntrusiveBinarySearchTree<IntrusiveTestNode, IntrusiveTestExtractor> bst;
+    
+    // Test case where successor is immediate right child
+    //   10
+    //  /  \
+    // 5   15
+    //      \
+    //      20
+    
+    IntrusiveTestNode n10(10), n5(5), n15(15), n20(20);
+    bst.insert(&n10);
+    bst.insert(&n5);
+    bst.insert(&n15);
+    bst.insert(&n20);
+    
+    // Erase 10 - successor (15) is immediate right child
+    ASSERT_EQ(bst.erase(10), &n10);
+    
+    // Verify structure is maintained
+    Vector<int> values;
+    bst.visitDepthFirstInOrder([&values](const IntrusiveTestNode& node) {
+        values.push(node.value);
+    });
+    
+    ASSERT_EQ(values.getSize(), 3);
+    ASSERT_EQ(values[0], 5);
+    ASSERT_EQ(values[1], 15);
+    ASSERT_EQ(values[2], 20);
+    
+    // Test case where successor is deep in right subtree
+    IntrusiveTestNode n25(25), n12(12), n18(18), n14(14), n16(16);
+    bst.insert(&n25);
+    bst.insert(&n12);
+    bst.insert(&n18);
+    bst.insert(&n14);
+    bst.insert(&n16);
+    
+    // Current tree: 5, 12, 14, 15, 16, 18, 20, 25
+    // Erase 12 - successor (14) is deeper in right subtree
+    ASSERT_EQ(bst.erase(12), &n12);
+    
+    values.~Vector();
+    new(&values) Vector<int>();
+    bst.visitDepthFirstInOrder([&values](const IntrusiveTestNode& node) {
+        values.push(node.value);
+    });
+    
+    // Should be: 5, 14, 15, 16, 18, 20, 25
+    ASSERT_EQ(values.getSize(), 7);
+    for (size_t i = 1; i < values.getSize(); i++) {
+        ASSERT_LT(values[i-1], values[i]); // Verify still sorted
+    }
+}
+
+TEST(intrusiveBSTEraseAllNodes) {
+    IntrusiveBinarySearchTree<IntrusiveTestNode, IntrusiveTestExtractor> bst;
+    
+    // Create nodes
+    Vector<IntrusiveTestNode*> nodes;
+    for (int i = 1; i <= 15; i++) {
+        nodes.push(new IntrusiveTestNode(i));
+        bst.insert(nodes[i-1]);
+    }
+    
+    // Erase all nodes in random order to stress swapNodes thoroughly
+    Vector<int> eraseOrder = {8, 3, 12, 1, 15, 6, 10, 4, 13, 7, 2, 11, 9, 5, 14};
+    
+    for (size_t i = 0; i < eraseOrder.getSize(); i++) {
+        int valueToErase = eraseOrder[i];
+        IntrusiveTestNode* erased = bst.erase(valueToErase);
+        ASSERT_NE(erased, nullptr);
+        ASSERT_EQ(erased->value, valueToErase);
+        
+        // Verify BST property is maintained after each erase
+        Vector<int> remaining;
+        bst.visitDepthFirstInOrder([&remaining](const IntrusiveTestNode& node) {
+            remaining.push(node.value);
+        });
+        
+        // Check that remaining values are still in sorted order
+        for (size_t j = 1; j < remaining.getSize(); j++) {
+            ASSERT_LT(remaining[j-1], remaining[j]);
+        }
+        
+        // Verify the erased value is no longer findable
+        ASSERT_EQ(bst.find(valueToErase), nullptr);
+    }
+    
+    // Clean up
+    for (auto* node : nodes) {
+        delete node;
+    }
+    
+    // Tree should be empty now
+    Vector<int> final;
+    bst.visitDepthFirstInOrder([&final](const IntrusiveTestNode& node) {
+        final.push(node.value);
+    });
+    ASSERT_EQ(final.getSize(), 0);
+}
+
