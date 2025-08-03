@@ -12,6 +12,7 @@
 #include "core/utility.h"
 #include "core/TypeTraits.h"
 #include <core/algo/sort.h>
+#include <initializer_list.h>
 
 template <typename T>
 class Vector {
@@ -112,6 +113,12 @@ public:
         other.size = 0;
         other.capacity = 0;
         return *this;
+    }
+
+    Vector(std::initializer_list<T> initializer) : Vector(initializer.size()){
+        for (auto& element : initializer) {
+            this -> push(element);
+        }
     }
 
     //Destructor

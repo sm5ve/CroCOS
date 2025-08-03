@@ -67,6 +67,9 @@ void print_tuple(Stream& ps, const Tuple& t, index_sequence<Is...>) {
     ps << ")";
 }
 
+namespace Core {
+    class PrintStream;
+}
 
 template<typename... Ts>
 Core::PrintStream& operator <<(Core::PrintStream& ps, const Tuple<Ts...>& var) requires(all_streamable_v<Core::PrintStream, Ts...>){
