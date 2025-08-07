@@ -32,6 +32,10 @@ namespace Core{
     {
         ps << t;
     };
+
+#ifdef CROCOS_TESTING
+    PrintStream& cout();
+#endif
 }
 
 #endif //CROCOS_PRINTSTREAM_H

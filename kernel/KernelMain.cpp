@@ -8,6 +8,7 @@
 #include <core/GraphBuilder.h>
 #include <core/algo/GraphAlgorithms.h>
 #include <core/ds/Heap.h>
+#include <core/ds/Tuple.h>
 
 extern "C" void (*__init_array_start[])(void) __attribute__((weak));
 extern "C" void (*__init_array_end[])(void) __attribute__((weak));

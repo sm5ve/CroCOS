@@ -226,17 +226,41 @@ public:
         return size;
     }
 
+    bool empty() const {
+        return size == 0;
+    }
+
     size_t getCapacity() const {
         return capacity;
     }
 
-    T& operator[](size_t index) {
+    template <UnsignedIntegral Index>
+    T& operator[](Index index) {
         assert(index < size, "Index out of bounds");
         return data[index];
     }
 
-    const T& operator[](size_t index) const {
+    template <UnsignedIntegral Index>
+    const T& operator[](Index index) const {
         assert(index < size, "Index out of bounds");
+        return data[index];
+    }
+
+    template <SignedIntegral Index>
+    T& operator[](Index index) {
+        assert(index < (Index)size, "Index out of bounds");
+        assert((Index)size + index >= 0, "Index out of bounds ", index, " has size ", size);
+        if (index < 0)
+            return data[size + index];
+        return data[index];
+    }
+
+    template <SignedIntegral Index>
+    const T& operator[](Index index) const {
+        assert(index < (Index)size, "Index out of bounds");
+        assert((Index)size + index >= 0, "Index out of bounds ", index, " has size ", size);
+        if (index < 0)
+            return data[size + index];
         return data[index];
     }
 
@@ -254,6 +278,10 @@ public:
 
     const T* end() const {
         return data + size;
+    }
+
+    T* top() {
+        return &data[size - 1];
     }
 
     void ensureRoom(size_t openSlots){

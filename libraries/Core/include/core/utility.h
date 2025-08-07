@@ -548,4 +548,14 @@ concept OrderedSemigroup = requires(T a, T b) {
     { a < b } -> convertible_to<bool>;
 };
 
+template <typename T>
+concept UnsignedIntegral = requires {
+    requires T(0) < T(-1); // true only for unsigned
+};
+
+template <typename T>
+concept SignedIntegral = requires {
+    requires T(-1) < T(0); // true only for signed
+};
+
 #endif //CROCOS_UTILITY_H

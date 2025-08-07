@@ -50,6 +50,9 @@ namespace CroCOSTest {
                 throw CroCOSTest::AssertionFailure("Assertion failed: expected false but got true: " #condition); \
             } \
         } while(0)
+
+	#define ASSERT_UNREACHABLE(message) \
+        throw CroCOSTest::AssertionFailure("Assertion failed: unreachable: " #message);
     
     #define ASSERT_EQ(expected, actual) \
         do { \

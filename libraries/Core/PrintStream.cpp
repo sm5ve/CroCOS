@@ -74,4 +74,18 @@ namespace Core{
         }
         return *this;
     }
+
+#ifdef CROCOS_TESTING
+    class Cout : public PrintStream{
+    protected:
+        void putString(const char * str){
+            std::cout << str;
+        }
+    };
+
+    PrintStream& cout() {
+        static Cout stream;
+        return stream;
+    }
+#endif
 }
