@@ -602,7 +602,7 @@ TEST(redBlackTreeInOrderTraversal) {
     
     // In-order traversal should give sorted sequence
     Vector<int> result;
-    rbt.visitDepthFirstInOrder([&result](const RedBlackTreeNode<int>& node) {
+    rbt.visitDepthFirstInOrder([&result](const auto& node) {
         result.push(node.data);
     });
     
@@ -737,7 +737,7 @@ TEST(redBlackTreeBalancingProperties) {
     
     // Verify in-order traversal gives sorted sequence
     Vector<int> result;
-    rbt.visitDepthFirstInOrder([&result](const RedBlackTreeNode<int>& node) {
+    rbt.visitDepthFirstInOrder([&result](const auto& node) {
         result.push(node.data);
     });
     
@@ -749,7 +749,7 @@ TEST(redBlackTreeBalancingProperties) {
 
 // Helper to verify red-black tree properties
 template<typename T>
-bool verifyRBTStructure(const RedBlackTreeNode<T>* node, int& blackHeight) {
+bool verifyRBTStructure(const RedBlackTreeNode<T, NoAugmentation>* node, int& blackHeight) {
     if (node == nullptr) {
         blackHeight = 1; // Null nodes are considered black
         return true;
@@ -765,8 +765,8 @@ bool verifyRBTStructure(const RedBlackTreeNode<T>* node, int& blackHeight) {
 
     // Property 2: All paths to leaves have same black height
     int leftBlackHeight = 0, rightBlackHeight = 0;
-    if (!verifyRBTStructure(node->left, leftBlackHeight) ||
-        !verifyRBTStructure(node->right, rightBlackHeight)) {
+    if (!verifyRBTStructure<int>(node->left, leftBlackHeight) ||
+        !verifyRBTStructure<int>(node->right, rightBlackHeight)) {
 		ASSERT_UNREACHABLE("Child tree failure");
         return false;
     }
@@ -792,7 +792,7 @@ TEST(redBlackTreeRedBlackProperties) {
     // Root should be black (this is a fundamental red-black tree property)
     // We can't directly access the root, but we can verify the tree maintains sorted order
     Vector<int> sortedResult;
-    rbt.visitDepthFirstInOrder([&sortedResult](const RedBlackTreeNode<int>& node) {
+    rbt.visitDepthFirstInOrder([&sortedResult](const auto& node) {
         sortedResult.push(node.data);
     });
     
@@ -807,7 +807,7 @@ TEST(redBlackTreeRedBlackProperties) {
     }
 
 	int blackHeight = 0;
-	ASSERT_TRUE(verifyRBTStructure(rbt.getRoot(), blackHeight));
+	ASSERT_TRUE(verifyRBTStructure<int>(rbt.getRoot(), blackHeight));
 }
 
 TEST(redBlackTreeLargeDataset) {
@@ -845,7 +845,7 @@ TEST(redBlackTreeLargeDataset) {
     
     // Verify in-order traversal gives sorted sequence
     Vector<int> result;
-    rbt.visitDepthFirstInOrder([&result](const RedBlackTreeNode<int>& node) {
+    rbt.visitDepthFirstInOrder([&result](const auto& node) {
         result.push(node.data);
     });
     
@@ -855,7 +855,7 @@ TEST(redBlackTreeLargeDataset) {
     }
 
 	int blackHeight = 0;
-	ASSERT_TRUE(verifyRBTStructure(rbt.getRoot(), blackHeight));
+	ASSERT_TRUE(verifyRBTStructure<int>(rbt.getRoot(), blackHeight));
 }
 
 TEST(redBlackTreeNoDuplicates) {
@@ -871,7 +871,7 @@ TEST(redBlackTreeNoDuplicates) {
     
     // Should only contain unique values
     Vector<int> result;
-    rbt.visitDepthFirstInOrder([&result](const RedBlackTreeNode<int>& node) {
+    rbt.visitDepthFirstInOrder([&result](const auto& node) {
         result.push(node.data);
     });
     
@@ -881,7 +881,7 @@ TEST(redBlackTreeNoDuplicates) {
     ASSERT_EQ(result[2], 7);
 
 	int blackHeight = 0;
-	ASSERT_TRUE(verifyRBTStructure(rbt.getRoot(), blackHeight));
+	ASSERT_TRUE(verifyRBTStructure<int>(rbt.getRoot(), blackHeight));
 }
 
 TEST(redBlackTreeEraseRedLeaf) {
@@ -894,7 +894,7 @@ TEST(redBlackTreeEraseRedLeaf) {
     
     // Verify initial structure
     int blackHeight = 0;
-    ASSERT_TRUE(verifyRBTStructure(rbt.getRoot(), blackHeight));
+    ASSERT_TRUE(verifyRBTStructure<int>(rbt.getRoot(), blackHeight));
     
     // Erase red leaf (should not require fixup)
     ASSERT_TRUE(rbt.erase(5));
@@ -902,7 +902,7 @@ TEST(redBlackTreeEraseRedLeaf) {
     
     // Verify structure is still valid
     blackHeight = 0;
-    ASSERT_TRUE(verifyRBTStructure(rbt.getRoot(), blackHeight));
+    ASSERT_TRUE(verifyRBTStructure<int>(rbt.getRoot(), blackHeight));
     
     // Remaining elements should still be there
     ASSERT_TRUE(rbt.contains(10));
@@ -932,10 +932,10 @@ TEST(redBlackTreeEraseBlackLeafShouldTriggerFixup) {
     
     // Verify initial structure
     int blackHeight = 0;
-    ASSERT_TRUE(verifyRBTStructure(rbt.getRoot(), blackHeight));
+    ASSERT_TRUE(verifyRBTStructure<int>(rbt.getRoot(), blackHeight));
 
 	int toDelete = -1;
-    rbt.visitDepthFirstInOrder([&toDelete](const RedBlackTreeNode<int>& node) {
+    rbt.visitDepthFirstInOrder([&toDelete](const auto& node) {
 		if(node.left == nullptr && node.right == nullptr){
 			if(!node.isRed){
 				toDelete = node.data;
@@ -957,11 +957,11 @@ TEST(redBlackTreeEraseNodeWithOneChild) {
     
     // Verify initial structure
     int blackHeight = 0;
-    ASSERT_TRUE(verifyRBTStructure(rbt.getRoot(), blackHeight));
+    ASSERT_TRUE(verifyRBTStructure<int>(rbt.getRoot(), blackHeight));
     
     // Find a node with exactly one child
     int nodeWithOneChild = -1;
-    rbt.visitDepthFirstInOrder([&nodeWithOneChild](const RedBlackTreeNode<int>& node) {
+    rbt.visitDepthFirstInOrder([&nodeWithOneChild](const auto& node) {
         bool hasLeft = (node.left != nullptr);
         bool hasRight = (node.right != nullptr);
         if (hasLeft != hasRight) { // XOR - exactly one child
@@ -976,7 +976,7 @@ TEST(redBlackTreeEraseNodeWithOneChild) {
         
         // Verify red-black properties are maintained
         blackHeight = 0;
-        ASSERT_TRUE(verifyRBTStructure(rbt.getRoot(), blackHeight));
+        ASSERT_TRUE(verifyRBTStructure<int>(rbt.getRoot(), blackHeight));
         
         // Verify remaining nodes are still present
         for (int val : values) {
@@ -998,11 +998,11 @@ TEST(redBlackTreeEraseNodeWithTwoChildren) {
     
     // Verify initial structure
     int blackHeight = 0;
-    ASSERT_TRUE(verifyRBTStructure(rbt.getRoot(), blackHeight));
+    ASSERT_TRUE(verifyRBTStructure<int>(rbt.getRoot(), blackHeight));
     
     // Find a node with two children
     int nodeWithTwoChildren = -1;
-    rbt.visitDepthFirstInOrder([&nodeWithTwoChildren](const RedBlackTreeNode<int>& node) {
+    rbt.visitDepthFirstInOrder([&nodeWithTwoChildren](const auto& node) {
         if (node.left != nullptr && node.right != nullptr) {
             nodeWithTwoChildren = node.data;
         }
@@ -1016,11 +1016,11 @@ TEST(redBlackTreeEraseNodeWithTwoChildren) {
     
     // Verify red-black properties are maintained
     blackHeight = 0;
-    ASSERT_TRUE(verifyRBTStructure(rbt.getRoot(), blackHeight));
+    ASSERT_TRUE(verifyRBTStructure<int>(rbt.getRoot(), blackHeight));
     
     // Verify remaining nodes are still present and tree is sorted
     Vector<int> result;
-    rbt.visitDepthFirstInOrder([&result](const RedBlackTreeNode<int>& node) {
+    rbt.visitDepthFirstInOrder([&result](const auto& node) {
         result.push(node.data);
     });
     
@@ -1047,7 +1047,7 @@ TEST(redBlackTreeEraseComplexRootCases) {
     
     // Verify initial structure
     int blackHeight = 0;
-    ASSERT_TRUE(verifyRBTStructure(rbt.getRoot(), blackHeight));
+    ASSERT_TRUE(verifyRBTStructure<int>(rbt.getRoot(), blackHeight));
     
     // Erase root node (should trigger complex rebalancing)
     ASSERT_TRUE(rbt.erase(20));
@@ -1055,7 +1055,7 @@ TEST(redBlackTreeEraseComplexRootCases) {
     
     // Verify red-black properties are maintained
     blackHeight = 0;
-    ASSERT_TRUE(verifyRBTStructure(rbt.getRoot(), blackHeight));
+    ASSERT_TRUE(verifyRBTStructure<int>(rbt.getRoot(), blackHeight));
     
     // Verify all other nodes are still present
     for (int val : values) {
@@ -1066,7 +1066,7 @@ TEST(redBlackTreeEraseComplexRootCases) {
     
     // Verify tree is still sorted
     Vector<int> result;
-    rbt.visitDepthFirstInOrder([&result](const RedBlackTreeNode<int>& node) {
+    rbt.visitDepthFirstInOrder([&result](const auto& node) {
         result.push(node.data);
     });
     
@@ -1093,11 +1093,11 @@ TEST(redBlackTreeSequentialErase) {
         
         // Verify red-black properties after each deletion
         int blackHeight = 0;
-        ASSERT_TRUE(verifyRBTStructure(rbt.getRoot(), blackHeight));
+        ASSERT_TRUE(verifyRBTStructure<int>(rbt.getRoot(), blackHeight));
         
         // Verify tree maintains sorted order
         Vector<int> result;
-        rbt.visitDepthFirstInOrder([&result](const RedBlackTreeNode<int>& node) {
+        rbt.visitDepthFirstInOrder([&result](const auto& node) {
             result.push(node.data);
         });
         
@@ -1143,7 +1143,7 @@ TEST(redBlackTreeEraseAllNodesRandomOrder) {
         if (!rbt.empty()) { // Skip verification for empty tree
             // Verify red-black properties after each deletion
             int blackHeight = 0;
-            ASSERT_TRUE(verifyRBTStructure(rbt.getRoot(), blackHeight));
+            ASSERT_TRUE(verifyRBTStructure<int>(rbt.getRoot(), blackHeight));
         }
     }
     
@@ -1164,7 +1164,7 @@ TEST(redBlackTreeEraseFixupStressCases) {
     
     // Verify initial structure
     int blackHeight = 0;
-    ASSERT_TRUE(verifyRBTStructure(rbt.getRoot(), blackHeight));
+    ASSERT_TRUE(verifyRBTStructure<int>(rbt.getRoot(), blackHeight));
     
     // Delete nodes that will trigger different fixup scenarios
     Vector<int> problematicDeletes = {4, 124, 16, 112, 8, 120, 32, 96}; // Leaf and internal nodes
@@ -1174,11 +1174,11 @@ TEST(redBlackTreeEraseFixupStressCases) {
         
         // Verify properties after each challenging deletion
         int currentBlackHeight = 0;
-        ASSERT_TRUE(verifyRBTStructure(rbt.getRoot(), currentBlackHeight));
+        ASSERT_TRUE(verifyRBTStructure<int>(rbt.getRoot(), currentBlackHeight));
         
         // Verify tree still maintains BST property
         Vector<int> inOrder;
-        rbt.visitDepthFirstInOrder([&inOrder](const RedBlackTreeNode<int>& node) {
+        rbt.visitDepthFirstInOrder([&inOrder](const auto& node) {
             inOrder.push(node.data);
         });
         
@@ -1210,7 +1210,7 @@ TEST(redBlackTreeEraseNonExistentValues) {
     
     // Verify structure is still valid
     int blackHeight = 0;
-    ASSERT_TRUE(verifyRBTStructure(rbt.getRoot(), blackHeight));
+    ASSERT_TRUE(verifyRBTStructure<int>(rbt.getRoot(), blackHeight));
 }
 
 TEST(redBlackTreeRandomInsertDeleteStressTest) {
@@ -1243,7 +1243,7 @@ TEST(redBlackTreeRandomInsertDeleteStressTest) {
             
             // Verify tree structure after each insertion
             int blackHeight = 0;
-            ASSERT_TRUE(verifyRBTStructure(rbt.getRoot(), blackHeight));
+            ASSERT_TRUE(verifyRBTStructure<int>(rbt.getRoot(), blackHeight));
         }
         
         // Verify all values are present
@@ -1267,7 +1267,7 @@ TEST(redBlackTreeRandomInsertDeleteStressTest) {
             // Verify tree structure after each deletion
             if (!rbt.empty()) {
                 int blackHeight = 0;
-                ASSERT_TRUE(verifyRBTStructure(rbt.getRoot(), blackHeight));
+                ASSERT_TRUE(verifyRBTStructure<int>(rbt.getRoot(), blackHeight));
             }
             
             // Verify remaining values are still present
@@ -1292,7 +1292,7 @@ TEST(redBlackTreeExtremeCasesStressTest) {
         for (int i = 1; i <= 50; i++) {
             rbt.insert(i);
             int blackHeight = 0;
-            ASSERT_TRUE(verifyRBTStructure(rbt.getRoot(), blackHeight));
+            ASSERT_TRUE(verifyRBTStructure<int>(rbt.getRoot(), blackHeight));
         }
         
         // Delete in reverse order: 50,49,48,...,1
@@ -1300,7 +1300,7 @@ TEST(redBlackTreeExtremeCasesStressTest) {
             ASSERT_TRUE(rbt.erase(i));
             if (!rbt.empty()) {
                 int blackHeight = 0;
-                ASSERT_TRUE(verifyRBTStructure(rbt.getRoot(), blackHeight));
+                ASSERT_TRUE(verifyRBTStructure<int>(rbt.getRoot(), blackHeight));
             }
         }
         
@@ -1315,7 +1315,7 @@ TEST(redBlackTreeExtremeCasesStressTest) {
         for (int i = 50; i >= 1; i--) {
             rbt.insert(i);
             int blackHeight = 0;
-            ASSERT_TRUE(verifyRBTStructure(rbt.getRoot(), blackHeight));
+            ASSERT_TRUE(verifyRBTStructure<int>(rbt.getRoot(), blackHeight));
         }
         
         // Delete in order: 1,2,3,...,50
@@ -1323,7 +1323,7 @@ TEST(redBlackTreeExtremeCasesStressTest) {
             ASSERT_TRUE(rbt.erase(i));
             if (!rbt.empty()) {
                 int blackHeight = 0;
-                ASSERT_TRUE(verifyRBTStructure(rbt.getRoot(), blackHeight));
+                ASSERT_TRUE(verifyRBTStructure<int>(rbt.getRoot(), blackHeight));
             }
         }
         
@@ -1340,7 +1340,7 @@ TEST(redBlackTreeExtremeCasesStressTest) {
             rbt.insert(i);
             inserted.push(i);
             int blackHeight = 0;
-            ASSERT_TRUE(verifyRBTStructure(rbt.getRoot(), blackHeight));
+            ASSERT_TRUE(verifyRBTStructure<int>(rbt.getRoot(), blackHeight));
         }
         
         // Insert 2,4,6,8,...,100 (evens)
@@ -1348,7 +1348,7 @@ TEST(redBlackTreeExtremeCasesStressTest) {
             rbt.insert(i);
             inserted.push(i);
             int blackHeight = 0;
-            ASSERT_TRUE(verifyRBTStructure(rbt.getRoot(), blackHeight));
+            ASSERT_TRUE(verifyRBTStructure<int>(rbt.getRoot(), blackHeight));
         }
         
         // Delete every other element
@@ -1356,7 +1356,7 @@ TEST(redBlackTreeExtremeCasesStressTest) {
             ASSERT_TRUE(rbt.erase(inserted[i]));
             if (!rbt.empty()) {
                 int blackHeight = 0;
-                ASSERT_TRUE(verifyRBTStructure(rbt.getRoot(), blackHeight));
+                ASSERT_TRUE(verifyRBTStructure<int>(rbt.getRoot(), blackHeight));
             }
         }
         
@@ -1365,7 +1365,7 @@ TEST(redBlackTreeExtremeCasesStressTest) {
             ASSERT_TRUE(rbt.erase(inserted[i]));
             if (!rbt.empty()) {
                 int blackHeight = 0;
-                ASSERT_TRUE(verifyRBTStructure(rbt.getRoot(), blackHeight));
+                ASSERT_TRUE(verifyRBTStructure<int>(rbt.getRoot(), blackHeight));
             }
         }
         
@@ -1405,7 +1405,7 @@ TEST(redBlackTreeLargeScaleStressTest) {
             // Only verify structure every 50 insertions to speed up test
             if (i % 50 == 0) {
                 int blackHeight = 0;
-                ASSERT_TRUE(verifyRBTStructure(rbt.getRoot(), blackHeight));
+                ASSERT_TRUE(verifyRBTStructure<int>(rbt.getRoot(), blackHeight));
             }
         }
         
@@ -1415,7 +1415,7 @@ TEST(redBlackTreeLargeScaleStressTest) {
             
             if (i % 50 == 0 && !rbt.empty()) {
                 int blackHeight = 0;
-                ASSERT_TRUE(verifyRBTStructure(rbt.getRoot(), blackHeight));
+                ASSERT_TRUE(verifyRBTStructure<int>(rbt.getRoot(), blackHeight));
             }
         }
         
@@ -1425,13 +1425,13 @@ TEST(redBlackTreeLargeScaleStressTest) {
             
             if (i % 50 == 0) {
                 int blackHeight = 0;
-                ASSERT_TRUE(verifyRBTStructure(rbt.getRoot(), blackHeight));
+                ASSERT_TRUE(verifyRBTStructure<int>(rbt.getRoot(), blackHeight));
             }
         }
         
         // Final structure verification
         int blackHeight = 0;
-        ASSERT_TRUE(verifyRBTStructure(rbt.getRoot(), blackHeight));
+        ASSERT_TRUE(verifyRBTStructure<int>(rbt.getRoot(), blackHeight));
         
         // Verify expected contents (first quarter deleted, rest present)
         for (int i = 0; i < largeValue / 4; i++) {
@@ -1447,6 +1447,102 @@ TEST(redBlackTreeLargeScaleStressTest) {
         }
         
         ASSERT_TRUE(rbt.empty());
+    }
+}
+
+TEST(augmentedRedBlackTreeSumStressTest) {
+    // Accumulator that computes the sum of all values in subtree
+    struct SumAccumulator {
+        int operator()(const int& nodeValue, const int* leftSum, const int* rightSum) const {
+            int left = leftSum ? *leftSum : 0;
+            int right = rightSum ? *rightSum : 0;
+            return nodeValue + left + right;
+        }
+    };
+    
+    using SumAugmentedRBT = AugmentedRedBlackTree<int, int, SumAccumulator>;
+    
+    const int maxValue = 50;
+    const int maxLoop = 20;
+    
+    // Seed for reproducible results
+    std::srand(123);
+    
+    for (int loop = 0; loop < maxLoop; loop++) {
+        SumAugmentedRBT arbt;
+        Vector<int> values;
+        int expectedTotalSum = 0;
+
+        // Generate sequential values 1 to maxValue
+        for (int i = 1; i <= maxValue; i++) {
+            values.push(i);
+            expectedTotalSum += i;
+        }
+        
+        // Shuffle for random insertion order
+        for (int i = maxValue - 1; i > 0; i--) {
+            int j = std::rand() % (i + 1);
+            int temp = values[i];
+            values[i] = values[j];
+            values[j] = temp;
+        }
+        
+        // Insert in random order and verify sum augmentation
+        int partialExpectedSum = 0;
+        for (int i = 0; i < maxValue; i++) {
+            arbt.insert(values[i]);
+            partialExpectedSum += values[i];
+
+			// Access root's augmentation data to verify sum
+            const auto* root = arbt.getRoot();
+            if (root != nullptr) {
+                ASSERT_EQ(root->augmentationData, partialExpectedSum);
+            }
+        }
+        
+        // All values inserted - verify final sum
+        const auto* root = arbt.getRoot();
+        ASSERT_NE(root, nullptr);
+        ASSERT_EQ(root->augmentationData, expectedTotalSum);
+        
+        // Verify all values are present
+        for (int i = 1; i <= maxValue; i++) {
+            ASSERT_TRUE(arbt.contains(i));
+        }
+        
+        // Shuffle again for random deletion order
+        for (int i = maxValue - 1; i > 0; i--) {
+            int j = std::rand() % (i + 1);
+            int temp = values[i];
+            values[i] = values[j];
+            values[j] = temp;
+        }
+        
+        // Delete in random order and verify sum augmentation
+        for (int i = 0; i < maxValue; i++) {
+            int valueToDelete = values[i];
+            ASSERT_TRUE(arbt.erase(valueToDelete));
+            ASSERT_FALSE(arbt.contains(valueToDelete));
+            expectedTotalSum -= valueToDelete;
+            
+            // Verify tree structure after deletion
+            if (!arbt.empty()) {
+                
+                // Verify sum augmentation at root
+                const auto* rootAfterDelete = arbt.getRoot();
+                ASSERT_NE(rootAfterDelete, nullptr);
+                ASSERT_EQ(rootAfterDelete->augmentationData, expectedTotalSum);
+            }
+            
+            // Verify remaining values are still present
+            for (int j = i + 1; j < maxValue; j++) {
+                ASSERT_TRUE(arbt.contains(values[j]));
+            }
+        }
+        
+        // Tree should be empty now
+        ASSERT_TRUE(arbt.empty());
+        ASSERT_EQ(expectedTotalSum, 0);
     }
 }
 

@@ -1,7 +1,6 @@
 set(MALLOC_SOURCES
         InternalAllocator.cpp
         backends/Kernel.cpp
-        backends/UnitTests.cpp
 )
 
 #Special version of Core meant to be linked with the kernel
