@@ -55,7 +55,7 @@ TEST(binaryTreeTraversal) {
     
     // In-order traversal: 3, 5, 7, 10, 15
     Vector<int> inOrder;
-    tree.visitDepthFirstInOrder([&inOrder](const TreeNode<int>& node) {
+    tree.visitDepthFirstInOrder([&inOrder](const TreeNode<int, true>& node) {
         inOrder.push(node.data);
     });
     
@@ -68,7 +68,7 @@ TEST(binaryTreeTraversal) {
     
     // Post-order traversal: 3, 7, 5, 15, 10
     Vector<int> postOrder;
-    tree.visitDepthFirstPostOrder([&postOrder](const TreeNode<int>& node) {
+    tree.visitDepthFirstPostOrder([&postOrder](const TreeNode<int, true>& node) {
         postOrder.push(node.data);
     });
     
@@ -132,7 +132,7 @@ TEST(binarySearchTreeInOrderTraversal) {
     
     // In-order traversal should give sorted sequence
     Vector<int> result;
-    bst.visitDepthFirstInOrder([&result](const TreeNode<int>& node) {
+    bst.visitDepthFirstInOrder([&result](const TreeNode<int, true>& node) {
         result.push(node.data);
     });
     
@@ -1545,5 +1545,4 @@ TEST(augmentedRedBlackTreeSumStressTest) {
         ASSERT_EQ(expectedTotalSum, 0);
     }
 }
-
 

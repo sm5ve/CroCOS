@@ -23,6 +23,7 @@ public:
     StaticStack() : stackPointer(0) {}
 
     void push(T t){
+		assert(stackPointer < N, "Stack is full");
         data[stackPointer++] = t;
     }
 

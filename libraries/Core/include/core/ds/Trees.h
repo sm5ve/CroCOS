@@ -27,10 +27,15 @@ concept RedBlackTreeNodeType = requires(NodeType& node, const RedBlackTreeInfoEx
     BinaryTreeNodeType<NodeType, RedBlackTreeInfoExtractor>;
 };
 
-template <typename NodeType, typename RedBlackTreeInfoExtractor>
-concept AugmentedBinaryTreeNodeType = requires(NodeType& node, const NodeType& cnode, const RedBlackTreeInfoExtractor extractor){
-	requires IsReference<decltype(RedBlackTreeInfoExtractor::augmentedData(node))>;
-	{RedBlackTreeInfoExtractor::recomputeAugmentedData(cnode, &cnode, &cnode)} -> IsSame<remove_reference_t<decltype(RedBlackTreeInfoExtractor::augmentedData(node))>>;
+template <typename NodeType, typename BinaryTreeInfoExtractor>
+concept AugmentedBinaryTreeNodeType = requires(NodeType& node, const NodeType& cnode, const BinaryTreeInfoExtractor extractor){
+	requires IsReference<decltype(BinaryTreeInfoExtractor::augmentedData(node))>;
+	{BinaryTreeInfoExtractor::recomputeAugmentedData(cnode, &cnode, &cnode)} -> IsSame<remove_reference_t<decltype(BinaryTreeInfoExtractor::augmentedData(node))>>;
+};
+
+template <typename NodeType, typename BinaryTreeInfoExtractor>
+concept ParentPointerBinaryTreeNodeType = requires(NodeType& node, const BinaryTreeInfoExtractor extractor){
+	{BinaryTreeInfoExtractor::parent(node)} -> IsSame<NodeType*&>;
 };
 
 struct NoAugmentation{};
@@ -144,8 +149,8 @@ protected:
     }
 
     template <typename Visitor>
-        requires ConstTreeVisitor<NodeType, Visitor>
-        TreeSearchAction visitDepthFirstInOrderImpl(Visitor&& visitor, const NodeType* node = nullptr) const{
+    requires ConstTreeVisitor<NodeType, Visitor>
+    TreeSearchAction visitDepthFirstInOrderImpl(Visitor&& visitor, const NodeType* node = nullptr) const{
         if(node == nullptr){
             return Continue;
         }
@@ -209,6 +214,14 @@ protected:
         BinaryTreeInfoExtractor::left(*newRoot) = pivot;
         //Update the root.
         node = newRoot;
+		if constexpr (ParentPointerBinaryTreeNodeType<NodeType, BinaryTreeInfoExtractor>) {
+			BinaryTreeInfoExtractor::parent(*newRoot) = BinaryTreeInfoExtractor::parent(*pivot);
+			BinaryTreeInfoExtractor::parent(*pivot) = newRoot;
+			auto* child = BinaryTreeInfoExtractor::right(*pivot);
+			if(child != nullptr){
+				BinaryTreeInfoExtractor::parent(*child) = pivot;
+			}
+		}
 		if constexpr (AugmentedBinaryTreeNodeType<NodeType, BinaryTreeInfoExtractor>) {
 			{
 				auto recomputedAugmentedData = BinaryTreeInfoExtractor::recomputeAugmentedData(*pivot, BinaryTreeInfoExtractor::left(*pivot), BinaryTreeInfoExtractor::right(*pivot));
@@ -237,6 +250,14 @@ protected:
         BinaryTreeInfoExtractor::right(*newRoot) = pivot;
         //Update the root
         node = newRoot;
+		if constexpr (ParentPointerBinaryTreeNodeType<NodeType, BinaryTreeInfoExtractor>) {
+			BinaryTreeInfoExtractor::parent(*newRoot) = BinaryTreeInfoExtractor::parent(*pivot);
+			BinaryTreeInfoExtractor::parent(*pivot) = newRoot;
+			auto* child = BinaryTreeInfoExtractor::left(*pivot);
+			if(child != nullptr){
+				BinaryTreeInfoExtractor::parent(*child) = pivot;
+			}
+		}
 		if constexpr (AugmentedBinaryTreeNodeType<NodeType, BinaryTreeInfoExtractor>) {
 			{
 				auto recomputedAugmentedData = BinaryTreeInfoExtractor::recomputeAugmentedData(*pivot, BinaryTreeInfoExtractor::left(*pivot), BinaryTreeInfoExtractor::right(*pivot));
@@ -358,52 +379,223 @@ class IntrusiveBinarySearchTree : protected IntrusiveBinaryTree<NodeType, Binary
     using Parent = IntrusiveBinaryTree<NodeType, BinaryTreeInfoExtractor>;
     using NodeData = decltype(BinaryTreeInfoExtractor::data(std::declval<NodeType&>()));
 
+static constexpr bool HasParentPointer = ParentPointerBinaryTreeNodeType<NodeType, BinaryTreeInfoExtractor>;
+static constexpr bool AugmentedNode = AugmentedBinaryTreeNodeType<NodeType, BinaryTreeInfoExtractor>;
+
 protected:
-	void updateNodeAugmentationData(NodeType* node) requires AugmentedBinaryTreeNodeType<NodeType, BinaryTreeInfoExtractor>{
-		if(node == nullptr){return;}
-		auto recomputedAugmentedData = BinaryTreeInfoExtractor::recomputeAugmentedData(*node, BinaryTreeInfoExtractor::left(*node), BinaryTreeInfoExtractor::right(*node));
-		BinaryTreeInfoExtractor::augmentedData(*node) = recomputedAugmentedData;
+	//Annoying nonsense in case multiple nodes have the same data
+	NodeType** findParentPointerTreeTraverse(const NodeType* node, NodeType** searchRoot) const requires (!HasParentPointer){
+		if(searchRoot == nullptr){return nullptr;}
+		if(*searchRoot == node){return searchRoot;}
+		if(BinaryTreeInfoExtractor::data(*node) != BinaryTreeInfoExtractor::data(**searchRoot)){return nullptr;}
+		NodeType** possible = findParentPointerTreeTraverse(node, BinaryTreeInfoExtractor::left(**searchRoot));
+		if(possible != nullptr){return possible;}
+		return findParentPointerTreeTraverse(node, BinaryTreeInfoExtractor::right(**searchRoot));
+	}
+
+	NodeType** findParentPointer(const NodeType* node) const requires (!HasParentPointer){
+		NodeType** current = &this -> root;
+		if(node == nullptr){return nullptr;}
+		NodeData& value = BinaryTreeInfoExtractor::data(*node);
+		while(*current != nullptr){
+			NodeData& currentValue = BinaryTreeInfoExtractor::data(**current);
+			if(value == currentValue){
+				return findParentPointerTreeTraverse(node, current);
+			}
+			else if(comparator(value, currentValue)){
+				current = &BinaryTreeInfoExtractor::right(**current);
+			}
+			else{
+				current = &BinaryTreeInfoExtractor::left(**current);
+			}
+		}
+		return nullptr;
+	}
+
+	template <typename StackType>
+	requires IsStack<NodeType**, StackType>
+	//Populates the ancestry stack starting at &root. *ancestryStack[-1] is either nullptr if no node exists
+	//with value targetValue, or it points to a node with that value
+	//Returns true if the node exists, and false otherwise.
+	bool populateAncestryStack(const NodeData& targetValue, StackType& ancestryStack) requires (!HasParentPointer){
+		NodeType** current = &this -> root;
+		ancestryStack.push(current);
+		while(*current != nullptr){
+			NodeData& value = BinaryTreeInfoExtractor::data(**current);
+			if(targetValue == value){return true;}
+			//if value < targetValue, go right
+			if(comparator(value, targetValue)){
+				current = &BinaryTreeInfoExtractor::right(**current);
+			}
+			else{
+				current = &BinaryTreeInfoExtractor::left(**current);
+			}
+			ancestryStack.push(current);
+		}
+		return false;
 	}
 
 	template <typename StackType>
 	requires IsStack<NodeType*, StackType>
-	void fixupAugmentationData(NodeType* node) requires AugmentedBinaryTreeNodeType<NodeType, BinaryTreeInfoExtractor>{
-		if(this -> root == nullptr){return;}
-		if(node == nullptr){
-			updateNodeAugmentationData(BinaryTreeInfoExtractor::left(*this -> root));
-			updateNodeAugmentationData(BinaryTreeInfoExtractor::right(*this -> root));
-			updateNodeAugmentationData(this -> root);
-			return;
-		}
-		StackType ancestryStack;
+	//Populates the ancestry stack starting at node. *ancestryStack[-1] is either if the stack is empty,
+	//points to the would-be parent after a BST insert if the node does not exist
+	//or points to the node containing targetValue
+	//Returns true if the node exists, and false otherwise.
+	bool populateAncestryStack(const NodeData& targetValue, StackType& ancestryStack) requires (!HasParentPointer){
 		NodeType* current = this -> root;
-		const auto& targetValue = BinaryTreeInfoExtractor::data(*node);
-		updateNodeAugmentationData(BinaryTreeInfoExtractor::left(*node));
-		updateNodeAugmentationData(BinaryTreeInfoExtractor::right(*node));
-		while(true){
-			if(current == nullptr){return;}
+		while(current != nullptr){
 			ancestryStack.push(current);
-			const auto& value = BinaryTreeInfoExtractor::data(*current);
-			if(targetValue == value){break;}
-			//if value < targetValue, go right
+			NodeData& value = BinaryTreeInfoExtractor::data(*current);
+			if(targetValue == value){return true;}
 			if(comparator(value, targetValue)){
 				current = BinaryTreeInfoExtractor::right(*current);
 			}
 			else{
 				current = BinaryTreeInfoExtractor::left(*current);
 			}
-		};
+		}
+		return false;
+	}
+
+
+	//More annoying nonsense in case multiple nodes have the same data
+	template <typename StackType>
+	requires IsStack<NodeType**, StackType>
+	bool tryFindTargetNode(NodeType* targetNode, NodeType* searchNode, StackType& ancestryStack) requires (!HasParentPointer){
+		if(searchNode == nullptr){return false;}
+		if(searchNode == targetNode){return true;}
+		if(BinaryTreeInfoExtractor::data(*targetNode) != BinaryTreeInfoExtractor::data(*searchNode)){return false;}
+		ancestryStack.push(&BinaryTreeInfoExtractor::left(*searchNode));
+		bool found = tryFindTargetNode(targetNode, BinaryTreeInfoExtractor::left(*searchNode), ancestryStack);
+		if(found){return true;}
+		ancestryStack.pop();
+		ancestryStack.push(&BinaryTreeInfoExtractor::right(*searchNode));
+		return tryFindTargetNode(targetNode, BinaryTreeInfoExtractor::right(*searchNode), ancestryStack);
+	}
+
+	template <typename StackType>
+	requires IsStack<NodeType*, StackType>
+	bool tryFindTargetNode(NodeType* targetNode, NodeType* searchNode, StackType& ancestryStack) requires (!HasParentPointer){
+		if(searchNode == nullptr){return false;}
+		if(searchNode == targetNode){return true;}
+		if(BinaryTreeInfoExtractor::data(*targetNode) != BinaryTreeInfoExtractor::data(*searchNode)){return false;}
+		ancestryStack.push(BinaryTreeInfoExtractor::left(*searchNode));
+		bool found = tryFindTargetNode(targetNode, BinaryTreeInfoExtractor::left(*searchNode), ancestryStack);
+		if(found){return true;}
+		ancestryStack.pop();
+		ancestryStack.push(BinaryTreeInfoExtractor::right(*searchNode));
+		return tryFindTargetNode(targetNode, BinaryTreeInfoExtractor::right(*searchNode), ancestryStack);
+	}
+
+	template <typename StackType>
+	requires IsStack<NodeType**, StackType>
+	//Populates the ancestry stack starting at &root. *ancestryStack[-1] is either nullptr if no node exists
+	//with value targetValue, or it points to a node with that value
+	//Returns true if the node exists, and false otherwise.
+	bool populateAncestryStack(const NodeType* targetNode, StackType& ancestryStack) requires (!HasParentPointer){
+		NodeType** current = &this -> root;
+		ancestryStack.push(current);
+		const NodeData& targetValue = BinaryTreeInfoExtractor::data(*targetNode);
+		while(*current != nullptr){
+			NodeData& value = BinaryTreeInfoExtractor::data(**current);
+			if(targetValue == value){
+				return tryFindTargetNode(targetNode, *current, ancestryStack);
+			}
+			//if value < targetValue, go right
+			if(comparator(value, targetValue)){
+				current = &BinaryTreeInfoExtractor::right(**current);
+			}
+			else{
+				current = &BinaryTreeInfoExtractor::left(**current);
+			}
+			ancestryStack.push(current);
+		}
+		return false;
+	}
+
+	template <typename StackType>
+	requires IsStack<NodeType*, StackType>
+	//Populates the ancestry stack starting at &root. *ancestryStack[-1] is either nullptr if no node exists
+	//with value targetValue, or it points to a node with that value
+	//Returns true if the node exists, and false otherwise.
+	bool populateAncestryStack(const NodeType* targetNode, StackType& ancestryStack) requires (!HasParentPointer){
+		NodeType** current = &this -> root;
+		ancestryStack.push(*current);
+		const NodeData& targetValue = BinaryTreeInfoExtractor::data(*targetNode);
+		while(*current != nullptr){
+			NodeData& value = BinaryTreeInfoExtractor::data(**current);
+			if(targetValue == value){
+				return tryFindTargetNode(targetNode, *current, ancestryStack);
+			}
+			//if value < targetValue, go right
+			if(comparator(value, targetValue)){
+				current = &BinaryTreeInfoExtractor::right(**current);
+			}
+			else{
+				current = &BinaryTreeInfoExtractor::left(**current);
+			}
+			ancestryStack.push(*current);
+		}
+		return false;
+	}
+
+	bool updateNodeAugmentationData(NodeType* node) requires AugmentedBinaryTreeNodeType<NodeType, BinaryTreeInfoExtractor>{
+		if(node == nullptr){return false;}
+		auto oldData = BinaryTreeInfoExtractor::augmentedData(*node);
+		auto recomputedAugmentedData = BinaryTreeInfoExtractor::recomputeAugmentedData(*node, BinaryTreeInfoExtractor::left(*node), BinaryTreeInfoExtractor::right(*node));
+		BinaryTreeInfoExtractor::augmentedData(*node) = recomputedAugmentedData;
+		return oldData == recomputedAugmentedData;
+	}
+
+	template <typename StackType>
+	requires IsStack<NodeType*, StackType>
+	void fixupAugmentationData(StackType& ancestryStack) requires AugmentedNode && (!HasParentPointer){
 		while(!ancestryStack.empty()){
 			updateNodeAugmentationData(ancestryStack.pop());
 		}
 	}
 
+	template <typename StackType>
+	requires IsStack<NodeType**, StackType>
+	void fixupAugmentationData(StackType& ancestryStack) requires AugmentedNode && (!HasParentPointer){
+		while(!ancestryStack.empty()){
+			updateNodeAugmentationData(*ancestryStack.pop());
+		}
+	}
+
+	void fixupAugmentationData(NodeType* node) requires AugmentedNode && HasParentPointer{
+		if(this -> root == nullptr){return;}
+
+		NodeType* current = node;
+
+		do{
+			updateNodeAugmentationData(current);
+		} while(current = BinaryTreeInfoExtractor::parent(*current));
+	}
+
+	template <typename StackType>
+	requires IsStack<NodeType*, StackType>
+	void propagateAugmentationRefresh(StackType& ancestryStack) requires AugmentedNode && (!HasParentPointer){
+		while(!ancestryStack.empty()){
+			if(updateNodeAugmentationData(ancestryStack.pop())) return;
+		}
+	}
+
+	void propagateAugmentationRefresh(NodeType& node) requires AugmentedNode && HasParentPointer{
+		NodeType* current = node;
+		do{
+			if(updateNodeAugmentationData(current)) return;
+		} while(current = BinaryTreeInfoExtractor::parent(*current));
+	}
+
     Comparator comparator;
 
-    void insert(NodeType* toInsert, NodeType*& root){
+    void insert(NodeType* toInsert, NodeType*& root) requires (!AugmentedNode || HasParentPointer) {
+		NodeType* parent = nullptr;
         NodeType** current = &root;
 
         while(*current != nullptr){
+			parent = *current;
             if(comparator(BinaryTreeInfoExtractor::data(*toInsert), BinaryTreeInfoExtractor::data(**current))){
                 current = &BinaryTreeInfoExtractor::left(**current);
             }
@@ -416,115 +608,271 @@ protected:
         //Make sure to set the children to null just in case there's any stale data in the node
         BinaryTreeInfoExtractor::left(*toInsert) = nullptr;
         BinaryTreeInfoExtractor::right(*toInsert) = nullptr;
-    }
 
-    NodeType* findImpl(const remove_reference_t<NodeData>& value, NodeType* root) const{
-        NodeType* current = root;
-        while(current != nullptr){
-            if(value == BinaryTreeInfoExtractor::data(*current)){
+		if constexpr(HasParentPointer){
+			BinaryTreeInfoExtractor::parent(*toInsert) = parent;
+			if constexpr(AugmentedNode){
+				propagateAugmentationRefresh(*toInsert);
+			}
+		}
+    }
+	template <typename StackType>
+	requires IsStack<NodeType*, StackType>
+	void insert(NodeType* toInsert, NodeType*& root) requires (AugmentedNode && !HasParentPointer) {
+		StackType ancestryStack;
+        NodeType** current = &root;
+
+        while(*current != nullptr){
+			ancestryStack.push(*current);
+            if(comparator(BinaryTreeInfoExtractor::data(*toInsert), BinaryTreeInfoExtractor::data(**current))){
+                current = &BinaryTreeInfoExtractor::left(**current);
+            }
+            else{
+                current = &BinaryTreeInfoExtractor::right(**current);
+            }
+        }
+        *current = toInsert;
+
+        //Make sure to set the children to null just in case there's any stale data in the node
+        BinaryTreeInfoExtractor::left(*toInsert) = nullptr;
+        BinaryTreeInfoExtractor::right(*toInsert) = nullptr;
+
+		ancestryStack.push(toInsert);
+		propagateAugmentationRefresh(ancestryStack);
+	}
+
+    NodeType** findImpl(const remove_reference_t<NodeData>& value, NodeType** root) const{
+        NodeType** current = root;
+        while(*current != nullptr){
+            if(value == BinaryTreeInfoExtractor::data(**current)){
                 return current;
             }
             //if value < current, go left
-            if(comparator(value, BinaryTreeInfoExtractor::data(*current))){
-                current = BinaryTreeInfoExtractor::left(*current);
+            if(comparator(value, BinaryTreeInfoExtractor::data(**current))){
+                current = &BinaryTreeInfoExtractor::left(**current);
             }
             //otherwise go right
             else{
-                current = BinaryTreeInfoExtractor::right(*current);
+                current = &BinaryTreeInfoExtractor::right(**current);
             }
         }
         return nullptr;
     }
     
-    const NodeType* findImpl(const remove_reference_t<NodeData>& value, const NodeType* root) const{
-        const NodeType* current = root;
-        while(current != nullptr){
-            if(value == BinaryTreeInfoExtractor::data(*current)){
+    const NodeType* const* findImpl(const remove_reference_t<NodeData>& value, const NodeType* const* root) const{
+        const NodeType* const* current = root;
+        while(*current != nullptr){
+            if(value == BinaryTreeInfoExtractor::data(**current)){
                 return current;
             }
             //if value < current, go left
-            if(comparator(value, BinaryTreeInfoExtractor::data(*current))){
-                current = BinaryTreeInfoExtractor::left(*current);
+            if(comparator(value, BinaryTreeInfoExtractor::data(**current))){
+                current = &BinaryTreeInfoExtractor::left(**current);
             }
             //otherwise go right
             else{
-                current = BinaryTreeInfoExtractor::right(*current);
+                current = &BinaryTreeInfoExtractor::right(**current);
             }
         }
         return nullptr;
     }
 
-    NodeType* eraseNodeImpl(NodeType** toRemove){
+    NodeType* eraseNodeImpl(NodeType** toRemove) requires (!AugmentedNode || HasParentPointer) {
         NodeType* toReturn = *toRemove;
         //If one of the children of the node we are trying to erase is null, deletion is simple: just replace
         //the pointer to toRemove in its parent with the other child
+		NodeType* parent = nullptr;
         if(BinaryTreeInfoExtractor::left(*(*toRemove)) == nullptr){
+			if constexpr(HasParentPointer){
+				parent = BinaryTreeInfoExtractor::parent(*(*toRemove));
+			}
             *toRemove = BinaryTreeInfoExtractor::right(*(*toRemove));
+			//It's possible toRemove is a leaf in this case
+			if constexpr(HasParentPointer){
+				if(*toRemove != nullptr){
+					BinaryTreeInfoExtractor::parent(*(*toRemove)) = parent;
+				}
+			}
+			if constexpr(AugmentedNode){
+				fixupAugmentationData(parent);
+			}
         }
         else if(BinaryTreeInfoExtractor::right(*(*toRemove)) == nullptr){
+			if constexpr(HasParentPointer){
+            	parent = BinaryTreeInfoExtractor::parent(*(*toRemove));
+			}
             *toRemove = BinaryTreeInfoExtractor::left(*(*toRemove));
+			//But here, we know toRemove's left child is not null, so no need for a null check
+			if constexpr(HasParentPointer){
+				BinaryTreeInfoExtractor::parent(*(*toRemove)) = parent;
+			}
+			if constexpr(AugmentedNode){
+				fixupAugmentationData(parent);
+			}
         }
         //Otherwise, we need to find the successor of toRemove, and replace it with the successor
+		//Notably the successor is not toRemove's immediate parent since BinaryTreeInfoExtractor::right is not null
         else{
             //Find the successor of toRemove
             NodeType** successor = &BinaryTreeInfoExtractor::right(*(*toRemove));
+			bool immediateChild = true;
             while(BinaryTreeInfoExtractor::left(*(*successor)) != nullptr){
+				immediateChild = false;
                 successor = &BinaryTreeInfoExtractor::left(*(*successor));
             }
-            //Retain a pointer to the right child of the successor
+
+			if(immediateChild){
+				auto leftChild = BinaryTreeInfoExtractor::left(**toRemove);
+				BinaryTreeInfoExtractor::left(**successor) = leftChild;
+
+				if constexpr(HasParentPointer){
+					if(leftChild != nullptr){
+						BinaryTreeInfoExtractor::parent(*leftChild) = *successor;
+					}
+					BinaryTreeInfoExtractor::parent(**successor) = BinaryTreeInfoExtractor::parent(**toRemove);
+				}
+				*toRemove = *successor;
+				if constexpr(AugmentedNode){
+					fixupAugmentationData(*toRemove);
+				}
+				return toReturn;
+			}
+			//In this case, we know successor is not the immediate child of toReplace.
+            //Retain a pointer to the successor, as we will be replacing it with its right child
             NodeType* successorPtr = *successor;
+
+			if constexpr(HasParentPointer){
+				parent = BinaryTreeInfoExtractor::parent(*successorPtr);
+			}
             //Remove the successor from the tree, replace it with its right child. The left will always be empty
             *successor = BinaryTreeInfoExtractor::right(*successorPtr);
+			if constexpr(HasParentPointer){
+				if(*successor != nullptr){
+					BinaryTreeInfoExtractor::parent(*(*successor)) = parent;
+				}
+				BinaryTreeInfoExtractor::parent(*successorPtr) = BinaryTreeInfoExtractor::parent(*(*toRemove));
+			}
 
             //Now copy the child pointers from toRemove to the successor
             BinaryTreeInfoExtractor::left(*successorPtr) = BinaryTreeInfoExtractor::left(*(*toRemove));
             BinaryTreeInfoExtractor::right(*successorPtr) = BinaryTreeInfoExtractor::right(*(*toRemove));
 
+			if constexpr(HasParentPointer){
+				NodeType* left = BinaryTreeInfoExtractor::left(*successorPtr);
+				NodeType* right = BinaryTreeInfoExtractor::right(*successorPtr);
+				if(left != nullptr){
+					BinaryTreeInfoExtractor::parent(*left) = successorPtr;
+				}
+				if(right != nullptr){
+					BinaryTreeInfoExtractor::parent(*right) = successorPtr;
+				}
+			}
+
             //update the parent pointer toRemove to point to its successor
             *toRemove = successorPtr;
+
+			if constexpr(AugmentedNode){
+				fixupAugmentationData(parent);
+			}
         }
         return toReturn;
     }
 
+	template <typename StackType>
+	requires IsStack<NodeType**, StackType>
+	NodeType* eraseNodeImpl(StackType& ancestryStack) requires (AugmentedNode && !HasParentPointer) {
+		if(ancestryStack.empty()){return nullptr;}
+		NodeType** toRemove = ancestryStack[-1];
+		NodeType* toReturn = *toRemove;
+		//If the left child is empty, just replace toRemove with its right child
+		if(BinaryTreeInfoExtractor::left(*(*toRemove)) == nullptr){
+			*toRemove = BinaryTreeInfoExtractor::right(*(*toRemove));
+			fixupAugmentationData(ancestryStack);
+		}
+		else if(BinaryTreeInfoExtractor::right(*(*toRemove)) == nullptr){
+			*toRemove = BinaryTreeInfoExtractor::left(*(*toRemove));
+			fixupAugmentationData(ancestryStack);
+		}
+		else{
+			NodeType** successor = &BinaryTreeInfoExtractor::right(*(*toRemove));
+			ancestryStack.push(successor);
+			bool immediateChild = true;
+            while(BinaryTreeInfoExtractor::left(*(*successor)) != nullptr){
+				immediateChild = false;
+                successor = &BinaryTreeInfoExtractor::left(*(*successor));
+				ancestryStack.push(successor);
+            }
+			if(immediateChild){
+				BinaryTreeInfoExtractor::left(**successor) = BinaryTreeInfoExtractor::left(**toRemove);
+				*toRemove = *successor;
+				fixupAugmentationData(ancestryStack);
+				return toReturn;
+			}
+
+			NodeType* successorPtr = *successor;
+			*successor = BinaryTreeInfoExtractor::right(*successorPtr);
+			BinaryTreeInfoExtractor::left(*successorPtr) = BinaryTreeInfoExtractor::left(*(*toRemove));
+			BinaryTreeInfoExtractor::right(*successorPtr) = BinaryTreeInfoExtractor::right(*(*toRemove));
+			*toRemove = successorPtr;
+			fixupAugmentationData(ancestryStack);
+		}
+		return toReturn;
+	}
+
     //Returns a pointer to the erased type - in an intrusive environment, it is up to the caller to delete the memory
     //as appropriate
-    NodeType* eraseImpl(const remove_reference_t<NodeData>& value, NodeType*& root){
-        NodeType** current = &root;
-        while(*current != nullptr){
-            if(BinaryTreeInfoExtractor::data(*(*current)) == value){
-                //We found the thing to erase, so let's erase it
-                return eraseNodeImpl(current);
-            }
-            //If value < current, go left
-            else if(comparator(value, BinaryTreeInfoExtractor::data(*(*current)))){
-                current = &BinaryTreeInfoExtractor::left(**current);
-            }
-            //Otherwise go right
-            else{
-                current = &BinaryTreeInfoExtractor::right(**current);
-            }
-        }
-        return nullptr;
+    NodeType* eraseImpl(const remove_reference_t<NodeData>& value, NodeType*& root) requires (!AugmentedNode || HasParentPointer) {
+        NodeType** toRemove = this -> findImpl(value, &root);
+		if(toRemove == nullptr){return nullptr;}
+        return eraseNodeImpl(toRemove);
     }
 
     //Returns a pointer to the erased type - in an intrusive environment, it is up to the caller to delete the memory
     //as appropriate
-    NodeType* eraseImpl(const NodeType* value, NodeType*& root){
-        NodeType** current = &root;
-        while(*current != nullptr){
-            if(value == *current){
-                return eraseNodeImpl(current);
-            }
-            //If value < current, go left
-            else if(comparator(BinaryTreeInfoExtractor::data(*value), BinaryTreeInfoExtractor::data(*(*current)))){
-                current = &BinaryTreeInfoExtractor::left(**current);
-            }
-            //Otherwise go right
-            else{
-                current = &BinaryTreeInfoExtractor::right(**current);
-            }
-        }
-        return nullptr;
+    NodeType* eraseImpl(const NodeType* node, NodeType*& root) requires (!AugmentedNode || HasParentPointer){
+        NodeType** toRemove = this -> findParentPointerTreeTraverse(node, &root);
+		if(toRemove == nullptr){return nullptr;}
+        return eraseNodeImpl(toRemove);
+    }
+
+	template <typename StackType>
+	requires IsStack<NodeType*, StackType>
+	NodeType* eraseImpl(const remove_reference_t<NodeData>& value, NodeType*& root) requires (AugmentedNode && !HasParentPointer) {
+        StackType ancestryStack;
+		if(populateAncestryStack(value, ancestryStack)){
+			return eraseNodeImpl(ancestryStack);
+		}
+		return nullptr;
+    }
+
+	template <typename StackType>
+	requires IsStack<NodeType**, StackType>
+	NodeType* eraseImpl(const remove_reference_t<NodeData>& value, NodeType*& root) requires (AugmentedNode && !HasParentPointer) {
+        StackType ancestryStack;
+		if(populateAncestryStack(value, ancestryStack)){
+			return eraseNodeImpl(ancestryStack);
+		}
+		return nullptr;
+    }
+
+	template <typename StackType>
+	requires IsStack<NodeType**, StackType>
+	NodeType* eraseImpl(const NodeType* node, NodeType*& root) requires (AugmentedNode && !HasParentPointer) {
+        StackType ancestryStack;
+		if(populateAncestryStack(node, ancestryStack)){
+			return eraseNodeImpl(ancestryStack);
+		}
+		return nullptr;
+    }
+
+	template <typename StackType>
+	requires IsStack<NodeType*, StackType>
+	NodeType* eraseImpl(const NodeType* node, NodeType*& root) requires (AugmentedNode && !HasParentPointer) {
+        StackType ancestryStack;
+		if(populateAncestryStack(const_cast<NodeType*>(node), ancestryStack)){
+			return eraseNodeImpl(ancestryStack);
+		}
+		return nullptr;
     }
 
     NodeType* const& floorImpl(const remove_reference_t<NodeData>& value) const{
@@ -654,24 +1002,64 @@ public:
     using Parent::visitDepthFirstReverseOrder;
     using Parent::visitDepthFirstPostOrder;
 
-    void insert(NodeType* node){
+    void insert(NodeType* node) requires (!AugmentedNode || HasParentPointer){
         this -> insert(node, this -> root);
     }
 
+	template <typename StackType = StaticStack<NodeType*, 64>>
+	requires IsStack<NodeType*, StackType>
+	void insert(NodeType* node) requires (AugmentedNode && !HasParentPointer) {
+        this -> template insert<StackType>(node, this -> root);
+    }
+
+	template <typename StackType>
+	requires IsStack<NodeType**, StackType>
+	void insert(NodeType* node) requires (AugmentedNode && !HasParentPointer) {
+        this -> template insert<StackType>(node, this -> root);
+    }
+
     NodeType* find(const remove_reference_t<NodeData>& value){
-        return this -> findImpl(value, this -> root);
+		NodeType** result = this -> findImpl(value, &this -> root);
+		if(result == nullptr){return nullptr;}
+        return *result;
     }
     
     const NodeType* find(const remove_reference_t<NodeData>& value) const{
-        return this -> findImpl(value, this -> root);
+		const NodeType* const* result = this -> findImpl(value, &this -> root);
+		if(result == nullptr){return nullptr;}
+        return *result;
     }
 
-    NodeType* erase(const remove_reference_t<NodeData>& value){
+    NodeType* erase(const remove_reference_t<NodeData>& value) requires (!AugmentedNode || HasParentPointer){
         return this -> eraseImpl(value, this -> root);
     }
 
-    NodeType* erase(NodeType* value){
+    NodeType* erase(NodeType* value) requires (!AugmentedNode || HasParentPointer){
         return this -> eraseImpl(value, this -> root);
+    }
+
+	template<typename StackType = StaticStack<NodeType*, 64>>
+	requires IsStack<NodeType*, StackType>
+	NodeType* erase(const remove_reference_t<NodeData>& value) requires (AugmentedNode && !HasParentPointer){
+        return this -> template eraseImpl<StackType>(value, this -> root);
+    }
+
+	template<typename StackType>
+	requires IsStack<NodeType**, StackType>
+	NodeType* erase(const remove_reference_t<NodeData>& value) requires (AugmentedNode && !HasParentPointer){
+        return this -> template eraseImpl<StackType>(value, this -> root);
+    }
+
+	template<typename StackType = StaticStack<NodeType*, 64>>
+	requires IsStack<NodeType*, StackType>
+    NodeType* erase(NodeType* node) requires (AugmentedNode && !HasParentPointer){
+        return this -> template eraseImpl<StackType>(node, this -> root);
+    }
+
+	template<typename StackType>
+	requires IsStack<NodeType**, StackType>
+    NodeType* erase(NodeType* node) requires (AugmentedNode && !HasParentPointer){
+        return this -> template eraseImpl<StackType>(node, this -> root);
     }
 
     const NodeType* floor(const remove_reference_t<NodeData>& value) const{
@@ -696,6 +1084,9 @@ requires BinaryTreeNodeType<NodeType, RedBlackTreeInfoExtractor> &&
     BinaryTreeComparator<NodeType, RedBlackTreeInfoExtractor, Comparator> &&
     RedBlackTreeNodeType<NodeType, RedBlackTreeInfoExtractor>
 class IntrusiveRedBlackTree : protected IntrusiveBinarySearchTree<NodeType, RedBlackTreeInfoExtractor, Comparator>{
+static constexpr bool HasParentPointer = ParentPointerBinaryTreeNodeType<NodeType, RedBlackTreeInfoExtractor>;
+static constexpr bool AugmentedNode = AugmentedBinaryTreeNodeType<NodeType, RedBlackTreeInfoExtractor>;
+
 protected:
 using BSTParent = IntrusiveBinarySearchTree<NodeType, RedBlackTreeInfoExtractor, Comparator>;
 using BinTreeParent = IntrusiveBinaryTree<NodeType, RedBlackTreeInfoExtractor>;
@@ -786,7 +1177,7 @@ void rotateSubtree(NodeType*& root, Direction direction){
 }
 
 template <typename StackType>
-void rotateAboutParent(StackType& ancestryStack, Direction direction){
+void rotateAboutParent(StackType& ancestryStack, Direction direction) requires (!HasParentPointer){
 	NodeType** current = ancestryStack[-1];
 	NodeType** parent = ancestryStack[-2];
 	bool rotatingTowardsCurrent = (getChild(**parent, direction) == *current);
@@ -940,7 +1331,7 @@ requires IsStack<NodeType**, StackType>
 //In this case, *ancestryStack[-1] will always be nullptr, pointing to the node that was just deleted.
 //Then *ancestryStack[-2] points to the parent of the just-deleted node, *ancestryStack[-3] to the grandparent, etc.
 //If we were to insert a black node there, we would have a valid RBT. Now we fix up the state of the tree.
-void eraseFixup(StackType& ancestryStack){
+void eraseFixup(StackType& ancestryStack) requires (!HasParentPointer){
 	while(ancestryStack.getSize() > 1){
 		NodeType* current = *ancestryStack[-1];
 		NodeType* parent = *ancestryStack[-2];
@@ -992,6 +1383,63 @@ void eraseFixup(StackType& ancestryStack){
 			break;
 		}
 	}
+	if(this -> root != nullptr){
+		setColor(*this -> root, Color::Black);
+	}
+}
+
+void eraseFixup(NodeType& node) requires (hasParentPointer){
+	NodeType* current = &node;
+	do{
+		NodeType* parent = *ancestryStack[-2];
+		Direction direction = getChildDirection(*parent, current);
+		NodeType** sibling = &getChild(*parent, opposite(direction));
+#ifdef PARANOID_RBT_VERIFICATION
+		//verifyAlmostRedBlackTree(ancestryStack);
+#endif
+		if(getColor(**sibling) == Color::Red){
+			setColor(**sibling, Color::Black);
+			setColor(*parent, Color::Red);
+			rotateAboutParent(ancestryStack, direction);
+			continue;
+		}
+
+		NodeType* nearNephew = getChild(**sibling, direction);
+		NodeType* farNephew = getChild(**sibling, opposite(direction));
+
+		bool nearNephewIsRed = (nearNephew != nullptr && getColor(*nearNephew) == Color::Red);
+		bool farNephewIsRed = (farNephew != nullptr && getColor(*farNephew) == Color::Red);
+
+		if(!nearNephewIsRed && !farNephewIsRed){
+			setColor(**sibling, Color::Red);
+			if(getColor(*parent) == Color::Red){
+				setColor(*parent, Color::Black);
+				break;
+			}
+			ancestryStack.pop();
+			continue;
+		}
+
+		if(!farNephewIsRed && nearNephewIsRed){
+			setColor(*nearNephew, Color::Black);
+			setColor(**sibling, Color::Red);
+			rotateSubtree(*sibling, opposite(direction));
+			sibling = &getChild(*parent, opposite(direction));
+			nearNephew = getChild(**sibling, direction);
+			farNephew = getChild(**sibling, opposite(direction));
+
+			nearNephewIsRed = (nearNephew != nullptr && getColor(*nearNephew) == Color::Red);
+			farNephewIsRed = (farNephew != nullptr && getColor(*farNephew) == Color::Red);
+		}
+
+		if(farNephewIsRed){
+			setColor(**sibling, getColor(*parent));
+			setColor(*parent, Color::Black);
+			setColor(*farNephew, Color::Black);
+			rotateAboutParent(ancestryStack, direction);
+			break;
+		}
+	} while(current = RedBlackTreeInfoExtractor::parent(*current));
 	if(this -> root != nullptr){
 		setColor(*this -> root, Color::Black);
 	}
@@ -1063,7 +1511,7 @@ void eraseImpl(NodeType*& toRemove, StackType& ancestryStack){
 	size_t preRemovalSize = getTreeSize();
 #endif
     //Address simple cases first, like the degenerate case when toRemove == null
-    if(toRemove == nullptr){}
+    if(toRemove == nullptr){return;}
     //If the node is a leaf, we just remove it. We need to perform a fixup if the node is not the root but is black
     else if(!hasChild(*toRemove)){
         if((toRemove != this -> root) && (getColor(*toRemove) == Color::Black)){
@@ -1084,7 +1532,7 @@ void eraseImpl(NodeType*& toRemove, StackType& ancestryStack){
         }
     }
 	NodeType* parent = nullptr;
-	if constexpr (AugmentedBinaryTreeNodeType<NodeType, RedBlackTreeInfoExtractor>){
+	if constexpr (AugmentedNode){
 		if(ancestryStack.getSize() > 1){
 			parent = *ancestryStack[-2];
 		}
@@ -1100,8 +1548,13 @@ void eraseImpl(NodeType*& toRemove, StackType& ancestryStack){
 	assert(getTreeSize() == preRemovalSize - 1, "Node count mismatch");
 	verifyRedBlackTree();
 #endif
-	if constexpr (AugmentedBinaryTreeNodeType<NodeType, RedBlackTreeInfoExtractor>){
-		BSTParent::template fixupAugmentationData<StaticStack<NodeType*, 64>>(parent);
+	if constexpr (AugmentedNode){
+		if(parent != nullptr){
+			StackType augmentationAncestryStack;
+			BSTParent::populateAncestryStack(RedBlackTreeInfoExtractor::data(*parent), augmentationAncestryStack);
+			augmentationAncestryStack.push(&RedBlackTreeInfoExtractor::left(*parent));
+			BSTParent::fixupAugmentationData(augmentationAncestryStack);
+		}
 		//assert(BinTreeParent::verifyAugmentationData(this -> root), "Augmentation data verification failed");
 	}
 }
@@ -1223,8 +1676,10 @@ bool insert(NodeType* node){
 	assert(getTreeSize() == preInsertionSize + (result ? 1 : 0), "Node count mismatch");
 	verifyRedBlackTree();
 #endif
-	if constexpr (AugmentedBinaryTreeNodeType<NodeType, RedBlackTreeInfoExtractor>){
-		BSTParent::template fixupAugmentationData<StaticStack<NodeType*, 64>>(node);
+	if constexpr (AugmentedNode){
+		StackType ancestryStack;
+		BSTParent::populateAncestryStack(RedBlackTreeInfoExtractor::data(*node), ancestryStack);
+		BSTParent::fixupAugmentationData(ancestryStack);
 		//assert(BinTreeParent::verifyAugmentationData(this -> root), "Augmentation data verification failed");
 	}
 	return result;
@@ -1257,35 +1712,79 @@ NodeType* erase(const NodeData& value){
 	}
 	return nullptr;
 }
+
+using UpdateLambda = FunctionRef<void(NodeType&)>;
+bool update(const NodeData& value, UpdateLambda updateLambda){
+	NodeType* node = erase(value);
+	if(node != nullptr){
+		updateLambda(*node);
+		insert(node);
+		return true;
+	}
+	return false;
+}
+
+void markAugmentedDataDirty(const NodeData& value) requires AugmentedBinaryTreeNodeType<NodeType, RedBlackTreeInfoExtractor>{
+//TODO
+}
 };
 
 // Value-owning tree node for standard (non-intrusive) trees
+template<typename T, bool HasParent>
+struct TreeNode;
+
 template<typename T>
-struct TreeNode {
+struct TreeNode<T, false> {
     T data;
     TreeNode* left;
     TreeNode* right;
-    
+
     TreeNode(const T& value) : data(value), left(nullptr), right(nullptr) {}
     TreeNode(T&& value) : data(move(value)), left(nullptr), right(nullptr) {}
 };
 
-// Extractor for TreeNode
 template<typename T>
-struct TreeNodeExtractor {
-    static TreeNode<T>*& left(TreeNode<T>& node) { return node.left; }
-    static TreeNode<T>*& right(TreeNode<T>& node) { return node.right; }
-    static TreeNode<T>* const& left(const TreeNode<T>& node) { return node.left; }
-    static TreeNode<T>* const& right(const TreeNode<T>& node) { return node.right; }
-    static T& data(TreeNode<T>& node) { return node.data; }
-    static const T& data(const TreeNode<T>& node) { return node.data; }
+struct TreeNode<T, true> {
+    T data;
+    TreeNode* left;
+    TreeNode* right;
+	TreeNode* parent;
+
+    TreeNode(const T& value) : data(value), left(nullptr), right(nullptr), parent(nullptr) {}
+    TreeNode(T&& value) : data(move(value)), left(nullptr), right(nullptr), parent(nullptr) {}
+};
+
+// Extractor for TreeNode
+template<typename T, bool HasParent>
+struct TreeNodeExtractor;
+
+template<typename T>
+struct TreeNodeExtractor<T, false> {
+    static TreeNode<T, false>*& left(TreeNode<T, false>& node) { return node.left; }
+    static TreeNode<T, false>*& right(TreeNode<T, false>& node) { return node.right; }
+    static TreeNode<T, false>* const& left(const TreeNode<T, false>& node) { return node.left; }
+    static TreeNode<T, false>* const& right(const TreeNode<T, false>& node) { return node.right; }
+    static T& data(TreeNode<T, false>& node) { return node.data; }
+    static const T& data(const TreeNode<T, false>& node) { return node.data; }
+};
+
+template<typename T>
+struct TreeNodeExtractor<T, true> {
+    static TreeNode<T, true>*& left(TreeNode<T, true>& node) { return node.left; }
+    static TreeNode<T, true>*& right(TreeNode<T, true>& node) { return node.right; }
+    static TreeNode<T, true>*& parent(TreeNode<T, true>& node) { return node.parent; }
+    static TreeNode<T, true>* const& left(const TreeNode<T, true>& node) { return node.left; }
+    static TreeNode<T, true>* const& right(const TreeNode<T, true>& node) { return node.right; }
+    static TreeNode<T, true>* const& parent(const TreeNode<T, true>& node) { return node.parent; }
+    static T& data(TreeNode<T, true>& node) { return node.data; }
+    static const T& data(const TreeNode<T, true>& node) { return node.data; }
 };
 
 // Value-owning Binary Tree
-template<typename T>
-class BinaryTree : private IntrusiveBinaryTree<TreeNode<T>, TreeNodeExtractor<T>> {
-    using Node = TreeNode<T>;
-    using Parent = IntrusiveBinaryTree<Node, TreeNodeExtractor<T>>;
+template<typename T, bool HasParent>
+class BinaryTreeBase : private IntrusiveBinaryTree<TreeNode<T, HasParent>, TreeNodeExtractor<T, HasParent>> {
+    using Node = TreeNode<T, HasParent>;
+    using Parent = IntrusiveBinaryTree<Node, TreeNodeExtractor<T, HasParent>>;
     
     void deleteSubtree(Node* node) {
         if (node != nullptr) {
@@ -1296,31 +1795,31 @@ class BinaryTree : private IntrusiveBinaryTree<TreeNode<T>, TreeNodeExtractor<T>
     }
     
 public:
-    BinaryTree() = default;
+    BinaryTreeBase() = default;
     
     // Constructor with root value
-    explicit BinaryTree(const T& rootValue) {
+    explicit BinaryTreeBase(const T& rootValue) {
         this->root = new Node(rootValue);
     }
     
-    explicit BinaryTree(T&& rootValue) {
+    explicit BinaryTreeBase(T&& rootValue) {
         this->root = new Node(move(rootValue));
     }
     
-    ~BinaryTree() {
+    ~BinaryTreeBase() {
         deleteSubtree(this->root);
     }
     
     // Delete copy constructor and assignment - trees are move-only for simplicity
-    BinaryTree(const BinaryTree&) = delete;
-    BinaryTree& operator=(const BinaryTree&) = delete;
+    BinaryTreeBase(const BinaryTreeBase&) = delete;
+    BinaryTreeBase& operator=(const BinaryTreeBase&) = delete;
     
     // Move constructor and assignment
-    BinaryTree(BinaryTree&& other) noexcept : Parent(other.root) {
+    BinaryTreeBase(BinaryTreeBase&& other) noexcept : Parent(other.root) {
         other.root = nullptr;
     }
     
-    BinaryTree& operator=(BinaryTree&& other) noexcept {
+    BinaryTreeBase& operator=(BinaryTreeBase&& other) noexcept {
         if (this != &other) {
             deleteSubtree(this->root);
             this->root = other.root;
@@ -1364,11 +1863,17 @@ public:
     bool empty() const { return this->root == nullptr; }
 };
 
+template <typename T>
+using BinaryTreeWithoutParents = BinaryTreeBase<T, false>;
+
+template <typename T>
+using BinaryTree = BinaryTreeBase<T, true>;
+
 // Value-owning Binary Search Tree
-template<typename T, typename Comparator = DefaultComparator<T>>
-class BinarySearchTree : private IntrusiveBinarySearchTree<TreeNode<T>, TreeNodeExtractor<T>, Comparator> {
-    using Node = TreeNode<T>;
-    using Parent = IntrusiveBinarySearchTree<Node, TreeNodeExtractor<T>, Comparator>;
+template<typename T, bool HasParent, typename Comparator>
+class BinarySearchTreeBase : private IntrusiveBinarySearchTree<TreeNode<T, HasParent>, TreeNodeExtractor<T, HasParent>, Comparator> {
+    using Node = TreeNode<T, HasParent>;
+    using Parent = IntrusiveBinarySearchTree<Node, TreeNodeExtractor<T, HasParent>, Comparator>;
     
     void deleteSubtree(Node* node) {
         if (node != nullptr) {
@@ -1379,27 +1884,27 @@ class BinarySearchTree : private IntrusiveBinarySearchTree<TreeNode<T>, TreeNode
     }
     
 public:
-    BinarySearchTree() = default;
-    explicit BinarySearchTree(Comparator comp) : Parent() {
+    BinarySearchTreeBase() = default;
+    explicit BinarySearchTreeBase(Comparator comp) : Parent() {
         this->comparator = comp;
     }
     
-    ~BinarySearchTree() {
+    ~BinarySearchTreeBase() {
         deleteSubtree(this->root);
     }
     
     // Delete copy constructor and assignment
-    BinarySearchTree(const BinarySearchTree&) = delete;
-    BinarySearchTree& operator=(const BinarySearchTree&) = delete;
+    BinarySearchTreeBase(const BinarySearchTreeBase&) = delete;
+    BinarySearchTreeBase& operator=(const BinarySearchTreeBase&) = delete;
     
     // Move constructor and assignment
-    BinarySearchTree(BinarySearchTree&& other) noexcept : Parent() {
+    BinarySearchTreeBase(BinarySearchTreeBase&& other) noexcept : Parent() {
         this->root = other.root;
         this->comparator = move(other.comparator);
         other.root = nullptr;
     }
     
-    BinarySearchTree& operator=(BinarySearchTree&& other) noexcept {
+    BinarySearchTreeBase& operator=(BinarySearchTreeBase&& other) noexcept {
         if (this != &other) {
             deleteSubtree(this->root);
             this->root = other.root;
@@ -1488,6 +1993,12 @@ public:
     
     bool empty() const { return this->root == nullptr; }
 };
+
+template<typename T, typename Comparator = DefaultComparator<T>>
+using BinarySearchTreeWithoutParents = BinarySearchTreeBase<T, false, Comparator>;
+
+template<typename T, typename Comparator = DefaultComparator<T>>
+using BinarySearchTree = BinarySearchTreeBase<T, true, Comparator>;
 
 // Red-black tree node for value-owning trees
 template<typename T>
