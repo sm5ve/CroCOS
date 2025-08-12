@@ -749,11 +749,51 @@ TEST(redBlackTreeBalancingProperties) {
 
 // Helper to verify red-black tree properties
 template<typename T>
-bool verifyRBTStructure(const RedBlackTreeNode<T, NoAugmentation>* node, int& blackHeight) {
+bool verifyRBTStructure(const RedBlackTreeNode<T, NoAugmentation, false>* node, int& blackHeight) {
     if (node == nullptr) {
         blackHeight = 1; // Null nodes are considered black
         return true;
     }
+
+    // Property 1: Red nodes cannot have red children
+    if (node->isRed) {
+        if ((node->left && node->left->isRed) || (node->right && node->right->isRed)) {
+			ASSERT_UNREACHABLE("Red node has red child");
+            return false; // Red node has red child
+        }
+    }
+
+    // Property 2: All paths to leaves have same black height
+    int leftBlackHeight = 0, rightBlackHeight = 0;
+    if (!verifyRBTStructure<int>(node->left, leftBlackHeight) ||
+        !verifyRBTStructure<int>(node->right, rightBlackHeight)) {
+		ASSERT_UNREACHABLE("Child tree failure");
+        return false;
+    }
+
+    if (leftBlackHeight != rightBlackHeight) {
+		ASSERT_UNREACHABLE("Black heights differ");
+        return false; // Different black heights
+    }
+
+    blackHeight = leftBlackHeight + (node->isRed ? 0 : 1);
+    return true;
+}
+
+template<typename T>
+bool verifyRBTStructure(const RedBlackTreeNode<T, NoAugmentation, true>* node, int& blackHeight) {
+    if (node == nullptr) {
+        blackHeight = 1; // Null nodes are considered black
+        return true;
+    }
+
+	auto* parentptr = node->parent;
+	if(parentptr != nullptr){
+		if(parentptr -> left != node && parentptr -> right != node){
+			ASSERT_UNREACHABLE("Parent pointer improperly set");
+			return false;
+		}
+	}
 
     // Property 1: Red nodes cannot have red children
     if (node->isRed) {
@@ -1535,6 +1575,156 @@ TEST(augmentedRedBlackTreeSumStressTest) {
             }
             
             // Verify remaining values are still present
+            for (int j = i + 1; j < maxValue; j++) {
+                ASSERT_TRUE(arbt.contains(values[j]));
+            }
+        }
+        
+        // Tree should be empty now
+        ASSERT_TRUE(arbt.empty());
+        ASSERT_EQ(expectedTotalSum, 0);
+    }
+}
+
+TEST(parentlessRedBlackTreeLargeScaleStressTest) {
+    const int largeValue = 1000;
+    const int iterations = 5;
+    
+    std::srand(12345); // Different seed for variety
+    
+    for (int iter = 0; iter < iterations; iter++) {
+        ParentlessRedBlackTree<int> rbt;
+        Vector<int> values;
+        
+        // Generate values 1 to largeValue
+        for (int i = 1; i <= largeValue; i++) {
+            values.push(i);
+        }
+        
+        // Multiple shuffle passes for better randomization
+        for (int pass = 0; pass < 3; pass++) {
+            for (int i = largeValue - 1; i > 0; i--) {
+                int j = std::rand() % (i + 1);
+                int temp = values[i];
+                values[i] = values[j];
+                values[j] = temp;
+            }
+        }
+        
+        // Insert first half
+        for (int i = 0; i < largeValue / 2; i++) {
+            rbt.insert(values[i]);
+            ASSERT_TRUE(rbt.contains(values[i]));
+        }
+        
+        // Insert second half
+        for (int i = largeValue / 2; i < largeValue; i++) {
+            rbt.insert(values[i]);
+            ASSERT_TRUE(rbt.contains(values[i]));
+        }
+        
+        // Verify all values are present
+        for (int i = 0; i < largeValue; i++) {
+            ASSERT_TRUE(rbt.contains(values[i]));
+        }
+        
+        // Shuffle again for deletion
+        for (int pass = 0; pass < 3; pass++) {
+            for (int i = largeValue - 1; i > 0; i--) {
+                int j = std::rand() % (i + 1);
+                int temp = values[i];
+                values[i] = values[j];
+                values[j] = temp;
+            }
+        }
+        
+        // Delete first half
+        for (int i = 0; i < largeValue / 2; i++) {
+            ASSERT_TRUE(rbt.erase(values[i]));
+            ASSERT_FALSE(rbt.contains(values[i]));
+        }
+        
+        // Verify remaining values are still present
+        for (int i = largeValue / 2; i < largeValue; i++) {
+            ASSERT_TRUE(rbt.contains(values[i]));
+        }
+        
+        // Delete second half
+        for (int i = largeValue / 2; i < largeValue; i++) {
+            ASSERT_TRUE(rbt.erase(values[i]));
+            ASSERT_FALSE(rbt.contains(values[i]));
+        }
+        
+        // Tree should be empty
+        ASSERT_TRUE(rbt.empty());
+    }
+}
+
+TEST(parentlessAugmentedRedBlackTreeSumStressTest) {
+    // Accumulator that computes the sum of all values in subtree
+    struct SumAccumulator {
+        int operator()(const int& nodeValue, const int* leftSum, const int* rightSum) const {
+            int left = leftSum ? *leftSum : 0;
+            int right = rightSum ? *rightSum : 0;
+            return nodeValue + left + right;
+        }
+    };
+    
+    using SumAugmentedRBT = ParentlessAugmentedRedBlackTree<int, int, SumAccumulator>;
+    
+    const int maxValue = 50;
+    const int maxLoop = 20;
+    
+    // Seed for reproducible results
+    std::srand(123);
+    
+    for (int loop = 0; loop < maxLoop; loop++) {
+        SumAugmentedRBT arbt;
+        Vector<int> values;
+        int expectedTotalSum = 0;
+
+        // Generate sequential values 1 to maxValue
+        for (int i = 1; i <= maxValue; i++) {
+            values.push(i);
+            expectedTotalSum += i;
+        }
+        
+        // Shuffle for random insertion order
+        for (int i = maxValue - 1; i > 0; i--) {
+            int j = std::rand() % (i + 1);
+            int temp = values[i];
+            values[i] = values[j];
+            values[j] = temp;
+        }
+        
+        // Insert all values
+        for (int i = 0; i < maxValue; i++) {
+            arbt.insert(values[i]);
+            ASSERT_TRUE(arbt.contains(values[i]));
+        }
+        
+        // Verify total sum through root's augmented data
+        ASSERT_EQ(arbt.getRoot() -> augmentationData, expectedTotalSum);
+        
+        // Shuffle for deletion order
+        for (int i = maxValue - 1; i > 0; i--) {
+            int j = std::rand() % (i + 1);
+            int temp = values[i];
+            values[i] = values[j];
+            values[j] = temp;
+        }
+        
+        // Delete all values, checking sum after each deletion
+        for (int i = 0; i < maxValue; i++) {
+            ASSERT_TRUE(arbt.erase(values[i]));
+            ASSERT_FALSE(arbt.contains(values[i]));
+            expectedTotalSum -= values[i];
+            
+            if (arbt.getRoot() != nullptr) {
+                ASSERT_EQ(arbt.getRoot() -> augmentationData, expectedTotalSum);
+            }
+            
+            // Verify remaining values are still there
             for (int j = i + 1; j < maxValue; j++) {
                 ASSERT_TRUE(arbt.contains(values[j]));
             }

@@ -286,6 +286,24 @@ protected:
 		return augmentedData == computedAugmentedData;
 	}
 
+	bool verifyParentPointers(NodeType* node) const requires ParentPointerBinaryTreeNodeType<NodeType, BinaryTreeInfoExtractor> {
+		if(node == nullptr){return true;}
+		if(node == this -> root){return true;}
+		NodeType* parent = BinaryTreeInfoExtractor::parent(*node);
+		if(parent == nullptr){return false;}
+		bool isLeftChild = BinaryTreeInfoExtractor::left(*parent) == node;
+		bool isRightChild = BinaryTreeInfoExtractor::right(*parent) == node;
+		if(!isLeftChild && !isRightChild){return false;}
+
+		bool leftValid = verifyParentPointers(BinaryTreeInfoExtractor::left(*node));
+		bool rightValid = verifyParentPointers(BinaryTreeInfoExtractor::right(*node));
+		return leftValid && rightValid;
+	}
+
+	bool verifyParentPointers() const requires ParentPointerBinaryTreeNodeType<NodeType, BinaryTreeInfoExtractor> {
+		return verifyParentPointers(this -> root);
+	}
+
 public:
     IntrusiveBinaryTree() : root(nullptr){}
     explicit IntrusiveBinaryTree(NodeType* r) : root(r){}
@@ -1167,12 +1185,34 @@ bool isChild(const NodeType& parent, const NodeType* childPtr){
     return RedBlackTreeInfoExtractor::left(parent) == childPtr || RedBlackTreeInfoExtractor::right(parent) == childPtr;
 }
 
-void rotateSubtree(NodeType*& root, Direction direction){
+void rotateSubtree(NodeType*& root, Direction direction) requires (!HasParentPointer){
     if(direction == Direction::Left){
         BinTreeParent::rotateLeft(root);
     }
     else{
         BinTreeParent::rotateRight(root);
+    }
+}
+
+void rotateSubtree(NodeType* root, Direction direction) requires (HasParentPointer){
+	NodeType** parentRef;
+	if(RedBlackTreeInfoExtractor::parent(*root) == nullptr){
+		parentRef = &this -> root;
+	}
+	else{
+		NodeType& parent = *RedBlackTreeInfoExtractor::parent(*root);
+		if(RedBlackTreeInfoExtractor::left(parent) == root){
+			parentRef = &RedBlackTreeInfoExtractor::left(parent);
+		}
+		else{
+			parentRef = &RedBlackTreeInfoExtractor::right(parent);
+		}
+	}
+	if(direction == Direction::Left){
+        BinTreeParent::rotateLeft(*parentRef);
+    }
+    else{
+        BinTreeParent::rotateRight(*parentRef);
     }
 }
 
@@ -1223,6 +1263,18 @@ bool verifyRedBlackTree(NodeType* node, size_t& blackHeight){
 		return true;
 	}
 
+	if constexpr (HasParentPointer){
+		if(node == this -> root){
+			assert(RedBlackTreeInfoExtractor::parent(*node) == nullptr, "root's parent should be null");
+		}
+		if(hasLeftChild(*node)){
+			assert(RedBlackTreeInfoExtractor::parent(*RedBlackTreeInfoExtractor::left(*node)) == node, "left child's parent should be node");
+		}
+		if(hasRightChild(*node)){
+			assert(RedBlackTreeInfoExtractor::parent(*RedBlackTreeInfoExtractor::right(*node)) == node, "right child's parent should be node");
+		}
+	}
+
 	if(getColor(*node) == Color::Red){
 		if(hasLeftChild(*node) && getColor(*RedBlackTreeInfoExtractor::left(*node)) == Color::Red){
 			assert(false, "Red violation");
@@ -1256,7 +1308,7 @@ void verifyRedBlackTree(){
 }
 
 template <typename StackType>
-bool verifyAlmostRedBlackTreeImpl(NodeType*& node, size_t& blackHeight, const StackType& ancestryStack, size_t& nodeCount){
+bool verifyAlmostRedBlackTreeImpl(NodeType*& node, size_t& blackHeight, const StackType& ancestryStack, size_t& nodeCount) requires (!HasParentPointer){
 
 	size_t virtualBlackHeight = (&node == ancestryStack[-1] ? 2 : 1);
 	size_t virtualNodeCount = (node == nullptr ? 0 : 1) + (&node == ancestryStack[-1] ? 1 : 0);
@@ -1304,7 +1356,7 @@ bool verifyAlmostRedBlackTreeImpl(NodeType*& node, size_t& blackHeight, const St
 }
 
 template <typename StackType>
-void verifyAlmostRedBlackTree(const StackType& ancestryStack){
+void verifyAlmostRedBlackTree(const StackType& ancestryStack) requires (!HasParentPointer){
 	size_t blackHeight = 0;
 	size_t nodeCount = 0;
 	for(size_t i = 0; i < ancestryStack.getSize() - 1; i++){
@@ -1313,6 +1365,62 @@ void verifyAlmostRedBlackTree(const StackType& ancestryStack){
 		assert(isChild(**ancestryStack[i], *ancestryStack[i + 1]), "verifyAlmostRedBlackTree - Ancestry stack is invalid");
 	}
 	assert(verifyAlmostRedBlackTreeImpl(this -> root, blackHeight, ancestryStack, nodeCount), "Almost RBT verification failed");
+}
+
+bool verifyAlmostRedBlackTreeImpl(NodeType* node, NodeType* fixupStart, Direction dir, size_t& blackHeight) requires (HasParentPointer){
+	if(node == nullptr){
+		blackHeight = 1;
+		return true;
+	}
+
+	if(node == this -> root){
+		assert(RedBlackTreeInfoExtractor::parent(*node) == nullptr, "Root has parent");
+	}
+
+	if(hasLeftChild(*node)){
+		assert(RedBlackTreeInfoExtractor::parent(*RedBlackTreeInfoExtractor::left(*node)) == node, "Left child parent is incorrect");
+	}
+	if(hasRightChild(*node)){
+		assert(RedBlackTreeInfoExtractor::parent(*RedBlackTreeInfoExtractor::right(*node)) == node, "Right child parent is incorrect");
+	}
+
+	if(getColor(*node) == Color::Red){
+		if(hasLeftChild(*node) && getColor(*RedBlackTreeInfoExtractor::left(*node)) == Color::Red){
+			assert(false, "Almost RBT - Red violation");
+			return false;
+		}
+		if(hasRightChild(*node) && getColor(*RedBlackTreeInfoExtractor::right(*node)) == Color::Red){
+			assert(false, "Almost RBT - Red violation");
+			return false;
+		}
+	}
+
+	size_t leftBlackHeight = 0;
+	size_t rightBlackHeight = 0;
+
+	if(!verifyAlmostRedBlackTreeImpl(RedBlackTreeInfoExtractor::left(*node), fixupStart, dir, leftBlackHeight) ||
+	   !verifyAlmostRedBlackTreeImpl(RedBlackTreeInfoExtractor::right(*node), fixupStart, dir, rightBlackHeight)){
+		assert(false, "Almost RBT - Subtree verification failed");
+		return false;
+	}
+
+	if(node == fixupStart){
+		if(dir == Direction::Left){leftBlackHeight++;}
+		else{rightBlackHeight++;}
+	}
+
+	if(leftBlackHeight != rightBlackHeight){
+		assert(false, "Almost RBT - Black violation");
+		return false;
+	}
+
+	blackHeight = (getColor(*node) == Color::Black) ? (leftBlackHeight + 1) : leftBlackHeight;
+	return true;
+}
+
+bool verifyAlmostRedBlackTree(NodeType* fixupStart, Direction dir) requires (HasParentPointer){
+	size_t blackHeight = 0;
+	return verifyAlmostRedBlackTreeImpl(this -> root, fixupStart, dir, blackHeight);
 }
 
 size_t getTreeSize(NodeType* node){
@@ -1388,58 +1496,58 @@ void eraseFixup(StackType& ancestryStack) requires (!HasParentPointer){
 	}
 }
 
-void eraseFixup(NodeType& node) requires (hasParentPointer){
-	NodeType* current = &node;
-	do{
-		NodeType* parent = *ancestryStack[-2];
-		Direction direction = getChildDirection(*parent, current);
-		NodeType** sibling = &getChild(*parent, opposite(direction));
+void eraseFixup(NodeType* parent, Direction direction) requires (HasParentPointer){
+	while(parent != nullptr){
 #ifdef PARANOID_RBT_VERIFICATION
-		//verifyAlmostRedBlackTree(ancestryStack);
+		verifyAlmostRedBlackTree(parent, direction);
 #endif
-		if(getColor(**sibling) == Color::Red){
-			setColor(**sibling, Color::Black);
+		NodeType* sibling = getChild(*parent, opposite(direction));
+
+		if(getColor(*sibling) == Color::Red){
+			setColor(*sibling, Color::Black);
 			setColor(*parent, Color::Red);
-			rotateAboutParent(ancestryStack, direction);
+			rotateSubtree(parent, direction);
 			continue;
 		}
 
-		NodeType* nearNephew = getChild(**sibling, direction);
-		NodeType* farNephew = getChild(**sibling, opposite(direction));
+		NodeType* nearNephew = getChild(*sibling, direction);
+		NodeType* farNephew = getChild(*sibling, opposite(direction));
 
 		bool nearNephewIsRed = (nearNephew != nullptr && getColor(*nearNephew) == Color::Red);
 		bool farNephewIsRed = (farNephew != nullptr && getColor(*farNephew) == Color::Red);
 
 		if(!nearNephewIsRed && !farNephewIsRed){
-			setColor(**sibling, Color::Red);
+			setColor(*sibling, Color::Red);
 			if(getColor(*parent) == Color::Red){
 				setColor(*parent, Color::Black);
 				break;
 			}
-			ancestryStack.pop();
+			NodeType* grandparent = RedBlackTreeInfoExtractor::parent(*parent);
+			if(grandparent == nullptr){break;}
+			direction = getChildDirection(*grandparent, parent);
+			parent = grandparent;
 			continue;
 		}
 
 		if(!farNephewIsRed && nearNephewIsRed){
 			setColor(*nearNephew, Color::Black);
-			setColor(**sibling, Color::Red);
-			rotateSubtree(*sibling, opposite(direction));
-			sibling = &getChild(*parent, opposite(direction));
-			nearNephew = getChild(**sibling, direction);
-			farNephew = getChild(**sibling, opposite(direction));
-
+			setColor(*sibling, Color::Red);
+			rotateSubtree(sibling, opposite(direction));
+			sibling = getChild(*parent, opposite(direction));
+			nearNephew = getChild(*sibling, direction);
+			farNephew = getChild(*sibling, opposite(direction));
 			nearNephewIsRed = (nearNephew != nullptr && getColor(*nearNephew) == Color::Red);
 			farNephewIsRed = (farNephew != nullptr && getColor(*farNephew) == Color::Red);
 		}
 
 		if(farNephewIsRed){
-			setColor(**sibling, getColor(*parent));
+			setColor(*sibling, getColor(*parent));
 			setColor(*parent, Color::Black);
 			setColor(*farNephew, Color::Black);
-			rotateAboutParent(ancestryStack, direction);
+			rotateSubtree(parent, direction);
 			break;
 		}
-	} while(current = RedBlackTreeInfoExtractor::parent(*current));
+	}
 	if(this -> root != nullptr){
 		setColor(*this -> root, Color::Black);
 	}
@@ -1449,21 +1557,26 @@ void eraseFixup(NodeType& node) requires (hasParentPointer){
 //to black
 template <Direction direction>
 void eraseCaseSingleChild(NodeType*& node){
+	NodeType* child;
     if constexpr(direction == Direction::Left){
-        node = RedBlackTreeInfoExtractor::left(*node);
-        setColor(*node, Color::Black);
+		child = RedBlackTreeInfoExtractor::left(*node);
     }
     else{
-        node = RedBlackTreeInfoExtractor::right(*node);
-        setColor(*node, Color::Black);
+		child = RedBlackTreeInfoExtractor::right(*node);
     }
+
+	if constexpr(HasParentPointer){
+		RedBlackTreeInfoExtractor::parent(*child) = RedBlackTreeInfoExtractor::parent(*node);
+	}
+    node = child;
+    setColor(*node, Color::Black);
 }
 
 //If the node we're erasing has 2 children, we have to replace it with its successor and possibly run a tree fixup
 //if the successor is black.
 template <typename StackType>
 requires IsStack<NodeType**, StackType>
-Color eraseCaseTwoChildren(NodeType*& node, StackType& ancestryStack){
+Color eraseCaseTwoChildren(NodeType*& node, StackType& ancestryStack) requires (!HasParentPointer){
 	size_t ancestryStackFixupIndex = ancestryStack.getSize();
     NodeType** successorRef = &RedBlackTreeInfoExtractor::right(*node);
 	ancestryStack.push(successorRef);
@@ -1501,11 +1614,69 @@ Color eraseCaseTwoChildren(NodeType*& node, StackType& ancestryStack){
 	return successorColor;
 }
 
+//sets fixupStart to the
+Color eraseCaseTwoChildren(NodeType*& node, NodeType*& fixupStart, Direction& fixupDirection) requires (HasParentPointer){
+	NodeType* successor = RedBlackTreeInfoExtractor::right(*node);
+	fixupDirection = Direction::Right;
+	while(hasLeftChild(*successor)){
+		fixupDirection = Direction::Left;
+		successor = RedBlackTreeInfoExtractor::left(*successor);
+	}
+	if(fixupDirection == Direction::Left){
+		fixupStart = RedBlackTreeInfoExtractor::parent(*successor);
+	}
+	else{
+		fixupStart = successor;
+	}
+
+	Color originalColor = getColor(*node);
+	Color successorColor = getColor(*successor);
+
+    //Regardless of whether or not successor is node's right child, we need to update the left child of successor
+	//to be node's old left child, and update that child's parent pointer if it's non-null
+	NodeType* leftChild = RedBlackTreeInfoExtractor::left(*node);
+	if(leftChild != nullptr){
+		RedBlackTreeInfoExtractor::parent(*leftChild) = successor;
+	}
+	RedBlackTreeInfoExtractor::left(*successor) = leftChild;
+
+	//If successor is not immediately to the right of node, we also update the right child
+	if(RedBlackTreeInfoExtractor::right(*node) != successor){
+		NodeType* oldRightChild = RedBlackTreeInfoExtractor::right(*successor);
+		NodeType* parent = RedBlackTreeInfoExtractor::parent(*successor);
+		if(oldRightChild != nullptr){
+			RedBlackTreeInfoExtractor::parent(*oldRightChild) = parent;
+			setColor(*oldRightChild, Color::Black);
+			successorColor = Color::Red;
+		}
+		RedBlackTreeInfoExtractor::left(*parent) = oldRightChild;
+
+		NodeType* rightChild = RedBlackTreeInfoExtractor::right(*node);
+		if(rightChild != nullptr){
+			RedBlackTreeInfoExtractor::parent(*rightChild) = successor;
+		}
+		RedBlackTreeInfoExtractor::right(*successor) = rightChild;
+	}
+	//Otherwise, we retain the reference to the existing right child. If that child is non-null, it must be red
+	//since there was no prior left child. If we recolor to black, then no fixup needs to be done.
+	else{
+		NodeType* rightChild = RedBlackTreeInfoExtractor::right(*successor);
+		if(rightChild != nullptr){
+			setColor(*rightChild, Color::Black);
+			successorColor = Color::Red;
+		}
+	}
+	RedBlackTreeInfoExtractor::parent(*successor) = RedBlackTreeInfoExtractor::parent(*node);
+	node = successor;
+	setColor(*successor, originalColor);
+	return successorColor;
+}
+
 template <typename StackType>
 requires IsStack<NodeType**, StackType>
 //Requires that ancestryStack.top() == &toRemove
 //The caller must populate the ancestry stack up to the point of toRemove
-void eraseImpl(NodeType*& toRemove, StackType& ancestryStack){
+void eraseImpl(NodeType*& toRemove, StackType& ancestryStack) requires (!HasParentPointer){
     bool performFixup = false;
 #ifdef PARANOID_RBT_VERIFICATION
 	size_t preRemovalSize = getTreeSize();
@@ -1559,16 +1730,59 @@ void eraseImpl(NodeType*& toRemove, StackType& ancestryStack){
 	}
 }
 
+void eraseImpl(NodeType*& toRemove) requires (HasParentPointer){
+	//assert(BinTreeParent::verifyParentPointers(), "eraseImpl start - parent pointers are invalid");
+	bool performFixup = false;
+
+	if(toRemove == nullptr){return;}
+
+	NodeType* fixupLocation = nullptr;
+	Direction fixupDirection = Direction::Right;
+	if(RedBlackTreeInfoExtractor::parent(*toRemove) != nullptr){
+		fixupLocation = RedBlackTreeInfoExtractor::parent(*toRemove);
+	}
+	if(!hasChild(*toRemove)){
+		if((toRemove != this -> root) && (getColor(*toRemove) == Color::Black)){
+			NodeType* parent = RedBlackTreeInfoExtractor::parent(*toRemove);
+			fixupDirection = getChildDirection(*parent, toRemove);
+            performFixup = true;
+        }
+        toRemove = nullptr;
+	}
+	else if(hasChild(*toRemove)){
+		if(!hasLeftChild(*toRemove)){
+			eraseCaseSingleChild<Direction::Right>(toRemove);
+		}
+		else if(!hasRightChild(*toRemove)){
+			eraseCaseSingleChild<Direction::Left>(toRemove);
+		}
+		else{
+			performFixup = (eraseCaseTwoChildren(toRemove, fixupLocation, fixupDirection) == Color::Black);
+		}
+	}
+	if(performFixup){
+		eraseFixup(fixupLocation, fixupDirection);
+	}
+	if constexpr (AugmentedNode){
+		if(fixupLocation != nullptr){
+			BSTParent::fixupAugmentationData(fixupLocation);
+		}
+	}
+#ifdef PARANOID_RBT_VERIFICATION
+		verifyRedBlackTree();
+#endif
+}
+
 template <typename StackType>
 requires IsStack<NodeType**, StackType>
-void insertFixup(StackType& ancestryStack){
+void insertFixup(StackType& ancestryStack) requires (!HasParentPointer){
     while(ancestryStack.getSize() >= 3){
 		NodeType* node = *ancestryStack[-1];       // current node
 		NodeType* parent = *ancestryStack[-2];     // parent
 		NodeType* grandparent = *ancestryStack[-3]; // grandparent
 
 		//If the parent is black, tree is already balanced
-        if(!RedBlackTreeInfoExtractor::isRed(*parent)){
+        if(getColor(*parent) == Color::Black){
 			break;
 		}
 
@@ -1612,13 +1826,56 @@ void insertFixup(StackType& ancestryStack){
 
     // Root must always be black
     if(this->root != nullptr){
-        RedBlackTreeInfoExtractor::setRed(*(this->root), false);
+		setColor(*this->root, Color::Black);
     }
+}
+
+void insertFixup(NodeType& node) requires (HasParentPointer){
+	NodeType* current = &node;
+	NodeType *parent, *grandparent;
+	while((parent = RedBlackTreeInfoExtractor::parent(*current)) && (grandparent = RedBlackTreeInfoExtractor::parent(*parent))){
+		if(getColor(*parent) == Color::Black){
+			return;
+		}
+
+		Direction parentDirection = getChildDirection(*grandparent, parent);
+		NodeType* uncle = getChild(*grandparent, opposite(parentDirection));
+
+		if(uncle != nullptr && RedBlackTreeInfoExtractor::isRed(*uncle)){
+			setColor(*parent, Color::Black);
+			setColor(*uncle, Color::Black);
+			setColor(*grandparent, Color::Red);
+
+			current = grandparent;
+		}
+		else{
+			Direction nodeDirection = getChildDirection(*parent, current);
+			NodeType* newParent = parent;
+			if(nodeDirection != parentDirection){
+				newParent = current;
+				rotateSubtree(parent, parentDirection);
+			}
+
+			rotateSubtree(grandparent, opposite(parentDirection));
+
+			setColor(*newParent, Color::Black);
+			if(auto child = RedBlackTreeInfoExtractor::left(*newParent)){
+				setColor(*child, Color::Red);
+			}
+			if(auto child = RedBlackTreeInfoExtractor::right(*newParent)){
+				setColor(*child, Color::Red);
+			}
+			break;
+		}
+	}
+	if(this -> root != nullptr){
+		setColor(*this -> root, Color::Black);
+	}
 }
 
 template <typename StackType>
 requires IsStack<NodeType**, StackType>
-bool insertImpl(NodeType* node){
+bool insertImpl(NodeType* node) requires (!HasParentPointer){
     if(node == nullptr){
         return false;
     }
@@ -1647,9 +1904,45 @@ bool insertImpl(NodeType* node){
         }
     }while(*current != nullptr);
     *current = node;
-	RedBlackTreeInfoExtractor::setRed(*node, true);
+	setColor(*node, Color::Red);
     ancestryStack.push(current);
     insertFixup(ancestryStack);
+	return true;
+}
+
+bool insertImpl(NodeType* node) requires (HasParentPointer){
+	if(node == nullptr){
+		return false;
+	}
+
+	if(this -> root == nullptr){
+		this -> root = node;
+		setColor(*node, Color::Black);
+		return true;
+	}
+
+	NodeType** current = &(this -> root);
+	NodeData& nvalue = RedBlackTreeInfoExtractor::data(*node);
+	NodeType* parent = nullptr;
+	do{
+		parent = *current;
+		NodeData& cvalue = RedBlackTreeInfoExtractor::data(*(*current));
+
+		if(nvalue == cvalue){
+			return false;
+		}
+		//if node < current, go left
+		if(comparator(nvalue, cvalue)){
+			current = &RedBlackTreeInfoExtractor::left(*(*current));
+		}
+		else{
+			current = &RedBlackTreeInfoExtractor::right(*(*current));
+		}
+	}while(*current != nullptr);
+	*current = node;
+	setColor(*node, Color::Red);
+	RedBlackTreeInfoExtractor::parent(*node) = parent;
+	insertFixup(*node);
 	return true;
 }
 
@@ -1666,7 +1959,7 @@ using BSTParent::predecessor;
 
 template <typename StackType>
 requires IsStack<NodeType**, StackType>
-bool insert(NodeType* node){
+bool insert(NodeType* node) requires (!HasParentPointer){
 #ifdef PARANOID_RBT_VERIFICATION
 	size_t preInsertionSize = getTreeSize();
 	verifyRedBlackTree();
@@ -1685,13 +1978,21 @@ bool insert(NodeType* node){
 	return result;
 }
 
+bool insert(NodeType* node) requires (HasParentPointer){
+	bool result = insertImpl(node);
+	if constexpr (AugmentedNode){
+		BSTParent::fixupAugmentationData(node);
+	}
+	return result;
+}
+
 template <typename StackType>
-NodeType* erase(NodeType* node){
+NodeType* erase(NodeType* node) requires (!HasParentPointer){
 	return erase<StackType>(RedBlackTreeInfoExtractor::data(*node));
 }
 
 template <typename StackType>
-NodeType* erase(const NodeData& value){
+NodeType* erase(const NodeData& value) requires (!HasParentPointer){
 	StackType ancestryStack;
 	NodeType** current = &this -> root;
 	while(*current != nullptr){
@@ -1713,8 +2014,27 @@ NodeType* erase(const NodeData& value){
 	return nullptr;
 }
 
+NodeType* erase(NodeType* node) requires (HasParentPointer){
+	if(node == nullptr){return nullptr;}
+	if(node == this -> root){
+		eraseImpl(this -> root);
+		return node;
+	}
+	NodeType* parent = RedBlackTreeInfoExtractor::parent(*node);
+	if(RedBlackTreeInfoExtractor::left(*parent) == node){
+		eraseImpl(RedBlackTreeInfoExtractor::left(*parent));
+		return node;
+	}
+	eraseImpl(RedBlackTreeInfoExtractor::right(*parent));
+	return node;
+}
+
+NodeType* erase(const NodeData& value) requires (HasParentPointer){
+	return erase(this -> find(value));
+}
+
 using UpdateLambda = FunctionRef<void(NodeType&)>;
-bool update(const NodeData& value, UpdateLambda updateLambda){
+bool update(const NodeData& value, UpdateLambda updateLambda) requires (!HasParentPointer){
 	NodeType* node = erase(value);
 	if(node != nullptr){
 		updateLambda(*node);
@@ -1722,10 +2042,6 @@ bool update(const NodeData& value, UpdateLambda updateLambda){
 		return true;
 	}
 	return false;
-}
-
-void markAugmentedDataDirty(const NodeData& value) requires AugmentedBinaryTreeNodeType<NodeType, RedBlackTreeInfoExtractor>{
-//TODO
 }
 };
 
@@ -2001,8 +2317,11 @@ template<typename T, typename Comparator = DefaultComparator<T>>
 using BinarySearchTree = BinarySearchTreeBase<T, true, Comparator>;
 
 // Red-black tree node for value-owning trees
+template<typename T, bool HasParent>
+struct PlainRedBlackTreeNode;
+
 template<typename T>
-struct PlainRedBlackTreeNode {
+struct PlainRedBlackTreeNode<T, false> {
     T data;
     PlainRedBlackTreeNode* left;
     PlainRedBlackTreeNode* right;
@@ -2012,8 +2331,23 @@ struct PlainRedBlackTreeNode {
     PlainRedBlackTreeNode(T&& value) : data(move(value)), left(nullptr), right(nullptr), isRed(true) {}
 };
 
+template<typename T>
+struct PlainRedBlackTreeNode<T, true> {
+    T data;
+    PlainRedBlackTreeNode* left;
+    PlainRedBlackTreeNode* right;
+	PlainRedBlackTreeNode* parent;
+    bool isRed;
+
+    PlainRedBlackTreeNode(const T& value) : data(value), left(nullptr), right(nullptr), parent(nullptr), isRed(true) {}
+    PlainRedBlackTreeNode(T&& value) : data(move(value)), left(nullptr), right(nullptr), parent(nullptr), isRed(true) {}
+};
+
+template<typename T, typename S, bool HasParent>
+struct AugmentedRedBlackTreeNode;
+
 template<typename T, typename S>
-struct AugmentedRedBlackTreeNode {
+struct AugmentedRedBlackTreeNode<T, S, false> {
     T data;
 	S augmentationData;
     AugmentedRedBlackTreeNode* left;
@@ -2024,34 +2358,92 @@ struct AugmentedRedBlackTreeNode {
     AugmentedRedBlackTreeNode(T&& value) : data(move(value)), left(nullptr), right(nullptr), isRed(true), augmentationData(S()) {}
 };
 
-// Extractor for RedBlackTreeNode
-template<typename T>
-struct PlainRedBlackTreeNodeExtractor {
-    static PlainRedBlackTreeNode<T>*& left(PlainRedBlackTreeNode<T>& node) { return node.left; }
-    static PlainRedBlackTreeNode<T>*& right(PlainRedBlackTreeNode<T>& node) { return node.right; }
-    static PlainRedBlackTreeNode<T>* const& left(const PlainRedBlackTreeNode<T>& node) { return node.left; }
-    static PlainRedBlackTreeNode<T>* const& right(const PlainRedBlackTreeNode<T>& node) { return node.right; }
-    static T& data(PlainRedBlackTreeNode<T>& node) { return node.data; }
-    static const T& data(const PlainRedBlackTreeNode<T>& node) { return node.data; }
-    static bool isRed(const PlainRedBlackTreeNode<T>& node) { return node.isRed; }
-    static void setRed(PlainRedBlackTreeNode<T>& node, bool red) { node.isRed = red; }
+template<typename T, typename S>
+struct AugmentedRedBlackTreeNode<T, S, true> {
+    T data;
+	S augmentationData;
+    AugmentedRedBlackTreeNode* left;
+    AugmentedRedBlackTreeNode* right;
+	AugmentedRedBlackTreeNode* parent;
+    bool isRed;
+
+    AugmentedRedBlackTreeNode(const T& value) : data(value), augmentationData(S()), left(nullptr), right(nullptr), parent(nullptr), isRed(true) {}
+    AugmentedRedBlackTreeNode(T&& value) : data(move(value)), augmentationData(S()), left(nullptr), right(nullptr), parent(nullptr), isRed(true) {}
 };
 
 // Extractor for RedBlackTreeNode
+template<typename T, bool HasParent>
+struct PlainRedBlackTreeNodeExtractor;
+
+template<typename T>
+struct PlainRedBlackTreeNodeExtractor<T, false> {
+    static PlainRedBlackTreeNode<T, false>*& left(PlainRedBlackTreeNode<T, false>& node) { return node.left; }
+    static PlainRedBlackTreeNode<T, false>*& right(PlainRedBlackTreeNode<T, false>& node) { return node.right; }
+    static PlainRedBlackTreeNode<T, false>* const& left(const PlainRedBlackTreeNode<T, false>& node) { return node.left; }
+    static PlainRedBlackTreeNode<T, false>* const& right(const PlainRedBlackTreeNode<T, false>& node) { return node.right; }
+    static T& data(PlainRedBlackTreeNode<T, false>& node) { return node.data; }
+    static const T& data(const PlainRedBlackTreeNode<T, false>& node) { return node.data; }
+    static bool isRed(const PlainRedBlackTreeNode<T, false>& node) { return node.isRed; }
+    static void setRed(PlainRedBlackTreeNode<T, false>& node, bool red) { node.isRed = red; }
+};
+
+template<typename T>
+struct PlainRedBlackTreeNodeExtractor<T, true> {
+    static PlainRedBlackTreeNode<T, true>*& left(PlainRedBlackTreeNode<T, true>& node) { return node.left; }
+    static PlainRedBlackTreeNode<T, true>*& right(PlainRedBlackTreeNode<T, true>& node) { return node.right; }
+    static PlainRedBlackTreeNode<T, true>*& parent(PlainRedBlackTreeNode<T, true>& node) { return node.parent; }
+    static PlainRedBlackTreeNode<T, true>* const& left(const PlainRedBlackTreeNode<T, true>& node) { return node.left; }
+    static PlainRedBlackTreeNode<T, true>* const& right(const PlainRedBlackTreeNode<T, true>& node) { return node.right; }
+    static PlainRedBlackTreeNode<T, true>* const& parent(const PlainRedBlackTreeNode<T, true>& node) { return node.parent; }
+    static T& data(PlainRedBlackTreeNode<T, true>& node) { return node.data; }
+    static const T& data(const PlainRedBlackTreeNode<T, true>& node) { return node.data; }
+    static bool isRed(const PlainRedBlackTreeNode<T, true>& node) { return node.isRed; }
+    static void setRed(PlainRedBlackTreeNode<T, true>& node, bool red) { node.isRed = red; }
+};
+
+// Extractor for RedBlackTreeNode
+template<typename T, typename S, typename AugmentationAccumulator, bool HasParent>
+struct AugmentedRedBlackTreeNodeExtractor;
+
 template<typename T, typename S, typename AugmentationAccumulator>
-struct AugmentedRedBlackTreeNodeExtractor {
-    static AugmentedRedBlackTreeNode<T, S>*& left(AugmentedRedBlackTreeNode<T, S>& node) { return node.left; }
-    static AugmentedRedBlackTreeNode<T, S>*& right(AugmentedRedBlackTreeNode<T, S>& node) { return node.right; }
-    static AugmentedRedBlackTreeNode<T, S>* const& left(const AugmentedRedBlackTreeNode<T, S>& node) { return node.left; }
-    static AugmentedRedBlackTreeNode<T, S>* const& right(const AugmentedRedBlackTreeNode<T, S>& node) { return node.right; }
-    static T& data(AugmentedRedBlackTreeNode<T, S>& node) { return node.data; }
-    static const T& data(const AugmentedRedBlackTreeNode<T, S>& node) { return node.data; }
-    static bool isRed(const AugmentedRedBlackTreeNode<T, S>& node) { return node.isRed; }
-    static void setRed(AugmentedRedBlackTreeNode<T, S>& node, bool red) { node.isRed = red; }
-	static S& augmentedData(AugmentedRedBlackTreeNode<T, S>& node) { return node.augmentationData; }
-	static const S& augmentedData(const AugmentedRedBlackTreeNode<T, S>& node) { return node.augmentationData; }
-	static S recomputeAugmentedData(const AugmentedRedBlackTreeNode<T, S>& node,
-		   const AugmentedRedBlackTreeNode<T, S>* left, const AugmentedRedBlackTreeNode<T, S>* right)
+struct AugmentedRedBlackTreeNodeExtractor<T, S, AugmentationAccumulator, false> {
+    static AugmentedRedBlackTreeNode<T, S, false>*& left(AugmentedRedBlackTreeNode<T, S, false>& node) { return node.left; }
+    static AugmentedRedBlackTreeNode<T, S, false>*& right(AugmentedRedBlackTreeNode<T, S, false>& node) { return node.right; }
+    static AugmentedRedBlackTreeNode<T, S, false>* const& left(const AugmentedRedBlackTreeNode<T, S, false>& node) { return node.left; }
+    static AugmentedRedBlackTreeNode<T, S, false>* const& right(const AugmentedRedBlackTreeNode<T, S, false>& node) { return node.right; }
+    static T& data(AugmentedRedBlackTreeNode<T, S, false>& node) { return node.data; }
+    static const T& data(const AugmentedRedBlackTreeNode<T, S, false>& node) { return node.data; }
+    static bool isRed(const AugmentedRedBlackTreeNode<T, S, false>& node) { return node.isRed; }
+    static void setRed(AugmentedRedBlackTreeNode<T, S, false>& node, bool red) { node.isRed = red; }
+	static S& augmentedData(AugmentedRedBlackTreeNode<T, S, false>& node) { return node.augmentationData; }
+	static const S& augmentedData(const AugmentedRedBlackTreeNode<T, S, false>& node) { return node.augmentationData; }
+	static S recomputeAugmentedData(const AugmentedRedBlackTreeNode<T, S, false>& node,
+		   const AugmentedRedBlackTreeNode<T, S, false>* left, const AugmentedRedBlackTreeNode<T, S, false>* right)
+	{
+		AugmentationAccumulator accumulator;
+		const T& nodeData = data(node);
+		const S* leftData = (left != nullptr) ? &augmentedData(*left) : nullptr;
+		const S* rightData = (right != nullptr) ? &augmentedData(*right) : nullptr;
+		return accumulator(nodeData, leftData, rightData);
+	}
+};
+
+template<typename T, typename S, typename AugmentationAccumulator>
+struct AugmentedRedBlackTreeNodeExtractor<T, S, AugmentationAccumulator, true> {
+    static AugmentedRedBlackTreeNode<T, S, true>*& left(AugmentedRedBlackTreeNode<T, S, true>& node) { return node.left; }
+    static AugmentedRedBlackTreeNode<T, S, true>*& right(AugmentedRedBlackTreeNode<T, S, true>& node) { return node.right; }
+    static AugmentedRedBlackTreeNode<T, S, true>*& parent(AugmentedRedBlackTreeNode<T, S, true>& node) { return node.parent; }
+    static AugmentedRedBlackTreeNode<T, S, true>* const& left(const AugmentedRedBlackTreeNode<T, S, true>& node) { return node.left; }
+    static AugmentedRedBlackTreeNode<T, S, true>* const& right(const AugmentedRedBlackTreeNode<T, S, true>& node) { return node.right; }
+    static AugmentedRedBlackTreeNode<T, S, true>* const& parent(const AugmentedRedBlackTreeNode<T, S, true>& node) { return node.parent; }
+    static T& data(AugmentedRedBlackTreeNode<T, S, true>& node) { return node.data; }
+    static const T& data(const AugmentedRedBlackTreeNode<T, S, true>& node) { return node.data; }
+    static bool isRed(const AugmentedRedBlackTreeNode<T, S, true>& node) { return node.isRed; }
+    static void setRed(AugmentedRedBlackTreeNode<T, S, true>& node, bool red) { node.isRed = red; }
+	static S& augmentedData(AugmentedRedBlackTreeNode<T, S, true>& node) { return node.augmentationData; }
+	static const S& augmentedData(const AugmentedRedBlackTreeNode<T, S, true>& node) { return node.augmentationData; }
+	static S recomputeAugmentedData(const AugmentedRedBlackTreeNode<T, S, true>& node,
+		   const AugmentedRedBlackTreeNode<T, S, true>* left, const AugmentedRedBlackTreeNode<T, S, true>* right)
 	{
 		AugmentationAccumulator accumulator;
 		const T& nodeData = data(node);
@@ -2066,46 +2458,46 @@ concept ValidAugmentationInfo = requires(const T t, const typename AI::Data* lef
 	{typename AI::Accumulator{}(t, left, right)} -> IsSame<typename AI::Data>;
 };
 
-template <typename T, typename AugmentationInfo>
+template <typename T, typename AugmentationInfo, bool HasParent>
 struct RedBlackTreeNodeHelper;
 
-template <typename T>
-struct RedBlackTreeNodeHelper<T, NoAugmentation> {
-	using type = PlainRedBlackTreeNode<T>;
+template <typename T, bool HasParent>
+struct RedBlackTreeNodeHelper<T, NoAugmentation, HasParent> {
+	using type = PlainRedBlackTreeNode<T, HasParent>;
 };
 
-template<typename T, typename AugmentationInfo>
+template<typename T, typename AugmentationInfo, bool HasParent>
 requires ValidAugmentationInfo<T, AugmentationInfo>
-struct RedBlackTreeNodeHelper<T, AugmentationInfo> {
-	using type = AugmentedRedBlackTreeNode<T, typename AugmentationInfo::Data>;
+struct RedBlackTreeNodeHelper<T, AugmentationInfo, HasParent> {
+	using type = AugmentedRedBlackTreeNode<T, typename AugmentationInfo::Data, HasParent>;
 };
 
-template<typename T, typename AugmentationInfo>
-using RedBlackTreeNode = RedBlackTreeNodeHelper<T, AugmentationInfo>::type;
+template<typename T, typename AugmentationInfo, bool HasParent>
+using RedBlackTreeNode = RedBlackTreeNodeHelper<T, AugmentationInfo, HasParent>::type;
 
-template <typename T, typename AugmentationInfo>
+template <typename T, typename AugmentationInfo, bool HasParent>
 struct RedBlackTreeInfoExtractorHelper;
 
-template <typename T>
-struct RedBlackTreeInfoExtractorHelper<T, NoAugmentation> {
-	using type = PlainRedBlackTreeNodeExtractor<T>;
+template <typename T, bool HasParent>
+struct RedBlackTreeInfoExtractorHelper<T, NoAugmentation, HasParent> {
+	using type = PlainRedBlackTreeNodeExtractor<T, HasParent>;
 };
 
-template<typename T, typename AugmentationInfo>
+template<typename T, typename AugmentationInfo, bool HasParent>
 requires ValidAugmentationInfo<T, AugmentationInfo>
-struct RedBlackTreeInfoExtractorHelper<T, AugmentationInfo> {
-	using type = AugmentedRedBlackTreeNodeExtractor<T, typename AugmentationInfo::Data, typename AugmentationInfo::Accumulator>;
+struct RedBlackTreeInfoExtractorHelper<T, AugmentationInfo, HasParent> {
+	using type = AugmentedRedBlackTreeNodeExtractor<T, typename AugmentationInfo::Data, typename AugmentationInfo::Accumulator, HasParent>;
 };
 
-template<typename T, typename AugmentationInfo>
-using RedBlackTreeInfoExtractor = RedBlackTreeInfoExtractorHelper<T, AugmentationInfo>::type;
+template<typename T, typename AugmentationInfo, bool HasParent>
+using RedBlackTreeInfoExtractor = RedBlackTreeInfoExtractorHelper<T, AugmentationInfo, HasParent>::type;
 
 // Value-owning Red-Black Tree
-template<typename T, typename AugmentationInfo = NoAugmentation, typename Comparator = DefaultComparator<T>, typename StackType = StaticStack<RedBlackTreeNode<T, AugmentationInfo>**, 64>>
-class GeneralRedBlackTree : private IntrusiveRedBlackTree<RedBlackTreeNode<T, AugmentationInfo>, RedBlackTreeInfoExtractor<T, AugmentationInfo>, Comparator> {
-    using Node = RedBlackTreeNode<T, AugmentationInfo>;
-    using Parent = IntrusiveRedBlackTree<Node, RedBlackTreeInfoExtractor<T, AugmentationInfo>, Comparator>;
-    
+template<typename T, typename AugmentationInfo = NoAugmentation, typename Comparator = DefaultComparator<T>, typename StackType = StaticStack<RedBlackTreeNode<T, AugmentationInfo, false>**, 64>>
+class GeneralParentlessRedBlackTree : private IntrusiveRedBlackTree<RedBlackTreeNode<T, AugmentationInfo, false>, RedBlackTreeInfoExtractor<T, AugmentationInfo, false>, Comparator> {
+    using Node = RedBlackTreeNode<T, AugmentationInfo, false>;
+    using Parent = IntrusiveRedBlackTree<Node, RedBlackTreeInfoExtractor<T, AugmentationInfo, false>, Comparator>;
+
     void deleteSubtree(Node* node) {
         if (node != nullptr) {
             deleteSubtree(node->left);
@@ -2113,29 +2505,29 @@ class GeneralRedBlackTree : private IntrusiveRedBlackTree<RedBlackTreeNode<T, Au
             delete node;
         }
     }
-    
+
 public:
-    GeneralRedBlackTree() = default;
-    explicit GeneralRedBlackTree(Comparator comp) : Parent() {
+    GeneralParentlessRedBlackTree() = default;
+    explicit GeneralParentlessRedBlackTree(Comparator comp) : Parent() {
         this->comparator = comp;
     }
-    
-    ~GeneralRedBlackTree() {
+
+    ~GeneralParentlessRedBlackTree() {
         deleteSubtree(this->root);
     }
-    
+
     // Delete copy constructor and assignment
-    GeneralRedBlackTree(const GeneralRedBlackTree&) = delete;
-    GeneralRedBlackTree& operator=(const GeneralRedBlackTree&) = delete;
-    
+    GeneralParentlessRedBlackTree(const GeneralParentlessRedBlackTree&) = delete;
+    GeneralParentlessRedBlackTree& operator=(const GeneralParentlessRedBlackTree&) = delete;
+
     // Move constructor and assignment
-    GeneralRedBlackTree(GeneralRedBlackTree&& other) noexcept : Parent() {
+    GeneralParentlessRedBlackTree(GeneralParentlessRedBlackTree&& other) noexcept : Parent() {
         this->root = other.root;
         this->comparator = move(other.comparator);
         other.root = nullptr;
     }
-    
-    GeneralRedBlackTree& operator=(GeneralRedBlackTree&& other) noexcept {
+
+    GeneralParentlessRedBlackTree& operator=(GeneralParentlessRedBlackTree&& other) noexcept {
         if (this != &other) {
             deleteSubtree(this->root);
             this->root = other.root;
@@ -2144,7 +2536,7 @@ public:
         }
         return *this;
     }
-    
+
     // Insert operations
     void insert(const T& value) {
         Node* node = new Node(value);
@@ -2152,19 +2544,19 @@ public:
 			delete node;
 		}
     }
-    
+
     void insert(T&& value) {
         Node* node = new Node(move(value));
 		if(!Parent::template insert<StackType>(node)){
 			delete node;
 		}
     }
-    
+
     // Find operation
     bool contains(const T& value) const {
         return Parent::find(value) != nullptr;
     }
-    
+
     // Erase operation
     bool erase(const T& value) {
 		auto erasedNode = Parent::template erase<StackType>(value);
@@ -2174,7 +2566,7 @@ public:
 		}
 		return false;
     }
-    
+
     // Floor operation - largest element <= value
     bool floor(const T& value, T& result) const {
         const Node* node = Parent::floor(value);
@@ -2184,8 +2576,8 @@ public:
         }
         return false;
     }
-    
-    // Ceil operation - smallest element >= value  
+
+    // Ceil operation - smallest element >= value
     bool ceil(const T& value, T& result) const {
         const Node* node = Parent::ceil(value);
         if (node != nullptr) {
@@ -2194,7 +2586,7 @@ public:
         }
         return false;
     }
-    
+
     // Successor operation - next larger element
     bool successor(const T& value, T& result) const {
         const Node* node = Parent::find(value);
@@ -2207,7 +2599,7 @@ public:
         }
         return false;
     }
-    
+
     // Predecessor operation - next smaller element
     bool predecessor(const T& value, T& result) const {
         const Node* node = Parent::find(value);
@@ -2220,19 +2612,147 @@ public:
         }
         return false;
     }
-    
+
     // Expose visitor methods
     using Parent::visitDepthFirstInOrder;
     using Parent::visitDepthFirstReverseOrder;
     using Parent::visitDepthFirstPostOrder;
-    
+
     bool empty() const { return this->root == nullptr; }
 
 	const Node* getRoot() const { return this->root; }
 };
 
-template<typename T, typename Comparator = DefaultComparator<T>, typename StackType = StaticStack<RedBlackTreeNode<T, NoAugmentation>**, 64>>
-using RedBlackTree = GeneralRedBlackTree<T, NoAugmentation, Comparator, StackType>;
+// Value-owning Red-Black Tree with parents
+template<typename T, typename AugmentationInfo = NoAugmentation, typename Comparator = DefaultComparator<T>>
+class GeneralRedBlackTree : private IntrusiveRedBlackTree<RedBlackTreeNode<T, AugmentationInfo, true>, RedBlackTreeInfoExtractor<T, AugmentationInfo, true>, Comparator> {
+    using Node = RedBlackTreeNode<T, AugmentationInfo, true>;
+    using Parent = IntrusiveRedBlackTree<Node, RedBlackTreeInfoExtractor<T, AugmentationInfo, true>, Comparator>;
+
+    void deleteSubtree(Node* node) {
+        if (node != nullptr) {
+            deleteSubtree(node->left);
+            deleteSubtree(node->right);
+            delete node;
+        }
+    }
+
+public:
+    GeneralRedBlackTree() = default;
+    explicit GeneralRedBlackTree(Comparator comp) : Parent() {
+        this->comparator = comp;
+    }
+
+    ~GeneralRedBlackTree() {
+        deleteSubtree(this->root);
+    }
+
+    // Delete copy constructor and assignment
+    GeneralRedBlackTree(const GeneralRedBlackTree&) = delete;
+    GeneralRedBlackTree& operator=(const GeneralRedBlackTree&) = delete;
+
+    // Move constructor and assignment
+    GeneralRedBlackTree(GeneralRedBlackTree&& other) noexcept : Parent() {
+        this->root = other.root;
+        this->comparator = move(other.comparator);
+        other.root = nullptr;
+    }
+
+    GeneralRedBlackTree& operator=(GeneralRedBlackTree&& other) noexcept {
+        if (this != &other) {
+            deleteSubtree(this->root);
+            this->root = other.root;
+            this->comparator = move(other.comparator);
+            other.root = nullptr;
+        }
+        return *this;
+    }
+
+    // Insert operations
+    void insert(const T& value) {
+        Node* node = new Node(value);
+        if(!Parent::insert(node)){
+			delete node;
+		}
+    }
+
+    void insert(T&& value) {
+        Node* node = new Node(move(value));
+		if(!Parent::insert(node)){
+			delete node;
+		}
+    }
+
+    // Find operation
+    bool contains(const T& value) const {
+        return Parent::find(value) != nullptr;
+    }
+
+    // Erase operation
+    bool erase(const T& value) {
+		auto erasedNode = Parent::erase(value);
+		if(erasedNode != nullptr){
+			delete erasedNode;
+			return true;
+		}
+		return false;
+    }
+
+    // Floor operation - largest element <= value
+    bool floor(const T& value, T& result) const {
+        const Node* node = Parent::floor(value);
+        if (node != nullptr) {
+            result = node->data;
+            return true;
+        }
+        return false;
+    }
+
+    // Ceil operation - smallest element >= value
+    bool ceil(const T& value, T& result) const {
+        const Node* node = Parent::ceil(value);
+        if (node != nullptr) {
+            result = node->data;
+            return true;
+        }
+        return false;
+    }
+
+    // Successor operation - next larger element
+    bool successor(const T& value, T& result) const {
+        const Node* node = Parent::find(value);
+        if (node != nullptr) {
+            const Node* succ = Parent::successor(node);
+            if (succ != nullptr) {
+                result = succ->data;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Predecessor operation - next smaller element
+    bool predecessor(const T& value, T& result) const {
+        const Node* node = Parent::find(value);
+        if (node != nullptr) {
+            const Node* pred = Parent::predecessor(node);
+            if (pred != nullptr) {
+                result = pred->data;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Expose visitor methods
+    using Parent::visitDepthFirstInOrder;
+    using Parent::visitDepthFirstReverseOrder;
+    using Parent::visitDepthFirstPostOrder;
+
+    bool empty() const { return this->root == nullptr; }
+
+	const Node* getRoot() const { return this->root; }
+};
 
 // Helper struct to package augmentation info for AugmentedRedBlackTree
 template<typename AugData, typename AugAccumulator>
@@ -2242,7 +2762,18 @@ struct AugmentationPackage {
 };
 
 // Convenience alias for augmented red-black trees
-template<typename T, typename AugData, typename AugAccumulator, typename Comparator = DefaultComparator<T>, typename StackType = StaticStack<RedBlackTreeNode<T, AugmentationPackage<AugData, AugAccumulator>>**, 64>>
-using AugmentedRedBlackTree = GeneralRedBlackTree<T, AugmentationPackage<AugData, AugAccumulator>, Comparator, StackType>;
+
+template<typename T, typename Comparator = DefaultComparator<T>, typename StackType = StaticStack<RedBlackTreeNode<T, NoAugmentation, false>**, 64>>
+using ParentlessRedBlackTree = GeneralParentlessRedBlackTree<T, NoAugmentation, Comparator, StackType>;
+
+template<typename T, typename Comparator = DefaultComparator<T>>
+using RedBlackTree = GeneralRedBlackTree<T, NoAugmentation, Comparator>;
+
+template<typename T, typename AugData, typename AugAccumulator, typename Comparator = DefaultComparator<T>, typename StackType = StaticStack<RedBlackTreeNode<T, AugmentationPackage<AugData, AugAccumulator>, false>**, 64>>
+using ParentlessAugmentedRedBlackTree = GeneralParentlessRedBlackTree<T, AugmentationPackage<AugData, AugAccumulator>, Comparator, StackType>;
+
+template<typename T, typename AugData, typename AugAccumulator, typename Comparator = DefaultComparator<T>>
+using AugmentedRedBlackTree = GeneralRedBlackTree<T, AugmentationPackage<AugData, AugAccumulator>, Comparator>;
+
 
 #endif //TREES_H
