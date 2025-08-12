@@ -12,7 +12,7 @@ At this point, we have a minimal implementation of the interrupt manager, we can
 
 ---
 
-9. Create driver for PIC
+9. Create driver for PIT
 10. Implement timer manager, sleep()
 11. SMP bring up
 12. Unit test RingBuffer

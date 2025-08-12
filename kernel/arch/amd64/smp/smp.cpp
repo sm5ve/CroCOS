@@ -10,7 +10,7 @@ namespace kernel::amd64::smp{
         uint64_t currentGsBase;
         asm volatile("rdgsbase %0" : "=r"(currentGsBase));
         currentGsBase &= ~0xfful;
-        currentGsBase |= (uint64_t)pid;
+        currentGsBase |= static_cast<uint64_t>(pid) & 0xfful;
         asm volatile("wrgsbase %0" : : "r"(currentGsBase));
     }
 
