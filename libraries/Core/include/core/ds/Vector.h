@@ -21,7 +21,7 @@ private:
     size_t size;
     size_t capacity;
     void reallocate(size_t new_capacity) {
-        T* new_data = static_cast<T*>(operator new(sizeof(T) * new_capacity));
+        T* new_data = static_cast<T*>(operator new(sizeof(T) * new_capacity, std::align_val_t{alignof(T)}));
         // Copy existing elements to the new buffer
         for (size_t i = 0; i < size; ++i) {
             if constexpr (is_trivially_copyable_v<T>) {
@@ -56,12 +56,12 @@ public:
 
     //Constructor with initial capacity
     Vector(size_t init_capacity) : size(0), capacity(init_capacity) {
-        data = static_cast<T*>(operator new(sizeof(T) * init_capacity));
+        data = static_cast<T*>(operator new(sizeof(T) * init_capacity, std::align_val_t{alignof(T)}));
     }
 
     //Constructor with initial data provided.
     Vector(T* array, size_t input_size) : size(input_size), capacity(input_size) {
-        data = static_cast<T*>(operator new(sizeof(T) * size));
+        data = static_cast<T*>(operator new(sizeof(T) * size, std::align_val_t{alignof(T)}));
         for (size_t i = 0; i < size; i++) {
             data[i] = array[i];
         }
@@ -69,7 +69,7 @@ public:
 
     //Copy constructor
     Vector(const Vector& other) : size(other.size), capacity(other.capacity) {
-        data = static_cast<T*>(operator new(sizeof(T) * other.capacity));
+        data = static_cast<T*>(operator new(sizeof(T) * other.capacity, std::align_val_t{alignof(T)}));
         for (size_t i = 0; i < size; i++) {
             data[i] = other.data[i];
         }
@@ -84,7 +84,7 @@ public:
         operator delete(data);
         size = other.size;
         capacity = other.capacity;
-        data = static_cast<T*>(operator new(sizeof(T) * capacity));
+        data = static_cast<T*>(operator new(sizeof(T) * capacity, std::align_val_t{alignof(T)}));
         for (size_t i = 0; i < size; i++) {
             data[i] = other.data[i];
         }

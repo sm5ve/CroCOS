@@ -84,7 +84,7 @@ protected:
 
     void resize(size_t newCapacity){
         //assert(count <= newCapacity, "Tried to resize hash map to be too small");
-        auto* newEntries = static_cast<Entry*>(operator new(sizeof(Entry) * newCapacity));
+        auto* newEntries = static_cast<Entry*>(operator new(sizeof(Entry) * newCapacity, std::align_val_t{alignof(Entry)}));
         memset(newEntries, 0, sizeof(Entry) * newCapacity);
         for(size_t index = 0; index < capacity; index++){
             auto& entry = entryBuffer[index];
@@ -148,7 +148,7 @@ protected:
     explicit IndexedHashTable(const size_t init_capacity){
         capacity = init_capacity;
         count = 0;
-        entryBuffer = static_cast<Entry*>(operator new(sizeof(Entry) * init_capacity));
+        entryBuffer = static_cast<Entry*>(operator new(sizeof(Entry) * init_capacity, std::align_val_t{alignof(Entry)}));
         memset(entryBuffer, 0, sizeof(Entry) * init_capacity);
     }
 
