@@ -10,8 +10,9 @@
 #include <liballoc/InternalAllocator.h>
 #include <liballoc/InternalAllocatorDebug.h>
 
-namespace LibAlloc::InternalAllocator {
 #define ASSUME_ALIGN_POWER_OF_TWO
+
+namespace LibAlloc::InternalAllocator {
 
     struct alignas(alignof(max_align_t)) UnallocatedMemoryBlockHeader {
         size_t sizeAndColor; //includes the size of the header itself
@@ -76,6 +77,9 @@ namespace LibAlloc::InternalAllocator {
         size_t sizeAndColor; //includes the size of the header itself
         AllocatedMemoryBlockHeader* left;
         AllocatedMemoryBlockHeader* right;
+#ifdef TRACK_REQUESTED_ALLOCATION_STATS
+        size_t requestedSize;
+#endif
 
         [[nodiscard]] uint32_t size() const {return sizeAndColor & ~3u;}
         [[nodiscard]] bool isRed() const {return ((sizeAndColor & 1u) == 1);}
@@ -105,6 +109,12 @@ namespace LibAlloc::InternalAllocator {
     //Smallest block size we will allocate is at least twice the size of the largest block header
     constexpr size_t minimumBlockSize = 2 * max(sizeof(UnallocatedMemoryBlockHeader),
         sizeof(AllocatedMemoryBlockHeader), sizeof(AlignedAllocatedMemoryBlockHeader));
+
+#ifdef TRACK_REQUESTED_ALLOCATION_STATS
+#define SPAN_ALLOC_STAT_LIST size_t& requestedAllocationStat, size_t& committedAllocationStat
+#else
+#define SPAN_ALLOC_STAT_LIST size_t& committedAllocationStat
+#endif
 
     //Each span belongs to 2 red-black trees - one ordered by starting address, and one by remaining free space
     //The latter RBT is augmented to keep track of the largest free block in the given span
@@ -144,8 +154,8 @@ namespace LibAlloc::InternalAllocator {
         [[nodiscard]] AllocatedMemoryBlockHeader* getValidatedHeaderForPtr(void* ptr) const;
         public:
         explicit MemorySpanHeader(size_t size);
-        void* allocateBlock(size_t size, std::align_val_t align);
-        bool freeBlock(void* ptr);
+        void* allocateBlock(size_t size, std::align_val_t align, SPAN_ALLOC_STAT_LIST);
+        bool freeBlock(void* ptr, SPAN_ALLOC_STAT_LIST);
         [[nodiscard]] bool isPointerAllocated(void* ptr) const;
 
         bool operator==(const MemorySpanHeader& other) const {
@@ -269,7 +279,7 @@ namespace LibAlloc::InternalAllocator {
         return alignDown(addr - sizeof(AllocatedMemoryBlockHeader), alignof(AllocatedMemoryBlockHeader));
     }
 
-    void* MemorySpanHeader::allocateBlock(size_t size, std::align_val_t align) {
+    void* MemorySpanHeader::allocateBlock(size_t size, std::align_val_t align, SPAN_ALLOC_STAT_LIST) {
         size_t paddedSize = computeWorstCaseAlignedSize(size, align);
         //This is a little conservative - there are edge cases where we might be able to fulfill a request with a slightly
         //smaller free block if it is conveniently aligned. But checking for that is rather inefficient, so we prefer
@@ -348,6 +358,11 @@ namespace LibAlloc::InternalAllocator {
         }
 
         this -> freeSpace -= allocatedBlock -> size();
+#ifdef TRACK_REQUESTED_ALLOCATION_STATS
+        requestedAllocationStat += paddedSize;
+        allocatedBlock -> requestedSize = size;
+#endif
+        committedAllocationStat += allocatedBlock -> size();
 
         return reinterpret_cast<void*>(returnAddr);
     }
@@ -407,10 +422,15 @@ namespace LibAlloc::InternalAllocator {
         return blockHeader;
     }
 
-    bool MemorySpanHeader::freeBlock(void* ptr) {
+    bool MemorySpanHeader::freeBlock(void* ptr, SPAN_ALLOC_STAT_LIST) {
         //First, we check that the pointer is indeed valid to free. We find the header of the block we believe to contain
         //ptr by finding ptr's floor in allocatedBlockTree. This gives us the closest AllocatedMemoryBlockHeader to ptr.
         AllocatedMemoryBlockHeader* blockHeader = getValidatedHeaderForPtr(ptr);
+        if (blockHeader == nullptr) return false;
+#ifdef TRACK_REQUESTED_ALLOCATION_STATS
+        requestedAllocationStat -= blockHeader -> requestedSize;
+#endif
+        committedAllocationStat -= blockHeader -> size();
         //If we've made it to this point, we've confirmed the free was to a valid pointer, and we get the address of the
         //beginning of its block.
         const auto blockAddr = reinterpret_cast<uintptr_t>(blockHeader);
@@ -477,8 +497,26 @@ namespace LibAlloc::InternalAllocator {
         }
     };
 
+    struct CoarseAllocatorStatistics {
+        size_t totalSystemMemoryAllocated;
+#ifdef TRACK_REQUESTED_ALLOCATION_STATS
+        size_t totalBytesRequested;
+#endif
+        size_t totalBytesInAllocatedBlocks;
+        size_t totalSizeOfSpanHeaders;
+
+        CoarseAllocatorStatistics() :
+        totalSystemMemoryAllocated(0),
+#ifdef TRACK_REQUESTED_ALLOCATION_STATS
+        totalBytesRequested(0),
+#endif
+        totalBytesInAllocatedBlocks(0), totalSizeOfSpanHeaders(0)
+        {}
+    };
+
     class CoarseInternalAllocator {
     private:
+        CoarseAllocatorStatistics stats;
         friend void validateAllocatorIntegrity();
         friend size_t computeTotalAllocatedSpace();
         friend size_t computeTotalFreeSpace();
@@ -493,7 +531,12 @@ namespace LibAlloc::InternalAllocator {
         void createSpan(size_t spanSize, void* baseAddr);
         void* allocate(size_t size, std::align_val_t align);
         bool free(void* ptr);
+        CoarseAllocatorStatistics getStatistics() const;
     };
+
+    CoarseAllocatorStatistics CoarseInternalAllocator::getStatistics() const {
+        return stats;
+    }
 
     MemorySpanHeader* CoarseInternalAllocator::findSpanContaining(void* ptr) {
         auto addr = reinterpret_cast<uintptr_t>(ptr);
@@ -540,6 +583,9 @@ namespace LibAlloc::InternalAllocator {
         this -> spansByFreeSpace.erase(span);
         this -> spansByAddress.erase(span);
 
+        stats.totalSystemMemoryAllocated -= span -> spanSize;
+        stats.totalSizeOfSpanHeaders -= sizeof(MemorySpanHeader);
+
         using namespace LibAlloc::Backend;
         freePages(span, (span -> spanSize)/smallPageSize);
     }
@@ -548,7 +594,15 @@ namespace LibAlloc::InternalAllocator {
         auto* span = new (baseAddr) MemorySpanHeader(spanSize);
         this -> spansByFreeSpace.insert(span);
         this -> spansByAddress.insert(span);
+        stats.totalSystemMemoryAllocated += spanSize;
+        stats.totalSizeOfSpanHeaders += sizeof(MemorySpanHeader);
     }
+
+#ifdef TRACK_REQUESTED_ALLOCATION_STATS
+#define COARSE_ALLOCATOR_SPAN_STATS stats.totalBytesRequested, stats.totalBytesInAllocatedBlocks
+#else
+#define COARSE_ALLOCATOR_SPAN_STATS stats.totalBytesInAllocatedBlocks
+#endif
 
     bool CoarseInternalAllocator::free(void* ptr) {
         auto* span = findSpanContaining(ptr);
@@ -557,8 +611,8 @@ namespace LibAlloc::InternalAllocator {
         //Automatically propagates changes to the augmentation data. Note that only spansByFreeSpace is augmented,
         //and spansByAddress isn't. Furthermore, modifying a span does not change its base address, so the structure
         //of the spansByAddress tree does not need to change.
-        spansByFreeSpace.update(span, [ptr, &out](MemorySpanHeader& header) {
-           out = header.freeBlock(ptr);
+        spansByFreeSpace.update(span, [ptr, &out, this](MemorySpanHeader& header) {
+           out = header.freeBlock(ptr, COARSE_ALLOCATOR_SPAN_STATS);
         });
 
         if (span -> freeSpace + sizeof(MemorySpanHeader) == span -> spanSize) {
@@ -590,8 +644,8 @@ namespace LibAlloc::InternalAllocator {
         //Automatically propagates changes to the augmentation data. Note that only spansByFreeSpace is augmented,
         //and spansByAddress isn't. Furthermore, modifying a span does not change its base address, so the structure
         //of the spansByAddress tree does not need to change.
-        spansByFreeSpace.update(span, [size, align, &out](MemorySpanHeader& header) {
-            out = header.allocateBlock(size, align);
+        spansByFreeSpace.update(span, [size, align, &out, this](MemorySpanHeader& header) {
+            out = header.allocateBlock(size, align, COARSE_ALLOCATOR_SPAN_STATS);
         });
         return out;
     }
@@ -671,4 +725,25 @@ namespace LibAlloc::InternalAllocator {
         return span -> isPointerAllocated(ptr);
     }
 
+    InternalAllocatorStats getAllocatorStats() {
+        InternalAllocatorStats out{};
+        auto coarseStats = coarseInternalAllocator.getStatistics();
+        out.totalSystemMemoryAllocated = coarseStats.totalSystemMemoryAllocated;
+#ifdef TRACK_REQUESTED_ALLOCATION_STATS
+        out.totalBytesRequested = coarseStats.totalBytesRequested;
+#endif
+        out.totalUsedBytesInAllocator = coarseStats.totalSizeOfSpanHeaders + coarseStats.totalBytesInAllocatedBlocks;
+        return out;
+    }
+
+#ifdef TRACK_REQUESTED_ALLOCATION_STATS
+    size_t InternalAllocatorStats::computeAllocatorMetadataOverhead() const{
+        return totalUsedBytesInAllocator - totalBytesRequested;
+    }
+
+    float InternalAllocatorStats::computeAllocatorMetadataPercentOverhead() const {
+        return static_cast<float>(computeAllocatorMetadataOverhead()) / static_cast<float>(totalUsedBytesInAllocator);
+    }
+
+#endif
 }

@@ -35,7 +35,7 @@ target_compile_options(LibAllocTests PRIVATE
     -Wno-c++26-extensions          # Allow C++26 extensions
     -DCROCOS_TESTING
     -DCORE_LIBRARY_TESTING
-    -O0
+    -O3
     -fsanitize=address
     -fsanitize=leak
     -g
@@ -45,7 +45,7 @@ target_compile_options(LibAllocTests PRIVATE
 
 # Custom PRE_LINK command to instrument object files before linking
 add_custom_command(TARGET LibAllocTests PRE_LINK
-    COMMENT "Instrumenting kernel test object files for memory tracking before linking"
+    COMMENT "Instrumenting liballoc test object files for memory tracking before linking"
     COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/../instrument_objects.sh ${CMAKE_CURRENT_BINARY_DIR} LibAllocTests
 )
 
