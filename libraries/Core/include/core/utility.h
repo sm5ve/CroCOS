@@ -110,6 +110,9 @@ constexpr bool is_same_v = is_same<T, S>::value;
 template<typename T, typename S>
 concept IsSame = is_same_v<T, S>;
 
+template<typename T, typename S>
+concept IsDifferent = !is_same_v<T, S>;
+
 template <typename T, typename... Ts>
 struct IndexOfHelper {
     static constexpr size_t value = static_cast<size_t>(-1);
@@ -314,13 +317,18 @@ inline void rotateLeft(T& t1, T& t2, T& t3){
 }
 
 template <typename T>
-inline T min(T t1, T t2){
+constexpr T min(T t1, T t2){
     return t1 < t2 ? t1 : t2;
 }
 
 template <typename T>
-inline T max(T t1, T t2){
+constexpr T max(T t1, T t2){
     return t1 > t2 ? t1 : t2;
+}
+
+template <typename T, typename... Rest>
+constexpr T max(T a, T b, Rest... rest) {
+    return max(max(a, b), rest...);
 }
 
 template <typename>
@@ -358,7 +366,7 @@ public:
 };
 
 template<typename From, typename To>
-concept convertible_to = requires(From f) {
+concept convertible_to = (IsSame<From, void> && IsSame<To, void>) || requires(From f) {
     static_cast<To>(f);
 };
 
@@ -556,6 +564,11 @@ concept UnsignedIntegral = requires {
 template <typename T>
 concept SignedIntegral = requires {
     requires T(-1) < T(0); // true only for signed
+};
+
+template <typename F, typename R, typename... Args>
+concept Invocable = requires(F f, Args... args) {
+    { f(args...) } -> convertible_to<R>;
 };
 
 #endif //CROCOS_UTILITY_H

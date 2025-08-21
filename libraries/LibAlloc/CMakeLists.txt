@@ -5,16 +5,17 @@ set(MALLOC_SOURCES
 
 #Special version of Core meant to be linked with the kernel
 
-add_library(MallocKernel STATIC ${MALLOC_SOURCES})
+add_library(AllocKernel STATIC ${MALLOC_SOURCES})
 
-target_include_directories(MallocKernel PUBLIC
+target_include_directories(AllocKernel PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/../../kernel/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/../Core/include
 )
 
 #target_compile_definitions(CoreKernel PRIVATE CORE_LINKED_WITH_KERNEL)
 
-target_compile_options(MallocKernel PRIVATE -mno-sse -mno-sse2 -mno-avx -ffreestanding -fno-rtti -fno-exceptions -fno-sized-deallocation -fconcepts -nostdlib -Wall -Wextra -pedantic -Wshadow -Wcast-align -Wwrite-strings -Wredundant-decls -Winline -Wno-long-long -Wconversion -Werror -mno-red-zone -mcmodel=kernel  -std=gnu++2b -masm=att
+target_compile_options(AllocKernel PRIVATE -mno-sse -mno-sse2 -mno-avx -ffreestanding -fno-rtti -fno-exceptions -fno-sized-deallocation -fconcepts -nostdlib -Wall -Wextra -pedantic -Wshadow -Wcast-align -Wwrite-strings -Wredundant-decls -Winline -Wno-long-long -Wconversion -Werror -mno-red-zone -mcmodel=kernel  -std=gnu++2b -masm=att
 -DKERNEL)
 
 #Standard version of Core for userspace

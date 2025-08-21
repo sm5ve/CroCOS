@@ -1,7 +1,7 @@
 //
 // Created by Spencer Martin on 8/1/25.
 //
-#include <Backend.h>
+#include <liballoc/Backend.h>
 #include <sys/mman.h>
 
 namespace LibAlloc::Backend{
@@ -20,7 +20,7 @@ namespace LibAlloc::Backend{
 #endif
 
     void* allocPages(size_t count){
-        mmap(nullptr, count * smallPageSize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        return mmap(nullptr, count * smallPageSize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     }
     //The caller is responsible for retaining information on page counts of allocations
     void freePages(void* ptr, size_t count){

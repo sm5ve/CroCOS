@@ -17,6 +17,7 @@ target_sources(LibAllocTests PRIVATE
 target_include_directories(LibAllocTests PUBLIC
     ../harness
     ../../libraries/LibAlloc/include
+    ../../libraries/Core/include
 )
 
 # Add liballoc source files that we're testing
@@ -33,6 +34,7 @@ target_compile_options(LibAllocTests PRIVATE
     -Wextra
     -Wno-c++26-extensions          # Allow C++26 extensions
     -DCROCOS_TESTING
+    -DCORE_LIBRARY_TESTING
     -O0
     -fsanitize=address
     -fsanitize=leak
@@ -71,6 +73,7 @@ target_compile_options(LibAllocTestRunner PRIVATE
     -Wall
     -Wextra
     -DCORE_KERNEL_TESTING
+    -DCORE_LIBRARY_TESTING
     -O0
     -fsanitize=address
     -fsanitize=leak

@@ -55,6 +55,17 @@ constexpr uint32_t log2floor(uint32_t value){
 #endif
 }
 
+template <typename T>
+constexpr T largestPowerOf2Dividing(T value) {
+    T result = 1;
+    if (value == 0) return 0;
+    while ((value & 1) == 0) {
+        value >>= 1;
+        result <<= 1;
+    }
+    return result;
+}
+
 constexpr size_t gcd(size_t a, size_t b) {
     return b == 0 ? a : gcd(b, a % b);
 }

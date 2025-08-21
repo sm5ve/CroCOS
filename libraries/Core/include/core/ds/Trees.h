@@ -625,7 +625,7 @@ protected:
 
 		do {
 			updateNodeAugmentationData(current);
-		} while (current = BinaryTreeInfoExtractor::parent(*current));
+		} while ((current = BinaryTreeInfoExtractor::parent(*current)));
 	}
 
 	template<typename StackType>
