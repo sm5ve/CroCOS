@@ -6,6 +6,7 @@
 #define CROCOS_UTILITY_H
 
 #include "TypeTraits.h"
+#include <stddef.h>
 
 template <typename T, T v>
 struct integral_constant {
@@ -570,5 +571,51 @@ template <typename F, typename R, typename... Args>
 concept Invocable = requires(F f, Args... args) {
     { f(args...) } -> convertible_to<R>;
 };
+
+
+template <typename T, size_t N>
+struct ConstexprArray {
+    T elems[N];
+
+    // constexpr element access
+    constexpr T const& operator[](size_t i) const { return elems[i]; }
+    constexpr T& operator[](size_t i) { return elems[i]; }
+    constexpr static size_t size() { return N; }
+    using Type = T;
+};
+
+template <typename T, size_t N>
+ConstexprArray(const T (&)[N]) -> ConstexprArray<T, N>;
+
+template <typename T, typename... U>
+ConstexprArray(T, U...) -> ConstexprArray<T, 1 + sizeof...(U)>;
+
+template <typename T>
+struct is_constexpr_array {
+    static constexpr bool value = false;
+};
+
+template <typename T, size_t N>
+struct is_constexpr_array<ConstexprArray<T, N>> {
+    static constexpr bool value = true;
+};
+
+template <typename T, size_t N>
+struct is_constexpr_array<const ConstexprArray<T, N>> {
+    static constexpr bool value = true;
+};
+
+template <typename T>
+concept IsConstexprArray = is_constexpr_array<T>::value;
+
+template<typename T, size_t N>
+constexpr bool isArraySorted(ConstexprArray<T, N> array){
+    for(size_t i = 1; i < N; i++){
+        if(array[i] < array[i-1]){
+            return false;
+        }
+    }
+    return true;
+}
 
 #endif //CROCOS_UTILITY_H
