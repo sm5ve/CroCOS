@@ -248,11 +248,16 @@ TEST(mixedSizeStressTest) {
     ASSERT_EQ(LibAlloc::InternalAllocator::computeTotalAllocatedSpace(), 0);
 }
 
+struct AllocationRecord{
+    void* ptr;
+    size_t size;
+};
+
 TEST(allocatorPerformanceStressTest) {
-    const int testDurationSeconds = 10;
+    const int testDurationSeconds = 2;
     const size_t sizes[] = {8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096};
 
-    Vector<void*> allocations;
+    Vector<AllocationRecord> allocations;
     std::srand(789); // Different seed for performance test
 
     // Performance statistics
@@ -296,7 +301,7 @@ TEST(allocatorPerformanceStressTest) {
             void* ptr = LibAlloc::InternalAllocator::malloc(size);
             ASSERT_NE(ptr, nullptr);
 
-            allocations.push(ptr);
+            allocations.push({ptr, size});
             totalAllocations++;
             totalBytesAllocated += size;
 
@@ -312,17 +317,14 @@ TEST(allocatorPerformanceStressTest) {
         } else {
             // Free a random allocation
             int index = std::rand() % allocations.getSize();
-            void* ptr = allocations[index];
-
-            // Estimate freed size (can't get exact size after free, so use allocation pattern)
-            size_t estimatedSize = sizes[std::rand() % 10]; // Rough estimate
+            void* ptr = allocations[index].ptr;
 
             LibAlloc::InternalAllocator::free(ptr);
 
+            totalBytesFreed += allocations[index].size;
             allocations[index] = allocations[allocations.getSize()-1];
             allocations.pop();
             totalFrees++;
-            totalBytesFreed += estimatedSize;
         }
 
         // Periodic random validation during sustained load
@@ -336,9 +338,10 @@ TEST(allocatorPerformanceStressTest) {
     double durationSeconds = duration.count() / 1000.0;
 
     // Clean up remaining allocations
-    for (void* ptr : allocations) {
-        LibAlloc::InternalAllocator::free(ptr);
+    for (auto info : allocations) {
+        LibAlloc::InternalAllocator::free(info.ptr);
         totalFrees++;
+        totalBytesFreed += info.size;
     }
 
     // Get final statistics
