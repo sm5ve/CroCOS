@@ -9,10 +9,24 @@
 #include <stdint.h>
 #include <liballoc/InternalAllocator.h>
 #include <liballoc/InternalAllocatorDebug.h>
+#include <core/SizeClass.h>
+#include <liballoc/Allocator.h>
+#include <liballoc/SlabAllocator.h>
 
 #define ASSUME_ALIGN_POWER_OF_TWO
 
 namespace LibAlloc::InternalAllocator {
+
+#ifdef ASSUME_ALIGN_POWER_OF_TWO
+    constexpr bool AssumePowerOfTwoAlignment = true;
+#else
+    constexpr bool AssumePowerOfTwoAlignment = false;
+#endif
+
+    constexpr ConstexprArray slabSizeClasses = {8, 16, 32, 64, 96, 128};
+    constexpr ConstexprArray slabAllocatorBufferSizes = {1024, 1024, 1024, 2048, 2048, 2048};
+    static_assert(slabSizeClasses.size() == slabAllocatorBufferSizes.size(), "Size classes and buffer sizes must be the same size");
+    constexpr auto sizeClassJumpTable = makeSizeClassJumpTable<slabSizeClasses>();
 
     struct alignas(alignof(max_align_t)) UnallocatedMemoryBlockHeader {
         size_t sizeAndColor; //includes the size of the header itself
@@ -210,19 +224,6 @@ namespace LibAlloc::InternalAllocator {
         }
     }
 
-    constexpr uintptr_t alignDown(uintptr_t addr, const size_t alignment) {
-#ifdef ASSUME_ALIGN_POWER_OF_TWO
-        addr &= ~(alignment - 1);
-#else
-        addr -= addr % alignment;
-#endif
-        return addr;
-    }
-
-    constexpr uintptr_t alignUp(const uintptr_t addr, const size_t alignment) {
-        return alignDown(addr + alignment - 1, alignment);
-    }
-
     //Memory block headers are automatically aligned to some degree.
     //This computes the guaranteed alignment of the memory immediately after an AllocatedMemoryBlockHeader.
     //If the requested alignment of the allocation is at most guaranteedAlignAfterBlock, then we can put the allocation
@@ -267,7 +268,7 @@ namespace LibAlloc::InternalAllocator {
 #endif
         {
             outAddr += alignedHeaderMetadataSize;
-            outAddr = alignUp(outAddr, alignSize);
+            outAddr = alignUp<AssumePowerOfTwoAlignment>(outAddr, alignSize);
         }
         return outAddr;
     }
@@ -276,7 +277,7 @@ namespace LibAlloc::InternalAllocator {
     //In this case, we may hope to keep this lower chunk of memory free, and put the allocated memory block header closer
     //to the return address.
     constexpr uintptr_t findFirstAlignedHeaderLocationBelowAddr(uintptr_t addr) {
-        return alignDown(addr - sizeof(AllocatedMemoryBlockHeader), alignof(AllocatedMemoryBlockHeader));
+        return alignDown<AssumePowerOfTwoAlignment>(addr - sizeof(AllocatedMemoryBlockHeader), alignof(AllocatedMemoryBlockHeader));
     }
 
     void* MemorySpanHeader::allocateBlock(size_t size, std::align_val_t align, SPAN_ALLOC_STAT_LIST) {
@@ -314,7 +315,7 @@ namespace LibAlloc::InternalAllocator {
         //Similarly, we need to see where the next header would go if there is enough space.
         //This should be at most blockEndAddr.
         uintptr_t nextHeaderBaseAddr = max(returnAddr + size, headerBaseAddr + minimumBlockSize);
-        nextHeaderBaseAddr = alignUp(nextHeaderBaseAddr, alignof(AllocatedMemoryBlockHeader));
+        nextHeaderBaseAddr = alignUp<AssumePowerOfTwoAlignment>(nextHeaderBaseAddr, alignof(AllocatedMemoryBlockHeader));
 
         //If the leftover space above is sufficiently small, extend the AllocatedBlock upwards to avoid a small block.
         size_t leftoverSizeAbove = blockEndAddr - nextHeaderBaseAddr;
@@ -514,12 +515,12 @@ namespace LibAlloc::InternalAllocator {
         {}
     };
 
-    class CoarseInternalAllocator {
+    class CoarseInternalAllocator : public Allocator{
     private:
         CoarseAllocatorStatistics stats;
         friend void validateAllocatorIntegrity();
-        friend size_t computeTotalAllocatedSpace();
-        friend size_t computeTotalFreeSpace();
+        friend size_t computeTotalAllocatedSpaceInCoarseAllocator();
+        friend size_t computeTotalFreeSpaceInCoarseAllocator();
         friend bool isValidPointer(void* ptr);
         IntrusiveRedBlackTree<MemorySpanHeader, MemorySpanFreeSpaceInfoExtractor, MemorySpanUnallocatedComparator> spansByFreeSpace;
         IntrusiveRedBlackTree<MemorySpanHeader, MemorySpanAddressInfoExtractor> spansByAddress;
@@ -528,9 +529,10 @@ namespace LibAlloc::InternalAllocator {
         MemorySpanHeader* findMostOccupiedSpanFittingRequest(size_t size, std::align_val_t align);
         void destroySpan(MemorySpanHeader* span);
     public:
+        ~CoarseInternalAllocator() override = default;
         void createSpan(size_t spanSize, void* baseAddr);
-        void* allocate(size_t size, std::align_val_t align);
-        bool free(void* ptr);
+        void* allocate(size_t size, std::align_val_t align) override;
+        bool free(void* ptr) override;
         CoarseAllocatorStatistics getStatistics() const;
     };
 
@@ -616,6 +618,7 @@ namespace LibAlloc::InternalAllocator {
         });
 
         if (span -> freeSpace + sizeof(MemorySpanHeader) == span -> spanSize) {
+            //should we delay destroying the span for a little to avoid thrashing?
             destroySpan(span);
         }
         return out;
@@ -650,18 +653,111 @@ namespace LibAlloc::InternalAllocator {
         return out;
     }
 
-    CoarseInternalAllocator coarseInternalAllocator;
+#define ALLOW_ZERO_ALLOC
+
+    class InternalAllocator : public LibAlloc::Allocator {
+        friend void validateAllocatorIntegrity();
+        friend size_t computeTotalAllocatedSpaceInCoarseAllocator();
+        friend size_t computeTotalFreeSpaceInCoarseAllocator();
+        friend bool isValidPointer(void* ptr);
+        friend InternalAllocatorStats getAllocatorStats();
+
+        CoarseInternalAllocator coarseAllocator;
+        SlabTreeType slabTree;
+        ConstexprArray<SlabAllocator, slabSizeClasses.size()> slabAllocators;
+#ifdef ALLOW_ZERO_ALLOC
+        uint8_t zero;
+#endif
+        template <size_t... Is>
+        ConstexprArray<SlabAllocator, slabSizeClasses.size()> makeSlabAllocators(index_sequence<Is...>);
+    public:
+        InternalAllocator(void* initialBuffer, size_t size);
+        InternalAllocator();
+        void* allocate(size_t size, std::align_val_t align) override;
+        bool free(void* ptr) override;
+    };
+
+    template <size_t... Is>
+    ConstexprArray<SlabAllocator, slabSizeClasses.size()> InternalAllocator::makeSlabAllocators(index_sequence<Is...> _) {
+        return {SlabAllocator(slabSizeClasses[Is], slabAllocatorBufferSizes[Is], this -> coarseAllocator, this -> slabTree)...};
+    }
+
+    InternalAllocator::InternalAllocator() : slabAllocators(makeSlabAllocators(make_index_sequence<slabSizeClasses.size()>{})) {
+        zero = 0;
+    }
+
+    InternalAllocator::InternalAllocator(void* initialBuffer, size_t size) : slabAllocators(makeSlabAllocators(make_index_sequence<slabSizeClasses.size()>{})) {
+        coarseAllocator.createSpan(size, initialBuffer);
+        zero = 0;
+    }
+
+    void* InternalAllocator::allocate(size_t size, std::align_val_t align) {
+#ifdef ALLOW_ZERO_ALLOC
+        if (condition_unlikely(size == 0)) {
+            return &zero;
+        }
+#endif
+        constexpr size_t maxSlabSize = slabSizeClasses[slabSizeClasses.size() - 1];
+        if (size > maxSlabSize) {
+            return coarseAllocator.allocate(size, align);
+        }
+        size_t slabIndex = sizeClassIndex<slabSizeClasses>(size);
+        auto alignVal = static_cast<size_t>(align);
+#ifdef ASSUME_ALIGN_POWER_OF_TWO
+        if (condition_likely((slabSizeClasses[slabIndex] & (alignVal - 1)) == 0)) {
+            return slabAllocators[slabIndex].alloc();
+        }
+        size_t alignedSize = max(2 << log2floor(size), alignVal);
+        if (condition_likely(alignedSize <= maxSlabSize)) {
+            slabIndex = sizeClassIndex<slabSizeClasses>(alignedSize);
+            return slabAllocators[slabIndex].alloc();
+        }
+#else
+        if (condition_likely(slabSizeClasses[slabIndex] % alignVal == 0)) {
+            return slabAllocators[slabIndex].alloc();
+        }
+#endif
+        return coarseAllocator.allocate(size, align);
+    }
+
+    bool InternalAllocator::free(void *ptr) {
+#ifdef ALLOW_ZERO_ALLOC
+        if (condition_unlikely(ptr == &zero)) {
+            return true;
+        }
+#endif
+        //I think the C spec says freeing null is allowed
+        if (condition_unlikely(ptr == nullptr)) {
+            return true;
+        }
+
+        uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
+        auto potentialSlab = slabTree.floor(addr);
+        if (potentialSlab != nullptr) {
+            if (potentialSlab -> contains(ptr)) {
+                if (condition_unlikely(!potentialSlab -> containsWithAlignment(ptr))) return false;
+                potentialSlab -> getAllocator() -> free(ptr, *potentialSlab);
+                return true;
+            }
+        }
+
+        return coarseAllocator.free(ptr);
+    }
+
+
+
+    InternalAllocator internalAllocator;
 
     void initializeInternalAllocator() {
-        new(&coarseInternalAllocator) CoarseInternalAllocator();
+        new(&internalAllocator) InternalAllocator();
     }
 
     void* malloc(size_t size, std::align_val_t align) {
-        return coarseInternalAllocator.allocate(size, align);
+        return internalAllocator.allocate(size, align);
     }
 
     void free(void* ptr) {
-        assert(coarseInternalAllocator.free(ptr), "Tried to free invalid pointer");
+        assert(internalAllocator.free(ptr), "Tried to free invalid pointer");
     }
 
     void validateNoAdjacentFreeBlocks(MemorySpanHeader& span) {
@@ -698,36 +794,58 @@ namespace LibAlloc::InternalAllocator {
     }
 
     void validateAllocatorIntegrity() {
-        coarseInternalAllocator.spansByAddress.visitDepthFirstInOrder([](MemorySpanHeader& header){
+        internalAllocator.coarseAllocator.spansByAddress.visitDepthFirstInOrder([](MemorySpanHeader& header){
             validateSpan(header);
         });
     }
 
-    size_t computeTotalAllocatedSpace() {
+    size_t computeTotalAllocatedSpaceInCoarseAllocator() {
+        for (auto& slab : internalAllocator.slabAllocators) {
+            slab.releaseAllFreeSlabs();
+        }
         size_t out = 0;
-        coarseInternalAllocator.spansByAddress.visitDepthFirstInOrder([&](MemorySpanHeader& header){
+        internalAllocator.coarseAllocator.spansByAddress.visitDepthFirstInOrder([&](MemorySpanHeader& header){
             out += totalAllocatedBlockSize(header);
         });
+        /*for (auto& slab : internalAllocator.slabAllocators) {
+            auto stats = slab.getStatistics();
+            out -= stats.totalBackingSize;
+            out += stats.currentlyAllocatedSize;
+        }*/
         return out;
     }
 
-    size_t computeTotalFreeSpace() {
+    size_t computeTotalFreeSpaceInCoarseAllocator() {
+        for (auto& slab : internalAllocator.slabAllocators) {
+            slab.releaseAllFreeSlabs();
+        }
         size_t out = 0;
-        coarseInternalAllocator.spansByAddress.visitDepthFirstInOrder([&](MemorySpanHeader& header){
+        internalAllocator.coarseAllocator.spansByAddress.visitDepthFirstInOrder([&](MemorySpanHeader& header){
             out += totalFreeBlockSize(header);
         });
+        /*for (auto& slab : internalAllocator.slabAllocators) {
+            auto stats = slab.getStatistics();
+            out += stats.totalBackingSize;
+            out -= stats.currentlyAllocatedSize;
+        }*/
         return out;
     }
 
     bool isValidPointer(void *ptr) {
-        auto* span = coarseInternalAllocator.findSpanContaining(ptr);
+        auto* slab = internalAllocator.slabTree.floor(reinterpret_cast<uintptr_t>(ptr));
+        if (slab != nullptr) {
+            if (slab -> containsWithAlignment(ptr) && !slab -> isFree(ptr)) {
+                return true;
+            }
+        }
+        auto* span = internalAllocator.coarseAllocator.findSpanContaining(ptr);
         if (span == nullptr) return false;
         return span -> isPointerAllocated(ptr);
     }
 
     InternalAllocatorStats getAllocatorStats() {
         InternalAllocatorStats out{};
-        auto coarseStats = coarseInternalAllocator.getStatistics();
+        const auto coarseStats = internalAllocator.coarseAllocator.getStatistics();
         out.totalSystemMemoryAllocated = coarseStats.totalSystemMemoryAllocated;
 #ifdef TRACK_REQUESTED_ALLOCATION_STATS
         out.totalBytesRequested = coarseStats.totalBytesRequested;

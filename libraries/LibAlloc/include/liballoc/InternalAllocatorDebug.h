@@ -24,8 +24,8 @@ namespace LibAlloc::InternalAllocator {
     };
 
     void validateAllocatorIntegrity();
-    size_t computeTotalAllocatedSpace();
-    size_t computeTotalFreeSpace();
+    size_t computeTotalAllocatedSpaceInCoarseAllocator();
+    size_t computeTotalFreeSpaceInCoarseAllocator();
     bool isValidPointer(void* ptr);
     InternalAllocatorStats getAllocatorStats();
 }

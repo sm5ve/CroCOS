@@ -640,7 +640,7 @@ protected:
 		NodeType *current = node;
 		do {
 			if (updateNodeAugmentationData(current)) return;
-		} while (current = BinaryTreeInfoExtractor::parent(*current));
+		} while ((current = BinaryTreeInfoExtractor::parent(*current)));
 	}
 
 	Comparator comparator;

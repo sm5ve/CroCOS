@@ -581,6 +581,9 @@ struct ConstexprArray {
     constexpr T const& operator[](size_t i) const { return elems[i]; }
     constexpr T& operator[](size_t i) { return elems[i]; }
     constexpr static size_t size() { return N; }
+
+    constexpr T* begin(){return &elems[0];}
+    constexpr T* end(){return &elems[N];}
     using Type = T;
 };
 
@@ -617,5 +620,16 @@ constexpr bool isArraySorted(ConstexprArray<T, N> array){
     }
     return true;
 }
+
+#ifdef __clang__
+#define condition_likely(x) __builtin_expect(!!(x), 1)
+#define condition_unlikely(x) __builtin_expect(!!(x), 0)
+#elifdef __GNUC__
+#define condition_likely(x) __builtin_expect(!!(x), 1)
+#define condition_unlikely(x) __builtin_expect(!!(x), 0)
+#else
+#define condition_likely(x) (x)
+#define condition_unlikely(x) (x)
+#endif
 
 #endif //CROCOS_UTILITY_H

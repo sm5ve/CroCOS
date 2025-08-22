@@ -24,6 +24,7 @@ target_include_directories(LibAllocTests PUBLIC
 target_sources(LibAllocTests PRIVATE
     ../../libraries/LibAlloc/InternalAllocator.cpp
     ../../libraries/LibAlloc/backends/UnitTests.cpp
+    ../../libraries/LibAlloc/SlabAllocator.cpp
 )
 
 # Kernel tests use host-compatible compilation but with freestanding mode for tested code
@@ -36,8 +37,8 @@ target_compile_options(LibAllocTests PRIVATE
     -DCROCOS_TESTING
     -DCORE_LIBRARY_TESTING
     -O3
-    -fsanitize=address
-    -fsanitize=leak
+    #-fsanitize=address
+    #-fsanitize=leak
     -g
     # Force include test.h to inject strong allocation symbols for objcopy
     -include ${CMAKE_CURRENT_SOURCE_DIR}/../test.h

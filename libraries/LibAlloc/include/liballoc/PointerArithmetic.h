@@ -14,4 +14,20 @@ inline S* offsetPointerByBytes(T* ptr, int64_t bytes){
     return reinterpret_cast<S*>(addr + bytes);
 }
 
+template <bool Power2Alignment>
+constexpr uintptr_t alignDown(uintptr_t addr, const size_t alignment) {
+    if (Power2Alignment) {
+        addr &= ~(alignment - 1);
+    }
+    else {
+        addr -= addr % alignment;
+    }
+    return addr;
+}
+
+template <bool Power2Alignment>
+constexpr uintptr_t alignUp(const uintptr_t addr, const size_t alignment) {
+    return alignDown<Power2Alignment>(addr + alignment - 1, alignment);
+}
+
 #endif //POINTERARITHMETIC_H
