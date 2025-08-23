@@ -138,6 +138,7 @@ namespace LibAlloc::InternalAllocator {
         struct { //Store red/black metadata for
             uint8_t unallocatedTreeColor : 1;
             uint8_t allocatedTreeColor : 1;
+            uint8_t releasable : 1;
         } flags{};
 
         MemorySpanHeader* unallocatedTreeLeftChild;
@@ -160,7 +161,6 @@ namespace LibAlloc::InternalAllocator {
         size_t freeSpace; //In bytes, including headers for each block
         size_t largestFreeBlockSize; //In bytes, including headers for each block
         size_t largestFreeBlockInMallocSubtree; //In bytes, including headers for each block
-        bool releasable;
 
         private:
         void insertFreeBlock(UnallocatedMemoryBlockHeader* block);
@@ -180,7 +180,7 @@ namespace LibAlloc::InternalAllocator {
     };
 
     MemorySpanHeader::MemorySpanHeader(const size_t size) {
-        releasable = true;
+        flags.releasable = true;
         spanSize = size;
         freeSpace = size - sizeof(MemorySpanHeader);
         auto* header = offsetPointerByBytes<UnallocatedMemoryBlockHeader>(this, sizeof(MemorySpanHeader));
@@ -199,7 +199,7 @@ namespace LibAlloc::InternalAllocator {
     }
 
     void MemorySpanHeader::markUnreleasable() {
-        releasable = false;
+        flags.releasable = false;
     }
 
 
@@ -591,7 +591,7 @@ namespace LibAlloc::InternalAllocator {
 
     void CoarseInternalAllocator::destroySpan(MemorySpanHeader* span) {
         //If we initialized the allocator with a fixed buffer, such as in the kernel, then we shouldn't try to release it.
-        if (span -> releasable) return;
+        if (!span -> flags.releasable) return;
         this -> spansByFreeSpace.erase(span);
         this -> spansByAddress.erase(span);
 
