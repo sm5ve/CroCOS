@@ -90,24 +90,32 @@ namespace LibAlloc{
         return occupancyToBucketLower[adjustedPercentage];
     }
 
+    constexpr size_t getAlignValForSlotSize(size_t slotSize) {
+        return max(largestPowerOf2Dividing(slotSize), 64);
+    }
+
     Slab::Slab(size_t slot_size, void* backing_store, size_t backing_size, SlabAllocator* alloc) {
         auto backingStoreAddr = reinterpret_cast<uintptr_t>(backing_store);
         auto backingStoreEnd = backingStoreAddr + backing_size;
+        const auto align = getAlignValForSlotSize(slot_size);
 #ifdef SLAB_ALLOCATOR_KEEP_FREE_LIST
         size_t objectCount = divideAndRoundDown(8 * backing_size, 8 * slot_size + 1);
         this -> freeList = reinterpret_cast<uint8_t*>(backingStoreAddr);
-        backingStoreAddr += objectCount / 8;
-        memset(this -> freeList, 0xff, divideAndRoundUp(objectCount, 8ul));
+        const auto freeListSize = divideAndRoundUp(objectCount, 8ul);
+        backingStoreAddr += freeListSize;
+        memset(this -> freeList, 0xff, freeListSize);
 #endif
-        backingStoreAddr = alignUp<true>(backingStoreAddr, largestPowerOf2Dividing(slot_size));
+        backingStoreAddr = alignUp<true>(backingStoreAddr, align);
+        backing_size = backingStoreEnd - backingStoreAddr;
+        size_t slotCount = divideAndRoundDown(backing_size, slot_size);
         this -> slotSize = slot_size;
         assert(slot_size >= 8, "Minimum slot size is 8 bytes");
         this -> backingStorage = reinterpret_cast<void*>(backingStoreAddr);
-        this -> backingSize = static_cast<size_t>(backingStoreEnd - backingStoreAddr);
-        this -> freeCount = divideAndRoundDown(backingSize, slot_size);
+        this -> backingSize = backing_size;
+        this -> freeCount = slotCount;
         this -> nextFree = reinterpret_cast<void*>(backingStoreAddr);
         this -> initializedHorizon = reinterpret_cast<void*>(backingStoreAddr);
-        this -> numSlots = this -> freeCount;
+        this -> numSlots = slotCount;
         assert(this -> numSlots > 1, "A slab must have more than 1 slot.");
         this -> nextInBucket = nullptr;
         this -> prevInBucket = nullptr;
@@ -230,7 +238,7 @@ namespace LibAlloc{
 
     Slab* initializeSlab(void* memory, const size_t slotSize, const size_t backingSize, SlabAllocator* allocator) {
         const auto memoryAddr = reinterpret_cast<uintptr_t>(memory);
-        const auto bufferStart = memoryAddr + sizeof(Slab);
+        auto bufferStart = memoryAddr + sizeof(Slab);
         return new (memory) Slab(slotSize, reinterpret_cast<void*>(bufferStart), backingSize - sizeof(Slab), allocator);
     }
 

@@ -36,7 +36,7 @@ target_compile_options(LibAllocTests PRIVATE
     -Wno-c++26-extensions          # Allow C++26 extensions
     -DCROCOS_TESTING
     -DCORE_LIBRARY_TESTING
-    -O3
+    -O0
     #-fsanitize=address
     #-fsanitize=leak
     -g

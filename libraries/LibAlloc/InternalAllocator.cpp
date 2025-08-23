@@ -23,8 +23,8 @@ namespace LibAlloc::InternalAllocator {
     constexpr bool AssumePowerOfTwoAlignment = false;
 #endif
 
-    constexpr ConstexprArray slabSizeClasses = {8ul, 16, 32, 64, 96, 128, 256, 512};
-    constexpr ConstexprArray slabAllocatorBufferSizes = {1024ul, 1024, 1024, 2048, 2048, 2048, 4096, 4096};
+    constexpr ConstexprArray slabSizeClasses = {8ul, 16, 32, 64, 96, 128, 256, 512, };
+    constexpr ConstexprArray slabAllocatorBufferSizes = {1024ul, 1024, 1024, 2048, 2048, 2048, 2048, 8192, };
     static_assert(slabSizeClasses.size() == slabAllocatorBufferSizes.size(), "Size classes and buffer sizes must be the same size");
     constexpr auto sizeClassJumpTable = makeSizeClassJumpTable<slabSizeClasses>();
 
@@ -169,9 +169,10 @@ namespace LibAlloc::InternalAllocator {
         [[nodiscard]] AllocatedMemoryBlockHeader* getValidatedHeaderForPtr(void* ptr) const;
         public:
         explicit MemorySpanHeader(size_t size);
-        void markUnreleasable(); //
+        void markUnreleasable();
         void* allocateBlock(size_t size, std::align_val_t align, SPAN_ALLOC_STAT_LIST);
         bool freeBlock(void* ptr, SPAN_ALLOC_STAT_LIST);
+        [[nodiscard]]size_t getBufferSize() const;
         [[nodiscard]] bool isPointerAllocated(void* ptr) const;
 
         bool operator==(const MemorySpanHeader& other) const {
@@ -179,12 +180,17 @@ namespace LibAlloc::InternalAllocator {
         }
     };
 
+    size_t MemorySpanHeader::getBufferSize() const {
+        auto* header = offsetPointerByBytesAndAlign<UnallocatedMemoryBlockHeader>(this, sizeof(MemorySpanHeader));
+        return reinterpret_cast<uintptr_t>(this) + this -> spanSize - reinterpret_cast<uintptr_t>(header);
+    }
+
     MemorySpanHeader::MemorySpanHeader(const size_t size) {
         flags.releasable = true;
         spanSize = size;
-        freeSpace = size - sizeof(MemorySpanHeader);
-        auto* header = offsetPointerByBytes<UnallocatedMemoryBlockHeader>(this, sizeof(MemorySpanHeader));
-        header -> sizeAndColor = size - sizeof(MemorySpanHeader);
+        auto* header = offsetPointerByBytesAndAlign<UnallocatedMemoryBlockHeader>(this, sizeof(MemorySpanHeader));
+        freeSpace = getBufferSize();
+        header -> sizeAndColor = freeSpace;
         unallocatedTreeLeftChild = nullptr;
         unallocatedTreeRightChild = nullptr;
         unallocatedTreeParent = nullptr;
@@ -628,7 +634,7 @@ namespace LibAlloc::InternalAllocator {
            out = header.freeBlock(ptr, COARSE_ALLOCATOR_SPAN_STATS);
         });
 
-        if (span -> freeSpace + sizeof(MemorySpanHeader) == span -> spanSize) {
+        if (span -> freeSpace == span -> getBufferSize()) {
             //should we delay destroying the span for a little to avoid thrashing?
             destroySpan(span);
         }
@@ -725,7 +731,8 @@ namespace LibAlloc::InternalAllocator {
         size_t alignedSize = max(2 << log2floor(size), alignVal);
         if (condition_likely(alignedSize <= maxSlabSize)) {
             slabIndex = sizeClassIndex<slabSizeClasses>(alignedSize);
-            return slabAllocators[slabIndex].alloc();
+            if ((slabSizeClasses[slabIndex] & (alignVal - 1)) == 0)
+                return slabAllocators[slabIndex].alloc();
         }
 #else
         if (condition_likely(slabSizeClasses[slabIndex] % alignVal == 0)) {
@@ -808,7 +815,7 @@ namespace LibAlloc::InternalAllocator {
         const auto totalFree = totalFreeBlockSize(span);
         const auto totalAllocated = totalAllocatedBlockSize(span);
         assert(totalFree == span.freeSpace, "Free block size does not match free space");
-        assert(totalFree + totalAllocated == span.spanSize - sizeof(MemorySpanHeader), "Allocated block size does not match span size");
+        assert(totalFree + totalAllocated == span.getBufferSize(), "Allocated block size does not match span size");
     }
 
     void validateAllocatorIntegrity() {
