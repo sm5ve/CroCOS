@@ -138,7 +138,7 @@ namespace LibAlloc::InternalAllocator {
         struct { //Store red/black metadata for
             uint8_t unallocatedTreeColor : 1;
             uint8_t allocatedTreeColor : 1;
-        } colors{};
+        } flags{};
 
         MemorySpanHeader* unallocatedTreeLeftChild;
         MemorySpanHeader* unallocatedTreeRightChild;
@@ -193,8 +193,8 @@ namespace LibAlloc::InternalAllocator {
         allocatedTreeParent = nullptr;
         largestFreeBlockSize = freeSpace;
         largestFreeBlockInMallocSubtree = freeSpace;
-        colors.unallocatedTreeColor = false;
-        colors.allocatedTreeColor = false;
+        flags.unallocatedTreeColor = false;
+        flags.allocatedTreeColor = false;
         insertFreeBlock(header);
     }
 
@@ -472,8 +472,8 @@ namespace LibAlloc::InternalAllocator {
         static MemorySpanHeader* const& parent(const MemorySpanHeader& header){return header.unallocatedTreeParent;}
         static MemorySpanHeader& data(MemorySpanHeader& header) {return header;}
         static const MemorySpanHeader& data(const MemorySpanHeader& header) {return header;}
-        static bool isRed(MemorySpanHeader& header){return header.colors.unallocatedTreeColor;}
-        static void setRed(MemorySpanHeader& header, bool red){header.colors.unallocatedTreeColor = red;}
+        static bool isRed(MemorySpanHeader& header){return header.flags.unallocatedTreeColor;}
+        static void setRed(MemorySpanHeader& header, bool red){header.flags.unallocatedTreeColor = red;}
         static size_t& augmentedData(MemorySpanHeader& header){return header.largestFreeBlockInMallocSubtree;}
         static size_t recomputeAugmentedData(const MemorySpanHeader& header, const MemorySpanHeader* left, const MemorySpanHeader* right) {
             const size_t size = header.largestFreeBlockSize;
@@ -491,8 +491,8 @@ namespace LibAlloc::InternalAllocator {
         static MemorySpanHeader*& parent(MemorySpanHeader& header){return header.allocatedTreeParent;}
         static MemorySpanHeader* const& parent(const MemorySpanHeader& header){return header.allocatedTreeParent;}
         static uintptr_t data(const MemorySpanHeader& header) {return reinterpret_cast<uintptr_t>(&header);}
-        static bool isRed(MemorySpanHeader& header){return header.colors.allocatedTreeColor;}
-        static void setRed(MemorySpanHeader& header, bool red){header.colors.allocatedTreeColor = red;}
+        static bool isRed(MemorySpanHeader& header){return header.flags.allocatedTreeColor;}
+        static void setRed(MemorySpanHeader& header, bool red){header.flags.allocatedTreeColor = red;}
     };
 
     //When looking up spans to allocate a new block, we first order by remaining free space and then
