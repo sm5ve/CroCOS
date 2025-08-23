@@ -3,12 +3,9 @@
 //
 #include <arch/hal/hal.h>
 #include <kernel.h>
-#include <core/atomic.h>
 #include <core/Object.h>
-#include <core/GraphBuilder.h>
 #include <core/algo/GraphAlgorithms.h>
-#include <core/ds/Heap.h>
-#include <core/ds/Tuple.h>
+#include <liballoc.h>
 
 extern "C" void (*__init_array_start[])(void) __attribute__((weak));
 extern "C" void (*__init_array_end[])(void) __attribute__((weak));
@@ -25,11 +22,11 @@ namespace kernel{
         }
     }
 
-    extern "C" void kernel_main(){
+    extern "C" void kernel_main() {
         klog << "\n"; // newline to separate from the "Booting from ROM.." message from qemu
 
         klog << "Hello amd64 kernel world!\n";
-
+        heapEarlyInit();
         presort_object_parent_lists();
         run_global_constructors();
 

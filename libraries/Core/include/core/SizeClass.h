@@ -10,12 +10,12 @@
 
 template <typename T, size_t N, ConstexprArray<T, N> array>
 requires (isArraySorted(array) && N > 0)
-constexpr ConstexprArray<T, log2floor(array[N-1]) + 1> _makeSizeClassJumpTableImpl(){
+constexpr ConstexprArray<size_t, log2floor(array[N-1]) + 1> _makeSizeClassJumpTableImpl(){
     constexpr size_t M = log2floor(array[N-1]) + 1;
-    ConstexprArray<T, M> jumpTable;
+    ConstexprArray<size_t, M> jumpTable;
     size_t index = 0; //the index into array that we are comparing against
     for(size_t i = 0; i < M; i++){
-        while(array[index] < (1 << i)) index++;
+        while(array[index] < (1ul << i)) index++;
         jumpTable[i] = index;
     }
 

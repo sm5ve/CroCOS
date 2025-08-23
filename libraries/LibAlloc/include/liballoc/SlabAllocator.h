@@ -127,6 +127,7 @@ namespace LibAlloc {
         static void removeSlabFromBucket(Slab& slab, Slab*& bucket);
         static void insertSlabAtBucketHead(Slab& slab, Slab*& bucket);
         inline void releaseFreeSlabsIfNecessary();
+        void checkBucketValidity();
     public:
         SlabAllocator(size_t slot_size, size_t desired_slab_size, Allocator& backing_allocator, SlabTreeType& slab_tree);
         ~SlabAllocator();

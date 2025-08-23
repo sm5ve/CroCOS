@@ -19,7 +19,7 @@ namespace LibAlloc::InternalAllocator {
 
 #ifdef TRACK_REQUESTED_ALLOCATION_STATS
         size_t computeAllocatorMetadataOverhead() const;
-        float computeAllocatorMetadataPercentOverhead() const;
+        //float computeAllocatorMetadataPercentOverhead() const;
 #endif
     };
 

@@ -360,6 +360,7 @@ public:
         explicit VertexIterator(InternalState s, const Graph<VertexDecorator, EdgeDecorator, StructureModifier>& graph) : state(s), g(graph) {}
     public:
         Vertex operator*() const {
+            //FIXME when iterating over a multigraph, we need to skip over vertices we've seen before
             if constexpr (VertexDecorator::is_labeled) {
                 return Vertex(g.vertexMetadata.get(), static_cast<VertexIndex>(*(g.vertexLabels -> indexOf(*state))));
             }

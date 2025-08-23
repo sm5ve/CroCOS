@@ -6,6 +6,7 @@
 #define INTERNALALLOCATOR_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 namespace LibAlloc::InternalAllocator {
 	void initializeInternalAllocator();

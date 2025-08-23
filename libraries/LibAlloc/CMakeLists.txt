@@ -2,6 +2,7 @@ set(MALLOC_SOURCES
         InternalAllocator.cpp
         backends/Kernel.cpp
         SlabAllocator.cpp
+        LibAllocMain.cpp
 )
 
 #Special version of Core meant to be linked with the kernel
@@ -17,7 +18,7 @@ target_include_directories(AllocKernel PUBLIC
 #target_compile_definitions(CoreKernel PRIVATE CORE_LINKED_WITH_KERNEL)
 
 target_compile_options(AllocKernel PRIVATE -mno-sse -mno-sse2 -mno-avx -ffreestanding -fno-rtti -fno-exceptions -fno-sized-deallocation -fconcepts -nostdlib -Wall -Wextra -pedantic -Wshadow -Wcast-align -Wwrite-strings -Wredundant-decls -Winline -Wno-long-long -Wconversion -Werror -mno-red-zone -mcmodel=kernel  -std=gnu++2b -masm=att
--DKERNEL)
+-DKERNEL -O3 -g)
 
 #Standard version of Core for userspace
 

@@ -14,7 +14,7 @@ set(KERNEL_SRC
         KernelMain.cpp
         arch/hal/hal.cpp
         include/arch/hal/hal.h
-        include/kernel.h mm/BumpAllocator.cpp
+        include/kernel.h
         panic.cpp
         mm/kmalloc.cpp
         mm/allocators.h
@@ -36,6 +36,7 @@ set(KERNEL_SRC
         arch/amd64/interrupts/InterruptSetup.cpp
         arch/amd64/lgdt.asm
         arch/hal/InterruptGraphManager.cpp
+        cxxcompat.cpp
 )
 
 add_executable(Kernel ${KERNEL_SRC})

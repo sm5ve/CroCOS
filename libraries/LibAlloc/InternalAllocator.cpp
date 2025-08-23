@@ -23,8 +23,8 @@ namespace LibAlloc::InternalAllocator {
     constexpr bool AssumePowerOfTwoAlignment = false;
 #endif
 
-    constexpr ConstexprArray slabSizeClasses = {8, 16, 32, 64, 96, 128, 256, 512};
-    constexpr ConstexprArray slabAllocatorBufferSizes = {1024, 1024, 1024, 2048, 2048, 2048, 4096, 4096};
+    constexpr ConstexprArray slabSizeClasses = {8ul, 16, 32, 64, 96, 128, 256, 512};
+    constexpr ConstexprArray slabAllocatorBufferSizes = {1024ul, 1024, 1024, 2048, 2048, 2048, 4096, 4096};
     static_assert(slabSizeClasses.size() == slabAllocatorBufferSizes.size(), "Size classes and buffer sizes must be the same size");
     constexpr auto sizeClassJumpTable = makeSizeClassJumpTable<slabSizeClasses>();
 
@@ -692,6 +692,7 @@ namespace LibAlloc::InternalAllocator {
 
     template <size_t... Is>
     ConstexprArray<SlabAllocator, slabSizeClasses.size()> InternalAllocator::makeSlabAllocators(index_sequence<Is...> _) {
+        (void)_;
         return {SlabAllocator(slabSizeClasses[Is], slabAllocatorBufferSizes[Is], this -> coarseAllocator, this -> slabTree)...};
     }
 
@@ -879,9 +880,9 @@ namespace LibAlloc::InternalAllocator {
         return totalUsedBytesInAllocator - totalBytesRequested;
     }
 
-    float InternalAllocatorStats::computeAllocatorMetadataPercentOverhead() const {
+    /*float InternalAllocatorStats::computeAllocatorMetadataPercentOverhead() const {
         return static_cast<float>(computeAllocatorMetadataOverhead()) / static_cast<float>(totalUsedBytesInAllocator);
-    }
+    }*/
 
     size_t getInternalAllocRemainingSlabCount() {
         for (auto& slab : internalAllocator.slabAllocators) {
@@ -889,6 +890,7 @@ namespace LibAlloc::InternalAllocator {
         }
         size_t out = 0;
         internalAllocator.slabTree.visitDepthFirstInOrder([&](auto _) {
+            (void)_;
             out++;
         });
         return out;

@@ -3,21 +3,24 @@
 //
 #include <kernel.h>
 #include "allocators.h"
+#include <liballoc.h>
+#include <kconfig.h>
 
-bool heap_initialized = false;
+//bool heap_initialized = false;
+
+uint8_t heap_buffer[KERNEL_INIT_HEAP_BUFFER];
 
 namespace kernel{
+    void heapEarlyInit() {
+        la_init(heap_buffer, sizeof(heap_buffer));
+    }
+
     void* kmalloc(size_t size, std::align_val_t align){
-        if(!heap_initialized){
-            return kernel::mm::allocators::bump_alloc(size, align);
-        }
-        return nullptr;
+        return la_malloc(size, align);
     }
 
     void kfree(void* ptr){
-        if(ptr == nullptr){
-            return;
-        }
+        la_free(ptr);
     }
 }
 

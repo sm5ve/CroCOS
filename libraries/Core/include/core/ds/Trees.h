@@ -637,7 +637,7 @@ protected:
 	}
 
 	void propagateAugmentationRefresh(NodeType &node) requires AugmentedNode && HasParentPointer {
-		NodeType *current = node;
+		NodeType *current = &node;
 		do {
 			if (updateNodeAugmentationData(current)) return;
 		} while ((current = BinaryTreeInfoExtractor::parent(*current)));
@@ -2077,6 +2077,43 @@ protected:
 		return true;
 	}
 
+	//This seems to be far too expensive to yield any sort of optimization for in-place updates
+	//with the RBTs in LibAlloc
+	bool verifyCorrectLocalOrder(NodeType& node) requires (HasParentPointer) {
+		//Note that comparator(a, b) essentially returns a < b
+		auto data = RedBlackTreeInfoExtractor::data(node);
+		if (auto left = RedBlackTreeInfoExtractor::left(node)) {
+			auto leftData = RedBlackTreeInfoExtractor::data(*left);
+			//if node < left, bail
+			if (comparator(data, leftData)) {
+				return false;
+			}
+		}
+		if (auto right = RedBlackTreeInfoExtractor::right(node)) {
+			auto rightData = RedBlackTreeInfoExtractor::data(*right);
+			//if right < node, bail
+			if (comparator(rightData, data)) {
+				return false;
+			}
+		}
+		if (auto parent = RedBlackTreeInfoExtractor::parent(node)) {
+			auto dir = getChildDirection(*parent, &node);
+			auto parentData = RedBlackTreeInfoExtractor::data(*parent);
+			if (dir == Direction::Left) {
+				//If node is the left child of its parent, then we should have data < parentData
+				if (comparator(parentData, data)) {
+					return false;
+				}
+			}
+			else {
+				if (comparator(data, parentData)) {
+					return false;
+				}
+			}
+		}
+		return true;
+	}
+
 public:
 	using BSTParent::visitDepthFirstInOrder;
 	using BSTParent::visitDepthFirstReverseOrder;
@@ -2184,8 +2221,14 @@ public:
 	requires Invocable<Lambda, void, NodeType&>
 	bool update(NodeType *node, Lambda updateLambda) requires (HasParentPointer) {
 		if (node == nullptr) { return false; }
-		erase(node);
+		auto color = getColor(*node);
 		updateLambda(*node);
+		setColor(*node, color);
+		/*if (verifyCorrectLocalOrder(*node)) {
+			BSTParent::propagateAugmentationRefresh(*node);
+			return true;
+		}*/
+		erase(node);
 		insert(node);
 		return true;
 	}
