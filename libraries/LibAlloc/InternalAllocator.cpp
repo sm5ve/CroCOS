@@ -23,8 +23,8 @@ namespace LibAlloc::InternalAllocator {
     constexpr bool AssumePowerOfTwoAlignment = false;
 #endif
 
-    constexpr ConstexprArray slabSizeClasses = {8, 16, 32, 64, 96, 128};
-    constexpr ConstexprArray slabAllocatorBufferSizes = {1024, 1024, 1024, 2048, 2048, 2048};
+    constexpr ConstexprArray slabSizeClasses = {8, 16, 32, 64, 96, 128, 256, 512};
+    constexpr ConstexprArray slabAllocatorBufferSizes = {1024, 1024, 1024, 2048, 2048, 2048, 4096, 4096};
     static_assert(slabSizeClasses.size() == slabAllocatorBufferSizes.size(), "Size classes and buffer sizes must be the same size");
     constexpr auto sizeClassJumpTable = makeSizeClassJumpTable<slabSizeClasses>();
 
@@ -160,6 +160,7 @@ namespace LibAlloc::InternalAllocator {
         size_t freeSpace; //In bytes, including headers for each block
         size_t largestFreeBlockSize; //In bytes, including headers for each block
         size_t largestFreeBlockInMallocSubtree; //In bytes, including headers for each block
+        bool releasable;
 
         private:
         void insertFreeBlock(UnallocatedMemoryBlockHeader* block);
@@ -168,6 +169,7 @@ namespace LibAlloc::InternalAllocator {
         [[nodiscard]] AllocatedMemoryBlockHeader* getValidatedHeaderForPtr(void* ptr) const;
         public:
         explicit MemorySpanHeader(size_t size);
+        void markUnreleasable(); //
         void* allocateBlock(size_t size, std::align_val_t align, SPAN_ALLOC_STAT_LIST);
         bool freeBlock(void* ptr, SPAN_ALLOC_STAT_LIST);
         [[nodiscard]] bool isPointerAllocated(void* ptr) const;
@@ -178,6 +180,7 @@ namespace LibAlloc::InternalAllocator {
     };
 
     MemorySpanHeader::MemorySpanHeader(const size_t size) {
+        releasable = true;
         spanSize = size;
         freeSpace = size - sizeof(MemorySpanHeader);
         auto* header = offsetPointerByBytes<UnallocatedMemoryBlockHeader>(this, sizeof(MemorySpanHeader));
@@ -194,6 +197,11 @@ namespace LibAlloc::InternalAllocator {
         colors.allocatedTreeColor = false;
         insertFreeBlock(header);
     }
+
+    void MemorySpanHeader::markUnreleasable() {
+        releasable = false;
+    }
+
 
     void MemorySpanHeader::insertFreeBlock(UnallocatedMemoryBlockHeader *block) {
         size_t freeSize = block -> size();
@@ -530,7 +538,7 @@ namespace LibAlloc::InternalAllocator {
         void destroySpan(MemorySpanHeader* span);
     public:
         ~CoarseInternalAllocator() override = default;
-        void createSpan(size_t spanSize, void* baseAddr);
+        MemorySpanHeader* createSpan(size_t spanSize, void* baseAddr);
         void* allocate(size_t size, std::align_val_t align) override;
         bool free(void* ptr) override;
         CoarseAllocatorStatistics getStatistics() const;
@@ -582,6 +590,8 @@ namespace LibAlloc::InternalAllocator {
     }
 
     void CoarseInternalAllocator::destroySpan(MemorySpanHeader* span) {
+        //If we initialized the allocator with a fixed buffer, such as in the kernel, then we shouldn't try to release it.
+        if (span -> releasable) return;
         this -> spansByFreeSpace.erase(span);
         this -> spansByAddress.erase(span);
 
@@ -592,12 +602,13 @@ namespace LibAlloc::InternalAllocator {
         freePages(span, (span -> spanSize)/smallPageSize);
     }
 
-    void CoarseInternalAllocator::createSpan(size_t spanSize, void* baseAddr) {
+    MemorySpanHeader* CoarseInternalAllocator::createSpan(size_t spanSize, void* baseAddr) {
         auto* span = new (baseAddr) MemorySpanHeader(spanSize);
         this -> spansByFreeSpace.insert(span);
         this -> spansByAddress.insert(span);
         stats.totalSystemMemoryAllocated += spanSize;
         stats.totalSizeOfSpanHeaders += sizeof(MemorySpanHeader);
+        return span;
     }
 
 #ifdef TRACK_REQUESTED_ALLOCATION_STATS
@@ -670,9 +681,11 @@ namespace LibAlloc::InternalAllocator {
 #endif
         template <size_t... Is>
         ConstexprArray<SlabAllocator, slabSizeClasses.size()> makeSlabAllocators(index_sequence<Is...>);
+        friend size_t getInternalAllocRemainingSlabCount();
     public:
         InternalAllocator(void* initialBuffer, size_t size);
         InternalAllocator();
+        void grantBuffer(void* buffer, size_t size);
         void* allocate(size_t size, std::align_val_t align) override;
         bool free(void* ptr) override;
     };
@@ -687,7 +700,8 @@ namespace LibAlloc::InternalAllocator {
     }
 
     InternalAllocator::InternalAllocator(void* initialBuffer, size_t size) : slabAllocators(makeSlabAllocators(make_index_sequence<slabSizeClasses.size()>{})) {
-        coarseAllocator.createSpan(size, initialBuffer);
+        auto* span = coarseAllocator.createSpan(size, initialBuffer);
+        span -> markUnreleasable();
         zero = 0;
     }
 
@@ -744,7 +758,10 @@ namespace LibAlloc::InternalAllocator {
         return coarseAllocator.free(ptr);
     }
 
-
+    void InternalAllocator::grantBuffer(void *buffer, size_t size) {
+        auto* span = this -> coarseAllocator.createSpan(size, buffer);
+        span -> markUnreleasable();
+    }
 
     InternalAllocator internalAllocator;
 
@@ -844,6 +861,9 @@ namespace LibAlloc::InternalAllocator {
     }
 
     InternalAllocatorStats getAllocatorStats() {
+        for (auto& slab : internalAllocator.slabAllocators) {
+            slab.releaseAllFreeSlabs();
+        }
         InternalAllocatorStats out{};
         const auto coarseStats = internalAllocator.coarseAllocator.getStatistics();
         out.totalSystemMemoryAllocated = coarseStats.totalSystemMemoryAllocated;
@@ -861,6 +881,21 @@ namespace LibAlloc::InternalAllocator {
 
     float InternalAllocatorStats::computeAllocatorMetadataPercentOverhead() const {
         return static_cast<float>(computeAllocatorMetadataOverhead()) / static_cast<float>(totalUsedBytesInAllocator);
+    }
+
+    size_t getInternalAllocRemainingSlabCount() {
+        for (auto& slab : internalAllocator.slabAllocators) {
+            slab.releaseAllFreeSlabs();
+        }
+        size_t out = 0;
+        internalAllocator.slabTree.visitDepthFirstInOrder([&](auto _) {
+            out++;
+        });
+        return out;
+    }
+
+	void grantBuffer(void* buffer, size_t size) {
+        internalAllocator.grantBuffer(buffer, size);
     }
 
 #endif

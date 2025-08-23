@@ -278,59 +278,61 @@ TEST(allocatorPerformanceStressTest) {
     const size_t pressureThreshold = maxTotalBytes * 0.8; // Start pressure at 80%
 
     while (std::chrono::steady_clock::now() < endTime) {
-        // Use fast O(1) statistics instead of expensive tree traversal
-        size_t currentActiveBytes = LibAlloc::InternalAllocator::getAllocatorStats().totalUsedBytesInAllocator;
+		for(size_t _inner = 0; _inner < 10000; _inner++) {
+			// Use fast O(1) statistics instead of expensive tree traversal
+        	size_t currentActiveBytes = LibAlloc::InternalAllocator::getAllocatorStats().totalUsedBytesInAllocator;
 
-        // Calculate allocation probability based on memory pressure
-        bool shouldAllocate;
-        if (allocations.empty()) {
-            shouldAllocate = true; // Must allocate if nothing is allocated
-        } else if (currentActiveBytes >= maxTotalBytes) {
-            shouldAllocate = false; // Force free if at limit
-        } else if (currentActiveBytes >= pressureThreshold) {
-            // Gradually reduce allocation probability as we approach limit
-            double pressureRatio = (double)(currentActiveBytes - pressureThreshold) / (maxTotalBytes - pressureThreshold);
-            double allocProbability = 0.7 * (1.0 - pressureRatio); // Scale down from 70%
-            shouldAllocate = (std::rand() % 100) < (allocProbability * 100);
-        } else {
-            shouldAllocate = (std::rand() % 10) < 7; // Normal 70% chance
-        }
+        	// Calculate allocation probability based on memory pressure
+        	bool shouldAllocate;
+        	if (allocations.empty()) {
+        	    shouldAllocate = true; // Must allocate if nothing is allocated
+        	} else if (currentActiveBytes >= maxTotalBytes) {
+        	    shouldAllocate = false; // Force free if at limit
+        	} else if (currentActiveBytes >= pressureThreshold) {
+        	    // Gradually reduce allocation probability as we approach limit
+        	    double pressureRatio = (double)(currentActiveBytes - pressureThreshold) / (maxTotalBytes - pressureThreshold);
+        	    double allocProbability = 0.7 * (1.0 - pressureRatio); // Scale down from 70%
+        	    shouldAllocate = (std::rand() % 100) < (allocProbability * 100);
+        	} else {
+        	    shouldAllocate = (std::rand() % 10) < 7; // Normal 70% chance
+        	}
 
-        if (shouldAllocate) {
-            size_t size = sizes[std::rand() % 10];
-            void* ptr = LibAlloc::InternalAllocator::malloc(size);
-            ASSERT_NE(ptr, nullptr);
+        	if (shouldAllocate) {
+        	    size_t size = sizes[std::rand() % 10];
+        	    void* ptr = LibAlloc::InternalAllocator::malloc(size);
+        	    ASSERT_NE(ptr, nullptr);
 
-            allocations.push({ptr, size});
-            totalAllocations++;
-            totalBytesAllocated += size;
+   		        allocations.push({ptr, size});
+    	        totalAllocations++;
+	            totalBytesAllocated += size;
 
-            // Track peaks
-            if (allocations.getSize() > peakActiveAllocations) {
-                peakActiveAllocations = allocations.getSize();
-            }
+        	    // Track peaks
+    	        if (allocations.getSize() > peakActiveAllocations) {
+	                peakActiveAllocations = allocations.getSize();
+	            }
 
-            // currentActiveBytes already computed above for memory pressure
-            if (currentActiveBytes > peakActiveBytes) {
-                peakActiveBytes = currentActiveBytes;
-            }
-        } else {
-            // Free a random allocation
-            int index = std::rand() % allocations.getSize();
-            void* ptr = allocations[index].ptr;
+        	    // currentActiveBytes already computed above for memory pressure
+        	    if (currentActiveBytes > peakActiveBytes) {
+        	        peakActiveBytes = currentActiveBytes;
+        	    }
+        	} else {
+            	// Free a random allocation
+            	int index = std::rand() % allocations.getSize();
+            	void* ptr = allocations[index].ptr;
 
-            LibAlloc::InternalAllocator::free(ptr);
+            	LibAlloc::InternalAllocator::free(ptr);
 
-            totalBytesFreed += allocations[index].size;
-            allocations[index] = allocations[allocations.getSize()-1];
-            allocations.pop();
-            totalFrees++;
-        }
+        	    totalBytesFreed += allocations[index].size;
+        	    allocations[index] = allocations[allocations.getSize()-1];
+        	    allocations.pop();
+        	    totalFrees++;
+        	}
 
-        // Periodic random validation during sustained load
-        if (std::rand() % 50000 == 0) {
-            LibAlloc::InternalAllocator::validateAllocatorIntegrity();
-        }
+        	// Periodic random validation during sustained load
+        	if (std::rand() % 50000 == 0) {
+        	    LibAlloc::InternalAllocator::validateAllocatorIntegrity();
+        	}
+		}
     }
 
     auto actualEndTime = std::chrono::steady_clock::now();
@@ -349,7 +351,8 @@ TEST(allocatorPerformanceStressTest) {
 
     // Final validation
     LibAlloc::InternalAllocator::validateAllocatorIntegrity();
-    //ASSERT_EQ(finalStats.totalUsedBytesInAllocator, 0);
+	printf("\nRemaining bytes in allocator: %zu\n", finalStats.totalUsedBytesInAllocator);
+    ASSERT_EQ(finalStats.totalUsedBytesInAllocator, 0);
 
     // Print performance statistics
     printf("\n=== Allocator Performance Statistics ===\n");

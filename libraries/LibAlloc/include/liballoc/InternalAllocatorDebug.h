@@ -28,6 +28,7 @@ namespace LibAlloc::InternalAllocator {
     size_t computeTotalFreeSpaceInCoarseAllocator();
     bool isValidPointer(void* ptr);
     InternalAllocatorStats getAllocatorStats();
+    size_t getInternalAllocRemainingSlabCount();
 }
 
 #endif //INTERNALALLOCATORDEBUG_H

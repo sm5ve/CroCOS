@@ -384,16 +384,7 @@ namespace LibAlloc{
                 --numNonFullSlabs;
             }
         }
-        if (condition_unlikely(freeSlabs == nullptr && topOccupiedBucket == &freeSlabs)) {
-            // Need to find the next highest occupied bucket
-            topOccupiedBucket = nullptr;
-            for (int i = slabAllocatorBucketCount - 1; i >= 0; --i) {
-                if (partiallyFullBuckets[i] != nullptr) {
-                    topOccupiedBucket = &partiallyFullBuckets[i];
-                    break;
-                }
-            }
-        }
+        assert(freeSlabs != nullptr || topOccupiedBucket != &freeSlabs, "topOccupiedBucket should never point to null");
     }
 
     void SlabAllocator::free(void *ptr, Slab& parentSlab) {
@@ -469,4 +460,5 @@ namespace LibAlloc{
     void SlabAllocator::releaseAllFreeSlabs() {
         releaseAllFromBucket(freeSlabs);
     }
+
 }

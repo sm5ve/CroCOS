@@ -9,6 +9,7 @@
 
 namespace LibAlloc::InternalAllocator {
 	void initializeInternalAllocator();
+	void grantBuffer(void* buffer, size_t size);
 
     void* malloc(size_t size, std::align_val_t align = std::align_val_t(alignof(uint64_t)));
 
