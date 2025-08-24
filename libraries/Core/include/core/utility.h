@@ -533,6 +533,9 @@ struct remove_pointer<T* const volatile> {
     using type = T;
 };
 
+template <typename T>
+using remove_pointer_t = remove_pointer<T>::type;
+
 template<typename T>
 void copy_assign_or_construct(T& dest, const T& src) {
     if constexpr (is_trivially_copyable_v<T>) {

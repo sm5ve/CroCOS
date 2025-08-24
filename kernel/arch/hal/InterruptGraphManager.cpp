@@ -87,7 +87,7 @@ namespace kernel::hal::interrupts {
                 auto domain = topologyGraph->getVertexLabel(vertex);
                 
                 if (domain->instanceof(TypeID_v<platform::InterruptReceiver>)) {
-                    auto receiver = crocos_dynamic_cast<platform::InterruptReceiver*>(domain.get());
+                    auto receiver = crocos_dynamic_cast<platform::InterruptReceiver>(domain);
                     for (size_t i = 0; i < receiver->getReceiverCount(); i++) {
                         routingVertices.push(RoutingVertexSpec{
                             RoutingNodeLabel(domain, i, NodeType::Input),
@@ -98,7 +98,7 @@ namespace kernel::hal::interrupts {
                 
                 if (domain->instanceof(TypeID_v<platform::InterruptEmitter>) && 
                     !domain->instanceof(TypeID_v<platform::InterruptReceiver>)) {
-                    auto emitter = crocos_dynamic_cast<platform::InterruptEmitter*>(domain.get());
+                    auto emitter = crocos_dynamic_cast<platform::InterruptEmitter>(domain);
                     for (size_t i = 0; i < emitter->getEmitterCount(); i++) {
                         routingVertices.push(RoutingVertexSpec{
                             RoutingNodeLabel(domain, i, NodeType::Device),
@@ -131,7 +131,7 @@ namespace kernel::hal::interrupts {
                 if (topologyGraph.getTarget(edge) == *targetTopologyVertex) {
                     auto& connector = topologyGraph.getEdgeLabel(edge);
                     if (connector->fromInput(targetIndex)) {
-                        auto* emitter = crocos_dynamic_cast<platform::InterruptEmitter*>(sourceDomain.get());
+                        auto emitter = crocos_dynamic_cast<platform::InterruptEmitter>(sourceDomain);
                         assert(*(connector -> fromInput(targetIndex)) < (emitter -> getEmitterCount()), "Emitter index out of bounds");
                         if (sourceType == NodeType::Device) {
                             return (connector -> fromOutput(sourceIndex).occupied()) && (*connector -> fromOutput(sourceIndex) == targetIndex);
@@ -239,7 +239,7 @@ namespace kernel::hal::interrupts {
             auto edge = currentConnector.operator*();
             auto targetVertex = topGraph.getTarget(edge);
             const auto& targetDomain = topGraph.getVertexLabel(targetVertex);
-            auto* receiverDomain = crocos_dynamic_cast<platform::InterruptReceiver*>(targetDomain.get());
+            auto receiverDomain = crocos_dynamic_cast<platform::InterruptReceiver>(targetDomain);
             assert(receiverDomain, "Target domain must be a receiver");
             if (currentIndex >= receiverDomain->getReceiverCount()) {
                 currentIndex = 0;
@@ -264,7 +264,7 @@ namespace kernel::hal::interrupts {
             auto edge = currentConnector.operator*();
             auto sourceVertex = topGraph.getSource(edge);
             const auto& sourceDomain = topGraph.getVertexLabel(sourceVertex);
-            auto emitterDomain = crocos_dynamic_cast<platform::InterruptEmitter*>(sourceDomain.get());
+            auto emitterDomain = crocos_dynamic_cast<platform::InterruptEmitter>(sourceDomain);
             assert(emitterDomain, "Source domain must be an emitter");
             if (currentIndex >= emitterDomain->getEmitterCount()) {
                 currentIndex = 0;

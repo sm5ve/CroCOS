@@ -298,7 +298,7 @@ public:
     // Friend declarations for casting functions
     template<typename U> friend class SharedPtr;
     template<typename U, typename V> friend SharedPtr<U> static_pointer_cast(const SharedPtr<V>& ptr);
-    template<typename U, typename V> friend SharedPtr<U> dynamic_pointer_cast(const SharedPtr<V>& ptr);
+    template<typename U, typename V> friend SharedPtr<U> crocos_dynamic_cast(const SharedPtr<V>& ptr);
 };
 
 // Casting functions
@@ -308,32 +308,6 @@ SharedPtr<T> static_pointer_cast(const SharedPtr<U>& ptr) {
         return SharedPtr<T>();
     }
     T* new_ptr = static_cast<T*>(ptr.typed_ptr);
-    return SharedPtr<T>(ptr, new_ptr);
-}
-
-// Concept for types that support SharedPtr dynamic casting
-template<typename Type>
-concept SharedPtrDynamicCastable = requires(Type from) {
-    from.getOffset(0ul);
-};
-
-template<typename T, typename U>
-SharedPtr<T> dynamic_pointer_cast(const SharedPtr<U>& ptr) requires SharedPtrDynamicCastable<U> {
-    if (!ptr) {
-        return SharedPtr<T>();
-    }
-
-    // Use CRClass instanceof for type checking
-    if (!ptr.typed_ptr->template instanceof<T>()) {
-        return SharedPtr<T>();
-    }
-
-    // Use crocos_dynamic_cast for the conversion
-    T* new_ptr = crocos_dynamic_cast<T*>(ptr.typed_ptr);
-    if (!new_ptr) {
-        return SharedPtr<T>();
-    }
-
     return SharedPtr<T>(ptr, new_ptr);
 }
 
@@ -484,5 +458,7 @@ struct DefaultHasher<SharedPtr<T[]>> {
         return reinterpret_cast<size_t>(key.get()) >> 3;
     }
 };
+
+#include <core/internal/SharedPtrDynamicCast.h>
 
 #endif //CROCOS_SMARTPOINTER_H

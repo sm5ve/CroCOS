@@ -27,7 +27,6 @@ target_sources(LibAllocTests PRIVATE
     ../../libraries/LibAlloc/SlabAllocator.cpp
 )
 
-# Kernel tests use host-compatible compilation but with freestanding mode for tested code
 target_compile_options(LibAllocTests PRIVATE
     -std=c++2c
     -fexceptions                    # Allow exceptions for test framework
@@ -36,7 +35,7 @@ target_compile_options(LibAllocTests PRIVATE
     -Wno-c++26-extensions          # Allow C++26 extensions
     -DCROCOS_TESTING
     -DCORE_LIBRARY_TESTING
-    -O0
+    -O3
     #-fsanitize=address
     #-fsanitize=leak
     -g

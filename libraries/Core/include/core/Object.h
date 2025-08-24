@@ -233,7 +233,7 @@ concept DynamicCastable = requires(Type from) {
 
 //Not guaranteed to work for virtual inheritance
 template <typename Dest, typename Source>
-Dest crocos_dynamic_cast(Source s) requires (is_pointer_v<Dest> && is_pointer_v<Source>)
+Dest crocos_dynamic_cast(Source s) requires (is_pointer_v<Dest> && is_pointer_v<Source> && DynamicCastable<remove_pointer_t<Source>>)
 {
     if (s == nullptr) {
         return nullptr;
@@ -251,5 +251,7 @@ Dest crocos_dynamic_cast(Source s) requires (is_pointer_v<Dest> && is_pointer_v<
 }
 
 extern "C" void presort_object_parent_lists();
+
+#include <core/internal/SharedPtrDynamicCast.h>
 
 #endif //OBJECT_H
