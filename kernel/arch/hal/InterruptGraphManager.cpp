@@ -45,7 +45,7 @@ namespace kernel::hal::interrupts {
         }
 
         void registerDomain(SharedPtr<platform::InterruptDomain> domain) {
-            getBuilder().addVertex(domain);
+            getBuilder().addVertex(move(domain));
             isDirty = true;
         }
 
@@ -56,16 +56,16 @@ namespace kernel::hal::interrupts {
             assert(source.occupied() && target.occupied(), "Must add interrupt domains before registering a connector between them");
             assert(connector -> getSource() -> instanceof(TypeID_v<platform::InterruptEmitter>), "Connector source must be an interrupt emitter");
             assert(connector -> getTarget() -> instanceof(TypeID_v<platform::InterruptReceiver>), "Connector target must be an interrupt receiver");
-            builder.addEdge(*source, *target, connector);
+            builder.addEdge(*source, *target, move(connector));
             isDirty = true;
         }
     }
 
     namespace managed {
         size_t RoutingNodeLabel::hash() const {
-            size_t domainHash = DefaultHasher<SharedPtr<kernel::hal::interrupts::platform::InterruptDomain>>{}(this -> domain);
-            size_t indexHash = this -> index;
-            size_t typeHash = static_cast<size_t>(this -> type);
+            const size_t domainHash = DefaultHasher<SharedPtr<kernel::hal::interrupts::platform::InterruptDomain>>{}(this -> domain);
+            const size_t indexHash = this -> index;
+            const size_t typeHash = static_cast<size_t>(this -> type);
 
             return domainHash ^ (indexHash << 1) ^ (typeHash << 2);
         }
@@ -83,11 +83,11 @@ namespace kernel::hal::interrupts {
                 return SharedPtr<RoutingGraphBuilder>();
             }
             
-            for (auto vertex : topologyGraph->vertices()) {
+            for (const auto vertex : topologyGraph->vertices()) {
                 auto domain = topologyGraph->getVertexLabel(vertex);
                 
                 if (domain->instanceof(TypeID_v<platform::InterruptReceiver>)) {
-                    auto receiver = crocos_dynamic_cast<platform::InterruptReceiver>(domain);
+                    const auto receiver = crocos_dynamic_cast<platform::InterruptReceiver>(domain);
                     for (size_t i = 0; i < receiver->getReceiverCount(); i++) {
                         routingVertices.push(RoutingVertexSpec{
                             RoutingNodeLabel(domain, i, NodeType::Input),
@@ -98,7 +98,7 @@ namespace kernel::hal::interrupts {
                 
                 if (domain->instanceof(TypeID_v<platform::InterruptEmitter>) && 
                     !domain->instanceof(TypeID_v<platform::InterruptReceiver>)) {
-                    auto emitter = crocos_dynamic_cast<platform::InterruptEmitter>(domain);
+                    const auto emitter = crocos_dynamic_cast<platform::InterruptEmitter>(domain);
                     for (size_t i = 0; i < emitter->getEmitterCount(); i++) {
                         routingVertices.push(RoutingVertexSpec{
                             RoutingNodeLabel(domain, i, NodeType::Device),
@@ -112,26 +112,26 @@ namespace kernel::hal::interrupts {
         }
 
         bool RoutingConstraint::isEdgeAllowed(const Builder &graph, VertexHandle source, VertexHandle target) {
-            auto sourceDomain = graph.getVertexLabel(source) -> domain;
-            auto sourceIndex = graph.getVertexLabel(source) -> index;
-            auto sourceType = graph.getVertexLabel(source) -> type;
-            auto targetDomain = graph.getVertexLabel(target) -> domain;
-            auto targetIndex = graph.getVertexLabel(target) -> index;
+            const auto sourceDomain = graph.getVertexLabel(source) -> domain;
+            const auto sourceIndex = graph.getVertexLabel(source) -> index;
+            const auto sourceType = graph.getVertexLabel(source) -> type;
+            const auto targetDomain = graph.getVertexLabel(target) -> domain;
+            const auto targetIndex = graph.getVertexLabel(target) -> index;
 
             //This will only ever be called if we already know the topology graph is preconstructed from createRoutingGraphBuilder
             //so it is safe to dereference
-            auto& topologyGraph = *topology::getTopologyGraph();
+            const auto& topologyGraph = *topology::getTopologyGraph();
 
             auto sourceTopologyVertex = topologyGraph.getVertexByLabel(sourceDomain);
             auto targetTopologyVertex = topologyGraph.getVertexByLabel(targetDomain);
 
             assert(sourceTopologyVertex.occupied() && targetTopologyVertex.occupied(), "Must have a topology vertex for each domain");
 
-            for (auto edge : topologyGraph.outgoingEdges(*sourceTopologyVertex)) {
+            for (const auto edge : topologyGraph.outgoingEdges(*sourceTopologyVertex)) {
                 if (topologyGraph.getTarget(edge) == *targetTopologyVertex) {
-                    auto& connector = topologyGraph.getEdgeLabel(edge);
+                    const auto connector = topologyGraph.getEdgeLabel(edge);
                     if (connector->fromInput(targetIndex)) {
-                        auto emitter = crocos_dynamic_cast<platform::InterruptEmitter>(sourceDomain);
+                        const auto emitter = crocos_dynamic_cast<platform::InterruptEmitter>(sourceDomain);
                         assert(*(connector -> fromInput(targetIndex)) < (emitter -> getEmitterCount()), "Emitter index out of bounds");
                         if (sourceType == NodeType::Device) {
                             return (connector -> fromOutput(sourceIndex).occupied()) && (*connector -> fromOutput(sourceIndex) == targetIndex);
@@ -146,14 +146,14 @@ namespace kernel::hal::interrupts {
         IteratorRange<PotentialEdgeIterator<true>> RoutingConstraint::validEdgesFrom(const Builder &graph, VertexHandle source) {
             using It = PotentialEdgeIterator<true>;
             
-            auto sourceDomain = graph.getVertexLabel(source)->domain;
-            auto sourceIndex = graph.getVertexLabel(source)->index;
+            const auto sourceDomain = graph.getVertexLabel(source)->domain;
+            const auto sourceIndex = graph.getVertexLabel(source)->index;
             
-            auto& topologyGraph = *topology::getTopologyGraph();
+            const auto& topologyGraph = *topology::getTopologyGraph();
             auto sourceTopologyVertex = topologyGraph.getVertexByLabel(sourceDomain);
             assert(sourceTopologyVertex.occupied(), "Source domain must exist in topology");
             
-            auto outgoingEdges = topologyGraph.outgoingEdges(*sourceTopologyVertex);
+            const auto outgoingEdges = topologyGraph.outgoingEdges(*sourceTopologyVertex);
             auto begin = outgoingEdges.begin();
             auto end = outgoingEdges.end();
             
@@ -166,14 +166,14 @@ namespace kernel::hal::interrupts {
         IteratorRange<PotentialEdgeIterator<false>> RoutingConstraint::validEdgesTo(const Builder &graph, VertexHandle target) {
             using It = PotentialEdgeIterator<false>;
 
-            auto targetDomain = graph.getVertexLabel(target)->domain;
-            auto targetIndex = graph.getVertexLabel(target)->index;
+            const auto targetDomain = graph.getVertexLabel(target)->domain;
+            const auto targetIndex = graph.getVertexLabel(target)->index;
 
-            auto& topologyGraph = *topology::getTopologyGraph();
+            const auto& topologyGraph = *topology::getTopologyGraph();
             auto targetTopologyVertex = topologyGraph.getVertexByLabel(targetDomain);
             assert(targetTopologyVertex.occupied(), "Source domain must exist in topology");
 
-            auto incomingEdges = topologyGraph.incomingEdges(*targetTopologyVertex);
+            const auto incomingEdges = topologyGraph.incomingEdges(*targetTopologyVertex);
             auto begin = incomingEdges.begin();
             auto end = incomingEdges.end();
 
@@ -197,7 +197,7 @@ namespace kernel::hal::interrupts {
                     //We also have to advance to the unique valid state
                     while (currentConnector != endConnector) {
                         auto edge = currentConnector.operator*();
-                        auto conn = topology::getTopologyGraph()->getEdgeLabel(edge);
+                        const auto conn = topology::getTopologyGraph()->getEdgeLabel(edge);
                         //If the connector connects to the relevant emitter, set the relevant receiver index and break
                         if (conn -> fromOutput(findex)) {
                             currentIndex = *conn -> fromOutput(findex);
@@ -235,11 +235,11 @@ namespace kernel::hal::interrupts {
             //This will only ever be called if we already know the topology graph is preconstructed from createRoutingGraphBuilder
             //so it is safe to dereference
             currentIndex++;
-            auto& topGraph = *topology::getTopologyGraph();
-            auto edge = currentConnector.operator*();
-            auto targetVertex = topGraph.getTarget(edge);
+            const auto& topGraph = *topology::getTopologyGraph();
+            const auto edge = currentConnector.operator*();
+            const auto targetVertex = topGraph.getTarget(edge);
             const auto& targetDomain = topGraph.getVertexLabel(targetVertex);
-            auto receiverDomain = crocos_dynamic_cast<platform::InterruptReceiver>(targetDomain);
+            const auto receiverDomain = crocos_dynamic_cast<platform::InterruptReceiver>(targetDomain);
             assert(receiverDomain, "Target domain must be a receiver");
             if (currentIndex >= receiverDomain->getReceiverCount()) {
                 currentIndex = 0;
@@ -260,11 +260,11 @@ namespace kernel::hal::interrupts {
             //This will only ever be called if we already know the topology graph is preconstructed from createRoutingGraphBuilder
             //so it is safe to dereference
             currentIndex++;
-            auto& topGraph = *topology::getTopologyGraph();
-            auto edge = currentConnector.operator*();
-            auto sourceVertex = topGraph.getSource(edge);
+            const auto& topGraph = *topology::getTopologyGraph();
+            const auto edge = currentConnector.operator*();
+            const auto sourceVertex = topGraph.getSource(edge);
             const auto& sourceDomain = topGraph.getVertexLabel(sourceVertex);
-            auto emitterDomain = crocos_dynamic_cast<platform::InterruptEmitter>(sourceDomain);
+            const auto emitterDomain = crocos_dynamic_cast<platform::InterruptEmitter>(sourceDomain);
             assert(emitterDomain, "Source domain must be an emitter");
             if (currentIndex >= emitterDomain->getEmitterCount()) {
                 currentIndex = 0;
@@ -341,7 +341,7 @@ namespace kernel::hal::interrupts {
                 }
             }
             
-            RoutingNodeLabel targetLabel(targetDomain, currentIndex, targetType);
+            const RoutingNodeLabel targetLabel(targetDomain, currentIndex, targetType);
             auto vertex = this->graph->getVertexByLabel(targetLabel);
             assert(vertex.occupied(), "Target vertex must exist in routing graph");
             return *vertex;
