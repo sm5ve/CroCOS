@@ -147,12 +147,13 @@ public:
 
     static constexpr const char* name() {
         const char * fullName = full_name();
-
-        static char output[typeNameSize];
-        for(size_t i = 0; i < typeNameSize - 1; i++){
+        //A small hack to prevent clangd from complaining about TypeName due to it pretending to be GCC
+        constexpr size_t clampedSize = typeNameSize < 10000 ? typeNameSize : 10000;
+        static char output[clampedSize];
+        for(size_t i = 0; i < clampedSize - 1; i++){
             output[i] = fullName[startIndex + i];
         }
-        output[typeNameSize - 1] = 0;
+        output[clampedSize - 1] = 0;
 
         return output;
     }
