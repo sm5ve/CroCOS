@@ -48,7 +48,7 @@ namespace LibAlloc::InternalAllocator {
         }
     };
 
-    struct alignas(alignof(max_align_t)) UnallocatedMemoryBlockInfoExtractor {
+    struct UnallocatedMemoryBlockInfoExtractor {
         static UnallocatedMemoryBlockHeader*& left(UnallocatedMemoryBlockHeader& header){return header.left;}
         static UnallocatedMemoryBlockHeader*& right(UnallocatedMemoryBlockHeader& header){return header.right;}
         static UnallocatedMemoryBlockHeader& data(UnallocatedMemoryBlockHeader& header) {return header;}
@@ -87,7 +87,7 @@ namespace LibAlloc::InternalAllocator {
 
     //We can eliminate the need for AlignedAllocatedMemoryBlockHeader with some clever packing in
     //sizeAndColor if ASSUME_ALIGN_POWER_OF_TWO is set. This may not save any space or be remotely advantageous, though.
-    struct AllocatedMemoryBlockHeader {
+    struct alignas(alignof(max_align_t)) AllocatedMemoryBlockHeader {
         size_t sizeAndColor; //includes the size of the header itself
         AllocatedMemoryBlockHeader* left;
         AllocatedMemoryBlockHeader* right;
