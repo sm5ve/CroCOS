@@ -6,6 +6,7 @@
 #define CROCOS_SHAREDPTRDYNAMICCAST_H
 template<typename U, typename V>
 SharedPtr<U> crocos_dynamic_cast(const SharedPtr<V>& ptr){
+    static_assert(DynamicCastable<V>);
     if (!ptr) {
         return SharedPtr<U>();
     }

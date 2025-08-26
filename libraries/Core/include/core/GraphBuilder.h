@@ -13,6 +13,7 @@
 #include <core/ds/HashMap.h>
 #include <core/math.h>
 #include <core/Iterator.h>
+#include <core/utility.h>
 
 namespace _GraphBuilder {
     template <bool HasLabel, bool HasColor, typename G>
@@ -586,14 +587,7 @@ namespace _GraphBuilder {
 
         // Check if an edge exists between two vertices
         [[nodiscard]] bool hasEdge(const VertexHandle& from, const VertexHandle& to) const {
-            validateVertexHandle(from);
-            validateVertexHandle(to);
-            for (const auto& edge : edgeInfo) {
-                if (edge.fromVertexId == from.index && edge.toVertexId == to.index) {
-                    return true;
-                }
-            }
-            return false;
+            return findEdgeBetween(from, to).occupied();
         }
 
         // Get edge counts for specific vertices
@@ -780,6 +774,24 @@ namespace _GraphBuilder {
                 UnpopulatedEdgeIterator(edges.begin(), edges.end(), *this),
                 UnpopulatedEdgeIterator(edges.end(), edges.end(), *this)
             );
+        }
+
+        Optional<EdgeHandle> findEdgeBetween(const VertexHandle& from, const VertexHandle& to) const
+        requires Graph::StructureModifier::is_simple_graph
+        {
+            validateVertexHandle(from);
+            validateVertexHandle(to);
+            for (const auto& edge : edgeInfo) {
+                if (edge.fromVertexId == from.index && edge.toVertexId == to.index) {
+                    return EdgeHandle(edge.index, &edgeInfo);
+                }
+                if constexpr (!Graph::StructureModifier::is_directed) {
+                    if (edge.toVertexId == from.index && edge.fromVertexId == to.index) {
+                        return EdgeHandle(edge.index, &edgeInfo);
+                    }
+                }
+            }
+            return {};
         }
     };
 }
@@ -1032,6 +1044,9 @@ using GraphBuilderBase = _GraphBuilder::GraphBuilderImpl<Graph>;
 template<typename Graph>
 using BuilderVertexHandle = typename _GraphBuilder::GraphBuilderImpl<Graph>::VertexHandle;
 
+template<typename Graph>
+using BuilderEdgeHandle = typename _GraphBuilder::GraphBuilderImpl<Graph>::EdgeHandle;
+
 // Concept for EdgeConstraint - defines methods that a constraint must implement  
 template<typename T, typename Graph>
 concept EdgeConstraint = requires(const T& constraint, const GraphBuilderBase<Graph>& builder,
@@ -1041,10 +1056,10 @@ concept EdgeConstraint = requires(const T& constraint, const GraphBuilderBase<Gr
     { constraint.isEdgeAllowed(builder, from, to) } -> convertible_to<bool>;
     
     // Get valid edges originating from a vertex
-    { constraint.validEdgesFrom(builder, from) } -> Iterable;
+    { constraint.validEdgesFrom(builder, from) } -> IterableWithValueType<BuilderVertexHandle<Graph>>;
     
     // Get valid edges targeting a vertex
-    { constraint.validEdgesTo(builder, to) } -> Iterable;
+    { constraint.validEdgesTo(builder, to) } -> IterableWithValueType<BuilderVertexHandle<Graph>>;
 };
 
 // RestrictedGraphBuilder - adds constraint-based edge validation to graph construction.
@@ -1227,17 +1242,85 @@ public:
     bool canAddEdge(const VertexHandle& from, const VertexHandle& to) const {
         this->validateVertexHandle(from);
         this->validateVertexHandle(to);
+        if constexpr (Graph::StructureModifier::is_simple_graph) {
+            if (hasEdge(from, to)) return false;
+        }
         return constraint.isEdgeAllowed(*this, from, to);
     }
-    
+
+    template <typename T, bool Forwards>
+    class SimpleGraphFilteredIterator {
+        T iterator;
+        const T end;
+        const RestrictedGraphBuilder& builder;
+        const VertexHandle fixedVertex;
+    public:
+        SimpleGraphFilteredIterator(T state, const T end, const RestrictedGraphBuilder& builder, const VertexHandle fv)
+            : iterator(state), end(end), builder(builder), fixedVertex(fv) {}
+
+        bool operator!=(const SimpleGraphFilteredIterator& other) const {
+            return iterator != other.iterator;
+        }
+
+        VertexHandle operator*() const {
+            return *iterator;
+        }
+
+        SimpleGraphFilteredIterator& operator++() {
+            if (isConstexprEqual(iterator, end)) return *this;
+            if constexpr(Forwards) {
+                do {
+                    ++iterator;
+                } while (iterator != end && builder.hasEdge(fixedVertex, *iterator));
+            }
+            else {
+                do {
+                    ++iterator;
+                } while (iterator != end && builder.hasEdge(*iterator, fixedVertex));
+            }
+            return *this;
+        }
+    };
+
+    template <typename T, bool Forward>
+    class SimpleGraphFilteredIteratorRange {
+        const T iterable;
+        const RestrictedGraphBuilder& builder;
+        const VertexHandle fixedVertex;
+    public:
+        using IteratorType = decltype(iterable.begin());
+        explicit SimpleGraphFilteredIteratorRange(T&& itr, const RestrictedGraphBuilder& b, const VertexHandle fv) :
+        iterable(move(itr)), builder(b), fixedVertex(fv) {}
+
+        SimpleGraphFilteredIterator<IteratorType, Forward> begin() const {
+            return SimpleGraphFilteredIterator<IteratorType, Forward>(iterable.begin(), iterable.end(), builder, fixedVertex);
+        }
+
+        SimpleGraphFilteredIterator<IteratorType, Forward> end() const {
+            return SimpleGraphFilteredIterator<IteratorType, Forward>(iterable.end(), iterable.end(), builder, fixedVertex);
+        }
+    };
+
     auto getValidEdgesFrom(const VertexHandle& vertex) const {
         this->validateVertexHandle(vertex);
-        return constraint.validEdgesFrom(*this, vertex);
+        if constexpr(Graph::StructureModifier::is_simple_graph) {
+            auto baseIterator = constraint.validEdgesFrom(*this, vertex);
+            return SimpleGraphFilteredIteratorRange<decltype(baseIterator), true>(move(baseIterator), *this, vertex);
+        }
+        else {
+            return constraint.validEdgesFrom(*this, vertex);
+        }
     }
     
     auto getValidEdgesTo(const VertexHandle& vertex) const {
         this->validateVertexHandle(vertex);
-        return constraint.validEdgesTo(*this, vertex);
+        if constexpr(Graph::StructureModifier::is_simple_graph) {
+            auto baseIterator = constraint.validEdgesTo(*this, vertex);
+            return SimpleGraphFilteredIteratorRange<decltype(baseIterator), false>(move(baseIterator), *this, vertex);
+        }
+        else {
+            return constraint.validEdgesTo(*this, vertex);
+        }
     }
     
     // Validation and building

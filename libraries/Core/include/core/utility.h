@@ -366,6 +366,14 @@ public:
     }
 };
 
+template <typename>
+struct NoncapturingLambdaRef;
+
+template <typename Ret, typename... Args>
+struct NoncapturingLambdaRef<Ret(Args...)> {
+    using Type = decltype([](Args...) -> Ret {});
+};
+
 template<typename From, typename To>
 concept convertible_to = (IsSame<From, void> && IsSame<To, void>) || requires(From f) {
     static_cast<To>(f);
@@ -623,6 +631,53 @@ constexpr bool isArraySorted(ConstexprArray<T, N> array){
     }
     return true;
 }
+
+template <typename T>
+concept HasOperatorEqualsEquals = requires(T a, T b) {
+    { a == b } -> convertible_to<bool>;
+};
+
+template <typename T>
+concept HasOperatorNotEqualsEquals = requires(T a, T b) {
+    { a != b } -> convertible_to<bool>;
+};
+
+template <typename T>
+concept HasDotOperatorEqualsEquals = requires(T a, T b) {
+    { a.operator==(b) } -> convertible_to<bool>;
+};
+
+template <typename T>
+concept HasDotOperatorNotEqualsEquals = requires(T a, T b) {
+    { a.operator!=(b) } -> convertible_to<bool>;
+};
+
+template <typename T>
+constexpr bool isConstexprEqual(T a, T b) requires HasOperatorEqualsEquals<T> {
+    return a == b;
+}
+
+template <typename T>
+constexpr bool isConstexprEqual(T a, T b) requires
+(!HasOperatorEqualsEquals<T> && HasOperatorNotEqualsEquals<T>) {
+    return !(a != b);
+}
+
+template <typename T>
+constexpr bool isConstexprEqual(T a, T b) requires
+(!HasOperatorEqualsEquals<T> && !HasOperatorNotEqualsEquals<T> &&
+    HasDotOperatorEqualsEquals<T>) {
+    return a.operator==(b);
+}
+
+template <typename T>
+constexpr bool isConstexprEqual(T a, T b) requires
+(!HasOperatorEqualsEquals<T> && !HasOperatorNotEqualsEquals<T> &&
+    !HasDotOperatorEqualsEquals<T> && HasDotOperatorNotEqualsEquals<T>) {
+    return !(a.operator!=(b));
+}
+
+
 
 #ifdef __clang__
 #define condition_likely(x) __builtin_expect(!!(x), 1)

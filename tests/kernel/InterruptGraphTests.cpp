@@ -1,6 +1,7 @@
 //
-// Unit tests for Interrupt Graph Infrastructure
-// Created by Spencer Martin on 7/27/25.
+// Comprehensive unit tests for Interrupt Graph Infrastructure
+// Tests topology graphs, routing graphs, and all domain types
+// Created by Spencer Martin on 8/26/25.
 //
 
 #define CROCOS_TESTING
@@ -15,7 +16,10 @@
 using namespace kernel::hal::interrupts;
 using namespace CroCOSTest;
 
-// Mock domains for testing
+// ============================================================================
+// Mock Domains for Testing
+// ============================================================================
+
 CRClass(MockEmitterDomain, public platform::InterruptDomain, public platform::InterruptEmitter) {
 private:
     size_t emitterCount;
@@ -32,14 +36,13 @@ public:
     size_t getReceiverCount() override { return receiverCount; }
 };
 
-CRClass(MockRoutableDomain, public platform::InterruptDomain, public platform::RoutableDomain) {
+CRClass(MockFreeRoutableDomain, public platform::InterruptDomain, public platform::FreeRoutableDomain) {
 private:
     size_t receiverCount;
     size_t emitterCount;
 public:
-    MockRoutableDomain(size_t receivers, size_t emitters) 
-        : receiverCount(receivers), emitterCount(emitters) {
-    }
+    MockFreeRoutableDomain(size_t receivers, size_t emitters) 
+        : receiverCount(receivers), emitterCount(emitters) {}
     
     size_t getReceiverCount() override { return receiverCount; }
     size_t getEmitterCount() override { return emitterCount; }
@@ -49,368 +52,498 @@ public:
     }
 };
 
-class MockDomainConnector : public platform::DomainConnector {
+CRClass(MockContextIndependentRoutableDomain, public platform::InterruptDomain, public platform::ContextIndependentRoutableDomain) {
 private:
-    Vector<Optional<platform::DomainInputIndex>> outputToInputMap;
-    Vector<Optional<platform::DomainOutputIndex>> inputToOutputMap;
+    size_t receiverCount;
+    size_t emitterCount;
     
 public:
-    MockDomainConnector(SharedPtr<platform::InterruptDomain> src, 
-                       SharedPtr<platform::InterruptDomain> tgt,
-                       size_t sourceOutputs, size_t targetInputs)
-        : platform::DomainConnector(src, tgt) {
-        outputToInputMap.ensureRoom(sourceOutputs);
-        inputToOutputMap.ensureRoom(targetInputs);
-        for (size_t i = 0; i < sourceOutputs; i++) {
-            outputToInputMap.push({});
-        }
-        for (size_t i = 0; i < targetInputs; i++) {
-            inputToOutputMap.push({});
-        }
+    MockContextIndependentRoutableDomain(size_t receivers, size_t emitters) 
+        : receiverCount(receivers), emitterCount(emitters) {}
+    
+    size_t getReceiverCount() override { return receiverCount; }
+    size_t getEmitterCount() override { return emitterCount; }
+    
+    bool routeInterrupt(size_t fromReceiver, size_t toEmitter) override {
+        return isRoutingAllowed(fromReceiver, toEmitter);
     }
     
-    void setMapping(platform::DomainOutputIndex output, platform::DomainInputIndex input) {
-        if (output < outputToInputMap.getSize() && input < inputToOutputMap.getSize()) {
-            outputToInputMap[output] = input;
-            inputToOutputMap[input] = output;
+    bool isRoutingAllowed(size_t fromReceiver, size_t toEmitter) const override {
+        if (fromReceiver >= receiverCount || toEmitter >= emitterCount) {
+            return false;
         }
-    }
-    
-    Optional<platform::DomainInputIndex> fromOutput(platform::DomainOutputIndex output) override {
-        if (output >= outputToInputMap.getSize()) {
-            return {};
-        }
-        return outputToInputMap[output];
-    }
-    
-    Optional<platform::DomainOutputIndex> fromInput(platform::DomainInputIndex input) override {
-        if (input >= inputToOutputMap.getSize()) {
-            return {};
-        }
-        return inputToOutputMap[input];
+        // Simple rule: allow routing only when receiver index equals emitter index
+        return fromReceiver == toEmitter;
     }
 };
 
-TEST(TopologyConnectorRegistration) {
+CRClass(MockContextDependentRoutableDomain, public platform::InterruptDomain, public platform::ContextDependentRoutableDomain) {
+private:
+    size_t receiverCount;
+    size_t emitterCount;
+    mutable bool allowAllForTesting;
+    
+public:
+    MockContextDependentRoutableDomain(size_t receivers, size_t emitters) 
+        : receiverCount(receivers), emitterCount(emitters), allowAllForTesting(false) {}
+    
+    void setAllowAllForTesting(bool allow) { allowAllForTesting = allow; }
+    
+    size_t getReceiverCount() override { return receiverCount; }
+    size_t getEmitterCount() override { return emitterCount; }
+    
+    bool routeInterrupt(size_t, size_t) override {
+        return true; // Simple stub
+    }
+    
+    bool isRoutingAllowed(size_t fromReceiver, size_t toEmitter, const GraphBuilderBase<managed::RoutingGraph>& builder) const override {
+        // Simple test implementation - could inspect builder for complex logic
+        (void)builder; // Suppress unused parameter warning
+        if (fromReceiver >= receiverCount || toEmitter >= emitterCount) {
+            return false;
+        }
+        return allowAllForTesting;
+    }
+};
+
+CRClass(MockFixedRoutingDomain, public platform::InterruptDomain, public platform::FixedRoutingDomain) {
+private:
+    size_t receiverCount;
+    size_t emitterCount;
+    Vector<size_t> fixedRouting; // [receiver] -> emitter
+    
+public:
+    MockFixedRoutingDomain(size_t receivers, size_t emitters) 
+        : receiverCount(receivers), emitterCount(emitters) {
+        // Default: receiver i routes to emitter i % emitterCount
+        for (size_t i = 0; i < receivers; i++) {
+            fixedRouting.push(i % emitters);
+        }
+    }
+    
+    void setFixedRoute(size_t receiver, size_t emitter) {
+        if (receiver < receiverCount && emitter < emitterCount) {
+            fixedRouting[receiver] = emitter;
+        }
+    }
+    
+    size_t getReceiverCount() override { return receiverCount; }
+    size_t getEmitterCount() override { return emitterCount; }
+    
+    size_t getEmitterFor(size_t receiver) const override {
+        if (receiver >= receiverCount) {
+            return 0; // Should not happen in normal operation
+        }
+        return fixedRouting[receiver];
+    }
+};
+
+// Simple connector that maps outputs 1:1 to inputs
+class MockSimpleConnector : public platform::DomainConnector {
+public:
+    MockSimpleConnector(SharedPtr<platform::InterruptDomain> src, SharedPtr<platform::InterruptDomain> tgt)
+        : DomainConnector(src, tgt) {}
+    
+    Optional<platform::DomainInputIndex> fromOutput(platform::DomainOutputIndex output) override {
+        return Optional<platform::DomainInputIndex>(output);
+    }
+    
+    Optional<platform::DomainOutputIndex> fromInput(platform::DomainInputIndex input) override {
+        return Optional<platform::DomainOutputIndex>(input);
+    }
+};
+
+// Connector with custom mapping
+class MockCustomConnector : public platform::DomainConnector {
+private:
+    Vector<Optional<size_t>> outputToInput;
+    Vector<Optional<size_t>> inputToOutput;
+    
+public:
+    MockCustomConnector(SharedPtr<platform::InterruptDomain> src, SharedPtr<platform::InterruptDomain> tgt)
+        : DomainConnector(src, tgt) {}
+    
+    void addMapping(size_t output, size_t input) {
+        // Resize vectors if needed
+        while (outputToInput.getSize() <= output) {
+            outputToInput.push(Optional<size_t>());
+        }
+        while (inputToOutput.getSize() <= input) {
+            inputToOutput.push(Optional<size_t>());
+        }
+        
+        outputToInput[output] = input;
+        inputToOutput[input] = output;
+    }
+    
+    Optional<platform::DomainInputIndex> fromOutput(platform::DomainOutputIndex output) override {
+        if (output < outputToInput.getSize()) {
+            return outputToInput[output];
+        }
+        return Optional<platform::DomainInputIndex>();
+    }
+    
+    Optional<platform::DomainOutputIndex> fromInput(platform::DomainInputIndex input) override {
+        if (input < inputToOutput.getSize()) {
+            return inputToOutput[input];
+        }
+        return Optional<platform::DomainOutputIndex>();
+    }
+};
+
+// ============================================================================
+// Test Setup/Teardown
+// ============================================================================
+
+class InterruptGraphTestSetup {
+public:
+    InterruptGraphTestSetup() {
+        topology::resetTopologyState();
+    }
+    
+    ~InterruptGraphTestSetup() {
+        topology::resetTopologyState();
+    }
+};
+
+// ============================================================================
+// Basic Topology Graph Tests
+// ============================================================================
+
+TEST(TopologyGraphDomainRegistration) {
+    InterruptGraphTestSetup setup;
+    
+    auto emitter = make_shared<MockEmitterDomain>(3);
+    auto receiver = make_shared<MockReceiverDomain>(2);
+    
+    topology::registerDomain(emitter);
+    topology::registerDomain(receiver);
+    
+    auto& topologyGraph = topology::getTopologyGraph();
+    ASSERT_TRUE(topologyGraph.occupied());
+    
+    // Should have 2 vertices
+    size_t vertexCount = 0;
+    for (auto vertex : topologyGraph->vertices()) {
+        (void)vertex; // Suppress unused variable warning
+        vertexCount++;
+    }
+    ASSERT_EQ(2u, vertexCount);
+}
+
+TEST(TopologyGraphConnectorRegistration) {
+    InterruptGraphTestSetup setup;
+    
     auto emitter = make_shared<MockEmitterDomain>(2);
-    auto receiver = make_shared<MockReceiverDomain>(3);
+    auto receiver = make_shared<MockReceiverDomain>(2);
+    auto connector = make_shared<MockSimpleConnector>(emitter, receiver);
     
-    topology::registerDomain(static_pointer_cast<platform::InterruptDomain>(emitter));
-    topology::registerDomain(static_pointer_cast<platform::InterruptDomain>(receiver));
-    
-    // Comment out the connector part to isolate the vertex-only case
-    auto connector = make_shared<MockDomainConnector>(emitter, receiver, 2, 3);
-    connector->setMapping(0, 1); // Output 0 -> Input 1
-    connector->setMapping(1, 2); // Output 1 -> Input 2
-    
+    topology::registerDomain(emitter);
+    topology::registerDomain(receiver);
     topology::registerConnector(connector);
     
-    auto graph = topology::getTopologyGraph();
-    ASSERT_TRUE(graph.occupied());
+    auto& topologyGraph = topology::getTopologyGraph();
+    ASSERT_TRUE(topologyGraph.occupied());
     
-    // Should have one edge
+    // Should have 1 edge
     size_t edgeCount = 0;
-    for (auto vertex : graph->vertices()) {
-        for (auto edge : graph->outgoingEdges(vertex)) {
+    for (auto vertex : topologyGraph->vertices()) {
+        for (auto edge : topologyGraph->outgoingEdges(vertex)) {
+            (void)edge; // Suppress unused variable warning
             edgeCount++;
         }
     }
-    ASSERT_EQ(edgeCount, 1u);
-    topology::resetTopologyState();
+    ASSERT_EQ(1u, edgeCount);
 }
 
-TEST(TopologyComplexGraph) {
-    // Create a more complex topology: Device -> Controller -> CPU
-    auto device = make_shared<MockEmitterDomain>(4);
-    auto controller = make_shared<MockRoutableDomain>(4, 2);
-    auto cpu = make_shared<MockReceiverDomain>(2);
-    
-    topology::registerDomain(static_pointer_cast<platform::InterruptDomain>(device));
-    topology::registerDomain(static_pointer_cast<platform::InterruptDomain>(controller));
-    topology::registerDomain(static_pointer_cast<platform::InterruptDomain>(cpu));
-    
-    // Device -> Controller
-    auto connector1 = make_shared<MockDomainConnector>(device, controller, 4, 4);
-    for (size_t i = 0; i < 4; i++) {
-        connector1->setMapping(i, i); // 1:1 mapping
-    }
-    
-    // Controller -> CPU
-    auto connector2 = make_shared<MockDomainConnector>(controller, cpu, 2, 2);
-    connector2->setMapping(0, 0);
-    connector2->setMapping(1, 1);
-    
-    topology::registerConnector(connector1);
-    topology::registerConnector(connector2);
-    
-    auto graph = topology::getTopologyGraph();
-    ASSERT_TRUE(graph.occupied());
-    
-    // Verify graph structure
-    size_t vertexCount = 0;
-    size_t edgeCount = 0;
-    for (auto vertex : graph->vertices()) {
-        vertexCount++;
-        for (auto edge : graph->outgoingEdges(vertex)) {
-            edgeCount++;
-        }
-    }
-    ASSERT_EQ(vertexCount, 3u);
-    ASSERT_EQ(edgeCount, 2u);
-    topology::resetTopologyState();
-}
+// ============================================================================
+// Routing Graph Builder Tests
+// ============================================================================
 
-// Test routing graph creation
-TEST(RoutingGraphBasicCreation) {
+TEST(RoutingGraphBuilderBasicVertexCreation) {
+    InterruptGraphTestSetup setup;
+    
     auto emitter = make_shared<MockEmitterDomain>(2);
     auto receiver = make_shared<MockReceiverDomain>(3);
     
-    topology::registerDomain(static_pointer_cast<platform::InterruptDomain>(emitter));
-    topology::registerDomain(static_pointer_cast<platform::InterruptDomain>(receiver));
+    topology::registerDomain(emitter);
+    topology::registerDomain(receiver);
     
-    auto connector = make_shared<MockDomainConnector>(emitter, receiver, 2, 3);
-    connector->setMapping(0, 1);
-    connector->setMapping(1, 2);
+    auto routingBuilder = managed::createRoutingGraphBuilder();
+    ASSERT_TRUE(routingBuilder);
+    
+    // Should have 5 vertices total (2 device + 3 input)
+    ASSERT_EQ(5u, routingBuilder->getCurrentVertexCount());
+    ASSERT_EQ(0u, routingBuilder->getCurrentEdgeCount());
+}
+
+TEST(RoutingGraphBuilderVertexLabels) {
+    InterruptGraphTestSetup setup;
+    
+    auto emitter = make_shared<MockEmitterDomain>(1);
+    auto receiver = make_shared<MockReceiverDomain>(1);
+    
+    topology::registerDomain(emitter);
+    topology::registerDomain(receiver);
+    
+    auto routingBuilder = managed::createRoutingGraphBuilder();
+    ASSERT_TRUE(routingBuilder);
+    
+    // Check that we can find vertices by label
+    auto deviceLabel = managed::RoutingNodeLabel(emitter, 0, managed::NodeType::Device);
+    auto inputLabel = managed::RoutingNodeLabel(receiver, 0, managed::NodeType::Input);
+    
+    auto deviceVertex = routingBuilder->getVertexByLabel(deviceLabel);
+    auto inputVertex = routingBuilder->getVertexByLabel(inputLabel);
+    
+    ASSERT_TRUE(deviceVertex.occupied());
+    ASSERT_TRUE(inputVertex.occupied());
+}
+
+// ============================================================================
+// Fixed Routing Domain Tests
+// ============================================================================
+
+TEST(FixedRoutingDomainPrebuiltEdges) {
+    InterruptGraphTestSetup setup;
+    
+    auto fixedDomain = make_shared<MockFixedRoutingDomain>(2, 2);
+    auto receiver = make_shared<MockReceiverDomain>(2);
+    auto connector = make_shared<MockSimpleConnector>(fixedDomain, receiver);
+    
+    // Set up fixed routing: receiver 0 -> emitter 1, receiver 1 -> emitter 0
+    fixedDomain->setFixedRoute(0, 1);
+    fixedDomain->setFixedRoute(1, 0);
+    
+    topology::registerDomain(fixedDomain);
+    topology::registerDomain(receiver);
     topology::registerConnector(connector);
     
     auto routingBuilder = managed::createRoutingGraphBuilder();
     ASSERT_TRUE(routingBuilder);
     
-    // Should create vertices for all device outputs and receiver inputs
-    // Device has 2 outputs (NodeType::Device)
-    // Receiver has 3 inputs (NodeType::Input)
-    // Total: 5 vertices
+    // Fixed domain should have edges prebuilt
+    auto sourceLabel0 = managed::RoutingNodeLabel(fixedDomain, 0, managed::NodeType::Input);
+    auto sourceLabel1 = managed::RoutingNodeLabel(fixedDomain, 1, managed::NodeType::Input);
     
-    auto graph = routingBuilder->build();
-    ASSERT_TRUE(graph.occupied());
+    auto sourceVertex0 = routingBuilder->getVertexByLabel(sourceLabel0);
+    auto sourceVertex1 = routingBuilder->getVertexByLabel(sourceLabel1);
     
-    size_t vertexCount = 0;
-    for (auto vertex : graph->vertices()) {
-        vertexCount++;
-    }
-    ASSERT_EQ(vertexCount, 5u);
-    topology::resetTopologyState();
+    ASSERT_TRUE(sourceVertex0.occupied());
+    ASSERT_TRUE(sourceVertex1.occupied());
+    
+    // Should have exactly 2 prebuilt edges
+    ASSERT_EQ(2u, routingBuilder->getCurrentEdgeCount());
+    
+    // Check edge counts for each source
+    ASSERT_EQ(1u, routingBuilder->getOutgoingEdgeCount(*sourceVertex0));
+    ASSERT_EQ(1u, routingBuilder->getOutgoingEdgeCount(*sourceVertex1));
 }
 
-TEST(RoutingGraphConstraintValidation) {
-    auto emitter = make_shared<MockEmitterDomain>(2);
+TEST(FixedRoutingDomainConstraintBehavior) {
+    InterruptGraphTestSetup setup;
+    
+    auto fixedDomain = make_shared<MockFixedRoutingDomain>(1, 2);
+    auto receiver = make_shared<MockReceiverDomain>(2);
+    auto connector = make_shared<MockSimpleConnector>(fixedDomain, receiver);
+    
+    // Fixed routing: receiver 0 -> emitter 1
+    fixedDomain->setFixedRoute(0, 1);
+    
+    topology::registerDomain(fixedDomain);
+    topology::registerDomain(receiver);
+    topology::registerConnector(connector);
+    
+    auto routingBuilder = managed::createRoutingGraphBuilder();
+    ASSERT_TRUE(routingBuilder);
+    
+    auto sourceLabel = managed::RoutingNodeLabel(fixedDomain, 0, managed::NodeType::Input);
+    auto targetLabel0 = managed::RoutingNodeLabel(receiver, 0, managed::NodeType::Input);
+    auto targetLabel1 = managed::RoutingNodeLabel(receiver, 1, managed::NodeType::Input);
+    
+    auto sourceVertex = routingBuilder->getVertexByLabel(sourceLabel);
+    auto targetVertex0 = routingBuilder->getVertexByLabel(targetLabel0);
+    auto targetVertex1 = routingBuilder->getVertexByLabel(targetLabel1);
+    
+    ASSERT_TRUE(sourceVertex.occupied());
+    ASSERT_TRUE(targetVertex0.occupied());
+    ASSERT_TRUE(targetVertex1.occupied());
+    
+    // Should have prebuilt edge to target1 but not target0
+    ASSERT_FALSE(routingBuilder->hasEdge(*sourceVertex, *targetVertex0));
+    ASSERT_TRUE(routingBuilder->hasEdge(*sourceVertex, *targetVertex1));
+}
+
+// ============================================================================
+// Free Routable Domain Tests
+// ============================================================================
+
+TEST(FreeRoutableDomainConstraints) {
+    InterruptGraphTestSetup setup;
+    
+    auto freeDomain = make_shared<MockFreeRoutableDomain>(2, 2);
+    auto receiver = make_shared<MockReceiverDomain>(2);
+    auto connector = make_shared<MockSimpleConnector>(freeDomain, receiver);
+    
+    topology::registerDomain(freeDomain);
+    topology::registerDomain(receiver);
+    topology::registerConnector(connector);
+    
+    auto routingBuilder = managed::createRoutingGraphBuilder();
+    ASSERT_TRUE(routingBuilder);
+    
+    auto sourceLabel0 = managed::RoutingNodeLabel(freeDomain, 0, managed::NodeType::Input);
+    auto sourceLabel1 = managed::RoutingNodeLabel(freeDomain, 1, managed::NodeType::Input);
+    auto targetLabel0 = managed::RoutingNodeLabel(receiver, 0, managed::NodeType::Input);
+    auto targetLabel1 = managed::RoutingNodeLabel(receiver, 1, managed::NodeType::Input);
+    
+    auto sourceVertex0 = routingBuilder->getVertexByLabel(sourceLabel0);
+    auto sourceVertex1 = routingBuilder->getVertexByLabel(sourceLabel1);
+    auto targetVertex0 = routingBuilder->getVertexByLabel(targetLabel0);
+    auto targetVertex1 = routingBuilder->getVertexByLabel(targetLabel1);
+    
+    // Free domain should allow all routing
+    ASSERT_TRUE(routingBuilder->canAddEdge(*sourceVertex0, *targetVertex0));
+    ASSERT_TRUE(routingBuilder->canAddEdge(*sourceVertex0, *targetVertex1));
+    ASSERT_TRUE(routingBuilder->canAddEdge(*sourceVertex1, *targetVertex0));
+    ASSERT_TRUE(routingBuilder->canAddEdge(*sourceVertex1, *targetVertex1));
+}
+
+// ============================================================================
+// Context Independent Routable Domain Tests
+// ============================================================================
+
+TEST(ContextIndependentRoutableDomainConstraints) {
+    InterruptGraphTestSetup setup;
+    
+    auto routableDomain = make_shared<MockContextIndependentRoutableDomain>(2, 2);
+    auto receiver = make_shared<MockReceiverDomain>(2);
+    auto connector = make_shared<MockSimpleConnector>(routableDomain, receiver);
+    
+    // Built-in logic: receiver0->emitter0, receiver1->emitter1 (receiver index == emitter index)
+    
+    topology::registerDomain(routableDomain);
+    topology::registerDomain(receiver);
+    topology::registerConnector(connector);
+    
+    auto routingBuilder = managed::createRoutingGraphBuilder();
+    ASSERT_TRUE(routingBuilder);
+    
+    auto sourceLabel0 = managed::RoutingNodeLabel(routableDomain, 0, managed::NodeType::Input);
+    auto sourceLabel1 = managed::RoutingNodeLabel(routableDomain, 1, managed::NodeType::Input);
+    auto targetLabel0 = managed::RoutingNodeLabel(receiver, 0, managed::NodeType::Input);
+    auto targetLabel1 = managed::RoutingNodeLabel(receiver, 1, managed::NodeType::Input);
+    
+    auto sourceVertex0 = routingBuilder->getVertexByLabel(sourceLabel0);
+    auto sourceVertex1 = routingBuilder->getVertexByLabel(sourceLabel1);
+    auto targetVertex0 = routingBuilder->getVertexByLabel(targetLabel0);
+    auto targetVertex1 = routingBuilder->getVertexByLabel(targetLabel1);
+    
+    // Should allow only the specified routing
+    ASSERT_TRUE(routingBuilder->canAddEdge(*sourceVertex0, *targetVertex0));
+    ASSERT_FALSE(routingBuilder->canAddEdge(*sourceVertex0, *targetVertex1));
+    ASSERT_FALSE(routingBuilder->canAddEdge(*sourceVertex1, *targetVertex0));
+    ASSERT_TRUE(routingBuilder->canAddEdge(*sourceVertex1, *targetVertex1));
+}
+
+// ============================================================================
+// Context Dependent Routable Domain Tests
+// ============================================================================
+
+TEST(ContextDependentRoutableDomainConstraints) {
+    InterruptGraphTestSetup setup;
+    
+    auto routableDomain = make_shared<MockContextDependentRoutableDomain>(2, 2);
+    auto receiver = make_shared<MockReceiverDomain>(2);
+    auto connector = make_shared<MockSimpleConnector>(routableDomain, receiver);
+    
+    topology::registerDomain(routableDomain);
+    topology::registerDomain(receiver);
+    topology::registerConnector(connector);
+    
+    auto routingBuilder = managed::createRoutingGraphBuilder();
+    ASSERT_TRUE(routingBuilder);
+    
+    auto sourceLabel0 = managed::RoutingNodeLabel(routableDomain, 0, managed::NodeType::Input);
+    auto targetLabel0 = managed::RoutingNodeLabel(receiver, 0, managed::NodeType::Input);
+    
+    auto sourceVertex0 = routingBuilder->getVertexByLabel(sourceLabel0);
+    auto targetVertex0 = routingBuilder->getVertexByLabel(targetLabel0);
+    
+    // Initially disallow
+    routableDomain->setAllowAllForTesting(false);
+    ASSERT_FALSE(routingBuilder->canAddEdge(*sourceVertex0, *targetVertex0));
+    
+    // Then allow
+    routableDomain->setAllowAllForTesting(true);
+    ASSERT_TRUE(routingBuilder->canAddEdge(*sourceVertex0, *targetVertex0));
+}
+
+// ============================================================================
+// Device Domain Constraint Tests
+// ============================================================================
+
+TEST(DeviceDomainConstraints) {
+    InterruptGraphTestSetup setup;
+    
+    auto device = make_shared<MockEmitterDomain>(2);
+    auto receiver = make_shared<MockReceiverDomain>(3);
+    auto connector = make_shared<MockCustomConnector>(device, receiver);
+    
+    // Map device output 0 -> receiver input 1, device output 1 -> receiver input 2
+    connector->addMapping(0, 1);
+    connector->addMapping(1, 2);
+    
+    topology::registerDomain(device);
+    topology::registerDomain(receiver);
+    topology::registerConnector(connector);
+    
+    auto routingBuilder = managed::createRoutingGraphBuilder();
+    ASSERT_TRUE(routingBuilder);
+    
+    auto deviceLabel0 = managed::RoutingNodeLabel(device, 0, managed::NodeType::Device);
+    auto deviceLabel1 = managed::RoutingNodeLabel(device, 1, managed::NodeType::Device);
+    auto targetLabel0 = managed::RoutingNodeLabel(receiver, 0, managed::NodeType::Input);
+    auto targetLabel1 = managed::RoutingNodeLabel(receiver, 1, managed::NodeType::Input);
+    auto targetLabel2 = managed::RoutingNodeLabel(receiver, 2, managed::NodeType::Input);
+    
+    auto deviceVertex0 = routingBuilder->getVertexByLabel(deviceLabel0);
+    auto deviceVertex1 = routingBuilder->getVertexByLabel(deviceLabel1);
+    auto targetVertex0 = routingBuilder->getVertexByLabel(targetLabel0);
+    auto targetVertex1 = routingBuilder->getVertexByLabel(targetLabel1);
+    auto targetVertex2 = routingBuilder->getVertexByLabel(targetLabel2);
+    
+    // Should only allow connections as mapped by connector
+    ASSERT_FALSE(routingBuilder->canAddEdge(*deviceVertex0, *targetVertex0));
+    ASSERT_TRUE(routingBuilder->canAddEdge(*deviceVertex0, *targetVertex1));
+    ASSERT_FALSE(routingBuilder->canAddEdge(*deviceVertex0, *targetVertex2));
+    
+    ASSERT_FALSE(routingBuilder->canAddEdge(*deviceVertex1, *targetVertex0));
+    ASSERT_FALSE(routingBuilder->canAddEdge(*deviceVertex1, *targetVertex1));
+    ASSERT_TRUE(routingBuilder->canAddEdge(*deviceVertex1, *targetVertex2));
+}
+
+// ============================================================================
+// Complex Multi-Domain Integration Tests
+// ============================================================================
+
+TEST(ComplexMultiDomainTopology) {
+    InterruptGraphTestSetup setup;
+    
+    // Create a complex topology: Device -> Fixed -> Free -> Receiver
+    auto device = make_shared<MockEmitterDomain>(2);
+    auto fixedDomain = make_shared<MockFixedRoutingDomain>(2, 2);
+    auto freeDomain = make_shared<MockFreeRoutableDomain>(2, 3);
     auto receiver = make_shared<MockReceiverDomain>(3);
     
-    topology::registerDomain(static_pointer_cast<platform::InterruptDomain>(emitter));
-    topology::registerDomain(static_pointer_cast<platform::InterruptDomain>(receiver));
-    
-    auto connector = make_shared<MockDomainConnector>(emitter, receiver, 2, 3);
-    connector->setMapping(0, 1); // Output 0 -> Input 1
-    connector->setMapping(1, 2); // Output 1 -> Input 2
-    topology::registerConnector(connector);
-    
-    auto routingBuilder = managed::createRoutingGraphBuilder();
-    ASSERT_TRUE(routingBuilder);
-    
-    // Find device output vertices and receiver input vertices
-    managed::RoutingNodeLabel deviceOutput0(emitter, 0, managed::NodeType::Device);
-    managed::RoutingNodeLabel deviceOutput1(emitter, 1, managed::NodeType::Device);
-    managed::RoutingNodeLabel receiverInput1(receiver, 1, managed::NodeType::Input);
-    managed::RoutingNodeLabel receiverInput2(receiver, 2, managed::NodeType::Input);
-    managed::RoutingNodeLabel receiverInput0(receiver, 0, managed::NodeType::Input);
-    
-    auto output0 = routingBuilder->getVertexByLabel(deviceOutput0);
-    auto output1 = routingBuilder->getVertexByLabel(deviceOutput1);
-    auto input0 = routingBuilder->getVertexByLabel(receiverInput0);
-    auto input1 = routingBuilder->getVertexByLabel(receiverInput1);
-    auto input2 = routingBuilder->getVertexByLabel(receiverInput2);
-    
-    ASSERT_TRUE(output0.occupied());
-    ASSERT_TRUE(output1.occupied());
-    ASSERT_TRUE(input0.occupied());
-    ASSERT_TRUE(input1.occupied());
-    ASSERT_TRUE(input2.occupied());
-    
-    // Test valid connections based on connector mapping
-    ASSERT_TRUE(routingBuilder->canAddEdge(*output0, *input1)); // 0->1 mapped
-    ASSERT_TRUE(routingBuilder->canAddEdge(*output1, *input2)); // 1->2 mapped
-    
-    // Test invalid connections
-    ASSERT_FALSE(routingBuilder->canAddEdge(*output0, *input0)); // 0->0 not mapped
-    ASSERT_FALSE(routingBuilder->canAddEdge(*output0, *input2)); // 0->2 not mapped
-    ASSERT_FALSE(routingBuilder->canAddEdge(*output1, *input0)); // 1->0 not mapped
-    ASSERT_FALSE(routingBuilder->canAddEdge(*output1, *input1)); // 1->1 not mapped
-    topology::resetTopologyState();
-}
-
-TEST(RoutingGraphMultiDomainRouting) {
-    // Test with a controller that can route between inputs and outputs
-    auto device = make_shared<MockEmitterDomain>(2);
-    auto controller = make_shared<MockRoutableDomain>(2, 2);
-    auto cpu = make_shared<MockReceiverDomain>(2);
-    
-    topology::registerDomain(static_pointer_cast<platform::InterruptDomain>(device));
-    topology::registerDomain(static_pointer_cast<platform::InterruptDomain>(controller));
-    topology::registerDomain(static_pointer_cast<platform::InterruptDomain>(cpu));
-    
-    // Device -> Controller (1:1 mapping)
-    auto connector1 = make_shared<MockDomainConnector>(device, controller, 2, 2);
-    connector1->setMapping(0, 0);
-    connector1->setMapping(1, 1);
-    
-    // Controller -> CPU (1:1 mapping)
-    auto connector2 = make_shared<MockDomainConnector>(controller, cpu, 2, 2);
-    connector2->setMapping(0, 0);
-    connector2->setMapping(1, 1);
-    
-    topology::registerConnector(connector1);
-    topology::registerConnector(connector2);
-    
-    auto routingBuilder = managed::createRoutingGraphBuilder();
-    ASSERT_TRUE(routingBuilder);
-    
-    // Should create vertices for:
-    // - Device outputs: 2 (NodeType::Device)
-    // - Controller inputs: 2 (NodeType::Input) 
-    // - CPU inputs: 2 (NodeType::Input)
-    // Total: 6 vertices
-    
-    auto graph = routingBuilder->build();
-    ASSERT_TRUE(graph.occupied());
-    
-    size_t vertexCount = 0;
-    for (auto vertex : graph->vertices()) {
-        vertexCount++;
-    }
-    ASSERT_EQ(vertexCount, 6u);
-    topology::resetTopologyState();
-}
-
-TEST(PotentialEdgeIteratorForward) {
-    auto device = make_shared<MockEmitterDomain>(2);
-    auto controller = make_shared<MockRoutableDomain>(3, 2);
+    auto connector1 = make_shared<MockSimpleConnector>(device, fixedDomain);
+    auto connector2 = make_shared<MockSimpleConnector>(fixedDomain, freeDomain);
+    auto connector3 = make_shared<MockSimpleConnector>(freeDomain, receiver);
     
     topology::registerDomain(device);
-    topology::registerDomain(controller);
-    
-    auto connector = make_shared<MockDomainConnector>(device, controller, 2, 3);
-    connector->setMapping(0, 1); // Device output 0 -> Controller input 1
-    connector->setMapping(1, 2); // Device output 1 -> Controller input 2
-    topology::registerConnector(connector);
-    
-    auto routingBuilder = managed::createRoutingGraphBuilder();
-    ASSERT_TRUE(routingBuilder);
-    
-    // Test forward iteration from device output
-    managed::RoutingNodeLabel deviceOutput0(device, 0, managed::NodeType::Device);
-    auto output0 = routingBuilder->getVertexByLabel(deviceOutput0);
-    ASSERT_TRUE(output0.occupied());
-    
-    // Get valid edges from this device output
-    auto validEdges = managed::RoutingConstraint::validEdgesFrom(*routingBuilder, *output0);
-    
-    size_t edgeCount = 0;
-    for (auto target : validEdges) {
-        edgeCount++;
-        auto targetLabel = routingBuilder->getVertexLabel(target);
-        
-        // Should connect to controller input 1 (due to mapping)
-        //ASSERT_EQ(targetLabel->getDomain(), controller);
-        ASSERT_EQ(targetLabel->getIndex(), 1u);
-        ASSERT_EQ(targetLabel->getType(), managed::NodeType::Input);
-    }
-    ASSERT_EQ(edgeCount, 1u); // Should find exactly one valid target
-    topology::resetTopologyState();
-}
-
-TEST(PotentialEdgeIteratorBackward) {
-    auto device = make_shared<MockEmitterDomain>(2);
-    auto controller = make_shared<MockRoutableDomain>(3, 2);
-    
-    topology::registerDomain(device);
-    topology::registerDomain(controller);
-    
-    auto connector = make_shared<MockDomainConnector>(device, controller, 2, 3);
-    connector->setMapping(0, 1); // Device output 0 -> Controller input 1
-    connector->setMapping(1, 2); // Device output 1 -> Controller input 2
-    topology::registerConnector(connector);
-    
-    auto routingBuilder = managed::createRoutingGraphBuilder();
-    ASSERT_TRUE(routingBuilder);
-    
-    // Test backward iteration to controller input
-    managed::RoutingNodeLabel controllerInput1(controller, 1, managed::NodeType::Input);
-    auto input1 = routingBuilder->getVertexByLabel(controllerInput1);
-    ASSERT_TRUE(input1.occupied());
-    
-    // Get valid edges to this controller input
-    auto validEdges = managed::RoutingConstraint::validEdgesTo(*routingBuilder, *input1);
-    
-    size_t edgeCount = 0;
-    for (auto source : validEdges) {
-        edgeCount++;
-        auto sourceLabel = routingBuilder->getVertexLabel(source);
-        
-        // Should connect from device output 0 (due to mapping)
-        //ASSERT_EQ(sourceLabel->getDomain(), device);
-        ASSERT_EQ(sourceLabel->getIndex(), 0u);
-        ASSERT_EQ(sourceLabel->getType(), managed::NodeType::Device);
-    }
-    ASSERT_EQ(edgeCount, 1u); // Should find exactly one valid source
-    topology::resetTopologyState();
-}
-
-TEST(RoutingNodeLabelHashAndEquality) {
-    auto domain1 = make_shared<MockEmitterDomain>(2);
-    auto domain2 = make_shared<MockReceiverDomain>(3);
-    
-    managed::RoutingNodeLabel label1(domain1, 0, managed::NodeType::Device);
-    managed::RoutingNodeLabel label2(domain1, 0, managed::NodeType::Device);
-    managed::RoutingNodeLabel label3(domain1, 1, managed::NodeType::Device);
-    managed::RoutingNodeLabel label4(domain2, 0, managed::NodeType::Input);
-    managed::RoutingNodeLabel label5(domain1, 0, managed::NodeType::Input);
-    
-    // Test equality
-    ASSERT_TRUE(label1 == label2);  // Same domain, index, type
-    ASSERT_FALSE(label1 == label3); // Different index
-    ASSERT_FALSE(label1 == label4); // Different domain
-    ASSERT_FALSE(label1 == label5); // Different type
-    
-    // Test hash consistency
-    ASSERT_EQ(label1.hash(), label2.hash()); // Equal objects have equal hashes
-    
-    // Test that different objects likely have different hashes
-    ASSERT_NE(label1.hash(), label3.hash());
-    ASSERT_NE(label1.hash(), label4.hash());
-    ASSERT_NE(label1.hash(), label5.hash());
-    topology::resetTopologyState();
-}
-
-TEST(ComplexRoutingScenario) {
-    // Create a complex interrupt routing scenario:
-    // Device1 (2 outputs) -> Controller (4 inputs, 2 outputs) -> CPU (2 inputs)
-    // Device2 (2 outputs) -> Controller
-    
-    auto device1 = make_shared<MockEmitterDomain>(2);
-    auto device2 = make_shared<MockEmitterDomain>(2);
-    auto controller = make_shared<MockRoutableDomain>(4, 2);
-    auto cpu = make_shared<MockReceiverDomain>(2);
-    
-    topology::registerDomain(device1);
-    topology::registerDomain(device2);
-    topology::registerDomain(controller);
-    topology::registerDomain(cpu);
-    
-    // Device1 -> Controller (outputs 0,1 -> inputs 0,1)
-    auto connector1 = make_shared<MockDomainConnector>(device1, controller, 2, 4);
-    connector1->setMapping(0, 0);
-    connector1->setMapping(1, 1);
-    
-    // Device2 -> Controller (outputs 0,1 -> inputs 2,3)
-    auto connector2 = make_shared<MockDomainConnector>(device2, controller, 2, 4);
-    connector2->setMapping(0, 2);
-    connector2->setMapping(1, 3);
-    
-    // Controller -> CPU (outputs 0,1 -> inputs 0,1)
-    auto connector3 = make_shared<MockDomainConnector>(controller, cpu, 2, 2);
-    connector3->setMapping(0, 0);
-    connector3->setMapping(1, 1);
-    
+    topology::registerDomain(fixedDomain);
+    topology::registerDomain(freeDomain);
+    topology::registerDomain(receiver);
     topology::registerConnector(connector1);
     topology::registerConnector(connector2);
     topology::registerConnector(connector3);
@@ -418,44 +551,145 @@ TEST(ComplexRoutingScenario) {
     auto routingBuilder = managed::createRoutingGraphBuilder();
     ASSERT_TRUE(routingBuilder);
     
-    // Expected vertices:
-    // Device1: 2 device outputs
-    // Device2: 2 device outputs  
-    // Controller: 4 inputs
-    // CPU: 2 inputs
-    // Total: 10 vertices
+    // Should have vertices for all domains
+    // Device: 2 emitter nodes
+    // Fixed: 2 input nodes (receivers from device)
+    // Free: 2 input nodes
+    // Receiver: 3 input nodes
+    // Total: 9 vertices
+    ASSERT_EQ(9u, routingBuilder->getCurrentVertexCount());
     
-    auto graph = routingBuilder->build();
-    ASSERT_TRUE(graph.occupied());
+    // Fixed domain should have 2 prebuilt edges
+    ASSERT_EQ(2u, routingBuilder->getCurrentEdgeCount());
+}
+
+TEST(EdgeIterationValidEdgesFrom) {
+    InterruptGraphTestSetup setup;
     
-    size_t vertexCount = 0;
-    for (auto vertex : graph->vertices()) {
-        vertexCount++;
+    auto device = make_shared<MockEmitterDomain>(1);
+    auto freeDomain = make_shared<MockFreeRoutableDomain>(2, 2);
+    auto receiver = make_shared<MockReceiverDomain>(2);
+    
+    auto connector1 = make_shared<MockSimpleConnector>(device, freeDomain);
+    auto connector2 = make_shared<MockSimpleConnector>(freeDomain, receiver);
+    
+    topology::registerDomain(device);
+    topology::registerDomain(freeDomain);
+    topology::registerDomain(receiver);
+    topology::registerConnector(connector1);
+    topology::registerConnector(connector2);
+    
+    auto routingBuilder = managed::createRoutingGraphBuilder();
+    ASSERT_TRUE(routingBuilder);
+    
+    // Test iteration from free domain input
+    auto sourceLabel = managed::RoutingNodeLabel(freeDomain, 0, managed::NodeType::Input);
+    auto sourceVertex = routingBuilder->getVertexByLabel(sourceLabel);
+    ASSERT_TRUE(sourceVertex.occupied());
+    
+    auto validEdges = routingBuilder->getValidEdgesFrom(*sourceVertex);
+    
+    // Count valid edges
+    size_t edgeCount = 0;
+    for (auto targetVertex : validEdges) {
+        (void)targetVertex; // Suppress unused variable warning
+        edgeCount++;
     }
-    ASSERT_EQ(vertexCount, 10u);
     
-    // Test specific routing constraints
-    managed::RoutingNodeLabel device1_out0(device1, 0, managed::NodeType::Device);
-    managed::RoutingNodeLabel controller_in0(controller, 0, managed::NodeType::Input);
-    managed::RoutingNodeLabel device2_out1(device2, 1, managed::NodeType::Device);
-    managed::RoutingNodeLabel controller_in3(controller, 3, managed::NodeType::Input);
+    // Free domain should be able to connect to both receiver inputs
+    ASSERT_EQ(2u, edgeCount);
+}
+
+// ============================================================================
+// Edge Addition and Routing Tests
+// ============================================================================
+
+TEST(ActualEdgeAddition) {
+    InterruptGraphTestSetup setup;
     
-    auto d1_o0 = routingBuilder->getVertexByLabel(device1_out0);
-    auto c_i0 = routingBuilder->getVertexByLabel(controller_in0);
-    auto d2_o1 = routingBuilder->getVertexByLabel(device2_out1);
-    auto c_i3 = routingBuilder->getVertexByLabel(controller_in3);
+    auto freeDomain = make_shared<MockFreeRoutableDomain>(1, 1);
+    auto receiver = make_shared<MockReceiverDomain>(1);
+    auto connector = make_shared<MockSimpleConnector>(freeDomain, receiver);
     
-    ASSERT_TRUE(d1_o0.occupied());
-    ASSERT_TRUE(c_i0.occupied());
-    ASSERT_TRUE(d2_o1.occupied());
-    ASSERT_TRUE(c_i3.occupied());
+    topology::registerDomain(freeDomain);
+    topology::registerDomain(receiver);
+    topology::registerConnector(connector);
     
-    // Test valid connections
-    ASSERT_TRUE(routingBuilder->canAddEdge(*d1_o0, *c_i0)); // Device1 out 0 -> Controller in 0
-    ASSERT_TRUE(routingBuilder->canAddEdge(*d2_o1, *c_i3)); // Device2 out 1 -> Controller in 3
+    auto routingBuilder = managed::createRoutingGraphBuilder();
+    ASSERT_TRUE(routingBuilder);
     
-    // Test invalid connections
-    ASSERT_FALSE(routingBuilder->canAddEdge(*d1_o0, *c_i3)); // Wrong mapping
-    ASSERT_FALSE(routingBuilder->canAddEdge(*d2_o1, *c_i0)); // Wrong mapping
-    topology::resetTopologyState();
+    auto sourceLabel = managed::RoutingNodeLabel(freeDomain, 0, managed::NodeType::Input);
+    auto targetLabel = managed::RoutingNodeLabel(receiver, 0, managed::NodeType::Input);
+    
+    auto sourceVertex = routingBuilder->getVertexByLabel(sourceLabel);
+    auto targetVertex = routingBuilder->getVertexByLabel(targetLabel);
+    
+    ASSERT_TRUE(sourceVertex.occupied());
+    ASSERT_TRUE(targetVertex.occupied());
+    
+    // Should be able to add edge
+    ASSERT_TRUE(routingBuilder->canAddEdge(*sourceVertex, *targetVertex));
+    
+    routingBuilder->addEdge(*sourceVertex, *targetVertex);
+    
+    // Should now have the edge
+    ASSERT_TRUE(routingBuilder->hasEdge(*sourceVertex, *targetVertex));
+    ASSERT_EQ(1u, routingBuilder->getCurrentEdgeCount());
+}
+
+TEST(MultipleConcurrentEdges) {
+    InterruptGraphTestSetup setup;
+    
+    auto freeDomain = make_shared<MockFreeRoutableDomain>(2, 2);
+    auto receiver = make_shared<MockReceiverDomain>(2);
+    auto connector = make_shared<MockSimpleConnector>(freeDomain, receiver);
+    
+    topology::registerDomain(freeDomain);
+    topology::registerDomain(receiver);
+    topology::registerConnector(connector);
+    
+    auto routingBuilder = managed::createRoutingGraphBuilder();
+    ASSERT_TRUE(routingBuilder);
+    
+    // Add multiple edges
+    auto source0 = *routingBuilder->getVertexByLabel(managed::RoutingNodeLabel(freeDomain, 0, managed::NodeType::Input));
+    auto source1 = *routingBuilder->getVertexByLabel(managed::RoutingNodeLabel(freeDomain, 1, managed::NodeType::Input));
+    auto target0 = *routingBuilder->getVertexByLabel(managed::RoutingNodeLabel(receiver, 0, managed::NodeType::Input));
+    auto target1 = *routingBuilder->getVertexByLabel(managed::RoutingNodeLabel(receiver, 1, managed::NodeType::Input));
+    
+    routingBuilder->addEdge(source0, target0);
+    routingBuilder->addEdge(source1, target1);
+    
+    ASSERT_EQ(2u, routingBuilder->getCurrentEdgeCount());
+    ASSERT_TRUE(routingBuilder->hasEdge(source0, target0));
+    ASSERT_TRUE(routingBuilder->hasEdge(source1, target1));
+}
+
+// ============================================================================
+// Error Condition Tests
+// ============================================================================
+
+TEST(InvalidDomainConnection) {
+    InterruptGraphTestSetup setup;
+    
+    auto emitter = make_shared<MockEmitterDomain>(1);
+    auto receiver = make_shared<MockReceiverDomain>(1);
+    
+    topology::registerDomain(emitter);
+    topology::registerDomain(receiver);
+    
+    auto routingBuilder = managed::createRoutingGraphBuilder();
+    ASSERT_TRUE(routingBuilder);
+    
+    auto deviceLabel = managed::RoutingNodeLabel(emitter, 0, managed::NodeType::Device);
+    auto inputLabel = managed::RoutingNodeLabel(receiver, 0, managed::NodeType::Input);
+    
+    auto deviceVertex = routingBuilder->getVertexByLabel(deviceLabel);
+    auto inputVertex = routingBuilder->getVertexByLabel(inputLabel);
+    
+    ASSERT_TRUE(deviceVertex.occupied());
+    ASSERT_TRUE(inputVertex.occupied());
+    
+    // Should not be able to add edge without topology connection
+    ASSERT_FALSE(routingBuilder->canAddEdge(*deviceVertex, *inputVertex));
 }

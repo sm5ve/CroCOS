@@ -33,6 +33,17 @@ namespace kernel::hal::interrupts {
          virtual bool routeInterrupt(size_t fromReceiver, size_t toEmitter) = 0;
       };
 
+      CRClass(FreeRoutableDomain, public RoutableDomain) {};
+
+      CRClass(ContextIndependentRoutableDomain, public RoutableDomain) {
+      public:
+         [[nodiscard]] virtual bool isRoutingAllowed(size_t fromReceiver, size_t toEmitter) const = 0;
+      };
+
+      CRClass(FixedRoutingDomain, public InterruptReceiver, public InterruptEmitter) {
+      public:
+         [[nodiscard]] virtual size_t getEmitterFor(size_t receiver) const = 0;
+      };
 
       using DomainInputIndex = size_t;
       using DomainOutputIndex = size_t;
@@ -124,9 +135,10 @@ namespace kernel::hal::interrupts {
          const GraphBuilderBase<RoutingGraph>* graph;
          friend struct RoutingConstraint;
          struct None{};
-         conditional_t<Forward, bool, None> trivialIterator;
          PotentialEdgeIterator(const SharedPtr<platform::InterruptDomain>& domain, Iterator& itr,
             Iterator& end, size_t index, size_t findex, const GraphBuilderBase<RoutingGraph>* g);
+         void advanceIntermediateState();
+         [[nodiscard]] bool isValidIntermediateState() const;
          void advanceToValidState();
       public:
          bool operator!=(const PotentialEdgeIterator& other) const {
@@ -148,6 +160,13 @@ namespace kernel::hal::interrupts {
       using RoutingGraphBuilder = RestrictedGraphBuilder<RoutingGraph, RoutingConstraint>;
       
       SharedPtr<RoutingGraphBuilder> createRoutingGraphBuilder();
+   }
+
+   namespace platform {
+      CRClass(ContextDependentRoutableDomain, public RoutableDomain) {
+         public:
+         [[nodiscard]] virtual bool isRoutingAllowed(size_t fromReceiver, size_t toEmitter, const GraphBuilderBase<managed::RoutingGraph>& builder) const = 0;
+      };
    }
 }
 

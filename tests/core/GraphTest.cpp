@@ -4,6 +4,7 @@
 // Created by Spencer Martin on 7/24/25.
 //
 
+#include <iostream>
 #include "../test.h"
 #include <harness/TestHarness.h>
 #include <core/GraphBuilder.h>  // This includes Graph.h
@@ -462,6 +463,15 @@ TEST(RestrictedGraphBuilderConstraintEnforcement) {
     ASSERT_EQ(3u, builder.getCurrentEdgeCount());
 }
 
+template <typename T>
+size_t getIteratorSize(const T& iterator) {
+    size_t out = 0;
+    for(const auto _ : iterator) {
+        out++;
+    }
+    return out;
+}
+
 TEST(RestrictedGraphBuilderConstraintQueries) {
     ConsecutiveIndexConstraint constraint;
     Vector<int> vertexLabels;
@@ -488,16 +498,16 @@ TEST(RestrictedGraphBuilderConstraintQueries) {
     
     // Test valid edges queries
     auto validFromV1 = builder.getValidEdgesFrom(v1);
-    ASSERT_EQ(2u, validFromV1.getSize()); // v0 and v2
+    ASSERT_EQ(2u, getIteratorSize(validFromV1)); // v0 and v2
     
     auto validToV2 = builder.getValidEdgesTo(v2);
-    ASSERT_EQ(2u, validToV2.getSize()); // v1 and v3
+    ASSERT_EQ(2u, getIteratorSize(validToV2)); // v1 and v3
     
     auto validFromV0 = builder.getValidEdgesFrom(v0);
-    ASSERT_EQ(1u, validFromV0.getSize()); // only v1
+    ASSERT_EQ(1u, getIteratorSize(validFromV0)); // only v1
     
     auto validFromV3 = builder.getValidEdgesFrom(v3);
-    ASSERT_EQ(1u, validFromV3.getSize()); // only v2
+    ASSERT_EQ(1u, getIteratorSize(validFromV3)); // only v2
 }
 
 TEST(RestrictedGraphBuilderBuildingAndReset) {
