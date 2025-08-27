@@ -209,6 +209,8 @@ public:
 template <typename T, typename... Bases>
 typename _ObjectInheritanceImpl<T, Bases...>::_sorted_type _ObjectInheritanceImpl<T, Bases...>::_crocos_sorted_parents = {};
 
+//FIXME this auxiliary intermediate class approach prevents one from calling parent constructors.
+//  we need to figure out something to do about this.
 #define _CRClass_IMPL(Name, AuxName, ...) \
 class Name; \
 class AuxName : public virtual ObjectBase __VA_OPT__(,) __VA_ARGS__ { \

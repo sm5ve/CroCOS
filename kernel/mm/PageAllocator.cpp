@@ -423,7 +423,7 @@ namespace kernel::mm::PageAllocator{
                         return false;
                     }
                     newPage = pool.poolTop();
-                    if(hal::atomic_cmpxchg_u64(pool.poolSize, oldSize, oldSize - 1)){
+                    if(atomic_cmpxchg(pool.poolSize, oldSize, oldSize - 1)){
                         pool.lock.release_reader();
                         break;
                     }

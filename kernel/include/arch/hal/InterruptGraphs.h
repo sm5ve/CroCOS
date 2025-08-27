@@ -45,6 +45,12 @@ namespace kernel::hal::interrupts {
          [[nodiscard]] virtual size_t getEmitterFor(size_t receiver) const = 0;
       };
 
+      CRClass(MaskableDomain) {
+      public:
+         [[nodiscard]] virtual bool isReceiverMasked(size_t receiver) const = 0;
+         virtual void setReceiverMask(size_t receiver, bool shouldMask) = 0;
+      };
+
       using DomainInputIndex = size_t;
       using DomainOutputIndex = size_t;
 

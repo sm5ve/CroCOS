@@ -1255,8 +1255,8 @@ public:
         const RestrictedGraphBuilder& builder;
         const VertexHandle fixedVertex;
     public:
-        SimpleGraphFilteredIterator(T state, const T end, const RestrictedGraphBuilder& builder, const VertexHandle fv)
-            : iterator(state), end(end), builder(builder), fixedVertex(fv) {}
+        SimpleGraphFilteredIterator(T s, const T e, const RestrictedGraphBuilder& b, const VertexHandle fv)
+            : iterator(s), end(e), builder(b), fixedVertex(fv) {}
 
         bool operator!=(const SimpleGraphFilteredIterator& other) const {
             return iterator != other.iterator;

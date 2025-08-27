@@ -11,6 +11,7 @@
 
 namespace kernel{
     void print_stacktrace();
+    void print_stacktrace(uintptr_t* rbp);
     template <typename... Args>
     [[noreturn]]
     void panic(const char* filename, const uint32_t line, Args&&... args){

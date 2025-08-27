@@ -37,6 +37,7 @@ set(KERNEL_SRC
         arch/amd64/lgdt.asm
         arch/hal/InterruptGraphManager.cpp
         cxxcompat.cpp
+        arch/amd64/interrupts/APIC.cpp
 )
 
 add_executable(Kernel ${KERNEL_SRC})

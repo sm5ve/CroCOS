@@ -160,7 +160,7 @@ namespace kernel::amd64::PageTableManager{
                 uint64_t newMetadata = maskedMetadata | ((count + 1) << 2);
 
                 // Try to acquire the acquire with atomic compare and exchange
-                if (amd64::atomic_cmpxchg_u64(value, expectedOldMetadata, newMetadata)) {
+                if (atomic_cmpxchg(value, expectedOldMetadata, newMetadata)) {
                     return; // Reader successfully acquired the acquire
                 }
             }
@@ -182,7 +182,7 @@ namespace kernel::amd64::PageTableManager{
                 uint64_t newMetadata = (value & ~readerLockMask) | (count << 2);
 
                 // Try to release the acquire with atomic compare and exchange
-                if (atomic_cmpxchg_u64(value, oldMetadata, newMetadata)) {
+                if (atomic_cmpxchg(value, oldMetadata, newMetadata)) {
                     return; // Reader acquire successfully released
                 }
             }
@@ -199,7 +199,7 @@ namespace kernel::amd64::PageTableManager{
                 uint64_t expectedNoRequest = oldValue & ~writerLockRequestMask;
                 uint64_t requestSet = expectedNoRequest | writerLockRequestMask;
 
-                if (atomic_cmpxchg_u64(value, expectedNoRequest, requestSet)) {
+                if (atomic_cmpxchg(value, expectedNoRequest, requestSet)) {
                     // We've successfully set the request bit
                     while (true) {
                         // Wait for readers and writers to clear
@@ -213,7 +213,7 @@ namespace kernel::amd64::PageTableManager{
                         uint64_t expected = base | writerLockRequestMask;
                         uint64_t acquired = base | writerLockHeldMask;
 
-                        if (atomic_cmpxchg_u64(value, expected, acquired)) {
+                        if (atomic_cmpxchg(value, expected, acquired)) {
                             return;
                         }
                     }
@@ -225,7 +225,7 @@ namespace kernel::amd64::PageTableManager{
             while(true) {
                 uint64_t oldMetadata = value;
                 uint64_t newMetadata = (value & ~writerLockHeldMask);
-                if(atomic_cmpxchg_u64(value, oldMetadata, newMetadata)){
+                if(atomic_cmpxchg(value, oldMetadata, newMetadata)){
                     return;
                 }
             }
@@ -304,7 +304,7 @@ namespace kernel::amd64::PageTableManager{
                 //If the ring buffer's full, abort!!!
                 return false;
             }
-            incrementedWriteHead = kernel::amd64::atomic_cmpxchg_u64(reservePoolWriteHead, prevValue, nextValue);
+            incrementedWriteHead = atomic_cmpxchg(reservePoolWriteHead, prevValue, nextValue);
         } while(!incrementedWriteHead);
         ReservePoolEntry& m = reservePool[prevValue];
         //if it happens that the read head was incremented but the entry is still populated, try spinning to wait
@@ -313,7 +313,7 @@ namespace kernel::amd64::PageTableManager{
             asm volatile ("pause");
         }
         m.pageInfo = page;
-        kernel::amd64::mfence();
+        thread_fence();
         m.populated = true;
         return true;
     }
@@ -329,7 +329,7 @@ namespace kernel::amd64::PageTableManager{
                 //If the ring buffer's empty, abort!!!
                 return false;
             }
-            incrementedReadHead = kernel::amd64::atomic_cmpxchg_u64(reservePoolReadHead, prevValue, nextValue);
+            incrementedReadHead = atomic_cmpxchg(reservePoolReadHead, prevValue, nextValue);
         } while(!incrementedReadHead);
         ReservePoolEntry& m = reservePool[prevValue];
         //if it happens that the write head was incremented but the entry is still populated, try spinning to wait
@@ -338,7 +338,7 @@ namespace kernel::amd64::PageTableManager{
             asm volatile ("pause");
         }
         page = m.pageInfo;
-        kernel::amd64::mfence();
+        thread_fence();
         m.populated = false;
         return true;
     }
@@ -355,7 +355,7 @@ namespace kernel::amd64::PageTableManager{
                 //If the ring buffer's full, abort!!!
                 return false;
             }
-            incrementedWriteHead = kernel::amd64::atomic_cmpxchg_u64(freeOverflowWriteHead, prevValue, nextValue);
+            incrementedWriteHead = atomic_cmpxchg(freeOverflowWriteHead, prevValue, nextValue);
         } while(!incrementedWriteHead);
         OverflowPoolEntry& m = freeOverflowPool[prevValue];
 
@@ -364,7 +364,7 @@ namespace kernel::amd64::PageTableManager{
         assert(!m.readyToProcess, "Free overflow ring buffer state is insane!");
         m.pageInfo = page;
         memcpy(m.toProcessBitmap, toProcessBitmapBlank, sizeof(toProcessBitmapBlank));
-        kernel::amd64::mfence();
+        thread_fence();
         m.readyToProcess = true;
         if(singleProcessorMode){
             processOverflowPool();
@@ -388,8 +388,7 @@ namespace kernel::amd64::PageTableManager{
             //If we haven't processed this entry in the freeOverflowPool yet, flush the TLB entry for the corresponding page!
             kernel::amd64::invlpg(entry.pageInfo.virtualAddress.value);
             //Then flip the bit indicating we've processed this TLB flush
-            kernel::amd64::atomic_and(entry.toProcessBitmap[processorInd], ~mask);
-            kernel::hal::compiler_fence();
+            atomic_and_fetch(entry.toProcessBitmap[processorInd], ~mask, MemoryOrder::ACQUIRE);
             //If all other processors have processed this page, increment the freeOverflowReadHead!
             size_t clearBitmaps = 0;
             for(size_t i = 0; i < meaningfulBitmapPages; i++){
@@ -403,9 +402,9 @@ namespace kernel::amd64::PageTableManager{
                 auto pageAddress = entry.pageInfo.physicalAddress;
                 auto virtAddress = entry.pageInfo.virtualAddress;
                 //No need to process this anymore!
-                kernel::amd64::mfence();
+                thread_fence();
                 entry.readyToProcess = false;
-                auto didIncrementReadHead = kernel::amd64::atomic_cmpxchg_u64(freeOverflowReadHead, index, (index + 1) % FREE_OVERFLOW_POOL_SIZE);
+                auto didIncrementReadHead = atomic_cmpxchg(freeOverflowReadHead, index, (index + 1) % FREE_OVERFLOW_POOL_SIZE);
                 //If we were the ones to increment the read head, then we can release the page back to the page allocator
                 //without fear of a double-free!
                 if(didIncrementReadHead) {
@@ -427,7 +426,7 @@ namespace kernel::amd64::PageTableManager{
                 //If the ring buffer's empty, abort!!!
                 return false;
             }
-            incrementedReadHead = kernel::amd64::atomic_cmpxchg_u64(freeOverflowReadHead, prevValue, nextValue);
+            incrementedReadHead = atomic_cmpxchg(freeOverflowReadHead, prevValue, nextValue);
         } while(!incrementedReadHead);
         OverflowPoolEntry& m = freeOverflowPool[prevValue];
         //if it happens that the write head was incremented but the entry is still populated, try spinning to wait
@@ -436,7 +435,7 @@ namespace kernel::amd64::PageTableManager{
             asm volatile ("pause");
         }
         info = m.pageInfo;
-        kernel::amd64::mfence();
+        thread_fence();
         m.readyToProcess = false;
         return true;
     }
@@ -512,7 +511,7 @@ namespace kernel::amd64::PageTableManager{
             }
             // Set or clear the bit based on 'full'
             auto newValue = full ? (oldValue | mask) : (oldValue & ~mask);
-            didSwap = atomic_cmpxchg_u64(fullMarkers[i], oldValue, newValue);
+            didSwap = atomic_cmpxchg(fullMarkers[i], oldValue, newValue);
         } while (!didSwap);
         return true;
     }
@@ -529,7 +528,7 @@ namespace kernel::amd64::PageTableManager{
             }
             // Set or clear the bit based on 'partiallyOccupied'
             auto newValue = partiallyOccupied ? (oldValue | mask) : (oldValue & ~mask);
-            didSwap = atomic_cmpxchg_u64(partiallyOccupiedMarkers[i], oldValue, newValue);
+            didSwap = atomic_cmpxchg(partiallyOccupiedMarkers[i], oldValue, newValue);
         } while (!didSwap);
         return true;
     }
@@ -579,15 +578,15 @@ namespace kernel::amd64::PageTableManager{
             do{
                 prevWriteHead = poQueueWriteHead;
                 auto next = static_cast<uint16_t>((prevWriteHead + 1) % ENTRIES_PER_TABLE);
-                didAdvanceHead = atomic_cmpxchg_u16(poQueueWriteHead, prevWriteHead, next);
+                didAdvanceHead = atomic_cmpxchg(poQueueWriteHead, prevWriteHead, next);
             } while(!didAdvanceHead);
             //write the index to the queue
             partiallyOccupiedRingBuffer[prevWriteHead] = index;
             //mark the page as not full, allowing it to be marked as full again in the future
             markFullState(index, false);
-            mfence();
+            thread_fence();
             while(true){
-                if(atomic_cmpxchg_u16(poQueueWrittenLimit, prevWriteHead, static_cast<uint16_t>((prevWriteHead + 1) % ENTRIES_PER_TABLE))){
+                if(atomic_cmpxchg(poQueueWrittenLimit, prevWriteHead, static_cast<uint16_t>((prevWriteHead + 1) % ENTRIES_PER_TABLE))){
                     break;
                 }
             };
@@ -614,7 +613,7 @@ namespace kernel::amd64::PageTableManager{
             assert(nextIndex != index, "free pointer points to self");
             assert(nextIndex == ENTRIES_PER_TABLE || !table[nextIndex].present(), "free pointer points to currently occupied entry");
             internalPageTableFreeIndex(table) = nextIndex;
-            didAllocate = atomic_cmpxchg_u64(table[0].value, prevEntry.value, newEntry.value);
+            didAllocate = atomic_cmpxchg(table[0].value, prevEntry.value, newEntry.value);
         } while(!didAllocate);
         assert(!table[index].present(), "Tried to allocate a page table entry that was already present");
         assert(!table[index].get_local_metadata<LOCAL_OCCUPIED_BIT>(), "Tried to allocate a page table entry that was already occupied");
@@ -638,7 +637,7 @@ namespace kernel::amd64::PageTableManager{
             entry.set_local_metadata<LOCAL_OCCUPIED_BIT>(false);
             //Now we construct a new head whose index points to the newly freed entry
             entry.set_local_metadata<LOCAL_OCCUPIED_BIT>(false);
-            didFree = atomic_cmpxchg_u64(internalPageTableFreeIndex(tableBase), priorHeadIndex, entryIndex);
+            didFree = atomic_cmpxchg(internalPageTableFreeIndex(tableBase), priorHeadIndex, entryIndex);
         } while(!didFree);
         //Mark the table as partially occupied - if it used to be full, move it to the queue
         markTableAsPartiallyOccupied(tableBase);
@@ -650,7 +649,7 @@ namespace kernel::amd64::PageTableManager{
         if(poQueueReadHead == prevWriteHead){
             auto nextWriteHead = static_cast<uint16_t>((prevWriteHead + 1) % ENTRIES_PER_TABLE);
             //If we can advance the write head, we're responsible for allocating a new page table and adding it to the queue!
-            if(atomic_cmpxchg_u16(poQueueWriteHead, prevWriteHead, nextWriteHead)){
+            if(atomic_cmpxchg(poQueueWriteHead, prevWriteHead, nextWriteHead)){
                 //In particular, only one processor at a time can possibly be running this code
                 auto backingPageAddr = mm::PageAllocator::allocateSmallPage();
                 //Map the table into memory with R/W and as global
@@ -670,9 +669,9 @@ namespace kernel::amd64::PageTableManager{
                 //advance the unpopulated head
                 unpopulatedHead++;
                 //finally advance the written limit
-                mfence();
+                thread_fence();
                 while(true){
-                    if(atomic_cmpxchg_u16(poQueueWrittenLimit, prevWriteHead, nextWriteHead)){
+                    if(atomic_cmpxchg(poQueueWrittenLimit, prevWriteHead, nextWriteHead)){
                         break;
                     }
                 }

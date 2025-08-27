@@ -6,9 +6,7 @@
 
 namespace kernel{
 
-    void print_stacktrace(){
-        uintptr_t* rbp;
-        asm volatile("movq %%rbp, %0" : "=r"(rbp));
+    void print_stacktrace(uintptr_t* rbp) {
         kernel::klog << "Stack trace:\n";
 
         for (int i = 0; (i < 20) && rbp; i++) {
@@ -16,6 +14,12 @@ namespace kernel{
             kernel::klog << "[" << i << "] " << (void*)rip << "\n";
             rbp = (uintptr_t*)rbp[0];
         }
+    }
+
+    void print_stacktrace(){
+        uintptr_t* rbp;
+        asm volatile("movq %%rbp, %0" : "=r"(rbp));
+        print_stacktrace(rbp);
     }
 }
 

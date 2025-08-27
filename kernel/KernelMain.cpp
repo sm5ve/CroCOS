@@ -5,7 +5,8 @@
 #include <kernel.h>
 #include <core/Object.h>
 #include <core/algo/GraphAlgorithms.h>
-#include <liballoc.h>
+#include <arch/hal/interrupts.h>
+#include <core/algo/GraphAlgorithms.h>
 
 extern "C" void (*__init_array_start[])(void) __attribute__((weak));
 extern "C" void (*__init_array_end[])(void) __attribute__((weak));
@@ -29,10 +30,16 @@ namespace kernel{
         heapEarlyInit();
         presort_object_parent_lists();
         run_global_constructors();
+        klog << "Early data structure setup complete\n";
 
         hal::hwinit();
 
         klog << "init done!\n";
+
+        auto interruptTopologyGraph = hal::interrupts::topology::getTopologyGraph();
+        assert(interruptTopologyGraph.occupied(), "Interrupt topology graph must be initialized");
+        //klog << interruptTopologyGraph -> getVertexCount();
+        algorithm::graph::printAsDOT(klog, *interruptTopologyGraph);
 
         asm volatile("outw %0, %1" ::"a"((uint16_t)0x2000), "Nd"((uint16_t)0x604)); //Quit qemu
     }

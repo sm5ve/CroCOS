@@ -33,10 +33,6 @@ namespace kernel::hal{
 #endif
     }
 
-    bool atomic_cmpxchg_u64(volatile uint64_t &var, volatile uint64_t &expected, uint64_t desired){
-        return amd64::atomic_cmpxchg_u64(var, expected, desired);
-    }
-
     void SerialPrintStream::putString(const char * str){
         kernel::hal::serialOutputString(str);
     }

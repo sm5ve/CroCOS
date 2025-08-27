@@ -28,7 +28,7 @@ template<typename T>
 inline void atomic_store(T& dest, T val, MemoryOrder mem_order = SEQ_CST){
     //use __atomic_store_n if trivially copiable and right size (can I force alignment on arguments?)
     //use lock-based fallback if not. Use C++ concepts to allow use of an object's internal acquire if it has one
-    if(_use_intrinsic_atomic_ops<T>){
+    if constexpr(_use_intrinsic_atomic_ops<T>){
 #ifdef __GNUC__
         __atomic_store_n(&dest, val, mem_order);
 #endif
@@ -40,7 +40,7 @@ inline void atomic_store(T& dest, T val, MemoryOrder mem_order = SEQ_CST){
 
 template<typename T>
 inline T atomic_load( T& src, MemoryOrder mem_order = SEQ_CST){
-    if(_use_intrinsic_atomic_ops<T>){
+    if constexpr(_use_intrinsic_atomic_ops<T>){
 #ifdef __GNUC__
         return __atomic_load_n(&src, mem_order);
 #endif
@@ -52,7 +52,7 @@ inline T atomic_load( T& src, MemoryOrder mem_order = SEQ_CST){
 
 template<typename T>
 inline T atomic_and_fetch( T& src, T mask, MemoryOrder mem_order = SEQ_CST){
-    if(_use_intrinsic_atomic_ops<T>){
+    if constexpr(_use_intrinsic_atomic_ops<T>){
 #ifdef __GNUC__
         return __atomic_and_fetch(&src, mask, mem_order);
 #endif
@@ -64,7 +64,7 @@ inline T atomic_and_fetch( T& src, T mask, MemoryOrder mem_order = SEQ_CST){
 
 template<typename T>
 inline T atomic_or_fetch( T& src, T mask, MemoryOrder mem_order = SEQ_CST){
-    if(_use_intrinsic_atomic_ops<T>){
+    if constexpr(_use_intrinsic_atomic_ops<T>){
 #ifdef __GNUC__
         return __atomic_or_fetch(&src, mask, mem_order);
 #endif
@@ -76,7 +76,7 @@ inline T atomic_or_fetch( T& src, T mask, MemoryOrder mem_order = SEQ_CST){
 
 template<typename T>
 inline T atomic_xor_fetch( T& src, T mask, MemoryOrder mem_order = SEQ_CST){
-    if(_use_intrinsic_atomic_ops<T>){
+    if constexpr(_use_intrinsic_atomic_ops<T>){
 #ifdef __GNUC__
         return __atomic_xor_fetch(&src, mask, mem_order);
 #endif
@@ -88,7 +88,7 @@ inline T atomic_xor_fetch( T& src, T mask, MemoryOrder mem_order = SEQ_CST){
 
 template<typename T>
 inline T atomic_nand_fetch(T& src, T mask, MemoryOrder mem_order = SEQ_CST){
-    if(_use_intrinsic_atomic_ops<T>){
+    if constexpr(_use_intrinsic_atomic_ops<T>){
 #ifdef __GNUC__
         return __atomic_nand_fetch(&src, mask, mem_order);
 #endif
@@ -100,7 +100,7 @@ inline T atomic_nand_fetch(T& src, T mask, MemoryOrder mem_order = SEQ_CST){
 
 template<typename T>
 inline T atomic_add_fetch(T& src, T val, MemoryOrder mem_order = SEQ_CST){
-    if(_use_intrinsic_atomic_ops<T>){
+    if constexpr(_use_intrinsic_atomic_ops<T>){
 #ifdef __GNUC__
         return __atomic_add_fetch(&src, val, mem_order);
 #endif
@@ -112,7 +112,7 @@ inline T atomic_add_fetch(T& src, T val, MemoryOrder mem_order = SEQ_CST){
 
 template<typename T>
 inline T atomic_sub_fetch(T& src, T val, MemoryOrder mem_order = SEQ_CST){
-    if(_use_intrinsic_atomic_ops<T>){
+    if constexpr(_use_intrinsic_atomic_ops<T>){
 #ifdef __GNUC__
         return __atomic_sub_fetch(&src, val, mem_order);
 #endif
@@ -139,6 +139,25 @@ inline bool atomic_cmpxchg(T& src, T& expected, T value, bool weak = false,
     else{
         static_assert(_use_intrinsic_atomic_ops<T>, "Unimplemented");
     }
+}
+
+template<typename T>
+inline bool atomic_cmpxchg(volatile T& src, T& expected, T value, bool weak = false,
+                          MemoryOrder success_order = SEQ_CST, MemoryOrder failure_order = SEQ_CST){
+    if(_use_intrinsic_atomic_ops<T>){
+#ifdef __GNUC__
+        return __atomic_compare_exchange_n(&src, &expected, value, weak, success_order, failure_order);
+#endif
+    }
+    else{
+        static_assert(_use_intrinsic_atomic_ops<T>, "Unimplemented");
+    }
+}
+
+inline void thread_fence(MemoryOrder order = SEQ_CST){
+#ifdef __GNUC__
+    __atomic_thread_fence(order);
+#endif
 }
 
 template<typename T>

@@ -8,12 +8,12 @@
 
 namespace kernel::hal::interrupts {
     namespace topology {
-        static bool isDirty = false;
-        static Optional<TopologyGraph> cachedGraph;
         
 #ifdef CROCOS_TESTING
-        static GraphBuilder<TopologyGraph>* builder_ptr = nullptr;
-        static GraphBuilder<TopologyGraph>& getBuilder() {
+        bool isDirty = false;
+        Optional<TopologyGraph> cachedGraph;
+        GraphBuilder<TopologyGraph>* builder_ptr = nullptr;
+        GraphBuilder<TopologyGraph>& getBuilder() {
             if (!builder_ptr) {
                 builder_ptr = new GraphBuilder<TopologyGraph>();
             }
@@ -30,8 +30,10 @@ namespace kernel::hal::interrupts {
             cachedGraph = {};
         }
 #else
+        bool isDirty = false;
+        WITH_GLOBAL_CONSTRUCTOR(Optional<TopologyGraph>, cachedGraph);
         WITH_GLOBAL_CONSTRUCTOR(GraphBuilder<TopologyGraph>, topologyBuilder);
-        static GraphBuilder<TopologyGraph>& getBuilder() {
+        GraphBuilder<TopologyGraph>& getBuilder() {
             return topologyBuilder;
         }
 #endif
@@ -112,6 +114,8 @@ namespace kernel::hal::interrupts {
             //where ind is the index of an emitter if Domain is not a receiver, and
             //the index of a receiver otherwise. In the former case, the node is labeled as a device
             //and in the latter, it is labeled as an input.
+
+            //For a fixed routing domain, we can prepopulate the edges coming out of it in advance - they are forced
             auto out = make_shared<RoutingGraphBuilder>(routingVertices, RoutingConstraint{});
             for (auto topVert : topologyGraph->vertices()) {
                 auto domain = topologyGraph->getVertexLabel(topVert);
@@ -131,7 +135,6 @@ namespace kernel::hal::interrupts {
                                 out -> addEdge(*sourceBuilderVertex, *targetBuilderVertex);
                             }
                         }
-
                     }
                 }
             }

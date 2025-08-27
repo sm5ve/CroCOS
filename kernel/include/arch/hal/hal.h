@@ -27,12 +27,6 @@ namespace kernel::hal{
     ProcessorID getCurrentProcessorID();
     size_t processorCount();
 
-    inline void compiler_fence(){
-        asm volatile("" ::: "memory");
-    };
-
-    bool atomic_cmpxchg_u64(volatile uint64_t &var, volatile uint64_t &expected, uint64_t desired);
-
 class SerialPrintStream : public Core::PrintStream{
     protected:
         void putString(const char*) override;

@@ -41,7 +41,7 @@ private:
 template<typename Filter, typename It>
 concept IteratorFilter = requires(Filter f, It it)
 {
-    Iterable<It>;
+    requires Iterable<It>;
     {f(*it)} -> convertible_to<bool>;
 };
 
