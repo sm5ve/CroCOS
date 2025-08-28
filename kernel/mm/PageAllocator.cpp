@@ -255,14 +255,7 @@ namespace kernel::mm::PageAllocator{
 #endif
                 return getFreeStackIndex(SuperpageIndex::fromAddress(addr, base));
             }
-#ifdef ALLOCATOR_DEBUG
-            template <typename T>
-            void verifyMapSanity(T t){
-                assert(getSuperpageIndex(t) == getSuperpageIndex(getFreeStackIndex(t)), "Superpage pool state insane 1");
-                assert(getFreeStackIndex(t) == getFreeStackIndex(getSuperpageIndex(t)), "Superpage pool state insane 2");
-                assert(getFreeStackIndex(t).bufferId == bufferId, "Superpage pool state insane 3");
-            }
-#endif
+
 
             SuperpageStackMarker poolTopMarker(){
 #ifdef ALLOCATOR_DEBUG
@@ -286,6 +279,14 @@ namespace kernel::mm::PageAllocator{
                 fsi.value = newPosition;
             }
         public:
+#ifdef ALLOCATOR_DEBUG
+            template <typename T>
+            void verifyMapSanity(T t){
+                assert(getSuperpageIndex(t) == getSuperpageIndex(getFreeStackIndex(t)), "Superpage pool state insane 1");
+                assert(getFreeStackIndex(t) == getFreeStackIndex(getSuperpageIndex(t)), "Superpage pool state insane 2");
+                assert(getFreeStackIndex(t).bufferId == bufferId, "Superpage pool state insane 3");
+            }
+#endif
             RWSpinlock lock;
             const phys_addr base;
 
@@ -345,7 +346,14 @@ namespace kernel::mm::PageAllocator{
                 auto& sft = getFreeStackIndex(t);
                 auto& sfs = getFreeStackIndex(s);
                 auto& sfr = getFreeStackIndex(r);
-
+#ifdef ALLOCATOR_DEBUG
+                assert(spt != sps, "Arguments to rotate must point to distinct pages");
+                assert(spt != spr, "Arguments to rotate must point to distinct pages");
+                assert(spr != sps, "Arguments to rotate must point to distinct pages");
+                assert(sft != sfs, "Arguments to rotate must point to distinct pages");
+                assert(sft != sfr, "Arguments to rotate must point to distinct pages");
+                assert(sfr != sfs, "Arguments to rotate must point to distinct pages");
+#endif
                 rotateLeft(spt, sps, spr);
                 //You need to do the inverse permutation for the inverse mapping, you dummy!
                 rotateRight(sft, sfs, sfr);
@@ -374,6 +382,14 @@ namespace kernel::mm::PageAllocator{
                 auto& sft = getFreeStackIndex(t);
                 auto& sfs = getFreeStackIndex(s);
                 auto& sfr = getFreeStackIndex(r);
+#ifdef ALLOCATOR_DEBUG
+                assert(spt != sps, "Arguments to rotate must point to distinct pages");
+                assert(spt != spr, "Arguments to rotate must point to distinct pages");
+                assert(spr != sps, "Arguments to rotate must point to distinct pages");
+                assert(sft != sfs, "Arguments to rotate must point to distinct pages");
+                assert(sft != sfr, "Arguments to rotate must point to distinct pages");
+                assert(sfr != sfs, "Arguments to rotate must point to distinct pages");
+#endif
                 rotateRight(spt, sps, spr);
                 rotateLeft(sft, sfs, sfr);
 #ifdef ALLOCATOR_DEBUG
@@ -532,13 +548,28 @@ namespace kernel::mm::PageAllocator{
             void movePageFromFreeToPartiallyOccupied(phys_addr addr){
 #ifdef ALLOCATOR_DEBUG
                 assert(spp.isAtOrAboveMarker(addr, freeZoneStart), "Tried to move page that isn't free");
+                spp.verifyMapSanity(spp.fromAddress(addr));
 #endif
-                spp.rotatePagesRight(spp.fromAddress(addr), spp.fromMarker(fullyOccupiedZoneStart),
-                                     spp.fromMarker(freeZoneStart));
+                auto addrSuperpageIndex = spp.fromAddress(addr);
+                auto freeZoneStartSuperpageIndex = spp.fromMarker(freeZoneStart);
+                auto fullyOccupiedZoneStartSuperpageIndex = spp.fromMarker(fullyOccupiedZoneStart);
+                //If the fully occupied zone is empty, do a swap
+                if (freeZoneStartSuperpageIndex == fullyOccupiedZoneStartSuperpageIndex) {
+                    spp.swapPages(spp.fromAddress(addr), freeZoneStartSuperpageIndex);
+                }
+                //If we're freeing the base page of the free zone, also swap
+                else if (addrSuperpageIndex == freeZoneStartSuperpageIndex) {
+                    spp.swapPages(spp.fromAddress(addr), fullyOccupiedZoneStartSuperpageIndex);
+                }
+                //Otherwise rotate
+                else {
+                    spp.rotatePagesRight(addrSuperpageIndex, fullyOccupiedZoneStartSuperpageIndex, freeZoneStartSuperpageIndex);
+                }
                 freeZoneStart++;
                 fullyOccupiedZoneStart++;
 #ifdef ALLOCATOR_DEBUG
-                assert(spp.isBelowMarker(addr, fullyOccupiedZoneStart), "movePageFromPartiallyOccupiedToFull failed");
+                spp.verifyMapSanity(spp.fromAddress(addr));
+                assert(spp.isBelowMarker(addr, fullyOccupiedZoneStart), "movePageFromFreeToPartiallyOccupied failed");
 #endif
             }
 
@@ -546,8 +577,22 @@ namespace kernel::mm::PageAllocator{
 #ifdef ALLOCATOR_DEBUG
                 assert(spp.isBelowMarker(addr, fullyOccupiedZoneStart), "Tried to move page that isn't partially occupied");
 #endif
-                spp.rotatePagesLeft(spp.fromAddress(addr), spp.fromMarker(partiallyOccupiedZoneTop()),
-                                    spp.fromMarker(fullyOccupiedZoneTop()));
+                auto addrSuperpageIndex = spp.fromAddress(addr);
+                auto partiallyOccupiedZoneTopSuperpageIndex = spp.fromMarker(partiallyOccupiedZoneTop());
+                auto fullyOccupiedZoneTopSuperpageIndex = spp.fromMarker(fullyOccupiedZoneTop());
+                //If the fully occupied zone is empty, swap the partially occupied page up to be the new base
+                //of the free zone
+                if (partiallyOccupiedZoneTopSuperpageIndex == fullyOccupiedZoneTopSuperpageIndex) {
+                    spp.swapPages(addrSuperpageIndex, fullyOccupiedZoneTopSuperpageIndex);
+                }
+                //If we're at the top of the partially occupied pool, we can also swap.
+                else if (addrSuperpageIndex == partiallyOccupiedZoneTopSuperpageIndex) {
+                    spp.swapPages(addrSuperpageIndex, fullyOccupiedZoneTopSuperpageIndex);
+                }
+                else {
+                    spp.rotatePagesLeft(spp.fromAddress(addr), spp.fromMarker(partiallyOccupiedZoneTop()),
+                                        spp.fromMarker(fullyOccupiedZoneTop()));
+                }
                 freeZoneStart--;
                 fullyOccupiedZoneStart--;
 
@@ -608,6 +653,10 @@ namespace kernel::mm::PageAllocator{
                 else if(spp.isAtOrAboveMarker(page, freeZoneStart)){
                     movePageFromFreeToFull(addr);
                 }
+
+#ifdef ALLOCATOR_DEBUG
+                assert(spp.isAtOrAboveMarker(addr, fullyOccupiedZoneStart) && spp.isBelowMarker(addr, freeZoneStart), "Superpage not in fully occupied zone???");
+#endif
             }
 
             void reserveSuperpageAsPartiallyAllocated(phys_addr addr){
