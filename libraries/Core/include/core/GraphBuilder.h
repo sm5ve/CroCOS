@@ -1089,6 +1089,7 @@ private:
             auto& vertex = this->createVertex();
             immutableVertices.push(this->getVertexHandle(vertex.index));
         }
+        immutableVertices.shrinkToFit();
     }
     
     template<typename VertexContainer>
@@ -1132,6 +1133,8 @@ private:
             
             immutableVertices.push(handle);
         }
+
+        immutableVertices.shrinkToFit();
     }
     
 public:

@@ -291,6 +291,10 @@ public:
         }
     }
 
+    void shrinkToFit() {
+        reallocate(size);
+    }
+
     template <typename Comparator = DefaultComparator<T>>
     void sort(Comparator comp = Comparator{}){
         algorithm::sort(data, size, comp);
