@@ -4,6 +4,7 @@
 #include <arch/amd64/interrupts/APIC.h>
 #include <arch/amd64/amd64.h>
 #include <core/ds/Trees.h>
+#include <arch/amd64/interrupts/IRQDomain.h>
 
 namespace kernel::amd64::interrupts{
     constexpr uint32_t IOAPIC_REG_ID = 0x00;
@@ -99,13 +100,52 @@ namespace kernel::amd64::interrupts{
             return a -> getGSIBase() < b -> getGSIBase();
         }
     };
+
+    IRQDomain::IRQDomain(size_t mapping[16]){
+        memcpy(surjectiveMapping, mapping, sizeof(surjectiveMapping));
+        maxMapping = 0;
+        for (auto i : surjectiveMapping) {
+            maxMapping = max(i, maxMapping);
+        }
+    }
+
+    size_t IRQDomain::getEmitterCount() {
+        return maxMapping + 1;
+    }
+
+    size_t IRQDomain::getReceiverCount() {
+        return 16;
+    }
+
+    size_t IRQDomain::getEmitterFor(size_t receiver) const{
+        assert(receiver < 16, "receiver out of range");
+        return surjectiveMapping[receiver];
+    }
+
+    IRQToIOAPICConnector::IRQToIOAPICConnector(SharedPtr<IRQDomain> irqDomain, SharedPtr<InterruptDomain> ioapic, Bimap<size_t, size_t> &&map) :
+    DomainConnector(static_pointer_cast<InterruptDomain>(move(irqDomain)), move(ioapic)), irqToAPICLineMap(move(map)){}
+
+    Optional<DomainInputIndex> IRQToIOAPICConnector::fromOutput(DomainOutputIndex index) {
+        if (irqToAPICLineMap.contains(index)) {
+            return irqToAPICLineMap.at(index);
+        }
+        return {};
+    }
+
+    Optional<DomainOutputIndex> IRQToIOAPICConnector::fromInput(DomainInputIndex index) {
+        if (irqToAPICLineMap.containsRight(index)) {
+            return irqToAPICLineMap.atRight(index);
+        }
+        return {};
+    }
+
     using IOAPIC_Tree = RedBlackTree<SharedPtr<IOAPIC>, IOAPIC_GSI_Comparator>;
     WITH_GLOBAL_CONSTRUCTOR(IOAPIC_Tree, ioapicsByGSI);
     using IOAPIC_ID_Map = HashMap<size_t, SharedPtr<IOAPIC>>;
     WITH_GLOBAL_CONSTRUCTOR(IOAPIC_ID_Map, ioapicsByID);
 
-    void setupIOAPICs(acpi::MADT& madt) {
-        for (auto ioapicEntry : madt.entries<acpi::MADT_IOAPIC_Entry>()) {
+    void createIOAPICStructures(acpi::MADT& madt) {
+        for (const auto ioapicEntry : madt.entries<acpi::MADT_IOAPIC_Entry>()) {
             uintptr_t base = ioapicEntry.ioapicAddress;
             auto* mmio_window = amd64::PageTableManager::temporaryHackMapMMIOPage(mm::phys_addr(base));
             auto gsiBase = ioapicEntry.gsiBase;
@@ -114,5 +154,96 @@ namespace kernel::amd64::interrupts{
             ioapicsByGSI.insert(ioapic);
             hal::interrupts::topology::registerDomain(ioapic);
         }
+    }
+
+    SharedPtr<IOAPIC> getIOAPICForGSI(uint32_t gsi) {
+        SharedPtr<IOAPIC> apicForGSI;
+        bool found = ioapicsByGSI.mappedFloor(gsi, apicForGSI, [](SharedPtr<IOAPIC> apic) {
+            return apic -> getGSIBase();
+        });
+        if (!found) {return SharedPtr<IOAPIC>();}
+        if (gsi - apicForGSI -> getGSIBase() >= apicForGSI -> getReceiverCount()) {
+            return SharedPtr<IOAPIC>();
+        }
+        return apicForGSI;
+    }
+
+    InterruptLineActivationType getActivationTypeFromMADTFlags(uint16_t flags) {
+        bool activeHigh = (flags & 2) == 0;
+        bool edgeTriggered = (flags & 8) == 0;
+        return activationTypeForLevelAndTriggerMode(activeHigh, edgeTriggered);
+    }
+
+    SharedPtr<IOAPIC> addIRQDomainConectorMapping(Optional<size_t>* irqToEmitterMap, size_t& emitterMax, HashMap<SharedPtr<IOAPIC>, SharedPtr<Bimap<size_t, size_t>>>& connectorMapsByIOAPIC, uint8_t irqSource, uint32_t gsi) {
+        assert(irqSource < 16, "irqSource out of range");
+
+        auto ioapic = getIOAPICForGSI(gsi);
+        assert(ioapic, "No IOAPIC for GSI");
+        if (!connectorMapsByIOAPIC.contains(ioapic)) {
+            connectorMapsByIOAPIC.insert(ioapic, make_shared<Bimap<size_t, size_t>>());
+        }
+
+        const auto bimap = connectorMapsByIOAPIC[ioapic];
+        //If the GSI we're trying to map to is already associated with an emitter, just update the emitter map
+        //but no changes need to be made to the connector
+        if (bimap -> containsRight(gsi)) {
+            irqToEmitterMap[irqSource] = bimap -> atRight(gsi);
+            return ioapic;
+        }
+        //Otherwise, we need to create a new emitter
+        assert(!irqToEmitterMap[irqSource].occupied(), "why are we calling this on an already mapped irq source?");
+        size_t emitterIndex = emitterMax++;
+        irqToEmitterMap[irqSource] = emitterIndex;
+
+        bimap -> insert(emitterIndex, gsi - ioapic -> getGSIBase());
+        return ioapic;
+    }
+
+    void createIRQDomainConnectorsAndConfigureIOAPICActivationType(acpi::MADT& madt) {
+        Optional<size_t> irqToEmitterMap[16];
+        size_t emitterMax = 0;
+        //maps IRQDomain emitter index to IOAPIC line (so gsi - gsi_base)
+        HashMap<SharedPtr<IOAPIC>, SharedPtr<Bimap<size_t, size_t>>> connectorMapsByIOAPIC;
+        uint16_t mappedIRQs = 0;
+        //For every source override entry, we configure the IOAPIC activation type accordingly
+        //and add the mapping to a bimap
+        for (const auto& sourceOverride : madt.entries<acpi::MADT_IOAPIC_Source_Override_Entry>()) {
+            if (sourceOverride.busSource != 0) {
+                klog << "Warning: MADT interrupt source override entry lists non-ISA bus source.\n";
+            }
+            if (mappedIRQs & (1u << sourceOverride.irqSource)) {
+                klog << "Warning: MADT interrupt source override entry lists duplicate interrupt source. Skipping.\n";
+                continue;
+            }
+            auto ioapic = addIRQDomainConectorMapping(irqToEmitterMap, emitterMax, connectorMapsByIOAPIC, sourceOverride.irqSource, sourceOverride.gsi);
+            ioapic -> setActivationType(sourceOverride.gsi, getActivationTypeFromMADTFlags(sourceOverride.flags));
+            mappedIRQs |= 1u << sourceOverride.irqSource;
+        }
+        for (uint32_t i = 0; i < 16; i++) {
+            if (mappedIRQs & (1u << i)) {
+                continue;
+            }
+            addIRQDomainConectorMapping(irqToEmitterMap, emitterMax, connectorMapsByIOAPIC, static_cast<uint8_t>(i), i);
+        }
+        size_t finalizedEmitterMap[16];
+        for (auto i = 0; i < 16; i++) {
+            assert(irqToEmitterMap[i].occupied(), "irqToEmitterMap[i] not occupied");
+            finalizedEmitterMap[i] = *irqToEmitterMap[i];
+        }
+
+        auto irqDomain = make_shared<IRQDomain>(finalizedEmitterMap);
+        hal::interrupts::topology::registerDomain(irqDomain);
+        for (const auto& connectorInfo : connectorMapsByIOAPIC) {
+            auto ioapic = connectorInfo.first();
+            auto bimap = connectorInfo.second();
+            auto connector = make_shared<IRQToIOAPICConnector>(irqDomain, ioapic, move(*bimap));
+            hal::interrupts::topology::registerConnector(connector);
+        }
+    }
+
+    void setupIOAPICs(acpi::MADT& madt) {
+        createIOAPICStructures(madt);
+        createIRQDomainConnectorsAndConfigureIOAPICActivationType(madt);
+        //hal::interrupts::topology::registerDomain()
     }
 }

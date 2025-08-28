@@ -13,26 +13,14 @@ set(KERNEL_SRC
         arch/amd64/interrupts/InterruptVectorTrampolines.asm
         KernelMain.cpp
         arch/hal/hal.cpp
-        include/arch/hal/hal.h
-        include/kernel.h
         panic.cpp
         mm/kmalloc.cpp
-        mm/allocators.h
-        include/acpi.h
-        include/mm.h
         acpi/ACPIFixedTables.cpp
-        include/kassert.h
-        include/panic.h
         mm/MemoryManager.cpp
         arch/amd64/PageTableManager.cpp
-        include/FlushPlanner.h
         timing/TimerManager.cpp
-        include/timers.h
-        include/arch/hal/InterruptGraphs.h
         arch/amd64/interrupts/LegacyPIC.cpp
-        include/arch/amd64/interrupts/LegacyPIC.h
         arch/amd64/smp/smp.cpp
-        include/arch/amd64/smp.h
         arch/amd64/interrupts/InterruptSetup.cpp
         arch/amd64/lgdt.asm
         arch/hal/InterruptGraphManager.cpp
@@ -41,6 +29,7 @@ set(KERNEL_SRC
 )
 
 add_executable(Kernel ${KERNEL_SRC})
+target_link_options(Kernel PRIVATE -Wl,--no-gc-sections)
 target_link_options(Kernel PUBLIC -O0 -ffreestanding -mcmodel=kernel -nostdlib -T ${CMAKE_SOURCE_DIR}/kernel/linker.ld)
 target_include_directories(Kernel PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(Kernel PRIVATE CoreKernel AllocKernel)

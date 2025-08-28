@@ -5,6 +5,8 @@
 
 set -euo pipefail
 
+killall qemu-system-x86_64 || true
+
 BUILD_DIR="cmake-build-amd64-kernel-debug"
 
 cmake --build "$BUILD_DIR" --target Kernel

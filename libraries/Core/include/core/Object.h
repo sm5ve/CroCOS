@@ -162,6 +162,9 @@ public:
     }
 
     __attribute__((used)) static void _crocos_presort(){
+        static bool initialized = false;
+        if (initialized) return;
+        initialized = true;
         memcpy(_crocos_sorted_parents, _crocos_const_flattened_ids, sizeof(_InheritanceInfo) * _crocos_obj_base_count);
         _crocos_initialize_type_metadata(_crocos_flattened_types, 0);
         algorithm::sort(_crocos_sorted_parents, _InheritanceInfoComparator{});
@@ -178,6 +181,9 @@ public:
     }
 
     static bool instanceof(uint64_t id) {
+        //FIXME this really should not be necessary, but for whatever reason the linker keep stripping this
+        //  symbol out of the presort array in odd cases.
+        _crocos_presort_init();
         const auto& arr = _crocos_sorted_parents;
         size_t left = 0, right = _crocos_obj_base_count;
         while (left < right) {
@@ -190,6 +196,7 @@ public:
     }
 
     static Optional<int64_t> getOffset(uint64_t id) {
+        _crocos_presort_init();
         const auto& arr = _crocos_sorted_parents;
         size_t left = 0, right = _crocos_obj_base_count;
         while (left < right) {

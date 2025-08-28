@@ -2893,6 +2893,8 @@ public:
 		return false;
 	}
 
+
+
 	// Expose visitor methods
 	using Parent::visitDepthFirstInOrder;
 	using Parent::visitDepthFirstReverseOrder;
@@ -3023,6 +3025,28 @@ public:
 				result = pred->data;
 				return true;
 			}
+		}
+		return false;
+	}
+
+	template<typename V, typename F, typename TComparator = DefaultComparator<V>>
+		requires Invocable<F, V, T> && Invocable<TComparator, bool, V, V>
+	bool mappedCeil(const V val, T& result, F transform) const {
+		auto* node = Parent::mappedCeil(val, transform);
+		if (node != nullptr) {
+			result = node->data;
+			return true;
+		}
+		return false;
+	}
+
+	template<typename V, typename F, typename TComparator = DefaultComparator<V>>
+		requires Invocable<F, V, T> && Invocable<TComparator, bool, V, V>
+	bool mappedFloor(const V val, T& result, F transform) const {
+		auto* node = Parent::mappedFloor(val, transform);
+		if (node != nullptr) {
+			result = node->data;
+			return true;
 		}
 		return false;
 	}

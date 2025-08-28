@@ -116,14 +116,27 @@ public:
         }
     };
 
+    struct KVPTransformConst {
+        Tuple<const K&, const V&> operator()(typename ParentTable::InternalEntryType& e) const {
+            return makeTuple(static_cast<const K &>(e.first()), e.second());
+        }
+    };
+
     struct KeyTransform {
         const K& operator()(typename ParentTable::InternalEntryType& e) const {
             return e.first();
         }
     };
 
+
     struct ValueTransform {
         V& operator()(typename ParentTable::InternalEntryType& e) const {
+            return e.second();
+        }
+    };
+
+    struct ValueTransformConst {
+        const V& operator()(typename ParentTable::InternalEntryType& e) const {
             return e.second();
         }
     };
@@ -145,7 +158,15 @@ public:
         );
     }
 
-    auto keys() {
+    auto entries() const {
+        using It = typename ParentTable::template TransformingIterator<KVPTransformConst>;
+        return IteratorRange(
+                It(this -> entryBuffer, this -> capacity, 0, KVPTransformConst{}),
+                It(this -> entryBuffer, this -> capacity, this -> capacity, KVPTransformConst{})
+        );
+    }
+
+    auto keys() const {
         using It = typename ParentTable::template TransformingIterator<KeyTransform>;
         return IteratorRange<It>(
                 It(this -> entryBuffer, this -> capacity, 0, KeyTransform{}),
@@ -158,6 +179,14 @@ public:
         return IteratorRange<It>(
                 It(this -> entryBuffer, this -> capacity, 0, ValueTransform{}),
                 It(this -> entryBuffer, this -> capacity, this -> capacity, ValueTransform{})
+        );
+    }
+
+    auto values() const {
+        using It = typename ParentTable::template TransformingIterator<ValueTransformConst>;
+        return IteratorRange<It>(
+                It(this -> entryBuffer, this -> capacity, 0, ValueTransformConst{}),
+                It(this -> entryBuffer, this -> capacity, this -> capacity, ValueTransformConst{})
         );
     }
 };

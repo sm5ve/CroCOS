@@ -48,6 +48,7 @@ SECTIONS
     .crocos_presort_array : {
         . = ALIGN(8);
         __crocos_presort_array_start = .;
+        KEEP(*(.crocos_presort_array.*))
         KEEP(*(.crocos_presort_array))
         __crocos_presort_array_end = .;
     }

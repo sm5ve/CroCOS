@@ -54,6 +54,18 @@ struct Tuple<T, Rest...> : Tuple<Rest...> {
     auto& third() requires(sizeof...(Rest) >= 2) {
         return get<2>();
     }
+
+    const auto& first() const{
+        return value;
+    }
+
+    const auto& second() const requires(sizeof...(Rest) >= 1){
+        return get<1>();
+    }
+
+    const auto& third() const requires(sizeof...(Rest) >= 2){
+        return get<2>();
+    }
 };
 
 template<typename... Ts>

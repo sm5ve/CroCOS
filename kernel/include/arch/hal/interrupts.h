@@ -16,6 +16,13 @@ enum InterruptLineActivationType : uint8_t{
     EDGE_HIGH = 0b11
 };
 
+constexpr InterruptLineActivationType activationTypeForLevelAndTriggerMode(bool activeHigh, bool edgeTriggered) {
+    uint8_t bits = 0;
+    if (activeHigh) bits |= 1;
+    if (edgeTriggered) bits |= 2;
+    return static_cast<InterruptLineActivationType>(bits);
+}
+
 constexpr bool isLevelTriggered(InterruptLineActivationType type){
     return type == InterruptLineActivationType::LEVEL_LOW || type == InterruptLineActivationType::LEVEL_HIGH;
 }

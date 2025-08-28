@@ -92,9 +92,4 @@ Core::PrintStream& operator<<(Core::PrintStream& ps, kernel::amd64::interrupts::
 
 extern "C" void interrupt_common_handler(kernel::amd64::interrupts::InterruptFrame& test){
     kernel::klog << test;
-    if (test.vector_index == 8) return;
-    if (test.vector_index < 32) {
-        kernel::print_stacktrace(reinterpret_cast<uintptr_t*>(test.rbp));
-        asm volatile("outw %0, %1" ::"a"((uint16_t)0x2000), "Nd"((uint16_t)0x604)); //Quit qemu
-    }
 }
