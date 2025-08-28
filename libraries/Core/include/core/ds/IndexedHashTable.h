@@ -33,7 +33,7 @@ protected:
         occupied = 2
     };
 
-    struct Entry {
+    struct Entry{
         EntryType value;
         EntryState state;
     };

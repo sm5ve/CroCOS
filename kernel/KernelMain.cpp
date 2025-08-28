@@ -7,8 +7,7 @@
 #include <core/algo/GraphAlgorithms.h>
 #include <arch/hal/interrupts.h>
 #include <core/algo/GraphAlgorithms.h>
-
-#include "arch/amd64/interrupts/IRQDomain.h"
+#include <liballoc/InternalAllocatorDebug.h>
 
 extern "C" void (*__init_array_start[])(void) __attribute__((weak));
 extern "C" void (*__init_array_end[])(void) __attribute__((weak));
@@ -34,9 +33,15 @@ namespace kernel{
         run_global_constructors();
         klog << "Early data structure setup complete\n";
 
-
+        klog << "Coarse allocator is using " <<
+                           LibAlloc::InternalAllocator::computeTotalAllocatedSpaceInCoarseAllocator()
+                           << " bytes\n";
 
         hal::hwinit();
+
+        klog << "Coarse allocator is using " <<
+                   LibAlloc::InternalAllocator::computeTotalAllocatedSpaceInCoarseAllocator()
+                   << " bytes\n";
 
         klog << "init done!\n";
 
@@ -50,13 +55,24 @@ namespace kernel{
             if (auto receiver = crocos_dynamic_cast<hal::interrupts::platform::InterruptReceiver>(domain)) {
                 klog << "Domain is receiver and has " << receiver -> getReceiverCount() << " receivers\n";
             }
+            else if (auto emitter = crocos_dynamic_cast<hal::interrupts::platform::InterruptEmitter>(domain)) {
+                klog << "Domain is pure emitter and has " << emitter -> getEmitterCount() << " emitters\n";
+            }
         }
+
+        klog << "Coarse allocator is using " <<
+                    LibAlloc::InternalAllocator::computeTotalAllocatedSpaceInCoarseAllocator()
+                    << " bytes\n";
 
         auto builder = hal::interrupts::managed::createRoutingGraphBuilder();
 
         klog << "Interrupt routing graph builder made\n";
         klog << "has " << builder -> getVertices().getSize() << " vertices\n";
         klog << "has " << builder -> getCurrentEdgeCount() << " edges\n";
+
+        klog << "Coarse allocator is using " <<
+            LibAlloc::InternalAllocator::computeTotalAllocatedSpaceInCoarseAllocator()
+            << " bytes\n";
 
         asm volatile("outw %0, %1" ::"a"((uint16_t)0x2000), "Nd"((uint16_t)0x604)); //Quit qemu
     }

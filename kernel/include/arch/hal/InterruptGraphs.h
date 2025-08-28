@@ -51,6 +51,13 @@ namespace kernel::hal::interrupts {
          virtual void setReceiverMask(size_t receiver, bool shouldMask) = 0;
       };
 
+      CRClass(CPUInterruptVectorFile, public InterruptDomain, public InterruptReceiver) {
+         size_t width;
+      public:
+         CPUInterruptVectorFile(size_t width);
+         [[nodiscard]] virtual size_t getReceiverCount() override;
+      };
+
       using DomainInputIndex = size_t;
       using DomainOutputIndex = size_t;
 
@@ -65,14 +72,26 @@ namespace kernel::hal::interrupts {
          SharedPtr<InterruptDomain> getTarget(){return target;}
          virtual ~DomainConnector() = default;
 
-         virtual Optional<DomainInputIndex> fromOutput(DomainOutputIndex) = 0;
-         virtual Optional<DomainOutputIndex> fromInput(DomainInputIndex) = 0;
+         virtual Optional<DomainInputIndex> fromOutput(DomainOutputIndex) const = 0;
+         virtual Optional<DomainOutputIndex> fromInput(DomainInputIndex) const = 0;
       };
+
+      class AffineConnector : public DomainConnector {
+         const size_t offset;
+      public:
+         AffineConnector(SharedPtr<InterruptDomain> src, SharedPtr<InterruptDomain> tgt, size_t offset);
+         Optional<DomainInputIndex> fromOutput(DomainOutputIndex index) const override;
+         Optional<DomainOutputIndex> fromInput(DomainInputIndex index) const override;
+      };
+
+      const SharedPtr<CPUInterruptVectorFile> getCPUInterruptVectors();
+      bool setupCPUInterruptVectorFile(size_t size);
    }
 
    namespace topology {
       void registerDomain(SharedPtr<platform::InterruptDomain> domain);
       void registerConnector(SharedPtr<platform::DomainConnector> connector);
+      bool registerExclusiveConnector(SharedPtr<platform::DomainConnector> connector);
       
       using TopologyVertexLabel = GraphProperties::LabeledVertex<SharedPtr<platform::InterruptDomain>>;
       using TopologyEdgeLabel = GraphProperties::LabeledEdge<SharedPtr<platform::DomainConnector>>;
@@ -93,11 +112,20 @@ namespace kernel::hal::interrupts {
       private:
          SharedPtr<platform::InterruptDomain> domain;
          size_t index;
-         NodeType type;
          friend struct RoutingConstraint;
+
+         [[nodiscard]] NodeType getType() const {
+            if (domain -> instanceof(TypeID_v<platform::InterruptReceiver>))
+               return NodeType::Input;
+            return NodeType::Device;
+         };
       public:
-         RoutingNodeLabel(SharedPtr<platform::InterruptDomain>&& d, size_t ind, NodeType t) : domain(move(d)), index(ind), type(t) {}
-         RoutingNodeLabel(const SharedPtr<platform::InterruptDomain>& d, size_t ind, NodeType t) : domain(d), index(ind), type(t) {}
+         RoutingNodeLabel(SharedPtr<platform::InterruptDomain>&& d, size_t ind) : domain(move(d)), index(ind) {
+            if (domain -> instanceof(TypeID_v<platform::InterruptReceiver>)){}
+         }
+         RoutingNodeLabel(const SharedPtr<platform::InterruptDomain>& d, size_t ind) : domain(d), index(ind) {
+            if (domain -> instanceof(TypeID_v<platform::InterruptReceiver>)){}
+         }
          bool operator==(const RoutingNodeLabel& other) const = default;
          size_t hash() const;
          
@@ -118,7 +146,7 @@ struct DefaultHasher<kernel::hal::interrupts::managed::RoutingNodeLabel> {
 
 namespace kernel::hal::interrupts {
    namespace managed {
-      using RoutingVertexConfig = GraphProperties::ColoredLabeledVertex<int, RoutingNodeLabel>;
+      using RoutingVertexConfig = GraphProperties::LabeledVertex<RoutingNodeLabel>;
       using RoutingEdgeConfig = GraphProperties::PlainEdge;
       using RoutingGraphStructure = GraphProperties::StructureModifier<GraphProperties::Directed, GraphProperties::SimpleGraph, GraphPredicates::DirectedAcyclic>;
       using RoutingGraph = Graph<RoutingVertexConfig, RoutingEdgeConfig, RoutingGraphStructure>;

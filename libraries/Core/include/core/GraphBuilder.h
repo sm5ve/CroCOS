@@ -19,16 +19,18 @@ namespace _GraphBuilder {
     template <bool HasLabel, bool HasColor, typename G>
     struct PartialVertexInfoImpl{};
 
+    using VertexEdgeIndexType = uint32_t;
+
     template <typename G>
     struct PartialVertexInfoImpl<true, true, G> {
         using Dec = typename G::VertexDecorator;
         Optional<typename Dec::LabelType> label;
         Optional<typename Dec::ColorType> color;
-        size_t index;
-        size_t incomingEdgeCount;
-        size_t outgoingEdgeCount;
+        VertexEdgeIndexType index;
+        VertexEdgeIndexType incomingEdgeCount;
+        VertexEdgeIndexType outgoingEdgeCount;
         
-        explicit PartialVertexInfoImpl(const size_t i) : index(i), incomingEdgeCount(0), outgoingEdgeCount(0) {}
+        explicit PartialVertexInfoImpl(const VertexEdgeIndexType i) : index(i), incomingEdgeCount(0), outgoingEdgeCount(0) {}
         
         [[nodiscard]] bool fullyPopulated() const {
             return label.occupied() && color.occupied();
@@ -39,11 +41,11 @@ namespace _GraphBuilder {
     struct PartialVertexInfoImpl<true, false, G> {
         using Dec = typename G::VertexDecorator;
         Optional<typename Dec::LabelType> label;
-        size_t index;
-        size_t incomingEdgeCount;
-        size_t outgoingEdgeCount;
+        VertexEdgeIndexType index;
+        VertexEdgeIndexType incomingEdgeCount;
+        VertexEdgeIndexType outgoingEdgeCount;
         
-        explicit PartialVertexInfoImpl(const size_t i) : index(i), incomingEdgeCount(0), outgoingEdgeCount(0) {}
+        explicit PartialVertexInfoImpl(const VertexEdgeIndexType i) : index(i), incomingEdgeCount(0), outgoingEdgeCount(0) {}
         
         [[nodiscard]] bool fullyPopulated() const {
             return label.occupied();
@@ -54,11 +56,11 @@ namespace _GraphBuilder {
     struct PartialVertexInfoImpl<false, true, G> {
         using Dec = typename G::VertexDecorator;
         Optional<typename Dec::ColorType> color;
-        size_t index;
-        size_t incomingEdgeCount;
-        size_t outgoingEdgeCount;
+        VertexEdgeIndexType index;
+        VertexEdgeIndexType incomingEdgeCount;
+        VertexEdgeIndexType outgoingEdgeCount;
         
-        explicit PartialVertexInfoImpl(const size_t i) : index(i), incomingEdgeCount(0), outgoingEdgeCount(0) {}
+        explicit PartialVertexInfoImpl(const VertexEdgeIndexType i) : index(i), incomingEdgeCount(0), outgoingEdgeCount(0) {}
         
         [[nodiscard]] bool fullyPopulated() const {
             return color.occupied();
@@ -67,11 +69,11 @@ namespace _GraphBuilder {
 
     template <typename G>
     struct PartialVertexInfoImpl<false, false, G> {
-        size_t index;
-        size_t incomingEdgeCount;
-        size_t outgoingEdgeCount;
+        VertexEdgeIndexType index;
+        VertexEdgeIndexType incomingEdgeCount;
+        VertexEdgeIndexType outgoingEdgeCount;
         
-        explicit PartialVertexInfoImpl(const size_t i) : index(i), incomingEdgeCount(0), outgoingEdgeCount(0) {}
+        explicit PartialVertexInfoImpl(const VertexEdgeIndexType i) : index(i), incomingEdgeCount(0), outgoingEdgeCount(0) {}
         
         [[nodiscard]] bool fullyPopulated() const {
             return true;
@@ -89,11 +91,11 @@ namespace _GraphBuilder {
         using Dec = typename G::EdgeDecorator;
         Optional<typename Dec::LabelType> label;
         Optional<typename Dec::WeightType> weight;
-        size_t fromVertexId;
-        size_t toVertexId;
-        size_t index;
+        VertexEdgeIndexType fromVertexId;
+        VertexEdgeIndexType toVertexId;
+        VertexEdgeIndexType index;
         
-        explicit PartialEdgeInfoImpl(const size_t i, const size_t from, const size_t to) : fromVertexId(from), toVertexId(to), index(i) {}
+        explicit PartialEdgeInfoImpl(const VertexEdgeIndexType i, const VertexEdgeIndexType from, const VertexEdgeIndexType to) : fromVertexId(from), toVertexId(to), index(i) {}
         
         [[nodiscard]] bool fullyPopulated() const {
             return label.occupied() && weight.occupied();
@@ -104,11 +106,11 @@ namespace _GraphBuilder {
     struct PartialEdgeInfoImpl<true, false, G> {
         using Dec = typename G::EdgeDecorator;
         Optional<typename Dec::LabelType> label;
-        size_t fromVertexId;
-        size_t toVertexId;
-        size_t index;
+        VertexEdgeIndexType fromVertexId;
+        VertexEdgeIndexType toVertexId;
+        VertexEdgeIndexType index;
         
-        explicit PartialEdgeInfoImpl(const size_t i, const size_t from, const size_t to) : fromVertexId(from), toVertexId(to), index(i) {}
+        explicit PartialEdgeInfoImpl(const VertexEdgeIndexType i, const VertexEdgeIndexType from, const VertexEdgeIndexType to) : fromVertexId(from), toVertexId(to), index(i) {}
         
         [[nodiscard]] bool fullyPopulated() const {
             return label.occupied();
@@ -119,11 +121,11 @@ namespace _GraphBuilder {
     struct PartialEdgeInfoImpl<false, true, G> {
         using Dec = typename G::EdgeDecorator;
         Optional<typename Dec::WeightType> weight;
-        size_t fromVertexId;
-        size_t toVertexId;
-        size_t index;
+        VertexEdgeIndexType fromVertexId;
+        VertexEdgeIndexType toVertexId;
+        VertexEdgeIndexType index;
         
-        explicit PartialEdgeInfoImpl(const size_t i, const size_t from, const size_t to) : fromVertexId(from), toVertexId(to), index(i) {}
+        explicit PartialEdgeInfoImpl(const VertexEdgeIndexType i, const VertexEdgeIndexType from, const VertexEdgeIndexType to) : fromVertexId(from), toVertexId(to), index(i) {}
         
         [[nodiscard]] bool fullyPopulated() const {
             return weight.occupied();
@@ -132,11 +134,11 @@ namespace _GraphBuilder {
 
     template <typename G>
     struct PartialEdgeInfoImpl<false, false, G> {
-        size_t fromVertexId;
-        size_t toVertexId;
-        size_t index;
+        VertexEdgeIndexType fromVertexId;
+        VertexEdgeIndexType toVertexId;
+        VertexEdgeIndexType index;
         
-        explicit PartialEdgeInfoImpl(const size_t i, const size_t from, const size_t to) : fromVertexId(from), toVertexId(to), index(i) {}
+        explicit PartialEdgeInfoImpl(const VertexEdgeIndexType i, const VertexEdgeIndexType from, const VertexEdgeIndexType to) : fromVertexId(from), toVertexId(to), index(i) {}
         
         [[nodiscard]] bool fullyPopulated() const {
             return true;
@@ -152,10 +154,10 @@ namespace _GraphBuilder {
         // Opaque handles for vertices and edges during construction with validation
         class VertexHandle {
         private:
-            size_t index;
+            VertexEdgeIndexType index;
             const Vector<PartialVertexInfo<Graph>>* builderVector; // Validates handle belongs to this builder
             friend class GraphBuilderImpl<Graph>;
-            explicit VertexHandle(size_t i, const Vector<PartialVertexInfo<Graph>>* vector) 
+            explicit VertexHandle(VertexEdgeIndexType i, const Vector<PartialVertexInfo<Graph>>* vector)
                 : index(i), builderVector(vector) {}
         public:
             bool operator==(const VertexHandle& other) const { 
@@ -166,10 +168,10 @@ namespace _GraphBuilder {
 
         class EdgeHandle {
         private:
-            size_t index;
+            VertexEdgeIndexType index;
             const Vector<PartialEdgeInfo<Graph>>* builderVector;
             friend class GraphBuilderImpl<Graph>;
-            explicit EdgeHandle(size_t i, const Vector<PartialEdgeInfo<Graph>>* vector) 
+            explicit EdgeHandle(VertexEdgeIndexType i, const Vector<PartialEdgeInfo<Graph>>* vector)
                 : index(i), builderVector(vector) {}
         public:
             bool operator==(const EdgeHandle& other) const { 
@@ -197,15 +199,15 @@ namespace _GraphBuilder {
         
         [[no_unique_address]]
         conditional_t<VertexDecorator::is_labeled,
-                      HashMap<typename VertexDecorator::LabelType, size_t>,
+                      HashMap<typename VertexDecorator::LabelType, VertexEdgeIndexType>,
                       None> vertexLabelMap;
         [[no_unique_address]]                      
         conditional_t<EdgeDecorator::is_labeled,
-                      HashMap<typename EdgeDecorator::LabelType, size_t>,
+                      HashMap<typename EdgeDecorator::LabelType, VertexEdgeIndexType>,
                       None> edgeLabelMap;
 
         PartialVertexInfo<Graph>& createVertex() {
-            vertexInfo.push(PartialVertexInfo<Graph>(vertexInfo.getSize()));
+            vertexInfo.push(PartialVertexInfo<Graph>(static_cast<VertexEdgeIndexType>(vertexInfo.getSize())));
             PartialVertexInfo<Graph>& vertex = vertexInfo[vertexInfo.getSize() - 1];
             return vertex;
         }
@@ -231,7 +233,7 @@ namespace _GraphBuilder {
                 }
             }
 
-            PartialEdgeInfo<Graph> edge(edgeInfo.getSize(), source.index, target.index);
+            PartialEdgeInfo<Graph> edge(static_cast<VertexEdgeIndexType>(edgeInfo.getSize()), source.index, target.index);
             edgeInfo.push(move(edge));
             ++source.outgoingEdgeCount;
             ++target.incomingEdgeCount;
@@ -565,12 +567,12 @@ namespace _GraphBuilder {
             return graph;
         }
 
-        VertexHandle getVertexHandle(size_t index) const {
+        VertexHandle getVertexHandle(VertexEdgeIndexType index) const {
             assert(index < vertexInfo.getSize(), "Vertex index out of bounds");
             return VertexHandle(index, &vertexInfo);
         }
 
-        EdgeHandle getEdgeHandle(size_t index) const {
+        EdgeHandle getEdgeHandle(VertexEdgeIndexType index) const {
             assert(index < edgeInfo.getSize(), "Edge index out of bounds");
             return EdgeHandle(index, &edgeInfo);
         }
@@ -647,7 +649,7 @@ namespace _GraphBuilder {
         requires VertexDecorator::is_labeled
         Optional<VertexHandle> getVertexByLabel(const T& label) const {
             if (vertexLabelMap.contains(label)) {
-                size_t index = vertexLabelMap.at(label);
+                VertexEdgeIndexType index = vertexLabelMap.at(label);
                 return VertexHandle(index, &vertexInfo);
             }
             return {};

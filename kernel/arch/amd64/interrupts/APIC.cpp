@@ -4,13 +4,15 @@
 #include <arch/amd64/interrupts/APIC.h>
 #include <arch/amd64/amd64.h>
 #include <core/ds/Trees.h>
-#include <arch/amd64/interrupts/IRQDomain.h>
+#include <arch/amd64/interrupts/AuxiliaryDomains.h>
 
 namespace kernel::amd64::interrupts{
     constexpr uint32_t IOAPIC_REG_ID = 0x00;
     constexpr uint32_t IOAPIC_REG_VERSION = 0x01;
     constexpr uint32_t IOAPIC_REG_ARBITRATION_PRIORITY = 0x02;
     constexpr uint32_t IOAPIC_REG_REDIRECT_TABLE_BASE = 0x10;
+
+    constexpr size_t IOAPIC_VECTOR_MAPPING_BASE = 0x10;
 
     IOAPIC::IOAPIC(uint8_t i, void* m, uint32_t g) : id(i), mmio_window(static_cast<volatile uint32_t*>(m)), gsi_base(g) {
         const uint32_t version = regRead(IOAPIC_REG_VERSION);
@@ -61,7 +63,7 @@ namespace kernel::amd64::interrupts{
 
     size_t IOAPIC::getEmitterCount(){
         //From the OSDev wiki: allowed values for interrupt vectors are 0x10 to 0xFE
-        return 0xFEul - 0x10ul + 1ul;
+        return (INTERRUPT_VECTOR_COUNT - 2) - IOAPIC_VECTOR_MAPPING_BASE + 1ul;
     }
 
     bool IOAPIC::routeInterrupt(size_t lineIndex, size_t destinationLine){
@@ -125,14 +127,14 @@ namespace kernel::amd64::interrupts{
     IRQToIOAPICConnector::IRQToIOAPICConnector(SharedPtr<IRQDomain> irqDomain, SharedPtr<InterruptDomain> ioapic, Bimap<size_t, size_t> &&map) :
     DomainConnector(static_pointer_cast<InterruptDomain>(move(irqDomain)), move(ioapic)), irqToAPICLineMap(move(map)){}
 
-    Optional<DomainInputIndex> IRQToIOAPICConnector::fromOutput(DomainOutputIndex index) {
+    Optional<DomainInputIndex> IRQToIOAPICConnector::fromOutput(DomainOutputIndex index) const {
         if (irqToAPICLineMap.contains(index)) {
             return irqToAPICLineMap.at(index);
         }
         return {};
     }
 
-    Optional<DomainOutputIndex> IRQToIOAPICConnector::fromInput(DomainInputIndex index) {
+    Optional<DomainOutputIndex> IRQToIOAPICConnector::fromInput(DomainInputIndex index) const {
         if (irqToAPICLineMap.containsRight(index)) {
             return irqToAPICLineMap.atRight(index);
         }
@@ -153,6 +155,10 @@ namespace kernel::amd64::interrupts{
             ioapicsByID[ioapicEntry.ioapicID] = ioapic;
             ioapicsByGSI.insert(ioapic);
             hal::interrupts::topology::registerDomain(ioapic);
+
+            auto apicConnector = make_shared<AffineConnector>(ioapic,
+            getCPUInterruptVectors(), IOAPIC_VECTOR_MAPPING_BASE);
+            hal::interrupts::topology::registerConnector(apicConnector);
         }
     }
 

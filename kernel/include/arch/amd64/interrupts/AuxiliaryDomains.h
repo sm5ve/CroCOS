@@ -21,12 +21,19 @@ namespace kernel::amd64::interrupts{
         size_t getEmitterFor(size_t receiver) const override;
     };
 
+    CRClass(ExceptionVectorDomain, public InterruptDomain, public InterruptEmitter){
+        size_t evc;
+    public:
+        ExceptionVectorDomain(size_t exceptionVectorCount) : evc(exceptionVectorCount) {}
+        size_t getEmitterCount() override { return evc; }
+    };
+
     class IRQToIOAPICConnector : public DomainConnector{
         Bimap<size_t, size_t> irqToAPICLineMap;
     public:
         IRQToIOAPICConnector(SharedPtr<IRQDomain> irqDomain, SharedPtr<InterruptDomain> ioapic, Bimap<size_t, size_t>&& map);
-        Optional<DomainInputIndex> fromOutput(DomainOutputIndex) override;
-        Optional<DomainOutputIndex> fromInput(DomainInputIndex) override;
+        Optional<DomainInputIndex> fromOutput(DomainOutputIndex) const override;
+        Optional<DomainOutputIndex> fromInput(DomainInputIndex) const override;
     };
 }
 

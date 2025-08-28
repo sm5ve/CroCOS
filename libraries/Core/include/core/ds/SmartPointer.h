@@ -176,6 +176,10 @@ private:
     }
 
 public:
+    constexpr static SharedPtr null() {
+        return SharedPtr();
+    }
+
     // Constructor
     explicit SharedPtr(T* ptr = nullptr) {
         if (ptr) {

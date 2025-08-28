@@ -61,15 +61,48 @@ namespace kernel::hal::interrupts {
             builder.addEdge(*source, *target, move(connector));
             isDirty = true;
         }
+
+        using ExclusiveConnectorMap = HashMap<managed::RoutingNodeLabel, SharedPtr<platform::DomainConnector>>;
+#ifdef CROCOS_TESTING
+
+#else
+        WITH_GLOBAL_CONSTRUCTOR(ExclusiveConnectorMap, exclusiveConnectors);
+
+        ExclusiveConnectorMap& getExclusiveConnectors() {
+            return exclusiveConnectors;
+        }
+#endif
+
+        bool registerExclusiveConnector(SharedPtr<platform::DomainConnector> connector) {
+            auto& builder = getBuilder();
+            auto source = builder.getVertexByLabel(connector -> getSource());
+            auto target = builder.getVertexByLabel(connector -> getTarget());
+            auto targetReceiver = crocos_dynamic_cast<platform::InterruptReceiver>(connector -> getTarget());
+            assert(source.occupied() && target.occupied(), "Must add interrupt domains before registering a connector between them");
+            assert(connector -> getSource() -> instanceof(TypeID_v<platform::InterruptEmitter>), "Connector source must be an interrupt emitter");
+            assert(targetReceiver, "Connector target must be an interrupt receiver");
+            builder.addEdge(*source, *target, move(connector));
+            isDirty = true;
+            bool wasSuccessful = true;
+            for (size_t i = 0; i < targetReceiver -> getReceiverCount(); i++) {
+                auto targetLabel = managed::RoutingNodeLabel(connector -> getTarget(), i);
+                if (exclusiveConnectors.contains(targetLabel)) {
+                    wasSuccessful = false;
+                    continue;
+                }
+                exclusiveConnectors.insert(targetLabel, connector);
+            }
+
+            return wasSuccessful;
+        }
     }
 
     namespace managed {
         size_t RoutingNodeLabel::hash() const {
             const size_t domainHash = DefaultHasher<SharedPtr<kernel::hal::interrupts::platform::InterruptDomain>>{}(this -> domain);
             const size_t indexHash = this -> index;
-            const size_t typeHash = static_cast<size_t>(this -> type);
 
-            return domainHash ^ (indexHash << 1) ^ (typeHash << 2);
+            return domainHash ^ (indexHash << 1);
         }
 
         SharedPtr<RoutingGraphBuilder> createRoutingGraphBuilder() {
@@ -92,7 +125,7 @@ namespace kernel::hal::interrupts {
                     const auto receiver = crocos_dynamic_cast<platform::InterruptReceiver>(domain);
                     for (size_t i = 0; i < receiver->getReceiverCount(); i++) {
                         routingVertices.push(RoutingVertexSpec{
-                            RoutingNodeLabel(domain, i, NodeType::Input),
+                            RoutingNodeLabel(domain, i),
                             0
                         });
                     }
@@ -101,7 +134,7 @@ namespace kernel::hal::interrupts {
                     const auto emitter = crocos_dynamic_cast<platform::InterruptEmitter>(domain);
                     for (size_t i = 0; i < emitter->getEmitterCount(); i++) {
                         routingVertices.push(RoutingVertexSpec{
-                            RoutingNodeLabel(domain, i, NodeType::Device),
+                            RoutingNodeLabel(domain, i),
                             0
                         });
                     }
@@ -127,11 +160,30 @@ namespace kernel::hal::interrupts {
                         for (size_t sourceIndex = 0; sourceIndex < fixedDomain -> getReceiverCount(); sourceIndex++) {
                             const auto emitterIndex = fixedDomain -> getEmitterFor(sourceIndex);
                             if (const auto targetIndex = connector -> fromOutput(emitterIndex)) {
-                                auto targetLabel = RoutingNodeLabel(targetDomain, *targetIndex, NodeType::Input);
-                                auto sourceLabel = RoutingNodeLabel(domain, sourceIndex, NodeType::Input);
+                                auto targetLabel = RoutingNodeLabel(targetDomain, *targetIndex);
+                                auto sourceLabel = RoutingNodeLabel(domain, sourceIndex);
                                 auto sourceBuilderVertex = out -> getVertexByLabel(sourceLabel);
                                 auto targetBuilderVertex = out -> getVertexByLabel(targetLabel);
                                 assert(sourceBuilderVertex.occupied() && targetBuilderVertex.occupied(), "Must have a vertex for each domain");
+                                out -> addEdge(*sourceBuilderVertex, *targetBuilderVertex);
+                            }
+                        }
+                    }
+                }
+                //If this is a device node, we can also immediately populate all edges
+                else if (!domain -> instanceof(TypeID_v<platform::InterruptReceiver>)) {
+                    const auto emitter = crocos_dynamic_cast<platform::InterruptEmitter>(domain);
+                    assert(emitter, "Domain must be an emitter");
+                    for (const auto outgoingEdge : topologyGraph -> outgoingEdges(topVert)) {
+                        const auto targetVertex = topologyGraph -> getTarget(outgoingEdge);
+                        const auto targetDomain = topologyGraph -> getVertexLabel(targetVertex);
+                        const auto connector = topologyGraph -> getEdgeLabel(outgoingEdge);
+                        for (size_t sourceIndex = 0; sourceIndex < emitter -> getEmitterCount(); sourceIndex++) {
+                            if (auto targetIndex = connector -> fromOutput(sourceIndex)) {
+                                auto targetLabel = RoutingNodeLabel(targetDomain, *targetIndex);
+                                auto sourceLabel = RoutingNodeLabel(domain, sourceIndex);
+                                auto sourceBuilderVertex = out -> getVertexByLabel(sourceLabel);
+                                auto targetBuilderVertex = out -> getVertexByLabel(targetLabel);
                                 out -> addEdge(*sourceBuilderVertex, *targetBuilderVertex);
                             }
                         }
@@ -148,7 +200,7 @@ namespace kernel::hal::interrupts {
 
             const auto sourceDomain = graph.getVertexLabel(source) -> domain;
             const auto sourceIndex = graph.getVertexLabel(source) -> index;
-            const auto sourceType = graph.getVertexLabel(source) -> type;
+            const auto sourceType = graph.getVertexLabel(source) -> getType();
             const auto targetDomain = graph.getVertexLabel(target) -> domain;
             const auto targetIndex = graph.getVertexLabel(target) -> index;
 
@@ -162,6 +214,12 @@ namespace kernel::hal::interrupts {
             assert(sourceTopologyVertex.occupied() && targetTopologyVertex.occupied(), "Must have a topology vertex for each domain");
             if (const auto edge = topologyGraph.findEdge(*sourceTopologyVertex, *targetTopologyVertex)) {
                 const auto connector = topologyGraph.getEdgeLabel(*edge);
+                const auto targetLabel = graph.getVertexLabel(target);
+                //If the target receiver is connected to by an exclusive connector, confirm that 'connector' is that exclusive connector
+                if (topology::getExclusiveConnectors().contains(*targetLabel)) {
+                    const auto exclusiveConnector = topology::getExclusiveConnectors().at(*targetLabel);
+                    if (connector != exclusiveConnector) return false;
+                }
                 if (auto emitterIndex = connector->fromInput(targetIndex)) {
                     const auto emitter = crocos_dynamic_cast<platform::InterruptEmitter>(sourceDomain);
                     if (!emitter) return false;
@@ -293,10 +351,9 @@ namespace kernel::hal::interrupts {
         bool PotentialEdgeIterator<false>::isValidIntermediateState() const {
             if (!graph) return false;
             auto& topologyGraph = *topology::getTopologyGraph();
-            auto targetLabel = RoutingNodeLabel(fixedDomain, fixedIndex, NodeType::Input);
+            auto targetLabel = RoutingNodeLabel(fixedDomain, fixedIndex);
             auto sourceDomain = topologyGraph.getVertexLabel(topologyGraph.getSource(*currentConnector));
-            auto sourceType = (sourceDomain -> instanceof(TypeID_v<platform::InterruptReceiver>)) ? NodeType::Input : NodeType::Device;
-            auto sourceLabel = RoutingNodeLabel(sourceDomain, currentIndex, sourceType);
+            auto sourceLabel = RoutingNodeLabel(sourceDomain, currentIndex);
 
             auto sourceVertex = graph -> getVertexByLabel(sourceLabel);
             auto targetVertex = graph -> getVertexByLabel(targetLabel);
@@ -308,10 +365,9 @@ namespace kernel::hal::interrupts {
         bool PotentialEdgeIterator<true>::isValidIntermediateState() const {
             if (!graph) return false;
             auto& topologyGraph = *topology::getTopologyGraph();
-            auto sourceType = (fixedDomain -> instanceof(TypeID_v<platform::InterruptReceiver>)) ? NodeType::Input : NodeType::Device;
-            auto sourceLabel = RoutingNodeLabel(fixedDomain, fixedIndex, sourceType);
+            auto sourceLabel = RoutingNodeLabel(fixedDomain, fixedIndex);
             auto targetDomain = topologyGraph.getVertexLabel(topologyGraph.getTarget(*currentConnector));
-            auto targetLabel = RoutingNodeLabel(targetDomain, currentIndex, NodeType::Input);
+            auto targetLabel = RoutingNodeLabel(targetDomain, currentIndex);
 
             auto sourceVertex = graph -> getVertexByLabel(sourceLabel);
             auto targetVertex = graph -> getVertexByLabel(targetLabel);
@@ -335,28 +391,60 @@ namespace kernel::hal::interrupts {
             auto edge = currentConnector.operator*();
             
             SharedPtr<platform::InterruptDomain> targetDomain;
-            NodeType targetType;
             
             if constexpr (Forward) {
                 auto targetVertex = topologyGraph.getTarget(edge);
                 targetDomain = topologyGraph.getVertexLabel(targetVertex);
-                targetType = NodeType::Input;
             } else {
                 auto sourceVertex = topologyGraph.getSource(edge);
                 targetDomain = topologyGraph.getVertexLabel(sourceVertex);
-                // For backward iteration, we need to determine if source is a device or input
-                if (targetDomain->instanceof(TypeID_v<platform::InterruptReceiver>)) {
-                    targetType = NodeType::Input;
-                } else {
-                    targetType = NodeType::Device;
-                }
             }
             
-            const RoutingNodeLabel targetLabel(targetDomain, currentIndex, targetType);
+            const RoutingNodeLabel targetLabel(targetDomain, currentIndex);
             auto vertex = this->graph->getVertexByLabel(targetLabel);
             assert(vertex.occupied(), "Target vertex must exist in routing graph");
             return *vertex;
         }
+    }
+
+    namespace platform {
+        AffineConnector::AffineConnector(SharedPtr<InterruptDomain> src, SharedPtr<InterruptDomain> tgt, size_t off) : DomainConnector(src, tgt), offset(off) {
+            auto emitter = crocos_dynamic_cast<InterruptEmitter>(src);
+            auto receiver = crocos_dynamic_cast<InterruptReceiver>(tgt);
+            assert(emitter, "Source domain must be an emitter");
+            assert(receiver, "Target domain must be a receiver");
+            assert(emitter -> getEmitterCount() + offset <= receiver -> getReceiverCount(), "Offset is out of bounds");
+        }
+
+        Optional<DomainInputIndex> AffineConnector::fromOutput(DomainOutputIndex index) const {
+            return index + offset;
+        }
+
+        Optional<DomainOutputIndex> AffineConnector::fromInput(DomainInputIndex index) const {
+            return index - offset;
+        }
+
+        CPUInterruptVectorFile::CPUInterruptVectorFile(size_t w) : width(w) {}
+
+        size_t CPUInterruptVectorFile::getReceiverCount() {
+            return width;
+        }
+
+        SharedPtr<CPUInterruptVectorFile> vectorFile;
+
+        const SharedPtr<CPUInterruptVectorFile> getCPUInterruptVectors(){
+            return vectorFile;
+        }
+
+        bool setupCPUInterruptVectorFile(size_t size) {
+            static bool initialized = false;
+            if (initialized) return false;
+            vectorFile = make_shared<CPUInterruptVectorFile>(size);
+            topology::registerDomain(vectorFile);
+            initialized = true;
+            return true;
+        }
+
     }
 }
 

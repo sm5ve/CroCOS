@@ -13,6 +13,7 @@
 #include <arch/amd64/interrupts/LegacyPIC.h>
 #include <arch/amd64/smp.h>
 #include <arch/amd64/interrupts/APIC.h>
+#include <arch/amd64/interrupts/AuxiliaryDomains.h>
 
 extern uint32_t mboot_magic;
 extern uint32_t mboot_table;
@@ -290,6 +291,19 @@ namespace kernel::amd64{
 
     extern "C" void load_gdt(void*);
 
+    void initializeInterrupts(acpi::MADT& madt) {
+        interrupts::init();
+        interrupts::disableLegacyPIC();
+        hal::interrupts::platform::setupCPUInterruptVectorFile(INTERRUPT_VECTOR_COUNT);
+        interrupts::setupIOAPICs(madt);
+        const auto exceptionVectors = make_shared<interrupts::ExceptionVectorDomain>(INTERRUPT_VECTOR_RESERVE_SIZE);
+        hal::interrupts::topology::registerDomain(exceptionVectors);
+        const auto exceptionVectorConnector =
+            make_shared<hal::interrupts::platform::AffineConnector>(exceptionVectors,
+            hal::interrupts::platform::getCPUInterruptVectors(), INTERRUPT_VECTOR_RESERVE_START);
+        hal::interrupts::topology::registerConnector(exceptionVectorConnector);
+    }
+
     void hwinit(){
         assert(mboot_magic == 0x2BADB002, "Somehow the multiboot magic number is wrong. How did we get here?");
 
@@ -342,10 +356,8 @@ namespace kernel::amd64{
 
         klog << "Finished initializing page table manager\n";
 
-        interrupts::init();
-        kernel::amd64::interrupts::disableLegacyPIC();
-        //
-        interrupts::setupIOAPICs(madt);
+        initializeInterrupts(madt);
+
         klog << "Finished initializing interrupts\n";
         //kernel::amd64::interrupts::buildApicTopology(madt); //Temporary ACPI initialization stuff...
 
