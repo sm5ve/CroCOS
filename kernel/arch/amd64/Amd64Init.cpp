@@ -14,6 +14,7 @@
 #include <arch/amd64/smp.h>
 #include <arch/amd64/interrupts/APIC.h>
 #include <arch/amd64/interrupts/AuxiliaryDomains.h>
+#include <arch/amd64/timers/PIT.h>
 
 extern uint32_t mboot_magic;
 extern uint32_t mboot_table;
@@ -357,6 +358,7 @@ namespace kernel::amd64{
         klog << "Finished initializing page table manager\n";
 
         initializeInterrupts(madt);
+        timers::initPIT();
 
         klog << "Finished initializing interrupts\n";
         //kernel::amd64::interrupts::buildApicTopology(madt); //Temporary ACPI initialization stuff...

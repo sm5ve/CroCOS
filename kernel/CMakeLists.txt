@@ -26,6 +26,7 @@ set(KERNEL_SRC
         arch/hal/InterruptGraphManager.cpp
         cxxcompat.cpp
         arch/amd64/interrupts/APIC.cpp
+        arch/amd64/timers/PIT.cpp
 )
 
 add_executable(Kernel ${KERNEL_SRC})

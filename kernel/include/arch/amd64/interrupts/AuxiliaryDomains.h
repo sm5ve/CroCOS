@@ -8,6 +8,7 @@
 #include <core/Object.h>
 #include <arch/hal/interrupts.h>
 #include <core/ds/Bimap.h>
+#include <core/ds/SmartPointer.h>
 
 namespace kernel::amd64::interrupts{
     using namespace kernel::hal::interrupts::platform;
@@ -35,6 +36,8 @@ namespace kernel::amd64::interrupts{
         Optional<DomainInputIndex> fromOutput(DomainOutputIndex) const override;
         Optional<DomainOutputIndex> fromInput(DomainInputIndex) const override;
     };
+
+    SharedPtr<IRQDomain> getIRQDomain();
 }
 
 #endif //CROCOS_IRQDOMAIN_H

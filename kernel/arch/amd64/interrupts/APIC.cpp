@@ -205,6 +205,8 @@ namespace kernel::amd64::interrupts{
         return ioapic;
     }
 
+    SharedPtr<IRQDomain> irqDomain;
+
     void createIRQDomainConnectorsAndConfigureIOAPICActivationType(acpi::MADT& madt) {
         Optional<size_t> irqToEmitterMap[16];
         size_t emitterMax = 0;
@@ -237,7 +239,7 @@ namespace kernel::amd64::interrupts{
             finalizedEmitterMap[i] = *irqToEmitterMap[i];
         }
 
-        auto irqDomain = make_shared<IRQDomain>(finalizedEmitterMap);
+        irqDomain = make_shared<IRQDomain>(finalizedEmitterMap);
         hal::interrupts::topology::registerDomain(irqDomain);
         for (const auto& connectorInfo : connectorMapsByIOAPIC) {
             auto ioapic = connectorInfo.first();
@@ -245,6 +247,10 @@ namespace kernel::amd64::interrupts{
             auto connector = make_shared<IRQToIOAPICConnector>(irqDomain, ioapic, move(*bimap));
             hal::interrupts::topology::registerConnector(connector);
         }
+    }
+
+    SharedPtr<IRQDomain> getIRQDomain() {
+        return irqDomain;
     }
 
     void setupIOAPICs(acpi::MADT& madt) {
