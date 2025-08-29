@@ -19,16 +19,6 @@ namespace kernel::hal::interrupts {
             }
             return *builder_ptr;
         }
-        
-        // Function to reset state between tests
-        void resetTopologyState() {
-            if (builder_ptr) {
-                delete builder_ptr;
-                builder_ptr = nullptr;
-            }
-            isDirty = false;
-            cachedGraph = {};
-        }
 #else
         bool isDirty = false;
         WITH_GLOBAL_CONSTRUCTOR(Optional<TopologyGraph>, cachedGraph);
@@ -64,7 +54,28 @@ namespace kernel::hal::interrupts {
 
         using ExclusiveConnectorMap = HashMap<managed::RoutingNodeLabel, SharedPtr<platform::DomainConnector>>;
 #ifdef CROCOS_TESTING
+        ExclusiveConnectorMap* exclusiveConnectors;
 
+        ExclusiveConnectorMap& getExclusiveConnectors() {
+            if (exclusiveConnectors == nullptr) {
+                exclusiveConnectors = new ExclusiveConnectorMap();
+            }
+            return *exclusiveConnectors;
+        }
+
+        // Function to reset state between tests
+        void resetTopologyState() {
+            if (builder_ptr) {
+                delete builder_ptr;
+                builder_ptr = nullptr;
+            }
+            if (exclusiveConnectors) {
+                delete exclusiveConnectors;
+                exclusiveConnectors = nullptr;
+            }
+            isDirty = false;
+            cachedGraph = {};
+        }
 #else
         WITH_GLOBAL_CONSTRUCTOR(ExclusiveConnectorMap, exclusiveConnectors);
 
@@ -86,11 +97,11 @@ namespace kernel::hal::interrupts {
             bool wasSuccessful = true;
             for (size_t i = 0; i < targetReceiver -> getReceiverCount(); i++) {
                 auto targetLabel = managed::RoutingNodeLabel(connector -> getTarget(), i);
-                if (exclusiveConnectors.contains(targetLabel)) {
+                if (getExclusiveConnectors().contains(targetLabel)) {
                     wasSuccessful = false;
                     continue;
                 }
-                exclusiveConnectors.insert(targetLabel, connector);
+                getExclusiveConnectors().insert(targetLabel, connector);
             }
 
             return wasSuccessful;

@@ -133,7 +133,6 @@ namespace kernel::hal::interrupts {
          // Accessors for testing only
          const SharedPtr<platform::InterruptDomain>& getDomain() const { return domain; }
          size_t getIndex() const { return index; }
-         NodeType getType() const { return type; }
 #endif
       };
    }
