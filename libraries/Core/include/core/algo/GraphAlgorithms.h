@@ -109,7 +109,7 @@ namespace algorithm::graph {
             } else {
                 ps << " -- ";
             }
-            ps << indexedVertices[graph.getTarget(edge)];
+            ps << "v" << indexedVertices[graph.getTarget(edge)];
             if constexpr (G::EdgeDecorator::is_labeled && Core::Printable<typename G::EdgeDecorator::LabelType>) {
                 ps << " [label=\"" << graph.getEdgeLabel(edge) << "\"]";
             }
