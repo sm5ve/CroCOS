@@ -5,6 +5,8 @@
 #ifndef ITERATOR_H
 #define ITERATOR_H
 
+#include <core/utility.h>
+
 // Concept for types that provide iteration through begin() and end()
 template<typename T>
 concept Iterable = requires(T t) {

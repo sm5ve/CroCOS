@@ -18,6 +18,7 @@ target_sources(CoreTests PRIVATE
     TreeTest.cpp
     VariantTest.cpp
     VectorTest.cpp
+    LinkedListTests.cpp
 )
 
 # Add the TestHarness from parent directory
