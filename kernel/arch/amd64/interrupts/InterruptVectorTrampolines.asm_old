@@ -1,3 +1,5 @@
+#define ASM_FILE 1
+
 .critical_isr_trampoline:
     cli
     cld
@@ -45,29 +47,11 @@
     pushq   %r14
     pushq   %r15
 
-    # CREATE A FAKE CALL FRAME FOR GDB
-    # We'll push a fake return address pointing to the interrupted code
-    # and set up RBP to create a proper frame chain
+    # Set up first argument to C handler
+    movq    %rsp, %rdi         # rdi = pointer to interrupt stack frame
 
-    # Get the original RIP (24 bytes up: 15*8 regs + RAX + VECTOR + ERROR_CODE + RIP)
-    movq    136(%rsp), %rax    # 17*8 = 136: Load original RIP
-    pushq   %rax               # Push it as fake return address
-
-    # Set up frame pointer to create proper chain
-    pushq   %rbp               # Save current RBP (though it's already saved above)
-    movq    %rsp, %rbp         # Set up new frame pointer
-
-    # Now create the interrupt frame structure that your C code expects
-    # Calculate pointer to the saved registers + interrupt frame
-    leaq    16(%rsp), %rdi     # Skip fake ret addr and saved RBP to point to saved regs
-
-    # Call the common C handler - this will now have a proper stack frame
+    # Call the common C handler
     call    interrupt_common_handler
-
-    # Clean up our fake frame
-    movq    %rbp, %rsp         # Restore stack pointer
-    popq    %rbp               # Restore frame pointer
-    addq    $8, %rsp           # Skip the fake return address
 
     # Restore all saved registers
     popq    %r15

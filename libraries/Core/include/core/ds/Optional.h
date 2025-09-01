@@ -63,16 +63,13 @@ public:
         value = T::null();
     }
 
-    ImplicitOptional(T& t){
-        value = t;
+    ImplicitOptional(T& t) : value(t){
     }
 
-    ImplicitOptional(const T& t){
-        value = t;
+    ImplicitOptional(const T& t) : value(t){
     }
 
-    ImplicitOptional(T&& t){
-        value = move(t);
+    ImplicitOptional(T&& t) : value(move(t)){
     }
 
     bool occupied() const{
@@ -208,20 +205,20 @@ public:
         return {};
     }
 
-    ExplicitOptional(){
-        value.template emplace<monostate>();
+    ExplicitOptional() {
+        new(&value) Variant<T, monostate>(monostate{});
     }
 
     ExplicitOptional(T& t){
-        value.template emplace<T>(t);
+        new(&value) Variant<T, monostate>(t);
     }
 
     ExplicitOptional(const T& t){
-        value.template emplace<T>(t);
+        new(&value) Variant<T, monostate>(t);
     }
 
     ExplicitOptional(T&& t){
-        value.template emplace<T>(forward<T>(t));
+        new(&value) Variant<T, monostate>(move(t));
     }
 
     template<typename ... Ts>

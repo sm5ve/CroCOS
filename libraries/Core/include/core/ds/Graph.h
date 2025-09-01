@@ -852,14 +852,17 @@ public:
         else {
             dataSize = graph.getVertexCount();
         }
-        data = new T[dataSize];
+        data = static_cast<T*>(operator new(sizeof(T) * dataSize, std::align_val_t{alignof(T)}));
         for (size_t i = 0; i < dataSize; ++i) {
-            data[i] = init;
+            new(&(data[i])) T(init);
         }
     }
 
     ~VertexAnnotation() {
-        delete[] data;
+        for (auto v : g.vertices()) {
+            data[v.index].~T();
+        }
+        operator delete(data);
     }
 
     T& operator[](typename G::Vertex v) {
@@ -887,14 +890,17 @@ public:
         else {
             dataSize = graph.getEdgeCount();
         }
-        data = new T[dataSize];
+        data = static_cast<T*>(operator new(sizeof(T) * dataSize, std::align_val_t{alignof(T)}));
         for (size_t i = 0; i < dataSize; ++i) {
-            data[i] = init;
+            new(&(data[i])) T(init);
         }
     }
 
     ~EdgeAnnotation() {
-        delete[] data;
+        for (auto v : g.edges()) {
+            data[v.index].~T();
+        }
+        operator delete(data);
     }
 
     T& operator[](typename G::Edge e) {

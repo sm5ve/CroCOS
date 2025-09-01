@@ -18,7 +18,7 @@ namespace kernel::amd64::timers{
         auto interruptDomain = make_shared<PITInterruptDomain>();
         topology::registerDomain(interruptDomain);
         auto irqDomain = interrupts::getIRQDomain();
-        auto connector = make_shared<platform::AffineConnector>(interruptDomain, irqDomain, 0);
+        auto connector = make_shared<platform::AffineConnector>(interruptDomain, irqDomain, 0, 0, 1);
         topology::registerConnector(connector);
     }
 }

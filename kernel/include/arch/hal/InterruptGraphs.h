@@ -78,8 +78,10 @@ namespace kernel::hal::interrupts {
 
       class AffineConnector : public DomainConnector {
          const size_t offset;
+         const size_t start;
+         const size_t width;
       public:
-         AffineConnector(SharedPtr<InterruptDomain> src, SharedPtr<InterruptDomain> tgt, size_t offset);
+         AffineConnector(SharedPtr<InterruptDomain> src, SharedPtr<InterruptDomain> tgt, size_t offset, size_t start, size_t width);
          Optional<DomainInputIndex> fromOutput(DomainOutputIndex index) const override;
          Optional<DomainOutputIndex> fromInput(DomainInputIndex index) const override;
       };
@@ -110,29 +112,30 @@ namespace kernel::hal::interrupts {
       struct RoutingConstraint;
       class RoutingNodeLabel{
       private:
-         SharedPtr<platform::InterruptDomain> domain;
-         size_t index;
          friend struct RoutingConstraint;
+         SharedPtr<platform::InterruptDomain> dom;
+         size_t ind;
+      public:
+
+
+         SharedPtr<platform::InterruptDomain> domain() const{return dom;}
+         size_t index() const{return ind;};
+
+         RoutingNodeLabel(SharedPtr<platform::InterruptDomain>&& d, size_t i) : dom(move(d)), ind(i) {}
+         RoutingNodeLabel(const SharedPtr<platform::InterruptDomain>& d, size_t i) : dom(d), ind(i) {}
+         bool operator==(const RoutingNodeLabel& other) const = default;
+         [[nodiscard]] size_t hash() const;
 
          [[nodiscard]] NodeType getType() const {
-            if (domain -> instanceof(TypeID_v<platform::InterruptReceiver>))
+            if (domain() -> instanceof(TypeID_v<platform::InterruptReceiver>))
                return NodeType::Input;
             return NodeType::Device;
          };
-      public:
-         RoutingNodeLabel(SharedPtr<platform::InterruptDomain>&& d, size_t ind) : domain(move(d)), index(ind) {
-            if (domain -> instanceof(TypeID_v<platform::InterruptReceiver>)){}
-         }
-         RoutingNodeLabel(const SharedPtr<platform::InterruptDomain>& d, size_t ind) : domain(d), index(ind) {
-            if (domain -> instanceof(TypeID_v<platform::InterruptReceiver>)){}
-         }
-         bool operator==(const RoutingNodeLabel& other) const = default;
-         size_t hash() const;
          
 #ifdef CROCOS_TESTING
          // Accessors for testing only
-         const SharedPtr<platform::InterruptDomain>& getDomain() const { return domain; }
-         size_t getIndex() const { return index; }
+         const SharedPtr<platform::InterruptDomain>& getDomain() const { return dom; }
+         size_t getIndex() const { return index(); }
 #endif
       };
    }

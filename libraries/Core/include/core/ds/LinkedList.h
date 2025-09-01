@@ -174,9 +174,9 @@ public:
     ~LinkedList() {
         Node* current = Base::head();
         while(current != nullptr){
-            Node* next = Base::next(*current);
+            Node* nextNode = Base::next(*current);
             delete current;
-            current = next;
+            current = nextNode;
         }
     }
 
@@ -194,37 +194,25 @@ public:
         }
     }
 
-    Node* pushBack(NodeData& data) requires (!is_trivially_copyable_v<NodeData>){
+    Node* pushBack(const NodeData& data){
         auto newNode = new Node{data, nullptr, nullptr};
         Base::pushBack(*newNode);
         return newNode;
     }
 
-    Node* pushFront(NodeData& data) requires (!is_trivially_copyable_v<NodeData>){
+    Node* pushFront(const NodeData& data){
         auto newNode = new Node{data, nullptr, nullptr};
         Base::pushFront(*newNode);
         return newNode;
     }
 
-    Node* pushBack(NodeData data) {
-        auto newNode = new Node{data, nullptr, nullptr};
-        Base::pushBack(*newNode);
-        return newNode;
-    }
-
-    Node* pushFront(NodeData data) {
-        auto newNode = new Node{data, nullptr, nullptr};
-        Base::pushFront(*newNode);
-        return newNode;
-    }
-
-    Node* pushBack(NodeData&& data) requires (!is_trivially_copyable_v<NodeData>){
+    Node* pushBack(NodeData&& data){
         auto newNode = new Node{move(data), nullptr, nullptr};
         Base::pushBack(*newNode);
         return newNode;
     }
 
-    Node* pushFront(NodeData&& data) requires (!is_trivially_copyable_v<NodeData>){
+    Node* pushFront(NodeData&& data){
         auto newNode = new Node{move(data), nullptr, nullptr};
         Base::pushFront(*newNode);
         return newNode;
@@ -305,6 +293,10 @@ public:
             return &Base::tail()->data;
         }
         return nullptr;
+    }
+
+    bool empty(){
+        return Base::head() == nullptr;
     }
 
     using Base::next;

@@ -19,7 +19,8 @@ public:
 
     // Destructor
     ~UniquePtr() {
-        delete ptr;
+        if (ptr)
+            delete ptr;
     }
 
     // Deleted Copy Constructor and Copy Assignment (unique ownership)

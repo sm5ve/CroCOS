@@ -13,6 +13,7 @@
 #include "core/TypeTraits.h"
 #include <core/algo/sort.h>
 #include <initializer_list.h>
+#include <core/Iterator.h>
 
 template <typename T>
 class Vector {
@@ -74,6 +75,15 @@ public:
             data[i] = other.data[i];
         }
     }
+
+    template <typename Itr>
+    requires IterableWithValueType<Itr, T>
+    explicit Vector(Itr itr) : Vector(5){
+        for (auto i : itr) {
+            push(i);
+        }
+    }
+
 
     //Copy assignment
     Vector& operator=(const Vector& other) {
@@ -298,6 +308,29 @@ public:
     template <typename Comparator = DefaultComparator<T>>
     void sort(Comparator comp = Comparator{}){
         algorithm::sort(data, size, comp);
+    }
+
+    class ReverseIterator {
+        T* ptr;
+        friend class Vector;
+        explicit ReverseIterator(T* p) : ptr(p) {}
+    public:
+        T& operator*() const { return *ptr; }
+        ReverseIterator& operator++() {
+            --ptr;
+            return *this;
+        }
+        ReverseIterator operator++(int) {
+            --ptr;
+            return *this;
+        }
+        bool operator==(const ReverseIterator& other) const {
+            return ptr == other.ptr;
+        }
+    };
+
+    IteratorRange<ReverseIterator> reverse() const {
+        return IteratorRange<ReverseIterator>(ReverseIterator(data + size - 1), ReverseIterator(data - 1));
     }
 };
 

@@ -292,6 +292,10 @@ namespace kernel::amd64{
 
     extern "C" void load_gdt(void*);
 
+    void temporaryPageFaultHandler(hal::InterruptFrame& frame) {
+        kernel::klog << "Page fault at " << reinterpret_cast<void*>(frame.rip) << "\n";
+    }
+
     void initializeInterrupts(acpi::MADT& madt) {
         interrupts::init();
         interrupts::disableLegacyPIC();
@@ -301,8 +305,11 @@ namespace kernel::amd64{
         hal::interrupts::topology::registerDomain(exceptionVectors);
         const auto exceptionVectorConnector =
             make_shared<hal::interrupts::platform::AffineConnector>(exceptionVectors,
-            hal::interrupts::platform::getCPUInterruptVectors(), INTERRUPT_VECTOR_RESERVE_START);
+            hal::interrupts::platform::getCPUInterruptVectors(), INTERRUPT_VECTOR_RESERVE_START, 0, INTERRUPT_VECTOR_RESERVE_SIZE);
         hal::interrupts::topology::registerConnector(exceptionVectorConnector);
+
+        using namespace hal::interrupts::managed;
+        registerHandler(InterruptSourceHandle(exceptionVectors, 14), make_unique<InterruptHandler>(temporaryPageFaultHandler));
     }
 
     void hwinit(){

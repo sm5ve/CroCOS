@@ -11,6 +11,7 @@
 
 #include <core/algo/GraphPredicates.h>
 #include <core/PrintStream.h>
+#include <core/ds/LinkedList.h>
 
 namespace algorithm::graph {
     
@@ -39,7 +40,7 @@ namespace algorithm::graph {
     GraphProperties::GraphHasPredicate<G, GraphPredicates::DirectedAcyclic> {
         
         Vector<typename G::Vertex> result;
-        Vector<typename G::Vertex> queue;
+        LinkedList<typename G::Vertex> queue;
         
         // Track in-degrees using vertex annotation
         VertexAnnotation<size_t, G> inDegree(graph, 0);
@@ -50,14 +51,14 @@ namespace algorithm::graph {
             
             // Add vertices with in-degree 0 to the queue
             if (inDegree[vertex] == 0) {
-                queue.push(vertex);
+                queue.pushFront(vertex);
             }
         }
         
         // Process vertices in topological order
-        while (queue.getSize() > 0) {
+        while (!queue.empty()) {
             // Remove a vertex with in-degree 0
-            auto current = queue.pop();
+            auto current = *queue.popBack();
             result.push(current);
             
             // For each outgoing edge, reduce in-degree of target vertex
@@ -67,7 +68,7 @@ namespace algorithm::graph {
                 
                 // If target now has in-degree 0, add it to queue
                 if (inDegree[target] == 0) {
-                    queue.push(target);
+                    queue.pushFront(target);
                 }
             }
         }

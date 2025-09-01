@@ -3,6 +3,7 @@
 //
 
 #include <arch/amd64/amd64.h>
+#include <arch/hal/interrupts.h>
 
 #define ISR(n) extern "C" void isr_##n();
 #define SET_ISR(n) set_idt_entry(n, isr_##n, is_trap_gate(n));
@@ -90,6 +91,6 @@ Core::PrintStream& operator<<(Core::PrintStream& ps, kernel::amd64::interrupts::
     return ps;
 }
 
-extern "C" void interrupt_common_handler(kernel::amd64::interrupts::InterruptFrame& test){
-    kernel::klog << test;
+extern "C" void interrupt_common_handler(kernel::amd64::interrupts::InterruptFrame& frame){
+    kernel::hal::interrupts::managed::dispatchInterrupt(frame);
 }

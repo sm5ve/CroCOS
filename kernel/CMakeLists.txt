@@ -27,6 +27,8 @@ set(KERNEL_SRC
         cxxcompat.cpp
         arch/amd64/interrupts/APIC.cpp
         arch/amd64/timers/PIT.cpp
+        arch/hal/InterruptRoutingAndDispatch.cpp
+        arch/hal/InterruptRoutingPolicyImpls.cpp
 )
 
 add_executable(Kernel ${KERNEL_SRC})

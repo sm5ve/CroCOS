@@ -35,7 +35,7 @@ namespace kernel::amd64::interrupts{
         return static_cast<uint8_t>(lineIndex * 2 + 0x10);
     }
 
-    void IOAPIC::setActivationType(uint32_t gsi, InterruptLineActivationType type) {
+    void IOAPIC::setActivationType(uint32_t gsi, hal::interrupts::InterruptLineActivationType type) {
         assert(gsi - gsi_base < lineCount, "gsi out of range");
         auto regVal = regRead(getRegStartForLineIndex(gsi - gsi_base));
         constexpr uint32_t polarity_mask = 1u << 13;
@@ -157,7 +157,7 @@ namespace kernel::amd64::interrupts{
             hal::interrupts::topology::registerDomain(ioapic);
 
             auto apicConnector = make_shared<AffineConnector>(ioapic,
-            getCPUInterruptVectors(), IOAPIC_VECTOR_MAPPING_BASE);
+            getCPUInterruptVectors(), IOAPIC_VECTOR_MAPPING_BASE, 0, ioapic -> getEmitterCount());
             hal::interrupts::topology::registerConnector(apicConnector);
         }
     }
@@ -174,10 +174,10 @@ namespace kernel::amd64::interrupts{
         return apicForGSI;
     }
 
-    InterruptLineActivationType getActivationTypeFromMADTFlags(uint16_t flags) {
+    hal::interrupts::InterruptLineActivationType getActivationTypeFromMADTFlags(uint16_t flags) {
         bool activeHigh = (flags & 2) == 0;
         bool edgeTriggered = (flags & 8) == 0;
-        return activationTypeForLevelAndTriggerMode(activeHigh, edgeTriggered);
+        return hal::interrupts::activationTypeForLevelAndTriggerMode(activeHigh, edgeTriggered);
     }
 
     SharedPtr<IOAPIC> addIRQDomainConectorMapping(Optional<size_t>* irqToEmitterMap, size_t& emitterMax, HashMap<SharedPtr<IOAPIC>, SharedPtr<Bimap<size_t, size_t>>>& connectorMapsByIOAPIC, uint8_t irqSource, uint32_t gsi) {

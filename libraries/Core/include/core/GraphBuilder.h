@@ -681,10 +681,10 @@ namespace _GraphBuilder {
 
         class EdgeIterator {
         private:
-            size_t index;
+            VertexEdgeIndexType index;
             const Vector<PartialEdgeInfo<Graph>>* edgeVector;
             friend GraphBuilderImpl;
-            EdgeIterator(size_t i, const Vector<PartialEdgeInfo<Graph>>* v) : index(i), edgeVector(v) {}
+            EdgeIterator(VertexEdgeIndexType i, const Vector<PartialEdgeInfo<Graph>>* v) : index(i), edgeVector(v) {}
         public:
             EdgeHandle operator*() const { return EdgeHandle(index, edgeVector); }
             EdgeIterator& operator++() { ++index; return *this; }
@@ -701,7 +701,7 @@ namespace _GraphBuilder {
         IteratorRange<EdgeIterator> currentEdges() const {
             return IteratorRange<EdgeIterator>(
                 EdgeIterator(0, &edgeInfo),
-                EdgeIterator(edgeInfo.getSize(), &edgeInfo)
+                EdgeIterator(static_cast<VertexEdgeIndexType>(edgeInfo.getSize()), &edgeInfo)
             );
         }
 

@@ -347,9 +347,9 @@ public:
 
     template<typename Callable>
     FunctionRef(Callable& f) {
-        obj = static_cast<void*>(&f);
+        obj = reinterpret_cast<void*>(&f);
         callback = [](void* o, Args... args) -> Ret {
-            return (*static_cast<Callable*>(o))(args...);
+            return (*reinterpret_cast<Callable*>(o))(args...);
         };
     }
 

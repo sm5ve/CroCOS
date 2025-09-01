@@ -33,46 +33,14 @@ namespace kernel{
         run_global_constructors();
         klog << "Early data structure setup complete\n";
 
-        klog << "Coarse allocator is using " <<
-                           LibAlloc::InternalAllocator::computeTotalAllocatedSpaceInCoarseAllocator()
-                           << " bytes\n";
-
         hal::hwinit();
 
-        klog << "Coarse allocator is using " <<
-                   LibAlloc::InternalAllocator::computeTotalAllocatedSpaceInCoarseAllocator()
-                   << " bytes\n";
+        klog << "Updating routing configuration\n";
+        hal::interrupts::managed::updateRouting();
+        klog << "Routing configuration updated\n";
 
-        klog << "init done!\n";
-
-        auto interruptTopologyGraph = hal::interrupts::topology::getTopologyGraph();
-        assert(interruptTopologyGraph.occupied(), "Interrupt topology graph must be initialized");
-        //klog << interruptTopologyGraph -> getVertexCount();
-        algorithm::graph::printAsDOT(klog, *interruptTopologyGraph);
-        for (auto vertex : interruptTopologyGraph -> vertices()) {
-            auto domain = interruptTopologyGraph -> getVertexLabel(vertex);
-            klog << "Considering domain:\n";
-            if (auto receiver = crocos_dynamic_cast<hal::interrupts::platform::InterruptReceiver>(domain)) {
-                klog << "Domain is receiver and has " << receiver -> getReceiverCount() << " receivers\n";
-            }
-            else if (auto emitter = crocos_dynamic_cast<hal::interrupts::platform::InterruptEmitter>(domain)) {
-                klog << "Domain is pure emitter and has " << emitter -> getEmitterCount() << " emitters\n";
-            }
-        }
-
-        klog << "Coarse allocator is using " <<
-                    LibAlloc::InternalAllocator::computeTotalAllocatedSpaceInCoarseAllocator()
-                    << " bytes\n";
-
-        auto builder = hal::interrupts::managed::createRoutingGraphBuilder();
-
-        klog << "Interrupt routing graph builder made\n";
-        klog << "has " << builder -> getVertices().getSize() << " vertices\n";
-        klog << "has " << builder -> getCurrentEdgeCount() << " edges\n";
-
-        klog << "Coarse allocator is using " <<
-            LibAlloc::InternalAllocator::computeTotalAllocatedSpaceInCoarseAllocator()
-            << " bytes\n";
+        uint32_t* tmp = nullptr;
+        klog << "Causing null pointer dereference " << *tmp << "\n";
 
         asm volatile("outw %0, %1" ::"a"((uint16_t)0x2000), "Nd"((uint16_t)0x604)); //Quit qemu
     }

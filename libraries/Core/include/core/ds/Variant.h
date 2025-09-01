@@ -37,7 +37,7 @@ private:
 
     using DestructorFunc = void(*)(void*);
     static constexpr DestructorFunc destructors[] = {
-            [](void* ptr) { reinterpret_cast<Ts*>(ptr)->~Ts(); }...
+            [](void* ptr) { assert(ptr != nullptr, "AAAA"); reinterpret_cast<Ts*>(ptr)->~Ts(); }...
     };
 
     template<typename VisitorT, size_t... Is>

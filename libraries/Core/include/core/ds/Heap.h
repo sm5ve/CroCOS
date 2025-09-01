@@ -162,10 +162,10 @@ public:
 };
 
 // Convenience type aliases
-template <typename T>
-using MaxHeap = Heap<T, DefaultComparator<T>>;
+template <typename T, typename Comparator = DefaultComparator<T>>
+using MaxHeap = Heap<T, Comparator>;
 
-template <typename T>
-using MinHeap = Heap<T, ReversedDefaultComparator<T>>;
+template <typename T, typename Comparator = DefaultComparator<T>>
+using MinHeap = Heap<T, ReversedComparator<Comparator>>;
 
 #endif //CROCOS_HEAP_H

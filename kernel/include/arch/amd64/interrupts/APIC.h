@@ -21,7 +21,7 @@ namespace kernel::amd64::interrupts{
     public:
         IOAPIC(uint8_t id, void* mmio_window, uint32_t gsi_base);
         ~IOAPIC() override;
-        void setActivationType(uint32_t gsi, InterruptLineActivationType type);
+        void setActivationType(uint32_t gsi, hal::interrupts::InterruptLineActivationType type);
         void setNonmaskable(uint32_t gsi, bool nonmaskable = true);
         size_t getReceiverCount() override;
         size_t getEmitterCount() override;

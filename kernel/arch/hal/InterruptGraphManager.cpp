@@ -110,8 +110,8 @@ namespace kernel::hal::interrupts {
 
     namespace managed {
         size_t RoutingNodeLabel::hash() const {
-            const size_t domainHash = DefaultHasher<SharedPtr<kernel::hal::interrupts::platform::InterruptDomain>>{}(this -> domain);
-            const size_t indexHash = this -> index;
+            const size_t domainHash = DefaultHasher<SharedPtr<kernel::hal::interrupts::platform::InterruptDomain>>{}(this -> domain());
+            const size_t indexHash = this -> index();
 
             return domainHash ^ (indexHash << 1);
         }
@@ -209,11 +209,11 @@ namespace kernel::hal::interrupts {
                 return graph.hasEdge(source, target);
             }
 
-            const auto sourceDomain = graph.getVertexLabel(source) -> domain;
-            const auto sourceIndex = graph.getVertexLabel(source) -> index;
+            const auto sourceDomain = graph.getVertexLabel(source) -> domain();
+            const auto sourceIndex = graph.getVertexLabel(source) -> index();
             const auto sourceType = graph.getVertexLabel(source) -> getType();
-            const auto targetDomain = graph.getVertexLabel(target) -> domain;
-            const auto targetIndex = graph.getVertexLabel(target) -> index;
+            const auto targetDomain = graph.getVertexLabel(target) -> domain();
+            const auto targetIndex = graph.getVertexLabel(target) -> index();
 
             //This will only ever be called if we already know the topology graph is preconstructed from createRoutingGraphBuilder
             //so it is safe to dereference
@@ -262,8 +262,8 @@ namespace kernel::hal::interrupts {
         IteratorRange<PotentialEdgeIterator<true>> RoutingConstraint::validEdgesFrom(const Builder &graph, const VertexHandle source) {
             using It = PotentialEdgeIterator<true>;
             
-            const auto sourceDomain = graph.getVertexLabel(source)->domain;
-            const auto sourceIndex = graph.getVertexLabel(source)->index;
+            const auto sourceDomain = graph.getVertexLabel(source)->domain();
+            const auto sourceIndex = graph.getVertexLabel(source)->index();
             
             const auto& topologyGraph = *topology::getTopologyGraph();
             auto sourceTopologyVertex = topologyGraph.getVertexByLabel(sourceDomain);
@@ -282,8 +282,8 @@ namespace kernel::hal::interrupts {
         IteratorRange<PotentialEdgeIterator<false>> RoutingConstraint::validEdgesTo(const Builder &graph, const VertexHandle target) {
             using It = PotentialEdgeIterator<false>;
 
-            const auto targetDomain = graph.getVertexLabel(target)->domain;
-            const auto targetIndex = graph.getVertexLabel(target)->index;
+            const auto targetDomain = graph.getVertexLabel(target)->domain();
+            const auto targetIndex = graph.getVertexLabel(target)->index();
 
             const auto& topologyGraph = *topology::getTopologyGraph();
             auto targetTopologyVertex = topologyGraph.getVertexByLabel(targetDomain);
@@ -419,20 +419,26 @@ namespace kernel::hal::interrupts {
     }
 
     namespace platform {
-        AffineConnector::AffineConnector(SharedPtr<InterruptDomain> src, SharedPtr<InterruptDomain> tgt, size_t off) : DomainConnector(src, tgt), offset(off) {
+        AffineConnector::AffineConnector(SharedPtr<InterruptDomain> src, SharedPtr<InterruptDomain> tgt, size_t off, size_t s, size_t w) : DomainConnector(src, tgt), offset(off), start(s), width(w) {
             auto emitter = crocos_dynamic_cast<InterruptEmitter>(src);
             auto receiver = crocos_dynamic_cast<InterruptReceiver>(tgt);
             assert(emitter, "Source domain must be an emitter");
             assert(receiver, "Target domain must be a receiver");
-            assert(emitter -> getEmitterCount() + offset <= receiver -> getReceiverCount(), "Offset is out of bounds");
+            assert(start + offset + width <= receiver -> getReceiverCount(), "Offset is out of bounds");
+            assert(start + width <= emitter -> getEmitterCount(), "Connector too wide");
         }
 
         Optional<DomainInputIndex> AffineConnector::fromOutput(DomainOutputIndex index) const {
+            if (index < start) return {};
+            if (index >= start + width) return {};
             return index + offset;
         }
 
         Optional<DomainOutputIndex> AffineConnector::fromInput(DomainInputIndex index) const {
-            return index - offset;
+            auto toReturn = index - offset;
+            if (toReturn < start) return {};
+            if (toReturn >= start + width) return {};
+            return toReturn;
         }
 
         CPUInterruptVectorFile::CPUInterruptVectorFile(size_t w) : width(w) {}
