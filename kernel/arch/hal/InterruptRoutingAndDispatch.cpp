@@ -118,8 +118,12 @@ namespace kernel::hal::interrupts::managed{
                     for (size_t i = 0; i < receiver -> getReceiverCount(); i++) {
                         const auto label = RoutingNodeLabel(domain, i);
                         const auto routingVertex = routingGraph.getVertexByLabel(label);
-                        if (routingGraph.outDegree(*routingVertex) != 0) {
+                        if (routingGraph.outDegree(*routingVertex) == 0) {
                             maskable -> setReceiverMask(i, true);
+                        }
+
+                        if (routingGraph.outDegree(*routingVertex) != 0) {
+                            maskable -> setReceiverMask(i, false);
                         }
                     }
                 }
@@ -138,7 +142,10 @@ namespace kernel::hal::interrupts::managed{
     void dispatchInterrupt(hal::InterruptFrame& frame) {
         if (!handlersByVector[frame.vector_index]->empty()) {
             for (auto& handler : *handlersByVector[frame.vector_index]) {
-                (**handler)(frame);
+                //It is possible that we have some uninitialized handlers for emitters routed to this vector, hence
+                //we must check for null
+                if (*handler)
+                    (**handler)(frame);
             }
         }
     }

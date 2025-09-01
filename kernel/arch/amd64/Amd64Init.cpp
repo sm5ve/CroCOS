@@ -294,10 +294,13 @@ namespace kernel::amd64{
 
     void temporaryPageFaultHandler(hal::InterruptFrame& frame) {
         kernel::klog << "Page fault at " << reinterpret_cast<void*>(frame.rip) << "\n";
+        print_stacktrace(&frame.rbp);
+        asm volatile("outw %0, %1" ::"a"((uint16_t)0x2000), "Nd"((uint16_t)0x604));
     }
 
     void initializeInterrupts(acpi::MADT& madt) {
         interrupts::init();
+        cli();
         interrupts::disableLegacyPIC();
         hal::interrupts::platform::setupCPUInterruptVectorFile(INTERRUPT_VECTOR_COUNT);
         interrupts::setupIOAPICs(madt);

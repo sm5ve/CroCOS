@@ -102,6 +102,9 @@ namespace kernel::amd64 {
     void sti();
     void invlpg(uint64_t addr);
 
+    void wrmsr(uint32_t msr, uint64_t value);
+    uint64_t rdmsr(uint32_t msr);
+
     void hwinit();
 
     inline void mfence() {
@@ -235,6 +238,13 @@ namespace kernel::amd64 {
         };
 
         void init();
+
+        class InterruptDisabler {
+            bool reenable;
+        public:
+            InterruptDisabler();
+            ~InterruptDisabler();
+        };
     }
 }
 

@@ -64,6 +64,23 @@ namespace kernel::amd64::interrupts{
         //Probably we should defer calling sti until the system is in a more stable state.
         //asm volatile("sti");
     }
+
+    InterruptDisabler::InterruptDisabler() {
+        uint64_t rflags;
+        asm volatile("pushfq; pop %0" : "=r"(rflags));
+        if (rflags & (1 << 9))
+            reenable = true;
+        else
+            reenable = false;
+        cli();
+    }
+
+    InterruptDisabler::~InterruptDisabler() {
+        if (reenable)
+            sti();
+    }
+
+
 }
 
 Core::PrintStream& operator<<(Core::PrintStream& ps, kernel::amd64::interrupts::InterruptFrame& iframe){

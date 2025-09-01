@@ -13,7 +13,7 @@
 
 namespace kernel::amd64::interrupts{
     void disableLegacyPIC(){
-        amd64::outb(PIC1_DATA, 0xff);
-        amd64::outb(PIC2_DATA, 0xff);
+        outb(PIC1_DATA, 0xff);
+        outb(PIC2_DATA, 0xff);
     }
 }

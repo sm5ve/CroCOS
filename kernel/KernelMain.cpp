@@ -39,9 +39,10 @@ namespace kernel{
         hal::interrupts::managed::updateRouting();
         klog << "Routing configuration updated\n";
 
-        uint32_t* tmp = nullptr;
-        klog << "Causing null pointer dereference " << *tmp << "\n";
+        amd64::sti();
 
-        asm volatile("outw %0, %1" ::"a"((uint16_t)0x2000), "Nd"((uint16_t)0x604)); //Quit qemu
+        for (;;)
+            asm volatile("hlt");
+        //asm volatile("outw %0, %1" ::"a"((uint16_t)0x2000), "Nd"((uint16_t)0x604)); //Quit qemu
     }
 }

@@ -5,6 +5,7 @@
 #include <arch/amd64/amd64.h>
 #include <core/ds/Trees.h>
 #include <arch/amd64/interrupts/AuxiliaryDomains.h>
+#include <arch/amd64/interrupts/LegacyPIC.h>
 
 namespace kernel::amd64::interrupts{
     constexpr uint32_t IOAPIC_REG_ID = 0x00;
@@ -13,6 +14,9 @@ namespace kernel::amd64::interrupts{
     constexpr uint32_t IOAPIC_REG_REDIRECT_TABLE_BASE = 0x10;
 
     constexpr size_t IOAPIC_VECTOR_MAPPING_BASE = 0x10;
+
+    constexpr uint32_t IA32_APIC_BASE_MSR = 0x1B;
+    constexpr uint32_t IA32_APIC_BASE_MSR_ENABLE = 1u << 11;
 
     IOAPIC::IOAPIC(uint8_t i, void* m, uint32_t g) : id(i), mmio_window(static_cast<volatile uint32_t*>(m)), gsi_base(g) {
         const uint32_t version = regRead(IOAPIC_REG_VERSION);
@@ -67,6 +71,8 @@ namespace kernel::amd64::interrupts{
     }
 
     bool IOAPIC::routeInterrupt(size_t lineIndex, size_t destinationLine){
+        //All emitters are indexed starting at 0, so destinationLine = 0 should correspond to interrupt number 16
+        destinationLine += IOAPIC_VECTOR_MAPPING_BASE;
         if (destinationLine < 0x10 || destinationLine > 0xFE) return false;
         if (lineIndex >= lineCount) return false;
         auto regVal = regRead(getRegStartForLineIndex(lineIndex));
@@ -253,9 +259,44 @@ namespace kernel::amd64::interrupts{
         return irqDomain;
     }
 
+    uint64_t getLAPICBaseMask() {
+        uint32_t eax, ebx, ecx, edx;
+        cpuid(eax, ebx, ecx, edx, 0x80000000);
+        uint64_t bits = 36;
+        if (eax >= 0x80000008) {
+            cpuid(eax, ebx, ecx, edx, 0x80000008);
+            bits = eax & 0xff;
+        }
+        uint64_t mask = (1ull << bits) - 1;
+        return mask & ~(0xffful);
+    }
+
+    uint64_t getLAPICBase() {
+        return rdmsr(IA32_APIC_BASE_MSR) & getLAPICBaseMask();
+    }
+
+    void* lapicBase = nullptr;
+
+    volatile uint32_t& lapicRegister(uint32_t registerNumber) {
+        return *reinterpret_cast<volatile uint32_t*>(reinterpret_cast<uintptr_t>(lapicBase) + registerNumber);
+    }
+
+    constexpr uint32_t LAPIC_SPURIOUS_INTERRUPT_VECTOR_REGISTER = 0xF0;
+    constexpr uint32_t LAPIC_EOI_REGISTER = 0xB0;
+
+    void enableLAPIC() {
+        auto lapicBasePhysical = getLAPICBase();
+        auto lapicMSRNewVal = lapicBasePhysical | IA32_APIC_BASE_MSR_ENABLE;
+        klog << "Enabling APIC, writing MSR value " << reinterpret_cast<void*>(lapicMSRNewVal) << "\n";
+        wrmsr(IA32_APIC_BASE_MSR, lapicMSRNewVal);
+        lapicBase = PageTableManager::temporaryHackMapMMIOPage(mm::phys_addr(lapicBasePhysical));
+        lapicRegister(LAPIC_SPURIOUS_INTERRUPT_VECTOR_REGISTER) = 0x1F0;
+        lapicRegister(LAPIC_EOI_REGISTER) = 0;
+    }
+
     void setupIOAPICs(acpi::MADT& madt) {
         createIOAPICStructures(madt);
         createIRQDomainConnectorsAndConfigureIOAPICActivationType(madt);
-        //hal::interrupts::topology::registerDomain()
+        enableLAPIC();
     }
 }
