@@ -411,7 +411,7 @@ namespace _GraphBuilder {
                 for (size_t i = 0; i < vertexInfo.getSize(); i++) {
                     auto index = *vertexLabels->indexOf(*vertexInfo[i].label);
                     vertexIdMap[i] = static_cast<VertexIndex>(index);
-                    vertexMetadataSize = max(vertexMetadataSize, vertexIdMap[i] + 1);
+                    vertexMetadataSize = static_cast<_GraphInternal::BasicIndex>(max(vertexMetadataSize, vertexIdMap[i] + 1));
                 }
             } else {
                 for (size_t i = 0; i < vertexInfo.getSize(); i++) {
@@ -423,7 +423,7 @@ namespace _GraphBuilder {
             if constexpr (EdgeDecorator::is_labeled) {
                 for (size_t i = 0; i < edgeInfo.getSize(); i++) {
                     edgeIdMap[i] = static_cast<EdgeIndex>(*edgeLabels->indexOf(*edgeInfo[i].label));
-                    edgeMetadataSize = max(edgeMetadataSize, edgeIdMap[i] + 1);
+                    edgeMetadataSize = static_cast<_GraphInternal::BasicIndex>(max(edgeMetadataSize, edgeIdMap[i] + 1));
                 }
             } else {
                 for (_GraphInternal::BasicIndex i = 0; i < edgeInfo.getSize(); i++) {
@@ -492,11 +492,11 @@ namespace _GraphBuilder {
                     vertexMetadata[vertexId].start = currentIncidenceOffset;
                     vertexMetadata[vertexId].fromSize = outgoingCounts[vertexId];
                     vertexMetadata[vertexId].toSize = incomingCounts[vertexId];
-                    currentIncidenceOffset += outgoingCounts[vertexId] + incomingCounts[vertexId];
+                    currentIncidenceOffset += static_cast<_GraphInternal::BasicIndex>(outgoingCounts[vertexId] + incomingCounts[vertexId]);
                 } else {
                     vertexMetadata[vertexId].start = currentIncidenceOffset;
                     vertexMetadata[vertexId].size = outgoingCounts[vertexId] + incomingCounts[vertexId];
-                    currentIncidenceOffset += outgoingCounts[vertexId] + incomingCounts[vertexId];
+                    currentIncidenceOffset += static_cast<_GraphInternal::BasicIndex>(outgoingCounts[vertexId] + incomingCounts[vertexId]);
                 }
             }
 

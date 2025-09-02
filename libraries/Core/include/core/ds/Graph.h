@@ -152,7 +152,7 @@ namespace _GraphInternal {
         }
 
         [[nodiscard]] BasicIndex toEnd() const {
-            return start + fromSize + toSize;
+            return static_cast<BasicIndex>(start + fromSize + toSize);
         }
 
         [[nodiscard]] BasicIndex totalStart() const {
@@ -160,7 +160,7 @@ namespace _GraphInternal {
         }
 
         [[nodiscard]] BasicIndex totalEnd() const {
-            return start + fromSize + toSize;
+            return static_cast<BasicIndex>(start + fromSize + toSize);
         }
     };
 
