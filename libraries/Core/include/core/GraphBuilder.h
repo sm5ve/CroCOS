@@ -19,7 +19,7 @@ namespace _GraphBuilder {
     template <bool HasLabel, bool HasColor, typename G>
     struct PartialVertexInfoImpl{};
 
-    using VertexEdgeIndexType = uint32_t;
+    using VertexEdgeIndexType = _GraphInternal::BasicIndex;
 
     template <typename G>
     struct PartialVertexInfoImpl<true, true, G> {
@@ -404,13 +404,13 @@ namespace _GraphBuilder {
             auto vertexIdMap = UniquePtr<VertexIndex[]>::make(vertexInfo.getSize());
             auto edgeIdMap = UniquePtr<EdgeIndex[]>::make(edgeInfo.getSize());
 
-            size_t vertexMetadataSize = 0;
-            size_t edgeMetadataSize = 0;
+            _GraphInternal::BasicIndex vertexMetadataSize = 0;
+            _GraphInternal::BasicIndex edgeMetadataSize = 0;
 
             if constexpr (VertexDecorator::is_labeled) {
                 for (size_t i = 0; i < vertexInfo.getSize(); i++) {
                     auto index = *vertexLabels->indexOf(*vertexInfo[i].label);
-                    vertexIdMap[i] = index;
+                    vertexIdMap[i] = static_cast<VertexIndex>(index);
                     vertexMetadataSize = max(vertexMetadataSize, vertexIdMap[i] + 1);
                 }
             } else {
@@ -422,14 +422,14 @@ namespace _GraphBuilder {
 
             if constexpr (EdgeDecorator::is_labeled) {
                 for (size_t i = 0; i < edgeInfo.getSize(); i++) {
-                    edgeIdMap[i] = *edgeLabels->indexOf(*edgeInfo[i].label);
+                    edgeIdMap[i] = static_cast<EdgeIndex>(*edgeLabels->indexOf(*edgeInfo[i].label));
                     edgeMetadataSize = max(edgeMetadataSize, edgeIdMap[i] + 1);
                 }
             } else {
-                for (size_t i = 0; i < edgeInfo.getSize(); i++) {
+                for (_GraphInternal::BasicIndex i = 0; i < edgeInfo.getSize(); i++) {
                     edgeIdMap[i] = i;  // Identity mapping
                 }
-                edgeMetadataSize = edgeInfo.getSize();
+                edgeMetadataSize = static_cast<_GraphInternal::BasicIndex>(edgeInfo.getSize());
             }
 
 
@@ -468,8 +468,8 @@ namespace _GraphBuilder {
 
             // Calculate vertex metadata (incidence list spans) using graph IDs
             // First, count edges per vertex using graph vertex IDs
-            auto outgoingCounts = UniquePtr<size_t[]>::make(vertexMetadataSize);
-            auto incomingCounts = UniquePtr<size_t[]>::make(vertexMetadataSize);
+            auto outgoingCounts = UniquePtr<_GraphInternal::BasicIndex[]>::make(vertexMetadataSize);
+            auto incomingCounts = UniquePtr<_GraphInternal::BasicIndex[]>::make(vertexMetadataSize);
             
             // Initialize arrays to zero
             for (size_t i = 0; i < vertexMetadataSize; i++) {
@@ -484,7 +484,7 @@ namespace _GraphBuilder {
             }
 
             // Calculate incidence list offsets
-            size_t currentIncidenceOffset = 0;
+            _GraphInternal::BasicIndex currentIncidenceOffset = 0;
             // Iterate through actual vertices that exist, using their graph IDs
             for (size_t i = 0; i < vertexInfo.getSize(); i++) {
                 VertexIndex vertexId = vertexIdMap[i];  // Get the actual graph vertex ID

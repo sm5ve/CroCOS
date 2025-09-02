@@ -101,7 +101,7 @@ namespace _GraphBuilder {
 
 namespace _GraphInternal {
     // Common types used across all graph types
-    using BasicIndex = size_t;
+    using BasicIndex = uint32_t;
     using VertexIndex = BasicIndex;
     using EdgeIndex = BasicIndex;
 
@@ -569,7 +569,7 @@ public:
     Optional<Vertex> getVertexByLabel(const T& label) const {
         auto indexOpt = vertexLabels->indexOf(label);
         if (indexOpt) {
-            return Vertex(vertexMetadata.get(), *indexOpt);
+            return Vertex(vertexMetadata.get(), static_cast<VertexIndex>(*indexOpt));
         }
         return Optional<Vertex>();
     }
@@ -579,7 +579,7 @@ public:
     Optional<Edge> getEdgeByLabel(const T& label) const {
         auto indexOpt = edgeLabels->indexOf(label);
         if (indexOpt) {
-            return Edge(edgeMetadata.get(), *indexOpt);
+            return Edge(edgeMetadata.get(), static_cast<EdgeIndex>(*indexOpt));
         }
         return Optional<Edge>();
     }
