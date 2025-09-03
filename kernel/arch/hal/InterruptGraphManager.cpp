@@ -5,6 +5,7 @@
 #include <arch/hal/interrupts.h>
 #include <core/ds/Graph.h>
 #include <core/utility.h>
+#include <core/algo/GraphAlgorithms.h>
 
 namespace kernel::hal::interrupts {
     namespace topology {
@@ -119,7 +120,7 @@ namespace kernel::hal::interrupts {
         SharedPtr<RoutingGraphBuilder> createRoutingGraphBuilder() {
             struct RoutingVertexSpec {
                 RoutingNodeLabel label;
-                int color;
+                RoutingNodeTriggerType color;
             };
             
             Vector<RoutingVertexSpec> routingVertices;
@@ -131,22 +132,46 @@ namespace kernel::hal::interrupts {
 
             for (const auto vertex : topologyGraph->vertices()) {
                 auto domain = topologyGraph->getVertexLabel(vertex);
-                
+                auto configurableTriggerDomain = crocos_dynamic_cast<platform::ConfigurableActivationTypeDomain>(domain);
                 if (domain->instanceof(TypeID_v<platform::InterruptReceiver>)) {
                     const auto receiver = crocos_dynamic_cast<platform::InterruptReceiver>(domain);
                     for (size_t i = 0; i < receiver->getReceiverCount(); i++) {
+                        auto triggerType = TRIGGER_UNDETERMINED;
+                        if (configurableTriggerDomain) {
+                            auto activationType = configurableTriggerDomain -> getActivationType(i);
+                            if (activationType) {
+                                if (isLevelTriggered(*activationType)) {
+                                    triggerType = TRIGGER_LEVEL;
+                                }
+                                else {
+                                    triggerType = TRIGGER_EDGE;
+                                }
+                            }
+                        }
                         routingVertices.push(RoutingVertexSpec{
                             RoutingNodeLabel(domain, i),
-                            0
+                            triggerType
                         });
                     }
                 }
                 else if (domain->instanceof(TypeID_v<platform::InterruptEmitter>)) {
                     const auto emitter = crocos_dynamic_cast<platform::InterruptEmitter>(domain);
                     for (size_t i = 0; i < emitter->getEmitterCount(); i++) {
+                        auto triggerType = TRIGGER_UNDETERMINED;
+                        if (configurableTriggerDomain) {
+                            auto activationType = configurableTriggerDomain -> getActivationType(i);
+                            if (activationType) {
+                                if (isLevelTriggered(*activationType)) {
+                                    triggerType = TRIGGER_LEVEL;
+                                }
+                                else {
+                                    triggerType = TRIGGER_EDGE;
+                                }
+                            }
+                        }
                         routingVertices.push(RoutingVertexSpec{
                             RoutingNodeLabel(domain, i),
-                            0
+                            triggerType
                         });
                     }
                 }
@@ -160,7 +185,7 @@ namespace kernel::hal::interrupts {
             //and in the latter, it is labeled as an input.
 
             //For a fixed routing domain, we can prepopulate the edges coming out of it in advance - they are forced
-            auto out = make_shared<RoutingGraphBuilder>(routingVertices, RoutingConstraint{});
+            auto out = make_shared<RoutingGraphBuilder>(routingVertices);
             for (auto topVert : topologyGraph->vertices()) {
                 auto domain = topologyGraph->getVertexLabel(topVert);
                 if (auto fixedDomain = crocos_dynamic_cast<platform::FixedRoutingDomain>(domain)) {
@@ -205,6 +230,7 @@ namespace kernel::hal::interrupts {
         }
 
         bool RoutingConstraint::isEdgeAllowed(const Builder &graph, const VertexHandle source, const VertexHandle target) {
+            auto& routingBuilder = RoutingGraphBuilder::fromGenericBuilder(graph);
             if (graph.getOutgoingEdgeCount(source) > 0) {
                 return graph.hasEdge(source, target);
             }
@@ -214,6 +240,22 @@ namespace kernel::hal::interrupts {
             const auto sourceType = graph.getVertexLabel(source) -> getType();
             const auto targetDomain = graph.getVertexLabel(target) -> domain();
             const auto targetIndex = graph.getVertexLabel(target) -> index();
+
+            const auto sourceActivationType = routingBuilder.getConnectedComponentTriggerType(source);
+            const auto targetActivationType = routingBuilder.getConnectedComponentTriggerType(target);
+            //Allowed connections are LEVEL -> LEVEL, LEVEL -> UNDETERMINED, and any mix of EDGE and UNDETERMINED
+            if (targetActivationType == TRIGGER_LEVEL) {
+                //Except we do allow connecting an undetermined device to a level-triggered source
+                //We then conclude the device wants level-triggered interrupts and mark it as such.
+                if (sourceActivationType != TRIGGER_LEVEL && sourceDomain -> instanceof(TypeID_v<platform::InterruptReceiver>)) {
+                    return false;
+                }
+            }
+            if (targetActivationType == TRIGGER_EDGE) {
+                if (sourceActivationType == TRIGGER_LEVEL){
+                    return false;
+                }
+            }
 
             //This will only ever be called if we already know the topology graph is preconstructed from createRoutingGraphBuilder
             //so it is safe to dereference
@@ -416,6 +458,80 @@ namespace kernel::hal::interrupts {
             assert(vertex.occupied(), "Target vertex must exist in routing graph");
             return *vertex;
         }
+
+        template<typename VertexContainer>
+        RoutingGraphBuilder::RoutingGraphBuilder(const VertexContainer &vertices) : Base(vertices, RoutingConstraint{}){}
+
+        RoutingNodeTriggerType RoutingGraphBuilder::getConnectedComponentTriggerType(Base::VertexHandle v) const{
+            while (auto e = _getFirstEdgeFromVertex(v)) {
+                v = getEdgeTarget(*e);
+            }
+            return *getVertexColor(v);
+        }
+
+        void RoutingGraphBuilder::setConnectedComponentTriggerType(Base::VertexHandle v, RoutingNodeTriggerType type) {
+            while (auto e = _getFirstEdgeFromVertex(v)) {
+                v = getEdgeTarget(*e);
+            }
+            _setVertexColor(v, type);
+        }
+
+        const RoutingGraphBuilder &RoutingGraphBuilder::fromGenericBuilder(const RoutingConstraint::Builder & b) {
+            return static_cast<const RoutingGraphBuilder&>(Base::fromGenericBuilder(b));
+        }
+
+        Optional<RoutingGraph> RoutingGraphBuilder::build() {
+            const auto topologyGraph = *topology::getTopologyGraph();
+            const auto domainsByTopologicalOrder = algorithm::graph::topologicalSort(topologyGraph);
+            for (int i = static_cast<int>(domainsByTopologicalOrder.getSize()) - 1; i >= 0; --i) {
+                auto d = topologyGraph.getVertexLabel(domainsByTopologicalOrder[i]);
+                if (auto receiver = crocos_dynamic_cast<platform::InterruptReceiver>(d)) {
+                    for (size_t j = 0; j < receiver -> getReceiverCount(); j++) {
+                        auto routingNodeLabel = RoutingNodeLabel(d, j);
+                        auto vertex = getVertexByLabel(routingNodeLabel);
+                        assert(vertex.occupied(), "Vertex must exist in routing graph");
+                        auto nextInPath = _getFirstEdgeFromVertex(*vertex);
+                        if (nextInPath.occupied()) {
+                            auto nextVertex = getEdgeTarget(*nextInPath);
+                            if (*getVertexColor(nextVertex) == TRIGGER_UNDETERMINED) {
+                                _setVertexColor(nextVertex, TRIGGER_EDGE); //Use edge trigger mode as a default
+                            }
+                            _setVertexColor(*vertex, getVertexColor(nextVertex));
+                        }
+                    }
+                }
+                else if (auto emitter = crocos_dynamic_cast<platform::InterruptEmitter>(d)) {
+                    for (size_t j = 0; j < emitter -> getEmitterCount(); j++) {
+                        auto routingNodeLabel = RoutingNodeLabel(d, j);
+                        auto vertex = getVertexByLabel(routingNodeLabel);
+                        assert(vertex.occupied(), "Vertex must exist in routing graph");
+                        auto nextInPath = _getFirstEdgeFromVertex(*vertex);
+                        if (nextInPath.occupied()) {
+                            auto nextVertex = getEdgeTarget(*nextInPath);
+                            _setVertexColor(*vertex, getVertexColor(nextVertex));
+                        }
+                    }
+                }
+                else {
+                    assertNotReached("Interrupt domain must at least be emitter or receiver");
+                }
+            }
+            return Base::build();
+        }
+
+
+        Optional<RoutingGraphBuilder::EdgeHandle> RoutingGraphBuilder::addEdge(const Base::VertexHandle &from, const Base::VertexHandle &to) {
+            const auto out =  Base::addEdge(from, to);
+            if (out.occupied()) {
+                const auto sourceTriggerType = *getVertexColor(from);
+                const auto targetTriggerType = getConnectedComponentTriggerType(to);
+                if (targetTriggerType == TRIGGER_UNDETERMINED && sourceTriggerType != TRIGGER_UNDETERMINED) {
+                    setConnectedComponentTriggerType(to, sourceTriggerType);
+                }
+            }
+            return out;
+        }
+
     }
 
     namespace platform {

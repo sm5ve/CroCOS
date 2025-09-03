@@ -4,6 +4,9 @@
 #include <arch/hal/interrupts.h>
 #include <core/algo/GraphAlgorithms.h>
 #include <core/ds/LinkedList.h>
+#include <liballoc/InternalAllocator.h>
+#include <liballoc/InternalAllocatorDebug.h>
+#include <liballoc/SlabAllocator.h>
 
 namespace kernel::hal::interrupts::managed{
     UniquePtr<InterruptRoutingPolicy> currentRoutingPolicy;
@@ -91,7 +94,7 @@ namespace kernel::hal::interrupts::managed{
                 if (!registeredHandlers.contains(sourceLabel)) {
                     registeredHandlers.insert(sourceLabel, make_shared<UniquePtr<InterruptHandler>>(nullptr));
                 }
-                size_t vectorNumber = *finalVectorNumber[source];
+                const size_t vectorNumber = *finalVectorNumber[source];
                 if (!handlersByVector[vectorNumber]) {
                     handlersByVector[vectorNumber] = make_unique<InterruptHandlerListForVector>();
                 }
@@ -140,7 +143,7 @@ namespace kernel::hal::interrupts::managed{
     }
 
     void dispatchInterrupt(hal::InterruptFrame& frame) {
-        if (!handlersByVector[frame.vector_index]->empty()) {
+        if (handlersByVector[frame.vector_index].get() != nullptr) {
             for (auto& handler : *handlersByVector[frame.vector_index]) {
                 //It is possible that we have some uninitialized handlers for emitters routed to this vector, hence
                 //we must check for null

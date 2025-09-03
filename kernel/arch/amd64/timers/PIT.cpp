@@ -5,6 +5,7 @@
 #include <arch/hal/interrupts.h>
 #include <arch/amd64/interrupts/AuxiliaryDomains.h>
 #include <arch/amd64/amd64.h>
+#include <arch/amd64/interrupts/APIC.h>
 
 namespace kernel::amd64::timers{
     constexpr uint32_t PIT_FREQUENCY = 1193182;
@@ -23,7 +24,11 @@ namespace kernel::amd64::timers{
     };
 
     void timerTick(hal::InterruptFrame&) {
-        klog << "Tick!\n";
+        static size_t ticks = 0;
+        ticks++;
+        if (ticks % 20 == 0)
+            klog << "Tick!\n";
+        interrupts::lapicIssueEOI();
     }
 
     void initPIT(){

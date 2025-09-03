@@ -18,37 +18,57 @@ namespace kernel::amd64::interrupts{
     constexpr uint32_t IA32_APIC_BASE_MSR = 0x1B;
     constexpr uint32_t IA32_APIC_BASE_MSR_ENABLE = 1u << 11;
 
-    IOAPIC::IOAPIC(uint8_t i, void* m, uint32_t g) : id(i), mmio_window(static_cast<volatile uint32_t*>(m)), gsi_base(g) {
+    IOAPIC::IOAPIC(const uint8_t i, void* m, const uint32_t g) : id(i), mmio_window(static_cast<volatile uint32_t*>(m)), gsi_base(g) {
         const uint32_t version = regRead(IOAPIC_REG_VERSION);
         lineCount = (version >> 16) & 0xffu;
+        activationTypes = make_unique_array<Optional<hal::interrupts::InterruptLineActivationType>>(lineCount);
     }
 
     IOAPIC::~IOAPIC() {}
 
-    uint32_t IOAPIC::regRead(uint8_t index) const{
+    uint32_t IOAPIC::regRead(const uint8_t index) const{
         mmio_window[0] = static_cast<uint32_t>(index) & 0xffu;
         return mmio_window[4];
     }
 
-    void IOAPIC::regWrite(uint8_t index, uint32_t value){
+    void IOAPIC::regWrite(const uint8_t index, const uint32_t value){
         mmio_window[0] = static_cast<uint32_t>(index) & 0xffu;
         mmio_window[4] = value;
     }
 
-    uint8_t getRegStartForLineIndex(size_t lineIndex){
+    uint8_t getRegStartForLineIndex(const size_t lineIndex){
         return static_cast<uint8_t>(lineIndex * 2 + 0x10);
     }
 
-    void IOAPIC::setActivationType(uint32_t gsi, hal::interrupts::InterruptLineActivationType type) {
-        assert(gsi - gsi_base < lineCount, "gsi out of range");
-        auto regVal = regRead(getRegStartForLineIndex(gsi - gsi_base));
+    void IOAPIC::setActivationTypeByGSI(const uint32_t gsi, const hal::interrupts::InterruptLineActivationType type) {
+        setActivationType(gsi + gsi_base, type);
+    }
+
+    void IOAPIC::setActivationType(const size_t receiver, const hal::interrupts::InterruptLineActivationType type) {
+        assert(receiver < lineCount, "gsi out of range");
+        auto regVal = regRead(getRegStartForLineIndex(receiver));
         constexpr uint32_t polarity_mask = 1u << 13;
         constexpr uint32_t trigger_mask = 1u << 15;
         regVal &= ~(polarity_mask | trigger_mask);
         if (isLevelTriggered(type)) regVal |= trigger_mask;
         if (isLowTriggered(type)) regVal |= polarity_mask;
-        regWrite(getRegStartForLineIndex(gsi - gsi_base), regVal);
+        regWrite(getRegStartForLineIndex(receiver), regVal);
+        activationTypes[receiver] = type;
     }
+
+    Optional<hal::interrupts::InterruptLineActivationType> IOAPIC::getActivationType(size_t receiver) const {
+        if (receiver >= lineCount) return {};
+        return activationTypes[receiver];
+    }
+    
+    void IOAPIC::setUninitializedActivationTypes(hal::interrupts::InterruptLineActivationType type) {
+        for (size_t i = 0; i < lineCount; i++) {
+            if (!activationTypes[i].occupied()) {
+                setActivationType(i, type);
+            }
+        }
+    }
+
 
     void IOAPIC::setNonmaskable(uint32_t gsi, bool nonmaskable) {
         assert(gsi - gsi_base < lineCount, "gsi out of range");
@@ -70,7 +90,7 @@ namespace kernel::amd64::interrupts{
         return (INTERRUPT_VECTOR_COUNT - 2) - IOAPIC_VECTOR_MAPPING_BASE + 1ul;
     }
 
-    bool IOAPIC::routeInterrupt(size_t lineIndex, size_t destinationLine){
+    bool IOAPIC::routeInterrupt(const size_t lineIndex, size_t destinationLine){
         //All emitters are indexed starting at 0, so destinationLine = 0 should correspond to interrupt number 16
         destinationLine += IOAPIC_VECTOR_MAPPING_BASE;
         if (destinationLine < 0x10 || destinationLine > 0xFE) return false;
@@ -84,13 +104,13 @@ namespace kernel::amd64::interrupts{
 
     constexpr uint32_t IOAPIC_MASK_BIT = 1u << 16;
 
-    bool IOAPIC::isReceiverMasked(size_t lineIndex) const{
+    bool IOAPIC::isReceiverMasked(const size_t lineIndex) const{
         assert(lineIndex < lineCount, "lineIndex out of range");
         auto regVal = regRead(getRegStartForLineIndex(lineIndex));
         return (regVal & IOAPIC_MASK_BIT) != 0;
     }
 
-    void IOAPIC::setReceiverMask(size_t lineIndex, bool shouldMask){
+    void IOAPIC::setReceiverMask(const size_t lineIndex, const bool shouldMask){
         assert(lineIndex < lineCount, "lineIndex out of range");
         auto regVal = regRead(getRegStartForLineIndex(lineIndex));
         regVal &= ~IOAPIC_MASK_BIT;
@@ -230,7 +250,7 @@ namespace kernel::amd64::interrupts{
                 continue;
             }
             auto ioapic = addIRQDomainConectorMapping(irqToEmitterMap, emitterMax, connectorMapsByIOAPIC, sourceOverride.irqSource, sourceOverride.gsi);
-            ioapic -> setActivationType(sourceOverride.gsi, getActivationTypeFromMADTFlags(sourceOverride.flags));
+            ioapic -> setActivationTypeByGSI(sourceOverride.gsi, getActivationTypeFromMADTFlags(sourceOverride.flags));
             mappedIRQs |= 1u << sourceOverride.irqSource;
         }
         for (uint32_t i = 0; i < 16; i++) {
@@ -284,6 +304,10 @@ namespace kernel::amd64::interrupts{
     constexpr uint32_t LAPIC_SPURIOUS_INTERRUPT_VECTOR_REGISTER = 0xF0;
     constexpr uint32_t LAPIC_EOI_REGISTER = 0xB0;
 
+    void lapicIssueEOI() {
+        lapicRegister(LAPIC_EOI_REGISTER) = 0;
+    }
+
     void enableLAPIC() {
         auto lapicBasePhysical = getLAPICBase();
         auto lapicMSRNewVal = lapicBasePhysical | IA32_APIC_BASE_MSR_ENABLE;
@@ -291,7 +315,11 @@ namespace kernel::amd64::interrupts{
         wrmsr(IA32_APIC_BASE_MSR, lapicMSRNewVal);
         lapicBase = PageTableManager::temporaryHackMapMMIOPage(mm::phys_addr(lapicBasePhysical));
         lapicRegister(LAPIC_SPURIOUS_INTERRUPT_VECTOR_REGISTER) = 0x1F0;
-        lapicRegister(LAPIC_EOI_REGISTER) = 0;
+        lapicIssueEOI();
+        for (auto& ioapic : ioapicsByID.values()) {
+            ioapic -> setUninitializedActivationTypes(hal::interrupts::activationTypeForLevelAndTriggerMode(true, false));
+        }
+        klog << "Enabled APIC\n";
     }
 
     void setupIOAPICs(acpi::MADT& madt) {

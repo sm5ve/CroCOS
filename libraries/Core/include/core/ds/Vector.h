@@ -310,6 +310,18 @@ public:
         algorithm::sort(data, size, comp);
     }
 
+    template <typename Comparator = DefaultComparator<T>>
+    void mergeIn(const T& value, Comparator comp = Comparator{}) {
+        push(value);
+        if (size == 1) return;
+        size_t i = size - 1;
+        //While data[i] < data[i - 1]
+        while (i > 0 && comp(data[i], data[i - 1])) {
+            swap(data[i], data[i - 1]);
+            --i;
+        }
+    }
+
     class ReverseIterator {
         T* ptr;
         friend class Vector;

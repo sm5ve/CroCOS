@@ -11,7 +11,39 @@
 #include <core/ds/SmartPointer.h>
 #include <core/Hasher.h>
 
+#include "interrupts.h"
+
 namespace kernel::hal::interrupts {
+   enum InterruptLineActivationType : uint8_t{
+      LEVEL_LOW = 0b00,
+      LEVEL_HIGH = 0b01,
+      EDGE_LOW = 0b10,
+      EDGE_HIGH = 0b11
+  };
+
+   constexpr InterruptLineActivationType activationTypeForLevelAndTriggerMode(const bool activeHigh, const bool edgeTriggered) {
+      uint8_t bits = 0;
+      if (activeHigh) bits |= 1;
+      if (edgeTriggered) bits |= 2;
+      return static_cast<InterruptLineActivationType>(bits);
+   }
+
+   constexpr bool isLevelTriggered(const InterruptLineActivationType type){
+      return type == LEVEL_LOW || type == LEVEL_HIGH;
+   }
+
+   constexpr bool isEdgeTriggered(const InterruptLineActivationType type){
+      return !isLevelTriggered(type);
+   }
+
+   constexpr bool isLowTriggered(const InterruptLineActivationType type){
+      return type == LEVEL_LOW || type == EDGE_LOW;
+   }
+
+   constexpr bool isHighTriggered(const InterruptLineActivationType type){
+      return !isLowTriggered(type);
+   }
+
    namespace platform {
       CRClass(InterruptDomain) {
 
@@ -49,6 +81,12 @@ namespace kernel::hal::interrupts {
       public:
          [[nodiscard]] virtual bool isReceiverMasked(size_t receiver) const = 0;
          virtual void setReceiverMask(size_t receiver, bool shouldMask) = 0;
+      };
+
+      CRClass(ConfigurableActivationTypeDomain) {
+      public:
+         virtual void setActivationType(size_t receiver, InterruptLineActivationType type) = 0;
+         [[nodiscard]] virtual Optional<InterruptLineActivationType> getActivationType(size_t receiver) const = 0;
       };
 
       CRClass(CPUInterruptVectorFile, public InterruptDomain, public InterruptReceiver) {
@@ -148,7 +186,13 @@ struct DefaultHasher<kernel::hal::interrupts::managed::RoutingNodeLabel> {
 
 namespace kernel::hal::interrupts {
    namespace managed {
-      using RoutingVertexConfig = GraphProperties::LabeledVertex<RoutingNodeLabel>;
+      enum RoutingNodeTriggerType{
+         TRIGGER_LEVEL,
+         TRIGGER_EDGE,
+         TRIGGER_UNDETERMINED
+     };
+
+      using RoutingVertexConfig = GraphProperties::ColoredLabeledVertex<RoutingNodeTriggerType, RoutingNodeLabel>;
       using RoutingEdgeConfig = GraphProperties::PlainEdge;
       using RoutingGraphStructure = GraphProperties::StructureModifier<GraphProperties::Directed, GraphProperties::SimpleGraph, GraphPredicates::DirectedAcyclic>;
       using RoutingGraph = Graph<RoutingVertexConfig, RoutingEdgeConfig, RoutingGraphStructure>;
@@ -188,12 +232,54 @@ namespace kernel::hal::interrupts {
       struct RoutingConstraint {
          using Builder = GraphBuilderBase<RoutingGraph>;
          using VertexHandle = BuilderVertexHandle<RoutingGraph>;
-         static bool isEdgeAllowed(const Builder& graph, VertexHandle source, VertexHandle target) ;
-         static IteratorRange<PotentialEdgeIterator<true>> validEdgesFrom(const Builder& graph, VertexHandle source) ;
-         static IteratorRange<PotentialEdgeIterator<false>> validEdgesTo(const Builder& graph, VertexHandle target) ;
+         static bool isEdgeAllowed(const Builder& graph, VertexHandle source, VertexHandle target);
+         static IteratorRange<PotentialEdgeIterator<true>> validEdgesFrom(const Builder& graph, VertexHandle source);
+         static IteratorRange<PotentialEdgeIterator<false>> validEdgesTo(const Builder& graph, VertexHandle target);
       };
 
-      using RoutingGraphBuilder = RestrictedGraphBuilder<RoutingGraph, RoutingConstraint>;
+      class RoutingGraphBuilder : RestrictedGraphBuilder<RoutingGraph, RoutingConstraint> {
+         using Base = RestrictedGraphBuilder<RoutingGraph, RoutingConstraint>;
+         RoutingNodeTriggerType getConnectedComponentTriggerType(Base::VertexHandle) const;
+         void setConnectedComponentTriggerType(Base::VertexHandle, RoutingNodeTriggerType type);
+         friend struct RoutingConstraint;
+      public:
+         static const RoutingGraphBuilder& fromGenericBuilder(const RoutingConstraint::Builder&);
+         template<typename VertexContainer>
+         explicit RoutingGraphBuilder(const VertexContainer& vertices);
+         Optional<RoutingGraph> build();
+
+         using Base::EdgeHandle;
+         using Base::VertexHandle;
+         using Base::getCurrentVertexCount;
+         using Base::getCurrentEdgeCount;
+         using Base::hasEdge;
+         using Base::getOutgoingEdgeCount;
+         using Base::getIncomingEdgeCount;
+         using Base::getVertexLabel;
+         using Base::getEdgeLabel;
+         using Base::getEdgeWeight;
+         using Base::getEdgeSource;
+         using Base::getEdgeTarget;
+         using Base::getVertexByLabel;
+         using Base::getEdgeByLabel;
+         using Base::currentVertices;
+         using Base::currentEdges;
+         using Base::unpopulatedVertices;
+         using Base::unpopulatedEdges;
+         using Base::reset;
+         using Base::isEdgeFullyPopulated;
+         using Base::getValidEdgesTo;
+         using Base::getValidEdgesFrom;
+         using Base::canAddEdge;
+         using Base::clearEdgeLabel;
+         using Base::setEdgeWeight;
+         using Base::setEdgeLabel;
+         using Base::getConstraint;
+         using Base::getVertices;
+         using Base::getVertex;
+
+         Optional<Base::EdgeHandle> addEdge(const Base::VertexHandle& from, const Base::VertexHandle& to);
+      };
       
       SharedPtr<RoutingGraphBuilder> createRoutingGraphBuilder();
    }
