@@ -229,7 +229,7 @@ namespace kernel::hal::interrupts {
             return out;
         }
 
-        bool RoutingConstraint::isEdgeAllowed(const Builder &graph, const VertexHandle source, const VertexHandle target) {
+        bool RoutingConstraint::isEdgeAllowedImpl(const Builder &graph, const VertexHandle source, const VertexHandle target, bool checkTriggerType) {
             auto& routingBuilder = RoutingGraphBuilder::fromGenericBuilder(graph);
             if (graph.getOutgoingEdgeCount(source) > 0) {
                 return graph.hasEdge(source, target);
@@ -244,19 +244,20 @@ namespace kernel::hal::interrupts {
             const auto sourceActivationType = routingBuilder.getConnectedComponentTriggerType(source);
             const auto targetActivationType = routingBuilder.getConnectedComponentTriggerType(target);
             //Allowed connections are LEVEL -> LEVEL, LEVEL -> UNDETERMINED, and any mix of EDGE and UNDETERMINED
-            if (targetActivationType == TRIGGER_LEVEL) {
-                //Except we do allow connecting an undetermined device to a level-triggered source
-                //We then conclude the device wants level-triggered interrupts and mark it as such.
-                if (sourceActivationType != TRIGGER_LEVEL && sourceDomain -> instanceof(TypeID_v<platform::InterruptReceiver>)) {
-                    return false;
+            if (checkTriggerType) {
+                if (targetActivationType == TRIGGER_LEVEL) {
+                    //Except we do allow connecting an undetermined device to a level-triggered source
+                    //We then conclude the device wants level-triggered interrupts and mark it as such.
+                    if (sourceActivationType != TRIGGER_LEVEL && sourceDomain -> instanceof(TypeID_v<platform::InterruptReceiver>)) {
+                        return false;
+                    }
+                }
+                if (targetActivationType == TRIGGER_EDGE) {
+                    if (sourceActivationType == TRIGGER_LEVEL){
+                        return false;
+                    }
                 }
             }
-            if (targetActivationType == TRIGGER_EDGE) {
-                if (sourceActivationType == TRIGGER_LEVEL){
-                    return false;
-                }
-            }
-
             //This will only ever be called if we already know the topology graph is preconstructed from createRoutingGraphBuilder
             //so it is safe to dereference
             const auto& topologyGraph = *topology::getTopologyGraph();
@@ -301,7 +302,7 @@ namespace kernel::hal::interrupts {
             return false;
         }
 
-        IteratorRange<PotentialEdgeIterator<true>> RoutingConstraint::validEdgesFrom(const Builder &graph, const VertexHandle source) {
+        IteratorRange<PotentialEdgeIterator<true>> RoutingConstraint::validEdgesFromImpl(const Builder &graph, const VertexHandle source, bool checkTriggerType) {
             using It = PotentialEdgeIterator<true>;
             
             const auto sourceDomain = graph.getVertexLabel(source)->domain();
@@ -316,12 +317,12 @@ namespace kernel::hal::interrupts {
             auto end = outgoingEdges.end();
             
             return {
-                It(sourceDomain, begin, end, 0, sourceIndex, &graph),
-                It(sourceDomain, end, end, 0, sourceIndex, &graph)
+                It(sourceDomain, begin, end, 0, sourceIndex, &graph, checkTriggerType),
+                It(sourceDomain, end, end, 0, sourceIndex, &graph, checkTriggerType)
             };
         }
 
-        IteratorRange<PotentialEdgeIterator<false>> RoutingConstraint::validEdgesTo(const Builder &graph, const VertexHandle target) {
+        IteratorRange<PotentialEdgeIterator<false>> RoutingConstraint::validEdgesToImpl(const Builder &graph, const VertexHandle target, bool checkTriggerType) {
             using It = PotentialEdgeIterator<false>;
 
             const auto targetDomain = graph.getVertexLabel(target)->domain();
@@ -336,15 +337,28 @@ namespace kernel::hal::interrupts {
             auto end = incomingEdges.end();
 
             return {
-                It(targetDomain, begin, end, 0, targetIndex, &graph),
-                It(targetDomain, end, end, 0, targetIndex, &graph)
+                It(targetDomain, begin, end, 0, targetIndex, &graph, checkTriggerType),
+                It(targetDomain, end, end, 0, targetIndex, &graph, checkTriggerType)
             };
+        }
+
+        bool RoutingConstraint::isEdgeAllowed(const Builder &graph, VertexHandle source, VertexHandle target) {
+            return isEdgeAllowedImpl(graph, source, target, true);
+        }
+
+        IteratorRange<PotentialEdgeIterator<true> > RoutingConstraint::validEdgesFrom(const Builder &graph, VertexHandle source) {
+            return validEdgesFromImpl(graph, source, true);
+        }
+
+        IteratorRange<PotentialEdgeIterator<false> > RoutingConstraint::validEdgesTo(const Builder &graph, VertexHandle target) {
+            return validEdgesToImpl(graph, target, true);
         }
 
         template<bool Forward>
         PotentialEdgeIterator<Forward>::PotentialEdgeIterator(const SharedPtr<platform::InterruptDomain>& domain, Iterator& itr,
-            Iterator& end, const size_t index, size_t findex, const GraphBuilderBase<RoutingGraph>* g):
-            currentConnector(itr), endConnector(end), currentIndex(index), fixedDomain(domain), fixedIndex(findex), graph(g) {
+            Iterator& end, const size_t index, size_t findex, const GraphBuilderBase<RoutingGraph>* g, bool c):
+            currentConnector(itr), endConnector(end), currentIndex(index), fixedDomain(domain), fixedIndex(findex), graph(g),
+            checkTriggerType(c) {
             assert(fixedDomain, "Fixed domain is null");
             advanceToValidState();
         }
@@ -411,7 +425,7 @@ namespace kernel::hal::interrupts {
             auto sourceVertex = graph -> getVertexByLabel(sourceLabel);
             auto targetVertex = graph -> getVertexByLabel(targetLabel);
             if (!(sourceVertex.occupied() && targetVertex.occupied())) return false;
-            return RoutingConstraint::isEdgeAllowed(*graph, *sourceVertex, *targetVertex);
+            return RoutingConstraint::isEdgeAllowedImpl(*graph, *sourceVertex, *targetVertex, checkTriggerType);
         }
 
         template<>
@@ -532,6 +546,22 @@ namespace kernel::hal::interrupts {
             return out;
         }
 
+        bool RoutingGraphBuilder::isEdgeAllowedIgnoringTriggerType(Base::VertexHandle source, Base::VertexHandle target) const {
+            validateVertexHandle(source);
+            validateVertexHandle(target);
+            if (hasEdge(source, target)) return false;
+            return RoutingConstraint::isEdgeAllowedImpl(asBase(), source, target, false);
+        }
+
+        RoutingGraphBuilder::FilteredPotentialEdgeIterator<false> RoutingGraphBuilder::validEdgesToIgnoringTriggerType(VertexHandle target) const {
+            auto baseIterator = RoutingConstraint::validEdgesToImpl(asBase(), target, false);
+            return FilteredPotentialEdgeIterator(move(baseIterator), *this, target);
+        }
+
+        RoutingGraphBuilder::FilteredPotentialEdgeIterator<true> RoutingGraphBuilder::validEdgesFromIgnoringTriggerType(VertexHandle target) const {
+            auto baseIterator = RoutingConstraint::validEdgesFromImpl(asBase(), target, false);
+            return FilteredPotentialEdgeIterator(move(baseIterator), *this, target);
+        }
     }
 
     namespace platform {

@@ -187,9 +187,9 @@ struct DefaultHasher<kernel::hal::interrupts::managed::RoutingNodeLabel> {
 namespace kernel::hal::interrupts {
    namespace managed {
       enum RoutingNodeTriggerType{
-         TRIGGER_LEVEL,
-         TRIGGER_EDGE,
-         TRIGGER_UNDETERMINED
+         TRIGGER_LEVEL = 0,
+         TRIGGER_EDGE = 1,
+         TRIGGER_UNDETERMINED = 2
      };
 
       using RoutingVertexConfig = GraphProperties::ColoredLabeledVertex<RoutingNodeTriggerType, RoutingNodeLabel>;
@@ -213,10 +213,11 @@ namespace kernel::hal::interrupts {
          const SharedPtr<platform::InterruptDomain> fixedDomain;
          const size_t fixedIndex;
          const GraphBuilderBase<RoutingGraph>* graph;
+         const bool checkTriggerType;
          friend struct RoutingConstraint;
          struct None{};
          PotentialEdgeIterator(const SharedPtr<platform::InterruptDomain>& domain, Iterator& itr,
-            Iterator& end, size_t index, size_t findex, const GraphBuilderBase<RoutingGraph>* g);
+            Iterator& end, size_t index, size_t findex, const GraphBuilderBase<RoutingGraph>* g, bool checkTriggerType);
          void advanceIntermediateState();
          [[nodiscard]] bool isValidIntermediateState() const;
          void advanceToValidState();
@@ -232,6 +233,9 @@ namespace kernel::hal::interrupts {
       struct RoutingConstraint {
          using Builder = GraphBuilderBase<RoutingGraph>;
          using VertexHandle = BuilderVertexHandle<RoutingGraph>;
+         static bool isEdgeAllowedImpl(const Builder& graph, VertexHandle source, VertexHandle target, bool checkTriggerType);
+         static IteratorRange<PotentialEdgeIterator<true>> validEdgesFromImpl(const Builder& graph, VertexHandle source, bool checkTriggerType);
+         static IteratorRange<PotentialEdgeIterator<false>> validEdgesToImpl(const Builder& graph, VertexHandle target, bool checkTriggerType);
          static bool isEdgeAllowed(const Builder& graph, VertexHandle source, VertexHandle target);
          static IteratorRange<PotentialEdgeIterator<true>> validEdgesFrom(const Builder& graph, VertexHandle source);
          static IteratorRange<PotentialEdgeIterator<false>> validEdgesTo(const Builder& graph, VertexHandle target);
@@ -239,9 +243,15 @@ namespace kernel::hal::interrupts {
 
       class RoutingGraphBuilder : RestrictedGraphBuilder<RoutingGraph, RoutingConstraint> {
          using Base = RestrictedGraphBuilder<RoutingGraph, RoutingConstraint>;
-         RoutingNodeTriggerType getConnectedComponentTriggerType(Base::VertexHandle) const;
          void setConnectedComponentTriggerType(Base::VertexHandle, RoutingNodeTriggerType type);
-         friend struct RoutingConstraint;
+         friend class FreelyRoutableDomainGreedyRouter;
+
+         template <bool Forward>
+         using FilteredPotentialEdgeIterator = SimpleGraphFilteredIteratorRange<IteratorRange<PotentialEdgeIterator<Forward>>, Forward>;
+
+         [[nodiscard]] bool isEdgeAllowedIgnoringTriggerType(Base::VertexHandle source, Base::VertexHandle target) const;
+         [[nodiscard]] FilteredPotentialEdgeIterator<true> validEdgesFromIgnoringTriggerType(VertexHandle source) const;
+         [[nodiscard]] FilteredPotentialEdgeIterator<false> validEdgesToIgnoringTriggerType(VertexHandle target) const;
       public:
          static const RoutingGraphBuilder& fromGenericBuilder(const RoutingConstraint::Builder&);
          template<typename VertexContainer>
@@ -278,6 +288,7 @@ namespace kernel::hal::interrupts {
          using Base::getVertices;
          using Base::getVertex;
 
+         [[nodiscard]] RoutingNodeTriggerType getConnectedComponentTriggerType(Base::VertexHandle) const;
          Optional<Base::EdgeHandle> addEdge(const Base::VertexHandle& from, const Base::VertexHandle& to);
       };
       

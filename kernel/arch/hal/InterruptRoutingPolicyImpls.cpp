@@ -6,16 +6,71 @@
 #include <kernel.h>
 
 namespace kernel::hal::interrupts::managed {
-    struct InterruptReceiverLoadComparator {
-        HashMap<RoutingNodeLabel, size_t>* receiverLoads;
-        InterruptReceiverLoadComparator(HashMap<RoutingNodeLabel, size_t>& loads) : receiverLoads(&loads) {}
-        bool operator()(const RoutingNodeLabel& a, const RoutingNodeLabel& b) {
-            return (*receiverLoads)[a] > (*receiverLoads)[b];
-        }
-    };
+    InterruptReceiverLoadComparator::InterruptReceiverLoadComparator(HashMap<RoutingNodeLabel, size_t>& loads) : receiverLoads(loads) {}
+    // Returns true if a is "heavier" than b, so that the heap promotes the least-loaded.
+    bool InterruptReceiverLoadComparator::operator()(const RoutingNodeLabel& a, const RoutingNodeLabel& b) const{
+        return receiverLoads[a] > receiverLoads[b];
+    }
 
-    using DomainReceiverHeap = Heap<RoutingNodeLabel, InterruptReceiverLoadComparator>;
-    using DomainReceiverLoadMap = VertexAnnotation<DomainReceiverHeap, topology::TopologyGraph>;
+    FreelyRoutableDomainGreedyRouter::FreelyRoutableDomainGreedyRouter(RoutingGraphBuilder &b, SharedPtr<platform::InterruptDomain> &d, DomainReceiverLoadMap& l) : builder(b), domain(d), loads(l),
+    comparator(loads), heaps{DomainReceiverHeap(comparator), DomainReceiverHeap(comparator), DomainReceiverHeap(comparator)}{
+        assert(domain -> instanceof(TypeID_v<platform::FreeRoutableDomain>), "Can't construct a FreelyRoutableDomainGreedyRouter with a domain that isn't freely routable");
+        auto nodeLabel = RoutingNodeLabel(domain, 0);
+        auto node = b.getVertexByLabel(nodeLabel);
+        assert(node.occupied(), "Node not found");
+        for (auto v : b.validEdgesFromIgnoringTriggerType(*node)) {
+            auto targetLabel = b.getVertexLabel(v);
+            auto targetTriggerType = b.getConnectedComponentTriggerType(v);
+            heaps[targetTriggerType].push(*targetLabel);
+        }
+    }
+
+    bool FreelyRoutableDomainGreedyRouter::routeAll() {
+        bool success = true;
+        const auto receiver = crocos_dynamic_cast<platform::InterruptReceiver>(domain);
+        const auto receiverCount = receiver -> getReceiverCount();
+        for (size_t i = 0; i < receiverCount; i++) {
+            auto didRouteSuccessfully = route(i).occupied();
+            if (!didRouteSuccessfully) {
+                klog << "FreelyRoutableDomainGreedyRouter::routeAll() failed on domain of type " <<
+                    receiver -> type_name() << " at receiver index " << i << "\n";
+                success = false;
+            }
+        }
+        return success;
+    }
+
+    Optional<RoutingGraphBuilder::EdgeHandle> FreelyRoutableDomainGreedyRouter::route(size_t receiverIndex) {
+        auto sourceLabel = RoutingNodeLabel(domain, receiverIndex);
+        auto sourceTriggerType = builder.getConnectedComponentTriggerType(*builder.getVertexByLabel(sourceLabel));
+        Optional<RoutingNodeLabel> bestCandidate;
+        Optional<RoutingNodeTriggerType> bestTriggerType;
+        auto consider = [&](RoutingNodeTriggerType type) {
+            if (!heaps[type].empty()) {
+                auto cand = heaps[type].top();
+                if (!bestCandidate.occupied() || comparator(*bestCandidate, cand)) {
+                    bestCandidate = cand;
+                    bestTriggerType = type;
+                }
+            }
+        };
+        consider(TRIGGER_UNDETERMINED);
+        consider(sourceTriggerType == TRIGGER_LEVEL ? TRIGGER_LEVEL : TRIGGER_EDGE);
+        if (!bestCandidate.occupied()) {
+            return {};
+        }
+        auto target = builder.getVertexByLabel(*bestCandidate);
+        auto out = builder.addEdge(*builder.getVertexByLabel(sourceLabel), *target);
+        heaps[*bestTriggerType].pop();
+        loads[*bestCandidate] += loads[sourceLabel];
+        if (*bestTriggerType == TRIGGER_UNDETERMINED) {
+            heaps[sourceTriggerType].push(*bestCandidate);
+        }
+        else {
+            heaps[*bestTriggerType].push(*bestCandidate);
+        }
+        return out;
+    }
 
     RoutingGraph GreedyRoutingPolicy::buildRoutingGraph(RoutingGraphBuilder& builder) {
         const auto topologyGraph = *topology::getTopologyGraph();
@@ -25,8 +80,8 @@ namespace kernel::hal::interrupts::managed {
             const auto domain = topologyGraph.getVertexLabel(topologyDomains[i]);
             domainOrder.insert(domain, i);
         }
-        HashMap<RoutingNodeLabel, size_t> receiverLoads;
-        const InterruptReceiverLoadComparator comparator(receiverLoads);
+
+        DomainReceiverLoadMap receiverLoads;
 
         auto preexistingEdges = Vector<RoutingGraphBuilder::EdgeHandle>(builder.currentEdges());
         preexistingEdges.sort([&](const RoutingGraphBuilder::EdgeHandle& a, const RoutingGraphBuilder::EdgeHandle& b) {
@@ -58,25 +113,8 @@ namespace kernel::hal::interrupts::managed {
             //If 'domain' is freely routable, then all interrupt receivers can be mapped
             //to any possible output, so we can just keep one global list of possible receivers to map to
             if (domain -> instanceof(TypeID_v<platform::FreeRoutableDomain>)) {
-                Heap<RoutingNodeLabel, InterruptReceiverLoadComparator> bestReceivers(comparator);
-                auto firstReceiver = builder.getVertexByLabel(RoutingNodeLabel(domain, 0));
-                assert(firstReceiver, "Routable domain must have at least one receiver");
-                for (auto dest : builder.getValidEdgesFrom(*firstReceiver)) {
-                    auto label = builder.getVertexLabel(dest);
-                    assert(label, "Routing vertex should be labeled");
-                    bestReceivers.push(*label);
-                }
-                auto receiver = crocos_dynamic_cast<platform::InterruptReceiver>(domain);
-                for (size_t i = 0; i < receiver -> getReceiverCount(); i++) {
-                    auto label = RoutingNodeLabel(domain, i);
-                    //Skip routing receivers that aren't eventually connected to any devices.
-                    if (receiverLoads[label] == 0) continue;
-                    auto target = bestReceivers.pop();
-                    receiverLoads[target] += receiverLoads[label];
-                    bestReceivers.push(target);
-                    auto edge = builder.addEdge(*builder.getVertexByLabel(label), *builder.getVertexByLabel(target));
-                    assert(edge.occupied(), "Edge should be created");
-                }
+                auto greedyFreeRouter = FreelyRoutableDomainGreedyRouter(builder, domain, receiverLoads);
+                assert(greedyFreeRouter.routeAll(), "Failed to route all receivers for freely routable domain");
             }
             //Otherwise, we have no hope of doing anything clever - we've gotta brute force it :(
             else if (domain -> instanceof(TypeID_v<platform::RoutableDomain>)) {

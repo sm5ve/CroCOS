@@ -1219,6 +1219,10 @@ protected:
     using Base::_getFirstEdgeToVertex;
     using Base::_getNextOutgoingEdge;
     using Base::_getNextIncomingEdge;
+    using Base::validateVertexHandle;
+    using Base::validateEdgeHandle;
+
+    const Base& asBase() const{ return *this; }
 
 private:
     // Immutable constraint and vertex configuration
