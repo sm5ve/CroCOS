@@ -309,7 +309,7 @@ namespace kernel::amd64{
         const auto exceptionVectorConnector =
             make_shared<hal::interrupts::platform::AffineConnector>(exceptionVectors,
             hal::interrupts::platform::getCPUInterruptVectors(), INTERRUPT_VECTOR_RESERVE_START, 0, INTERRUPT_VECTOR_RESERVE_SIZE);
-        hal::interrupts::topology::registerConnector(exceptionVectorConnector);
+        hal::interrupts::topology::registerExclusiveConnector(exceptionVectorConnector);
 
         using namespace hal::interrupts::managed;
         registerHandler(InterruptSourceHandle(exceptionVectors, 14), make_unique<InterruptHandler>(temporaryPageFaultHandler));

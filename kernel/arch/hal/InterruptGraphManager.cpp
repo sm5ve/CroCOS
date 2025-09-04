@@ -89,15 +89,18 @@ namespace kernel::hal::interrupts {
             auto& builder = getBuilder();
             auto source = builder.getVertexByLabel(connector -> getSource());
             auto target = builder.getVertexByLabel(connector -> getTarget());
-            auto targetReceiver = crocos_dynamic_cast<platform::InterruptReceiver>(connector -> getTarget());
+            const auto targetReceiver = crocos_dynamic_cast<platform::InterruptReceiver>(connector -> getTarget());
+            const auto sourceEmitter = crocos_dynamic_cast<platform::InterruptEmitter>(connector -> getSource());
             assert(source.occupied() && target.occupied(), "Must add interrupt domains before registering a connector between them");
-            assert(connector -> getSource() -> instanceof(TypeID_v<platform::InterruptEmitter>), "Connector source must be an interrupt emitter");
+            assert(sourceEmitter, "Connector source must be an interrupt emitter");
             assert(targetReceiver, "Connector target must be an interrupt receiver");
             builder.addEdge(*source, *target, move(connector));
             isDirty = true;
             bool wasSuccessful = true;
-            for (size_t i = 0; i < targetReceiver -> getReceiverCount(); i++) {
-                auto targetLabel = managed::RoutingNodeLabel(connector -> getTarget(), i);
+            for (size_t i = 0; i < sourceEmitter -> getEmitterCount(); i++) {
+                auto targetIndex = connector -> fromOutput(i);
+                if (!targetIndex) {continue;}
+                auto targetLabel = managed::RoutingNodeLabel(connector -> getTarget(), *targetIndex);
                 if (getExclusiveConnectors().contains(targetLabel)) {
                     wasSuccessful = false;
                     continue;
@@ -120,7 +123,7 @@ namespace kernel::hal::interrupts {
         SharedPtr<RoutingGraphBuilder> createRoutingGraphBuilder() {
             struct RoutingVertexSpec {
                 RoutingNodeLabel label;
-                RoutingNodeTriggerType color;
+                RoutingNodeMetadata color;
             };
             
             Vector<RoutingVertexSpec> routingVertices;
@@ -148,30 +151,25 @@ namespace kernel::hal::interrupts {
                                 }
                             }
                         }
+                        Optional<SharedPtr<platform::InterruptDomain>> owner = {};
+                        auto label = RoutingNodeLabel(domain, i);
+                        if (topology::getExclusiveConnectors().contains(label)) {
+                            owner = topology::getExclusiveConnectors().at(label)->getSource();
+                        }
                         routingVertices.push(RoutingVertexSpec{
                             RoutingNodeLabel(domain, i),
-                            triggerType
+                            {triggerType, owner}
                         });
                     }
                 }
                 else if (domain->instanceof(TypeID_v<platform::InterruptEmitter>)) {
                     const auto emitter = crocos_dynamic_cast<platform::InterruptEmitter>(domain);
                     for (size_t i = 0; i < emitter->getEmitterCount(); i++) {
-                        auto triggerType = TRIGGER_UNDETERMINED;
-                        if (configurableTriggerDomain) {
-                            auto activationType = configurableTriggerDomain -> getActivationType(i);
-                            if (activationType) {
-                                if (isLevelTriggered(*activationType)) {
-                                    triggerType = TRIGGER_LEVEL;
-                                }
-                                else {
-                                    triggerType = TRIGGER_EDGE;
-                                }
-                            }
-                        }
+                        //Pure emitters are not of configurable trigger type. We may create a different abstraction
+                        //to represent this concept, should it prove necessary.
                         routingVertices.push(RoutingVertexSpec{
                             RoutingNodeLabel(domain, i),
-                            triggerType
+                            {TRIGGER_UNDETERMINED, {}}
                         });
                     }
                 }
@@ -229,7 +227,7 @@ namespace kernel::hal::interrupts {
             return out;
         }
 
-        bool RoutingConstraint::isEdgeAllowedImpl(const Builder &graph, const VertexHandle source, const VertexHandle target, bool checkTriggerType) {
+        bool RoutingConstraint::isEdgeAllowedImpl(Builder &graph, const VertexHandle source, const VertexHandle target, bool checkTriggerType) {
             auto& routingBuilder = RoutingGraphBuilder::fromGenericBuilder(graph);
             if (graph.getOutgoingEdgeCount(source) > 0) {
                 return graph.hasEdge(source, target);
@@ -269,11 +267,6 @@ namespace kernel::hal::interrupts {
             if (const auto edge = topologyGraph.findEdge(*sourceTopologyVertex, *targetTopologyVertex)) {
                 const auto connector = topologyGraph.getEdgeLabel(*edge);
                 const auto targetLabel = graph.getVertexLabel(target);
-                //If the target receiver is connected to by an exclusive connector, confirm that 'connector' is that exclusive connector
-                if (topology::getExclusiveConnectors().contains(*targetLabel)) {
-                    const auto exclusiveConnector = topology::getExclusiveConnectors().at(*targetLabel);
-                    if (connector != exclusiveConnector) return false;
-                }
                 if (auto emitterIndex = connector->fromInput(targetIndex)) {
                     const auto emitter = crocos_dynamic_cast<platform::InterruptEmitter>(sourceDomain);
                     if (!emitter) return false;
@@ -281,6 +274,13 @@ namespace kernel::hal::interrupts {
                     if (sourceType == NodeType::Device) {
                         assert(!(emitter -> instanceof(TypeID_v<platform::InterruptReceiver>)), "Source type improperly set");
                         return (connector -> fromOutput(sourceIndex).occupied()) && (*connector -> fromOutput(sourceIndex) == targetIndex);
+                    }
+                    //For routable domains of any sort, we need to check for compatibility with ownership restrictions.
+                    if (emitter -> instanceof(TypeID_v<platform::RoutableDomain>)) {
+                        auto owner = routingBuilder.getEffectiveOwner(target);
+                        if (owner.occupied() && *owner != sourceDomain) {
+                            return false;
+                        }
                     }
                     if (emitter -> instanceof(TypeID_v<platform::FreeRoutableDomain>)) {
                         return true;
@@ -302,7 +302,7 @@ namespace kernel::hal::interrupts {
             return false;
         }
 
-        IteratorRange<PotentialEdgeIterator<true>> RoutingConstraint::validEdgesFromImpl(const Builder &graph, const VertexHandle source, bool checkTriggerType) {
+        IteratorRange<PotentialEdgeIterator<true>> RoutingConstraint::validEdgesFromImpl(Builder &graph, const VertexHandle source, bool checkTriggerType) {
             using It = PotentialEdgeIterator<true>;
             
             const auto sourceDomain = graph.getVertexLabel(source)->domain();
@@ -322,7 +322,7 @@ namespace kernel::hal::interrupts {
             };
         }
 
-        IteratorRange<PotentialEdgeIterator<false>> RoutingConstraint::validEdgesToImpl(const Builder &graph, const VertexHandle target, bool checkTriggerType) {
+        IteratorRange<PotentialEdgeIterator<false>> RoutingConstraint::validEdgesToImpl(Builder &graph, const VertexHandle target, bool checkTriggerType) {
             using It = PotentialEdgeIterator<false>;
 
             const auto targetDomain = graph.getVertexLabel(target)->domain();
@@ -342,21 +342,21 @@ namespace kernel::hal::interrupts {
             };
         }
 
-        bool RoutingConstraint::isEdgeAllowed(const Builder &graph, VertexHandle source, VertexHandle target) {
+        bool RoutingConstraint::isEdgeAllowed(Builder &graph, VertexHandle source, VertexHandle target) {
             return isEdgeAllowedImpl(graph, source, target, true);
         }
 
-        IteratorRange<PotentialEdgeIterator<true> > RoutingConstraint::validEdgesFrom(const Builder &graph, VertexHandle source) {
+        IteratorRange<PotentialEdgeIterator<true> > RoutingConstraint::validEdgesFrom(Builder &graph, VertexHandle source) {
             return validEdgesFromImpl(graph, source, true);
         }
 
-        IteratorRange<PotentialEdgeIterator<false> > RoutingConstraint::validEdgesTo(const Builder &graph, VertexHandle target) {
+        IteratorRange<PotentialEdgeIterator<false> > RoutingConstraint::validEdgesTo(Builder &graph, VertexHandle target) {
             return validEdgesToImpl(graph, target, true);
         }
 
         template<bool Forward>
         PotentialEdgeIterator<Forward>::PotentialEdgeIterator(const SharedPtr<platform::InterruptDomain>& domain, Iterator& itr,
-            Iterator& end, const size_t index, size_t findex, const GraphBuilderBase<RoutingGraph>* g, bool c):
+            Iterator& end, const size_t index, size_t findex, GraphBuilderBase<RoutingGraph>* g, bool c):
             currentConnector(itr), endConnector(end), currentIndex(index), fixedDomain(domain), fixedIndex(findex), graph(g),
             checkTriggerType(c) {
             assert(fixedDomain, "Fixed domain is null");
@@ -415,7 +415,7 @@ namespace kernel::hal::interrupts {
         }
 
         template<>
-        bool PotentialEdgeIterator<false>::isValidIntermediateState() const {
+        bool PotentialEdgeIterator<false>::isValidIntermediateState() {
             if (!graph) return false;
             auto& topologyGraph = *topology::getTopologyGraph();
             auto targetLabel = RoutingNodeLabel(fixedDomain, fixedIndex);
@@ -429,7 +429,7 @@ namespace kernel::hal::interrupts {
         }
 
         template<>
-        bool PotentialEdgeIterator<true>::isValidIntermediateState() const {
+        bool PotentialEdgeIterator<true>::isValidIntermediateState() {
             if (!graph) return false;
             auto& topologyGraph = *topology::getTopologyGraph();
             auto sourceLabel = RoutingNodeLabel(fixedDomain, fixedIndex);
@@ -476,22 +476,34 @@ namespace kernel::hal::interrupts {
         template<typename VertexContainer>
         RoutingGraphBuilder::RoutingGraphBuilder(const VertexContainer &vertices) : Base(vertices, RoutingConstraint{}){}
 
-        RoutingNodeTriggerType RoutingGraphBuilder::getConnectedComponentTriggerType(Base::VertexHandle v) const{
-            while (auto e = _getFirstEdgeFromVertex(v)) {
+        RoutingNodeTriggerType RoutingGraphBuilder::getConnectedComponentTriggerType(Base::VertexHandle v){
+            const auto original = v;
+            auto triggerType = getVertexColor(v)->triggerType;
+            Optional<EdgeHandle> e;
+            while ((e = _getFirstEdgeFromVertex(v)) && triggerType == TRIGGER_UNDETERMINED) {
                 v = getEdgeTarget(*e);
+                triggerType = getVertexColor(v) -> triggerType;
             }
-            return *getVertexColor(v);
+            auto vertexMetadata = getVertexColor(original);
+            vertexMetadata->triggerType = triggerType;
+            _setVertexColor(original, vertexMetadata);
+            return triggerType;
         }
 
         void RoutingGraphBuilder::setConnectedComponentTriggerType(Base::VertexHandle v, RoutingNodeTriggerType type) {
             while (auto e = _getFirstEdgeFromVertex(v)) {
+                auto currentMetadata = getVertexColor(v);
+                currentMetadata->triggerType = type;
+                _setVertexColor(v, currentMetadata);
                 v = getEdgeTarget(*e);
             }
-            _setVertexColor(v, type);
+            auto currentMetadata = getVertexColor(v);
+            currentMetadata->triggerType = type;
+            _setVertexColor(v, currentMetadata);
         }
 
-        const RoutingGraphBuilder &RoutingGraphBuilder::fromGenericBuilder(const RoutingConstraint::Builder & b) {
-            return static_cast<const RoutingGraphBuilder&>(Base::fromGenericBuilder(b));
+        RoutingGraphBuilder &RoutingGraphBuilder::fromGenericBuilder(RoutingConstraint::Builder & b) {
+            return static_cast<RoutingGraphBuilder&>(Base::fromGenericBuilder(b));
         }
 
         Optional<RoutingGraph> RoutingGraphBuilder::build() {
@@ -505,11 +517,12 @@ namespace kernel::hal::interrupts {
                         auto vertex = getVertexByLabel(routingNodeLabel);
                         assert(vertex.occupied(), "Vertex must exist in routing graph");
                         auto nextInPath = _getFirstEdgeFromVertex(*vertex);
+                        /*if (*getVertexColor(*vertex) == TRIGGER_UNDETERMINED) {
+                            _setVertexColor(*vertex, TRIGGER_EDGE); //Use edge trigger mode as a default
+                        }*/
                         if (nextInPath.occupied()) {
                             auto nextVertex = getEdgeTarget(*nextInPath);
-                            if (*getVertexColor(nextVertex) == TRIGGER_UNDETERMINED) {
-                                _setVertexColor(nextVertex, TRIGGER_EDGE); //Use edge trigger mode as a default
-                            }
+
                             _setVertexColor(*vertex, getVertexColor(nextVertex));
                         }
                     }
@@ -533,12 +546,11 @@ namespace kernel::hal::interrupts {
             return Base::build();
         }
 
-
         Optional<RoutingGraphBuilder::EdgeHandle> RoutingGraphBuilder::addEdge(const Base::VertexHandle &from, const Base::VertexHandle &to) {
+            const auto sourceTriggerType = getVertexColor(from) -> triggerType;
+            const auto targetTriggerType = getConnectedComponentTriggerType(to);
             const auto out =  Base::addEdge(from, to);
             if (out.occupied()) {
-                const auto sourceTriggerType = *getVertexColor(from);
-                const auto targetTriggerType = getConnectedComponentTriggerType(to);
                 if (targetTriggerType == TRIGGER_UNDETERMINED && sourceTriggerType != TRIGGER_UNDETERMINED) {
                     setConnectedComponentTriggerType(to, sourceTriggerType);
                 }
@@ -546,22 +558,44 @@ namespace kernel::hal::interrupts {
             return out;
         }
 
-        bool RoutingGraphBuilder::isEdgeAllowedIgnoringTriggerType(Base::VertexHandle source, Base::VertexHandle target) const {
+        bool RoutingGraphBuilder::isEdgeAllowedIgnoringTriggerType(Base::VertexHandle source, Base::VertexHandle target) {
             validateVertexHandle(source);
             validateVertexHandle(target);
             if (hasEdge(source, target)) return false;
             return RoutingConstraint::isEdgeAllowedImpl(asBase(), source, target, false);
         }
 
-        RoutingGraphBuilder::FilteredPotentialEdgeIterator<false> RoutingGraphBuilder::validEdgesToIgnoringTriggerType(VertexHandle target) const {
+        RoutingGraphBuilder::FilteredPotentialEdgeIterator<false> RoutingGraphBuilder::validEdgesToIgnoringTriggerType(VertexHandle target) {
             auto baseIterator = RoutingConstraint::validEdgesToImpl(asBase(), target, false);
             return FilteredPotentialEdgeIterator(move(baseIterator), *this, target);
         }
 
-        RoutingGraphBuilder::FilteredPotentialEdgeIterator<true> RoutingGraphBuilder::validEdgesFromIgnoringTriggerType(VertexHandle target) const {
+        RoutingGraphBuilder::FilteredPotentialEdgeIterator<true> RoutingGraphBuilder::validEdgesFromIgnoringTriggerType(VertexHandle target) {
             auto baseIterator = RoutingConstraint::validEdgesFromImpl(asBase(), target, false);
             return FilteredPotentialEdgeIterator(move(baseIterator), *this, target);
         }
+
+        Optional<SharedPtr<platform::InterruptDomain> > RoutingGraphBuilder::getEffectiveOwner(const Base::VertexHandle& h) {
+            auto currentMetadata = getVertexColor(h);
+            auto currentDomain = getVertexLabel(h) -> domain();
+            if (currentMetadata -> owner.occupied()) {
+                return currentMetadata -> owner;
+            }
+            auto e = _getFirstEdgeFromVertex(h);
+            if (e.occupied()) {
+                auto target = getEdgeTarget(*e);
+                auto childOwner = getEffectiveOwner(target);
+                if (childOwner.occupied() && (*childOwner == currentDomain)) {
+                    return {};
+                }
+                //Cache the results so we don't have to traverse down as much.
+                currentMetadata -> owner = childOwner;
+                _setVertexColor(h, currentMetadata);
+                return childOwner;
+            }
+            return {};
+        }
+
     }
 
     namespace platform {

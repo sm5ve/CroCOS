@@ -38,6 +38,7 @@ namespace kernel{
         klog << "Updating routing configuration\n";
         hal::interrupts::managed::updateRouting();
         klog << "Routing configuration updated\n";
+        klog << "Total malloc usage " << LibAlloc::InternalAllocator::getAllocatorStats().totalBytesRequested << "\n";
 
         amd64::sti();
 

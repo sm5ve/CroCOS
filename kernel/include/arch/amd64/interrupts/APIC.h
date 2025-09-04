@@ -11,7 +11,8 @@
 
 namespace kernel::amd64::interrupts{
     using namespace hal::interrupts::platform;
-    CRClass(IOAPIC, public InterruptDomain, public FreeRoutableDomain, public MaskableDomain, public ConfigurableActivationTypeDomain){
+    CRClass(IOAPIC, public InterruptDomain, public FreeRoutableDomain, public MaskableDomain,
+        public ConfigurableActivationTypeDomain){
         uint8_t id;
         volatile uint32_t* mmio_window;
         uint32_t gsi_base;

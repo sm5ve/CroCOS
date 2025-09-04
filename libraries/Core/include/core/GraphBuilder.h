@@ -1176,7 +1176,7 @@ using BuilderEdgeHandle = typename _GraphBuilder::GraphBuilderImpl<Graph>::EdgeH
 
 // Concept for EdgeConstraint - defines methods that a constraint must implement
 template<typename T, typename Graph>
-concept EdgeConstraint = requires(const T &constraint, const GraphBuilderBase<Graph> &builder,
+concept EdgeConstraint = requires(const T &constraint, GraphBuilderBase<Graph> &builder,
                                   BuilderVertexHandle<Graph> from,
                                   BuilderVertexHandle<Graph> to)
 {
@@ -1203,8 +1203,8 @@ public:
     using VertexHandle = typename Base::VertexHandle;
     using EdgeHandle = typename Base::EdgeHandle;
 
-    static const RestrictedGraphBuilder& fromGenericBuilder(const GraphBuilderBase<Graph> &builder) {
-        return static_cast<const RestrictedGraphBuilder&>(builder);
+    static RestrictedGraphBuilder& fromGenericBuilder(GraphBuilderBase<Graph> &builder) {
+        return static_cast<RestrictedGraphBuilder&>(builder);
     }
 
 protected:
@@ -1222,7 +1222,7 @@ protected:
     using Base::validateVertexHandle;
     using Base::validateEdgeHandle;
 
-    const Base& asBase() const{ return *this; }
+    Base& asBase() { return *this; }
 
 private:
     // Immutable constraint and vertex configuration
@@ -1458,7 +1458,7 @@ public:
         }
     };
 
-    auto getValidEdgesFrom(const VertexHandle &vertex) const {
+    auto getValidEdgesFrom(const VertexHandle &vertex) {
         this->validateVertexHandle(vertex);
         if constexpr (Graph::StructureModifier::is_simple_graph) {
             auto baseIterator = constraint.validEdgesFrom(*this, vertex);
@@ -1468,7 +1468,7 @@ public:
         }
     }
 
-    auto getValidEdgesTo(const VertexHandle &vertex) const {
+    auto getValidEdgesTo(const VertexHandle &vertex) {
         this->validateVertexHandle(vertex);
         if constexpr (Graph::StructureModifier::is_simple_graph) {
             auto baseIterator = constraint.validEdgesTo(*this, vertex);
