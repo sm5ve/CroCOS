@@ -12,7 +12,6 @@ namespace kernel::amd64::timers{
     constexpr uint32_t PIT_CHANNEL_0 = 0x40;
     constexpr uint32_t PIT_CHANNEL_1 = 0x41;
     constexpr uint32_t PIT_CHANNEL_2 = 0x42;
-    constexpr uint32_t PIT_CHANNEL_3 = 0x43;
     constexpr uint32_t PIT_COMMAND_PORT = 0x43;
 
     using namespace kernel::hal::interrupts;

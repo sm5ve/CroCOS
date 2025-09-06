@@ -31,7 +31,7 @@ namespace kernel{
         heapEarlyInit();
         //I am in agony - there is something fragile about the way things are linked
         //and calling presort_object_parent_lists() can apparently cause CRClass to break completely
-        //presort_object_parent_lists();
+        presort_object_parent_lists();
         run_global_constructors();
         klog << "Early data structure setup complete\n";
 
