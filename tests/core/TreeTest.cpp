@@ -59,7 +59,7 @@ TEST(binaryTreeTraversal) {
         inOrder.push(node.data);
     });
     
-    ASSERT_EQ(inOrder.getSize(), 5);
+    ASSERT_EQ(inOrder.size(), 5);
     ASSERT_EQ(inOrder[0], 3);
     ASSERT_EQ(inOrder[1], 5);
     ASSERT_EQ(inOrder[2], 7);
@@ -72,7 +72,7 @@ TEST(binaryTreeTraversal) {
         postOrder.push(node.data);
     });
     
-    ASSERT_EQ(postOrder.getSize(), 5);
+    ASSERT_EQ(postOrder.size(), 5);
     ASSERT_EQ(postOrder[0], 3);
     ASSERT_EQ(postOrder[1], 7);
     ASSERT_EQ(postOrder[2], 5);
@@ -136,7 +136,7 @@ TEST(binarySearchTreeInOrderTraversal) {
         result.push(node.data);
     });
     
-    ASSERT_EQ(result.getSize(), 7);
+    ASSERT_EQ(result.size(), 7);
     ASSERT_EQ(result[0], 1);
     ASSERT_EQ(result[1], 3);
     ASSERT_EQ(result[2], 4);
@@ -412,7 +412,7 @@ TEST(intrusiveBSTEraseStructuralIntegrity) {
         });
         
         // Check that values are in sorted order
-        for (size_t i = 1; i < values.getSize(); i++) {
+        for (size_t i = 1; i < values.size(); i++) {
             if (values[i-1] >= values[i]) {
                 return false;
             }
@@ -485,7 +485,7 @@ TEST(intrusiveBSTEraseSuccessorCases) {
         values.push(node.value);
     });
     
-    ASSERT_EQ(values.getSize(), 3);
+    ASSERT_EQ(values.size(), 3);
     ASSERT_EQ(values[0], 5);
     ASSERT_EQ(values[1], 15);
     ASSERT_EQ(values[2], 20);
@@ -509,8 +509,8 @@ TEST(intrusiveBSTEraseSuccessorCases) {
     });
     
     // Should be: 5, 14, 15, 16, 18, 20, 25
-    ASSERT_EQ(values.getSize(), 7);
-    for (size_t i = 1; i < values.getSize(); i++) {
+    ASSERT_EQ(values.size(), 7);
+    for (size_t i = 1; i < values.size(); i++) {
         ASSERT_LT(values[i-1], values[i]); // Verify still sorted
     }
 }
@@ -528,7 +528,7 @@ TEST(intrusiveBSTEraseAllNodes) {
     // Erase all nodes in random order to stress swapNodes thoroughly
     Vector<int> eraseOrder = {8, 3, 12, 1, 15, 6, 10, 4, 13, 7, 2, 11, 9, 5, 14};
     
-    for (size_t i = 0; i < eraseOrder.getSize(); i++) {
+    for (size_t i = 0; i < eraseOrder.size(); i++) {
         int valueToErase = eraseOrder[i];
         IntrusiveTestNode* erased = bst.erase(valueToErase);
         ASSERT_NE(erased, nullptr);
@@ -541,7 +541,7 @@ TEST(intrusiveBSTEraseAllNodes) {
         });
         
         // Check that remaining values are still in sorted order
-        for (size_t j = 1; j < remaining.getSize(); j++) {
+        for (size_t j = 1; j < remaining.size(); j++) {
             ASSERT_LT(remaining[j-1], remaining[j]);
         }
         
@@ -559,7 +559,7 @@ TEST(intrusiveBSTEraseAllNodes) {
     bst.visitDepthFirstInOrder([&final](const IntrusiveTestNode& node) {
         final.push(node.value);
     });
-    ASSERT_EQ(final.getSize(), 0);
+    ASSERT_EQ(final.size(), 0);
 }
 
 TEST(redBlackTreeBasicOperations) {
@@ -606,7 +606,7 @@ TEST(redBlackTreeInOrderTraversal) {
         result.push(node.data);
     });
     
-    ASSERT_EQ(result.getSize(), 7);
+    ASSERT_EQ(result.size(), 7);
     ASSERT_EQ(result[0], 1);
     ASSERT_EQ(result[1], 3);
     ASSERT_EQ(result[2], 4);
@@ -741,7 +741,7 @@ TEST(redBlackTreeBalancingProperties) {
         result.push(node.data);
     });
     
-    ASSERT_EQ(result.getSize(), 15);
+    ASSERT_EQ(result.size(), 15);
     for (int i = 0; i < 15; i++) {
         ASSERT_EQ(result[i], i + 1);
     }
@@ -837,7 +837,7 @@ TEST(redBlackTreeRedBlackProperties) {
     });
     
     // Verify tree is balanced by checking sorted order is maintained
-    for (size_t i = 1; i < sortedResult.getSize(); i++) {
+    for (size_t i = 1; i < sortedResult.size(); i++) {
         ASSERT_LT(sortedResult[i-1], sortedResult[i]);
     }
     
@@ -889,7 +889,7 @@ TEST(redBlackTreeLargeDataset) {
         result.push(node.data);
     });
     
-    ASSERT_EQ(result.getSize(), maxVal);
+    ASSERT_EQ(result.size(), maxVal);
     for (int i = 0; i < maxVal; i++) {
         ASSERT_EQ(result[i], i + 1);
     }
@@ -915,7 +915,7 @@ TEST(redBlackTreeNoDuplicates) {
         result.push(node.data);
     });
     
-    ASSERT_EQ(result.getSize(), 3);
+    ASSERT_EQ(result.size(), 3);
     ASSERT_EQ(result[0], 3);
     ASSERT_EQ(result[1], 5);
     ASSERT_EQ(result[2], 7);
@@ -1064,7 +1064,7 @@ TEST(redBlackTreeEraseNodeWithTwoChildren) {
         result.push(node.data);
     });
     
-    for (size_t i = 1; i < result.getSize(); i++) {
+    for (size_t i = 1; i < result.size(); i++) {
         ASSERT_LT(result[i-1], result[i]); // Verify sorted order
     }
     
@@ -1110,7 +1110,7 @@ TEST(redBlackTreeEraseComplexRootCases) {
         result.push(node.data);
     });
     
-    for (size_t i = 1; i < result.getSize(); i++) {
+    for (size_t i = 1; i < result.size(); i++) {
         ASSERT_LT(result[i-1], result[i]);
     }
 }
@@ -1141,7 +1141,7 @@ TEST(redBlackTreeSequentialErase) {
             result.push(node.data);
         });
         
-        for (size_t i = 1; i < result.getSize(); i++) {
+        for (size_t i = 1; i < result.size(); i++) {
             ASSERT_LT(result[i-1], result[i]);
         }
     }
@@ -1222,7 +1222,7 @@ TEST(redBlackTreeEraseFixupStressCases) {
             inOrder.push(node.data);
         });
         
-        for (size_t i = 1; i < inOrder.getSize(); i++) {
+        for (size_t i = 1; i < inOrder.size(); i++) {
             ASSERT_LT(inOrder[i-1], inOrder[i]);
         }
     }
@@ -1392,7 +1392,7 @@ TEST(redBlackTreeExtremeCasesStressTest) {
         }
         
         // Delete every other element
-        for (int i = 0; i < inserted.getSize(); i += 2) {
+        for (int i = 0; i < inserted.size(); i += 2) {
             ASSERT_TRUE(rbt.erase(inserted[i]));
             if (!rbt.empty()) {
                 int blackHeight = 0;
@@ -1401,7 +1401,7 @@ TEST(redBlackTreeExtremeCasesStressTest) {
         }
         
         // Delete remaining elements
-        for (int i = 1; i < inserted.getSize(); i += 2) {
+        for (int i = 1; i < inserted.size(); i += 2) {
             ASSERT_TRUE(rbt.erase(inserted[i]));
             if (!rbt.empty()) {
                 int blackHeight = 0;

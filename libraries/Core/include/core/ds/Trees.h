@@ -1484,7 +1484,7 @@ protected:
 	void verifyAlmostRedBlackTree(const StackType &ancestryStack) requires (!HasParentPointer) {
 		size_t blackHeight = 0;
 		size_t nodeCount = 0;
-		for (size_t i = 0; i < ancestryStack.getSize() - 1; i++) {
+		for (size_t i = 0; i < ancestryStack.size() - 1; i++) {
 			assert(ancestryStack[i] != ancestryStack[i + 1],
 			       "verifyAlmostRedBlackTree - Ancestry stack has duplicate entry");
 			assert(ancestryStack[i] != nullptr,
@@ -1572,7 +1572,7 @@ protected:
 	//Then *ancestryStack[-2] points to the parent of the just-deleted node, *ancestryStack[-3] to the grandparent, etc.
 	//If we were to insert a black node there, we would have a valid RBT. Now we fix up the state of the tree.
 	void eraseFixup(StackType &ancestryStack) requires (!HasParentPointer) {
-		while (ancestryStack.getSize() > 1) {
+		while (ancestryStack.size() > 1) {
 			NodeType *current = *ancestryStack[-1];
 			NodeType *parent = *ancestryStack[-2];
 			Direction direction = getChildDirection(*parent, current);
@@ -1708,7 +1708,7 @@ protected:
 	template<typename StackType>
 		requires IsStack<NodeType **, StackType>
 	Color eraseCaseTwoChildren(NodeType *&node, StackType &ancestryStack) requires (!HasParentPointer) {
-		size_t ancestryStackFixupIndex = ancestryStack.getSize();
+		size_t ancestryStackFixupIndex = ancestryStack.size();
 		NodeType **successorRef = &RedBlackTreeInfoExtractor::right(*node);
 		ancestryStack.push(successorRef);
 		while (hasLeftChild(*(*successorRef))) {
@@ -1833,7 +1833,7 @@ protected:
 		}
 		NodeType *parent = nullptr;
 		if constexpr (AugmentedNode) {
-			if (ancestryStack.getSize() > 1) {
+			if (ancestryStack.size() > 1) {
 				parent = *ancestryStack[-2];
 			}
 		}
@@ -1902,7 +1902,7 @@ protected:
 	template<typename StackType>
 		requires IsStack<NodeType **, StackType>
 	void insertFixup(StackType &ancestryStack) requires (!HasParentPointer) {
-		while (ancestryStack.getSize() >= 3) {
+		while (ancestryStack.size() >= 3) {
 			NodeType *node = *ancestryStack[-1]; // current node
 			NodeType *parent = *ancestryStack[-2]; // parent
 			NodeType *grandparent = *ancestryStack[-3]; // grandparent

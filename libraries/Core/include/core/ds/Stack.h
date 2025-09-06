@@ -31,7 +31,7 @@ public:
         return data[--stackPointer];
     }
 
-    size_t getSize() const{
+    size_t size() const{
         return stackPointer;
     }
 
@@ -86,7 +86,7 @@ template <typename T, typename S>
 concept IsStack = requires(T t, S s){
     s.push(t);
     {s.pop()} -> convertible_to<T>;
-    {s.getSize()} -> convertible_to<size_t>;
+    {s.size()} -> convertible_to<size_t>;
     {s.empty()} -> convertible_to<bool>;
     {s[0]} -> convertible_to<T&>;
     {s[-1]} -> convertible_to<T&>;

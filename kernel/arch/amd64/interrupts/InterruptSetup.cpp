@@ -110,4 +110,5 @@ Core::PrintStream& operator<<(Core::PrintStream& ps, kernel::amd64::interrupts::
 
 extern "C" void interrupt_common_handler(kernel::amd64::interrupts::InterruptFrame& frame){
     kernel::hal::interrupts::managed::dispatchInterrupt(frame);
+    //kernel::print_stacktrace(reinterpret_cast<uintptr_t*>(&frame.rbp));
 }

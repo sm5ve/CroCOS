@@ -143,8 +143,12 @@ namespace kernel::hal::interrupts {
       using TopologyEdgeLabel = GraphProperties::LabeledEdge<SharedPtr<platform::DomainConnector>>;
       using TopologyGraphStructure = GraphProperties::StructureModifier<GraphProperties::Directed, GraphProperties::SimpleGraph, GraphPredicates::DirectedAcyclic>;
       using TopologyGraph = Graph<TopologyVertexLabel, TopologyEdgeLabel, TopologyGraphStructure>;
+      using TopologicalOrderMap = HashMap<SharedPtr<platform::InterruptDomain>, size_t>;
       
       Optional<TopologyGraph>& getTopologyGraph();
+      Vector<SharedPtr<platform::InterruptDomain>>& topologicallySortedDomains();
+      TopologicalOrderMap& topologicalOrderMap();
+      void releaseCachedTopologicalOrdering();
       
 #ifdef CROCOS_TESTING
       void resetTopologyState();
@@ -314,6 +318,5 @@ namespace kernel::hal::interrupts {
       };
    }
 }
-
 
 #endif //CROCOS_INTERRUPTS_H

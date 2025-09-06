@@ -57,7 +57,7 @@ TEST(randomAllocFreeStressTest) {
         }
 
         // Verify all allocations are still valid and uncorrupted
-        for (size_t i = 0; i < allocatedPointers.getSize(); i++) {
+        for (size_t i = 0; i < allocatedPointers.size(); i++) {
             void* ptr = allocatedPointers[i];
             size_t size = allocationSizes[i];
 
@@ -72,7 +72,7 @@ TEST(randomAllocFreeStressTest) {
 
         // Phase 2: Random frees
         while (!allocatedPointers.empty()) {
-            int index = std::rand() % allocatedPointers.getSize();
+            int index = std::rand() % allocatedPointers.size();
             void* ptr = allocatedPointers[index];
 
             LibAlloc::InternalAllocator::free(ptr);
@@ -104,7 +104,7 @@ TEST(fragmentationResistanceTest) {
     }
 
     // Free every other small block to create fragmentation
-    for (size_t i = 1; i < smallAllocations.getSize(); i += 2) {
+    for (size_t i = 1; i < smallAllocations.size(); i += 2) {
         LibAlloc::InternalAllocator::free(smallAllocations[i]);
         smallAllocations[i] = nullptr;
     }
@@ -197,7 +197,7 @@ TEST(alignmentStressTest) {
 
     // Free in random order
     while (!allocations.empty()) {
-        int index = std::rand() % allocations.getSize();
+        int index = std::rand() % allocations.size();
         LibAlloc::InternalAllocator::free(allocations[index]);
         allocations[index] = allocations[-1];
         allocations.pop();
@@ -227,8 +227,8 @@ TEST(mixedSizeStressTest) {
         memset(ptr, 0, size);
 
         // Randomly free some allocations to maintain working set
-        if (allocations.getSize() > 75 && (std::rand() % 3) == 0) {
-            int freeIndex = std::rand() % allocations.getSize();
+        if (allocations.size() > 75 && (std::rand() % 3) == 0) {
+            int freeIndex = std::rand() % allocations.size();
             LibAlloc::InternalAllocator::free(allocations[freeIndex]);
             allocations[freeIndex] = allocations[-1];
             allocations.pop();
@@ -307,8 +307,8 @@ TEST(allocatorPerformanceStressTest) {
 	            totalBytesAllocated += size;
 
         	    // Track peaks
-    	        if (allocations.getSize() > peakActiveAllocations) {
-	                peakActiveAllocations = allocations.getSize();
+    	        if (allocations.size() > peakActiveAllocations) {
+	                peakActiveAllocations = allocations.size();
 	            }
 
         	    // currentActiveBytes already computed above for memory pressure
@@ -317,13 +317,13 @@ TEST(allocatorPerformanceStressTest) {
         	    }
         	} else {
             	// Free a random allocation
-            	int index = std::rand() % allocations.getSize();
+            	int index = std::rand() % allocations.size();
             	void* ptr = allocations[index].ptr;
 
             	LibAlloc::InternalAllocator::free(ptr);
 
         	    totalBytesFreed += allocations[index].size;
-        	    allocations[index] = allocations[allocations.getSize()-1];
+        	    allocations[index] = allocations[allocations.size()-1];
         	    allocations.pop();
         	    totalFrees++;
         	}
@@ -434,8 +434,8 @@ TEST(allocatorPerformanceStressTest) {
             totalBytesAllocated += size;
 
             // Track peaks
-            if (allocations.getSize() > peakActiveAllocations) {
-                peakActiveAllocations = allocations.getSize();
+            if (allocations.size() > peakActiveAllocations) {
+                peakActiveAllocations = allocations.size();
             }
 
             // currentActiveBytes already computed above for memory pressure
@@ -444,14 +444,14 @@ TEST(allocatorPerformanceStressTest) {
             }
         } else {
             // Free a random allocation
-            int index = std::rand() % allocations.getSize();
+            int index = std::rand() % allocations.size();
             void* ptr = allocations[index].ptr;
 
             free(ptr);
 
             currentActiveBytes -= allocations[index].size;
             totalBytesFreed += allocations[index].size;
-            allocations[index] = allocations[allocations.getSize()-1];
+            allocations[index] = allocations[allocations.size()-1];
             allocations.pop();
             totalFrees++;
         }

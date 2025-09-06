@@ -162,6 +162,15 @@ public:
 };
 
 template <typename T>
+class SharedPtr;
+
+template<typename S, typename U>
+SharedPtr<S> static_pointer_cast(const SharedPtr<U>& ptr);
+
+template<typename S, typename U>
+SharedPtr<S> static_pointer_cast(SharedPtr<U>& ptr);
+
+template <typename T>
 class SharedPtr {
 private:
     SharedPtrControlBlock* control_block;
@@ -175,6 +184,12 @@ private:
             ++control_block->refcount;
         }
     }
+
+    template<typename S, typename U>
+    friend SharedPtr<S> static_pointer_cast(const SharedPtr<U>& ptr);
+
+    template<typename S, typename U>
+    friend SharedPtr<S> static_pointer_cast(SharedPtr<U>& ptr);
 
 public:
     constexpr static SharedPtr null() {
@@ -307,13 +322,22 @@ public:
 };
 
 // Casting functions
-template<typename T, typename U>
-SharedPtr<T> static_pointer_cast(const SharedPtr<U>& ptr) {
+template<typename S, typename U>
+SharedPtr<S> static_pointer_cast(const SharedPtr<U>& ptr) {
     if (!ptr) {
-        return SharedPtr<T>();
+        return SharedPtr<S>();
     }
-    T* new_ptr = static_cast<T*>(ptr.typed_ptr);
-    return SharedPtr<T>(ptr, new_ptr);
+    S* new_ptr = static_cast<S* const>(ptr.typed_ptr);
+    return SharedPtr<S>(ptr, new_ptr);
+}
+
+template<typename S, typename U>
+SharedPtr<S> static_pointer_cast(SharedPtr<U>& ptr) {
+    if (!ptr) {
+        return SharedPtr<S>();
+    }
+    S* new_ptr = static_cast<S*>(ptr.typed_ptr);
+    return SharedPtr<S>(ptr, new_ptr);
 }
 
 // Specialization for arrays

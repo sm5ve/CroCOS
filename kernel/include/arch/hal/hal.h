@@ -17,10 +17,12 @@ namespace kernel::hal{
     void hwinit();
 
 #ifdef __x86_64__
-    using ProcessorID = kernel::amd64::ProcessorID;
-    const size_t MAX_PROCESSOR_COUNT = 256;
-    const size_t CACHE_LINE_SIZE = 64;
-    using InterruptFrame = kernel::amd64::interrupts::InterruptFrame;
+    using ProcessorID = amd64::ProcessorID;
+    constexpr size_t MAX_PROCESSOR_COUNT = 256;
+    constexpr size_t CACHE_LINE_SIZE = 64;
+    using InterruptFrame = amd64::interrupts::InterruptFrame;
+    using InterruptDisabler = amd64::interrupts::InterruptDisabler;
+    constexpr size_t CPU_INTERRUPT_COUNT = amd64::INTERRUPT_VECTOR_COUNT;
 #endif
 
     //Guaranteed to be between 0 and (the total number of logical processors - 1)

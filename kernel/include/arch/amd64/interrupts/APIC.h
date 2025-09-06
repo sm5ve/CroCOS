@@ -36,8 +36,20 @@ namespace kernel::amd64::interrupts{
         void setUninitializedActivationTypes(hal::interrupts::InterruptLineActivationType type);
     };
 
-    void setupIOAPICs(acpi::MADT& madt);
-    void lapicIssueEOI(); //Temporary until I find a better abstraction
+    CRClass(LAPIC, public InterruptDomain, public FixedRoutingDomain, public EOIDomain) {
+        volatile uint32_t* mmio_window;
+        volatile uint32_t& reg(size_t offset);
+    public:
+        LAPIC(mm::phys_addr paddr);
+        ~LAPIC() override;
+        [[nodiscard]] size_t getEmitterFor(size_t receiver) const override;
+        void issueEOI(InterruptFrame& iframe) override;
+        size_t getReceiverCount() override;
+        size_t getEmitterCount() override;
+    };
+
+    void setupAPICs(acpi::MADT& madt);
+    SharedPtr<LAPIC> getLAPICDomain();
 }
 
 #endif //CROCOS_APIC_H

@@ -11,7 +11,7 @@ using namespace CroCOSTest;
 
 TEST(VectorDefaultConstructor) {
     Vector<int> vec;
-    ASSERT_EQ(0u, vec.getSize());
+    ASSERT_EQ(0u, vec.size());
     ASSERT_EQ(0u, vec.getCapacity());
 }
 
@@ -21,7 +21,7 @@ TEST(VectorPushAndSize) {
     vec.push(24);
     vec.push(13);
     
-    ASSERT_EQ(3u, vec.getSize());
+    ASSERT_EQ(3u, vec.size());
     ASSERT_EQ(42, vec[0]);
     ASSERT_EQ(24, vec[1]);
     ASSERT_EQ(13, vec[2]);
@@ -39,8 +39,8 @@ TEST(VectorCapacityGrowth) {
     size_t firstCapacity = vec.getCapacity();
     
     // Fill up to capacity
-    while (vec.getSize() < firstCapacity) {
-        vec.push(static_cast<int>(vec.getSize()));
+    while (vec.size() < firstCapacity) {
+        vec.push(static_cast<int>(vec.size()));
     }
     
     // Next push should double capacity
@@ -55,13 +55,13 @@ TEST(VectorPop) {
     vec.push(30);
     
     ASSERT_EQ(30, vec.pop());
-    ASSERT_EQ(2u, vec.getSize());
+    ASSERT_EQ(2u, vec.size());
     
     ASSERT_EQ(20, vec.pop());
-    ASSERT_EQ(1u, vec.getSize());
+    ASSERT_EQ(1u, vec.size());
     
     ASSERT_EQ(10, vec.pop());
-    ASSERT_EQ(0u, vec.getSize());
+    ASSERT_EQ(0u, vec.size());
 }
 
 TEST(VectorInsert) {
@@ -72,13 +72,13 @@ TEST(VectorInsert) {
     
     // Insert at beginning
     vec.insert(0, 0);
-    ASSERT_EQ(4u, vec.getSize());
+    ASSERT_EQ(4u, vec.size());
     ASSERT_EQ(0, vec[0]);
     ASSERT_EQ(1, vec[1]);
     
     // Insert in middle
     vec.insert(2, 2);
-    ASSERT_EQ(5u, vec.getSize());
+    ASSERT_EQ(5u, vec.size());
     ASSERT_EQ(0, vec[0]);
     ASSERT_EQ(1, vec[1]);
     ASSERT_EQ(2, vec[2]);
@@ -95,14 +95,14 @@ TEST(VectorRemove) {
     
     // Remove from middle
     vec.remove(1);
-    ASSERT_EQ(3u, vec.getSize());
+    ASSERT_EQ(3u, vec.size());
     ASSERT_EQ(10, vec[0]);
     ASSERT_EQ(30, vec[1]);
     ASSERT_EQ(40, vec[2]);
     
     // Remove from beginning
     vec.remove(0);
-    ASSERT_EQ(2u, vec.getSize());
+    ASSERT_EQ(2u, vec.size());
     ASSERT_EQ(30, vec[0]);
     ASSERT_EQ(40, vec[1]);
 }
@@ -114,15 +114,15 @@ TEST(VectorCopyConstructor) {
     original.push(3);
     
     Vector<int> copy(original);
-    ASSERT_EQ(original.getSize(), copy.getSize());
+    ASSERT_EQ(original.size(), copy.size());
     
-    for (size_t i = 0; i < original.getSize(); i++) {
+    for (size_t i = 0; i < original.size(); i++) {
         ASSERT_EQ(original[i], copy[i]);
     }
     
     // Verify independence
     copy.push(4);
-    ASSERT_NE(original.getSize(), copy.getSize());
+    ASSERT_NE(original.size(), copy.size());
 }
 
 TEST(VectorMoveConstructor) {
@@ -130,11 +130,11 @@ TEST(VectorMoveConstructor) {
     original.push(1);
     original.push(2);
     original.push(3);
-    size_t originalSize = original.getSize();
+    size_t originalSize = original.size();
     
     Vector<int> moved(static_cast<Vector<int>&&>(original));
-    ASSERT_EQ(originalSize, moved.getSize());
-    ASSERT_EQ(0u, original.getSize());  // Original should be empty after move
+    ASSERT_EQ(originalSize, moved.size());
+    ASSERT_EQ(0u, original.size());  // Original should be empty after move
     
     ASSERT_EQ(1, moved[0]);
     ASSERT_EQ(2, moved[1]);

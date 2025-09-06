@@ -78,4 +78,13 @@ inline Core::PrintStream& operator<<(Core::PrintStream& ps, kernel::mm::virt_add
     }                                                                             \
     static void (*name##_ctor)(void) __attribute__((used, section(".init_array"))) = name##_init;
 
+#define ARRAY_WITH_GLOBAL_CONSTRUCTOR(Type, size, name)                           \
+    __attribute__((used)) static Type name[size];                                 \
+    static void name##_init() {                                                   \
+        static bool initialized = false;                                          \
+        assert(!initialized, "Double-initialized ", #name);                       \
+        initialized = true;                                                       \
+        for (auto& x : (name)) new (& x) Type();                                  \
+    }                                                                             \
+    static void (*name##_ctor)(void) __attribute__((used, section(".init_array"))) = name##_init;
 #endif //CROCOS_KERNEL_H

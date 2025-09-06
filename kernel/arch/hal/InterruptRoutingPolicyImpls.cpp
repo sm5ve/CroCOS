@@ -76,7 +76,7 @@ namespace kernel::hal::interrupts::managed {
         const auto topologyGraph = *topology::getTopologyGraph();
         const auto topologyDomains = algorithm::graph::topologicalSort(topologyGraph);
         HashMap<SharedPtr<platform::InterruptDomain>, size_t> domainOrder;
-        for (size_t i = 0; i < topologyDomains.getSize(); i++) {
+        for (size_t i = 0; i < topologyDomains.size(); i++) {
             const auto domain = topologyGraph.getVertexLabel(topologyDomains[i]);
             domainOrder.insert(domain, i);
         }
@@ -102,7 +102,7 @@ namespace kernel::hal::interrupts::managed {
                 }
             }
             //If there are preexisting edges coming from this domain, propagate the loads forwards
-            while (preexistingEdges.getSize() > 0 && builder.getVertexLabel(builder.getEdgeSource(*preexistingEdges.top())) -> domain() == domain) {
+            while (preexistingEdges.size() > 0 && builder.getVertexLabel(builder.getEdgeSource(*preexistingEdges.top())) -> domain() == domain) {
                 auto sourceLabel = builder.getVertexLabel(builder.getEdgeSource(*preexistingEdges.top()));
                 auto targetLabel = builder.getVertexLabel(builder.getEdgeTarget(*preexistingEdges.top()));
                 auto sourceLoad = receiverLoads[*sourceLabel];
@@ -146,5 +146,5 @@ namespace kernel::hal::interrupts::managed {
             }
         }
         return *(builder.build());
-    };
+    }
 }

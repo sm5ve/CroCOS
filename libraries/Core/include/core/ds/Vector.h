@@ -19,12 +19,12 @@ template <typename T>
 class Vector {
 private:
     T* data;
-    size_t size;
+    size_t _size;
     size_t capacity;
     void reallocate(size_t new_capacity) {
         T* new_data = static_cast<T*>(operator new(sizeof(T) * new_capacity, std::align_val_t{alignof(T)}));
         // Copy existing elements to the new buffer
-        for (size_t i = 0; i < size; ++i) {
+        for (size_t i = 0; i < _size; ++i) {
             if constexpr (is_trivially_copyable_v<T>) {
                 new_data[i] = data[i];
             }
@@ -42,10 +42,10 @@ private:
         if (capacity == 0) {
             reallocate(8);  // Start with a reasonable default capacity
         }
-        if (size == capacity) {
+        if (_size == capacity) {
             // Double the capacity when the vector is full
             reallocate(capacity * 2);
-        } else if (size <= capacity / 4 && capacity > 8) {
+        } else if (_size <= capacity / 4 && capacity > 8) {
             // Shrink the buffer when size drops below 1/4th of capacity
             // Ensure we don't shrink too much (e.g., to a 1-element buffer)
             reallocate(capacity / 2);
@@ -53,25 +53,25 @@ private:
     }
 public:
     //Default constructor
-    Vector() : data(nullptr), size(0), capacity(0) {}
+    Vector() : data(nullptr), _size(0), capacity(0) {}
 
     //Constructor with initial capacity
-    Vector(size_t init_capacity) : size(0), capacity(init_capacity) {
+    Vector(size_t init_capacity) : _size(0), capacity(init_capacity) {
         data = static_cast<T*>(operator new(sizeof(T) * init_capacity, std::align_val_t{alignof(T)}));
     }
 
     //Constructor with initial data provided.
-    Vector(T* array, size_t input_size) : size(input_size), capacity(input_size) {
-        data = static_cast<T*>(operator new(sizeof(T) * size, std::align_val_t{alignof(T)}));
-        for (size_t i = 0; i < size; i++) {
+    Vector(T* array, size_t input_size) : _size(input_size), capacity(input_size) {
+        data = static_cast<T*>(operator new(sizeof(T) * _size, std::align_val_t{alignof(T)}));
+        for (size_t i = 0; i < _size; i++) {
             data[i] = array[i];
         }
     }
 
     //Copy constructor
-    Vector(const Vector& other) : size(other.size), capacity(other.capacity) {
+    Vector(const Vector& other) : _size(other._size), capacity(other.capacity) {
         data = static_cast<T*>(operator new(sizeof(T) * other.capacity, std::align_val_t{alignof(T)}));
-        for (size_t i = 0; i < size; i++) {
+        for (size_t i = 0; i < _size; i++) {
             data[i] = other.data[i];
         }
     }
@@ -88,14 +88,14 @@ public:
     //Copy assignment
     Vector& operator=(const Vector& other) {
         if (this == &other) return *this;
-        for(size_t i = 0; i < size; i++){
+        for(size_t i = 0; i < _size; i++){
             data[i].~T();
         }
         operator delete(data);
-        size = other.size;
+        _size = other._size;
         capacity = other.capacity;
         data = static_cast<T*>(operator new(sizeof(T) * capacity, std::align_val_t{alignof(T)}));
-        for (size_t i = 0; i < size; i++) {
+        for (size_t i = 0; i < _size; i++) {
             data[i] = other.data[i];
         }
         return *this;
@@ -103,24 +103,24 @@ public:
 
     //Move constructor
     Vector(Vector&& other) noexcept :
-    data(other.data), size(other.size), capacity(other.capacity) {
+    data(other.data), _size(other._size), capacity(other.capacity) {
         other.data = nullptr;
-        other.size = 0;
+        other._size = 0;
         other.capacity = 0;
     }
 
     //Move assignment
     Vector& operator=(Vector&& other) noexcept {
         if (this == &other) return *this;
-        for(size_t i = 0; i < size; i++){
+        for(size_t i = 0; i < _size; i++){
             data[i].~T();
         }
         operator delete(data);
         data = other.data;
-        size = other.size;
+        _size = other._size;
         capacity = other.capacity;
         other.data = nullptr;
-        other.size = 0;
+        other._size = 0;
         other.capacity = 0;
         return *this;
     }
@@ -133,7 +133,7 @@ public:
 
     //Destructor
     ~Vector() {
-        for (size_t i = 0; i < size; ++i) {
+        for (size_t i = 0; i < _size; ++i) {
             data[i].~T();  //Remember to call the destructors for each element in our buffer
         }
         operator delete(data);
@@ -142,30 +142,30 @@ public:
     void push(const T& value) {
         reallocate_if_necessary();
         if constexpr (is_trivially_copyable_v<T>) {
-            data[size] = value;
+            data[_size] = value;
         }
         else{
-            new (&data[size]) T(value);  // Placement new for the new element
+            new (&data[_size]) T(value);  // Placement new for the new element
         }
-        ++size;
+        ++_size;
     }
 
     void push(T&& value) {
         reallocate_if_necessary();
         if constexpr (is_trivially_copyable_v<T>) {
-            data[size] = value;
+            data[_size] = value;
         }
         else{
-            new (&data[size]) T(move(value));  // Placement new for the new element
+            new (&data[_size]) T(move(value));  // Placement new for the new element
         }
-        ++size;
+        ++_size;
     }
 
     void remove(size_t index) {
-        assert(index < size, "Index out of bounds");
+        assert(index < _size, "Index out of bounds");
         data[index].~T();  // Explicitly call the destructor
         // Move elements to fill the gap
-        for (size_t i = index; i < size - 1; ++i) {
+        for (size_t i = index; i < _size - 1; ++i) {
             if constexpr (is_trivially_copyable_v<T>) {
                 data[i] = data[i + 1];
             }
@@ -173,28 +173,28 @@ public:
                 data[i] = move(data[i + 1]);
             }
         }
-        --size;
+        --_size;
         reallocate_if_necessary();  // Shrink the buffer if necessary
     }
 
     T pop() {
-        assert(size > 0, "Cannot pop from empty vector");
-        --size;
-        T result = move(data[size]);  // Move the last element
-        data[size].~T();  // Explicitly call the destructor
+        assert(_size > 0, "Cannot pop from empty vector");
+        --_size;
+        T result = move(data[_size]);  // Move the last element
+        data[_size].~T();  // Explicitly call the destructor
         reallocate_if_necessary();  // Shrink the buffer if necessary
         return result;
     }
 
     void insert(size_t index, const T& value) {
-        assert(index <= size, "Index out of bounds");
+        assert(index <= _size, "Index out of bounds");
         reallocate_if_necessary();
-        if(index == size){
+        if(index == _size){
             push(value);
             return;
         }
         // Move elements to make room for the new element
-        for (size_t i = size; i > index; --i) {
+        for (size_t i = _size; i > index; --i) {
             if constexpr (is_trivially_copyable_v<T>) {
                 data[i] = data[i - 1];
             }
@@ -203,18 +203,18 @@ public:
             }
         }
         new (data + index) T(value);  // Placement new for the new element
-        ++size;
+        ++_size;
     }
 
     void insert(size_t index, T&& value) {
-        assert(index <= size, "Index out of bounds");
+        assert(index <= _size, "Index out of bounds");
         reallocate_if_necessary();
-        if(index == size){
+        if(index == _size){
             push(value);
             return;
         }
         // Move elements to make room for the new element
-        for (size_t i = size; i > index; --i) {
+        for (size_t i = _size; i > index; --i) {
             if constexpr (is_trivially_copyable_v<T>) {
                 data[i] = data[i - 1];
             }
@@ -229,15 +229,15 @@ public:
         else{
             new (data + index) T(move(value));  // Placement new for the new element
         }
-        ++size;
+        ++_size;
     }
 
-    size_t getSize() const {
-        return size;
+    size_t size() const {
+        return _size;
     }
 
     bool empty() const {
-        return size == 0;
+        return _size == 0;
     }
 
     size_t getCapacity() const {
@@ -246,31 +246,31 @@ public:
 
     template <UnsignedIntegral Index>
     T& operator[](Index index) {
-        assert(index < size, "Index out of bounds");
+        assert(index < _size, "Index out of bounds");
         return data[index];
     }
 
     template <UnsignedIntegral Index>
     const T& operator[](Index index) const {
-        assert(index < size, "Index out of bounds");
+        assert(index < _size, "Index out of bounds");
         return data[index];
     }
 
     template <SignedIntegral Index>
     T& operator[](Index index) {
-        assert(index < (Index)size, "Index out of bounds");
-        assert((Index)size + index >= 0, "Index out of bounds ", index, " has size ", size);
+        assert(index < (Index)_size, "Index out of bounds");
+        assert((Index)_size + index >= 0, "Index out of bounds ", index, " has size ", _size);
         if (index < 0)
-            return data[size + index];
+            return data[_size + index];
         return data[index];
     }
 
     template <SignedIntegral Index>
     const T& operator[](Index index) const {
-        assert(index < (Index)size, "Index out of bounds");
-        assert((Index)size + index >= 0, "Index out of bounds ", index, " has size ", size);
+        assert(index < (Index)_size, "Index out of bounds");
+        assert((Index)_size + index >= 0, "Index out of bounds ", index, " has size ", _size);
         if (index < 0)
-            return data[size + index];
+            return data[_size + index];
         return data[index];
     }
 
@@ -283,38 +283,38 @@ public:
     }
 
     T* end() {
-        return data + size;
+        return data + _size;
     }
 
     const T* end() const {
-        return data + size;
+        return data + _size;
     }
 
     T* top() {
-        return &data[size - 1];
+        return &data[_size - 1];
     }
 
     void ensureRoom(size_t openSlots){
-        size_t min_size = size + openSlots;
+        size_t min_size = _size + openSlots;
         if(min_size > capacity){
             reallocate(min_size + 4); //just add a little wiggle room in case?
         }
     }
 
     void shrinkToFit() {
-        reallocate(size);
+        reallocate(_size);
     }
 
     template <typename Comparator = DefaultComparator<T>>
     void sort(Comparator comp = Comparator{}){
-        algorithm::sort(data, size, comp);
+        algorithm::sort(data, _size, comp);
     }
 
     template <typename Comparator = DefaultComparator<T>>
     void mergeIn(const T& value, Comparator comp = Comparator{}) {
         push(value);
-        if (size == 1) return;
-        size_t i = size - 1;
+        if (_size == 1) return;
+        size_t i = _size - 1;
         //While data[i] < data[i - 1]
         while (i > 0 && comp(data[i], data[i - 1])) {
             swap(data[i], data[i - 1]);
@@ -342,7 +342,16 @@ public:
     };
 
     IteratorRange<ReverseIterator> reverse() const {
-        return IteratorRange<ReverseIterator>(ReverseIterator(data + size - 1), ReverseIterator(data - 1));
+        return IteratorRange<ReverseIterator>(ReverseIterator(data + _size - 1), ReverseIterator(data - 1));
+    }
+
+    void clear() {
+        for (size_t i = 0; i < _size; ++i) {
+            data[i].~T();  //Remember to call the destructors for each element in our buffer
+        }
+        operator delete(data);
+        _size = 0;
+        capacity = 0;
     }
 };
 

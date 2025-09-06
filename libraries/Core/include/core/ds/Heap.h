@@ -45,7 +45,7 @@ private:
     }
 
     void bubbleDown(size_t index) {
-        algorithm::heapify(data.begin(), data.getSize(), 0, index, comparator);
+        algorithm::heapify(data.begin(), data.size(), 0, index, comparator);
     }
 
 public:
@@ -70,10 +70,10 @@ public:
 
     // Build heap from current data (heapify all elements)
     void buildHeap() {
-        if (data.getSize() <= 1) return;
+        if (data.size() <= 1) return;
         
         // Start from the last non-leaf node and heapify down
-        for (int64_t i = static_cast<int64_t>(data.getSize()) / 2 - 1; i >= 0; i--) {
+        for (int64_t i = static_cast<int64_t>(data.size()) / 2 - 1; i >= 0; i--) {
             bubbleDown(static_cast<size_t>(i));
         }
     }
@@ -81,25 +81,25 @@ public:
     // Insert element into heap
     void push(const T& value) {
         data.push(value);
-        bubbleUp(data.getSize() - 1);
+        bubbleUp(data.size() - 1);
     }
 
     void push(T&& value) {
         data.push(move(value));
-        bubbleUp(data.getSize() - 1);
+        bubbleUp(data.size() - 1);
     }
 
     // Extract maximum element (root)
     T pop() {
-        assert(data.getSize() > 0, "Cannot pop from empty heap");
+        assert(data.size() > 0, "Cannot pop from empty heap");
         
         T result = move(data[0]);
         
-        if (data.getSize() == 1) {
+        if (data.size() == 1) {
             data.pop();
         } else {
             // Move last element to root and restore heap property
-            data[0] = move(data[data.getSize() - 1]);
+            data[0] = move(data[data.size() - 1]);
             data.pop();
             bubbleDown(0);
         }
@@ -109,23 +109,23 @@ public:
 
     // Peek at maximum element without removing it
     const T& top() const {
-        assert(data.getSize() > 0, "Cannot peek at empty heap");
+        assert(data.size() > 0, "Cannot peek at empty heap");
         return data[0];
     }
 
     T& top() {
-        assert(data.getSize() > 0, "Cannot peek at empty heap");
+        assert(data.size() > 0, "Cannot peek at empty heap");
         return data[0];
     }
 
     // Get size of heap
     size_t size() const {
-        return data.getSize();
+        return data.size();
     }
 
     // Check if heap is empty
     bool empty() const {
-        return data.getSize() == 0;
+        return data.size() == 0;
     }
 
     // Get capacity of underlying storage
@@ -140,7 +140,7 @@ public:
 
     // Reserve capacity in underlying storage
     void reserve(size_t new_capacity) {
-        data.ensureRoom(new_capacity - data.getSize());
+        data.ensureRoom(new_capacity - data.size());
     }
 
     // Iterator support (note: iteration order is not sorted)

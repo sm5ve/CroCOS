@@ -38,14 +38,14 @@ SECTIONS
 		*(.data)
 	}
 
-    .init_array : {
+    .init_array ALIGN(4K) : {
         PROVIDE_HIDDEN(__init_array_start = .);
         KEEP (*(.init_array))
         KEEP (*(SORT_BY_INIT_PRIORITY(.init_array.*)))
         PROVIDE_HIDDEN (__init_array_end = .);
     }
 
-    .crocos_presort_array : {
+    .crocos_presort_array ALIGN(4K) : {
         . = ALIGN(8);
         __crocos_presort_array_start = .;
         KEEP(*(.crocos_presort_array.*))

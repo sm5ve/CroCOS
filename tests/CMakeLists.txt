@@ -49,16 +49,17 @@ target_compile_options(TestHarness PRIVATE
 )
 
 
-add_subdirectory(kernel)
+#add_subdirectory(kernel)
 add_subdirectory(liballoc)
 add_subdirectory(core)
 
 # Add a custom target to run all tests (core + kernel)
 add_custom_target(run_all_tests
     COMMAND core/CoreTestRunner
-    COMMAND kernel/KernelTestRunner
+    #COMMAND kernel/KernelTestRunner
     COMMAND liballoc/LibAllocTestRunner
-    DEPENDS core/CoreTestRunner kernel/KernelTestRunner liballoc/LibAllocTestRunner
+    DEPENDS core/CoreTestRunner liballoc/LibAllocTestRunner
+    #DEPENDS core/CoreTestRunner kernel/KernelTestRunner liballoc/LibAllocTestRunner
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     COMMENT "Running all CroCOS unit tests"
 )

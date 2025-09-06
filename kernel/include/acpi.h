@@ -289,13 +289,14 @@ namespace kernel::acpi{
             return out;
         }
         assertNotReached("RSDT signature did not match");
+        return {};
     }
 
     template<typename T>
     T& the(){
         auto tables = getTables<T>();
-        assert(tables.getSize() < 2, "ACPI contains duplicate of a unique table");
-        assert(tables.getSize() > 0, "ACPI missing required table");
+        assert(tables.size() < 2, "ACPI contains duplicate of a unique table");
+        assert(tables.size() > 0, "ACPI missing required table");
         return *tables[0];
     }
 }

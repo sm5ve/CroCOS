@@ -111,6 +111,10 @@ protected:
     }
 
     void resizeIfNecessary(){
+        if (capacity == 0) {
+            resize(8);
+            return;
+        }
         size_t loadFactorPercentage = divideAndRoundDown(count * 100, capacity);
         if(loadFactorPercentage > LOAD_FACTOR_PERCENTAGE_INCREASE_THRESHOLD){
             resize(count * 2);
@@ -143,6 +147,7 @@ protected:
             index = (index + 1) % capacity;
         } while(index != startIndex);
         assertNotReached("HashMap did not obey its own load limit");
+        return entryBuffer[-1];
     }
 
     explicit IndexedHashTable(const size_t init_capacity){
@@ -152,7 +157,7 @@ protected:
         memset(entryBuffer, 0, sizeof(Entry) * init_capacity);
     }
 
-    IndexedHashTable(Entry* buffer, size_t cap, size_t ct) : entryBuffer(buffer), capacity(cap), count(ct) {}
+    IndexedHashTable(Entry* buffer, size_t cap, size_t ct) : entryBuffer(buffer), capacity(cap), count(ct), hasher({}) {}
 
     // Move constructor - transfers ownership of buffer
     IndexedHashTable(IndexedHashTable&& other) noexcept 
@@ -232,6 +237,19 @@ protected:
 
     size_t getEntryIndex(const Entry& entry) const {
         return &entry - entryBuffer;
+    }
+
+    void clear() {
+        if(entryBuffer == nullptr) return;
+        for(size_t i = 0; i < capacity; i++){
+            auto& entry = entryBuffer[i];
+            if(entry.state != EntryState::occupied) continue;
+            entry.value.~EntryType();
+        }
+        operator delete(entryBuffer);
+        entryBuffer = nullptr;
+        count = 0;
+        capacity = 0;
     }
 
 public:

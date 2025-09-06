@@ -28,7 +28,6 @@ namespace kernel::amd64::timers{
         ticks++;
         if (ticks % 20 == 0)
             klog << "Tick " << ticks << "!\n";
-        interrupts::lapicIssueEOI();
     }
 
     void initPIT(){

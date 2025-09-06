@@ -189,6 +189,8 @@ public:
                 It(this -> entryBuffer, this -> capacity, this -> capacity, ValueTransformConst{})
         );
     }
+
+    using ParentTable::clear;
 };
 
 #endif //CROCOS_HASHMAP_H

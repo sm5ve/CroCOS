@@ -11,7 +11,7 @@ namespace kernel::hal::interrupts {
     namespace topology {
         
 #ifdef CROCOS_TESTING
-        bool isDirty = false;
+        bool isGraphDirty = false;
         Optional<TopologyGraph> cachedGraph;
         GraphBuilder<TopologyGraph>* builder_ptr = nullptr;
         GraphBuilder<TopologyGraph>& getBuilder() {
@@ -21,25 +21,58 @@ namespace kernel::hal::interrupts {
             return *builder_ptr;
         }
 #else
-        bool isDirty = false;
+        bool isGraphDirty = false;
+        bool isTopologicalOrderDirty = false;
         WITH_GLOBAL_CONSTRUCTOR(Optional<TopologyGraph>, cachedGraph);
         WITH_GLOBAL_CONSTRUCTOR(GraphBuilder<TopologyGraph>, topologyBuilder);
+        WITH_GLOBAL_CONSTRUCTOR(Vector<SharedPtr<platform::InterruptDomain>>, _topologicallySortedDomains);
+        WITH_GLOBAL_CONSTRUCTOR(TopologicalOrderMap, _topologicalOrderMap);
         GraphBuilder<TopologyGraph>& getBuilder() {
             return topologyBuilder;
         }
 #endif
 
+        void releaseCachedTopologicalOrdering() {
+            _topologicallySortedDomains.clear();
+            _topologicalOrderMap.clear();
+        }
+
+        void recomputeTopologicalOrderIfNecessary() {
+            if (isTopologicalOrderDirty) {
+                releaseCachedTopologicalOrdering();
+                auto& topGraph = *getTopologyGraph();
+                auto topSortedVertices = algorithm::graph::topologicalSort(topGraph);
+                for (size_t i = 0; i < topSortedVertices.size(); i++) {
+                    auto domain = topGraph.getVertexLabel(topSortedVertices[i]);
+                    _topologicallySortedDomains.push(domain);
+                    _topologicalOrderMap.insert(domain, i);
+                }
+                isTopologicalOrderDirty = false;
+            }
+        }
+
+        Vector<SharedPtr<platform::InterruptDomain>>& topologicallySortedDomains() {
+            recomputeTopologicalOrderIfNecessary();
+            return _topologicallySortedDomains;
+        }
+
+        TopologicalOrderMap& topologicalOrderMap() {
+            recomputeTopologicalOrderIfNecessary();
+            return _topologicalOrderMap;
+        }
+
         Optional<TopologyGraph>& getTopologyGraph() {
-            if (isDirty || !cachedGraph.occupied()) {
+            if (isGraphDirty || !cachedGraph.occupied()) {
+                isTopologicalOrderDirty = true;
                 cachedGraph = getBuilder().build();
-                isDirty = false;
+                isGraphDirty = false;
             }
             return cachedGraph;
         }
 
         void registerDomain(SharedPtr<platform::InterruptDomain> domain) {
             getBuilder().addVertex(move(domain));
-            isDirty = true;
+            isGraphDirty = true;
         }
 
         void registerConnector(SharedPtr<platform::DomainConnector> connector) {
@@ -50,7 +83,7 @@ namespace kernel::hal::interrupts {
             assert(connector -> getSource() -> instanceof(TypeID_v<platform::InterruptEmitter>), "Connector source must be an interrupt emitter");
             assert(connector -> getTarget() -> instanceof(TypeID_v<platform::InterruptReceiver>), "Connector target must be an interrupt receiver");
             builder.addEdge(*source, *target, move(connector));
-            isDirty = true;
+            isGraphDirty = true;
         }
 
         using ExclusiveConnectorMap = HashMap<managed::RoutingNodeLabel, SharedPtr<platform::DomainConnector>>;
@@ -74,7 +107,7 @@ namespace kernel::hal::interrupts {
                 delete exclusiveConnectors;
                 exclusiveConnectors = nullptr;
             }
-            isDirty = false;
+            isGraphDirty = false;
             cachedGraph = {};
         }
 #else
@@ -95,7 +128,7 @@ namespace kernel::hal::interrupts {
             assert(sourceEmitter, "Connector source must be an interrupt emitter");
             assert(targetReceiver, "Connector target must be an interrupt receiver");
             builder.addEdge(*source, *target, move(connector));
-            isDirty = true;
+            isGraphDirty = true;
             bool wasSuccessful = true;
             for (size_t i = 0; i < sourceEmitter -> getEmitterCount(); i++) {
                 auto targetIndex = connector -> fromOutput(i);
@@ -508,9 +541,10 @@ namespace kernel::hal::interrupts {
 
         Optional<RoutingGraph> RoutingGraphBuilder::build() {
             const auto topologyGraph = *topology::getTopologyGraph();
-            const auto domainsByTopologicalOrder = algorithm::graph::topologicalSort(topologyGraph);
-            for (int i = static_cast<int>(domainsByTopologicalOrder.getSize()) - 1; i >= 0; --i) {
-                auto d = topologyGraph.getVertexLabel(domainsByTopologicalOrder[i]);
+
+            const auto& domainsByTopologicalOrder = topology::topologicallySortedDomains();
+            for (int i = static_cast<int>(domainsByTopologicalOrder.size()) - 1; i >= 0; --i) {
+                auto d = domainsByTopologicalOrder[i];
                 if (auto receiver = crocos_dynamic_cast<platform::InterruptReceiver>(d)) {
                     for (size_t j = 0; j < receiver -> getReceiverCount(); j++) {
                         auto routingNodeLabel = RoutingNodeLabel(d, j);

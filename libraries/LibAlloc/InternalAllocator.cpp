@@ -26,7 +26,6 @@ namespace LibAlloc::InternalAllocator {
     constexpr ConstexprArray slabSizeClasses = {8ul, 16, 32, 64, 96, 128, 256, 512, };
     constexpr ConstexprArray slabAllocatorBufferSizes = {1024ul, 1024, 1024, 2048, 2048, 2048, 2048, 8192, };
     static_assert(slabSizeClasses.size() == slabAllocatorBufferSizes.size(), "Size classes and buffer sizes must be the same size");
-    constexpr auto sizeClassJumpTable = makeSizeClassJumpTable<slabSizeClasses>();
 
     struct alignas(alignof(max_align_t)) UnallocatedMemoryBlockHeader {
         size_t sizeAndColor; //includes the size of the header itself

@@ -269,8 +269,8 @@ namespace _GraphBuilder {
             None> edgeLabelMap;
 
         PartialVertexInfo<Graph> &createVertex() {
-            vertexInfo.push(PartialVertexInfo<Graph>(static_cast<VertexEdgeIndexType>(vertexInfo.getSize())));
-            PartialVertexInfo<Graph> &vertex = vertexInfo[vertexInfo.getSize() - 1];
+            vertexInfo.push(PartialVertexInfo<Graph>(static_cast<VertexEdgeIndexType>(vertexInfo.size())));
+            PartialVertexInfo<Graph> &vertex = vertexInfo[vertexInfo.size() - 1];
             return vertex;
         }
 
@@ -295,9 +295,9 @@ namespace _GraphBuilder {
                 }
             }
 
-            PartialEdgeInfo<Graph> edge(static_cast<VertexEdgeIndexType>(edgeInfo.getSize()), source.index,
+            PartialEdgeInfo<Graph> edge(static_cast<VertexEdgeIndexType>(edgeInfo.size()), source.index,
                                         target.index);
-            auto edgeIndex = static_cast<VertexEdgeIndexType>(edgeInfo.getSize());
+            auto edgeIndex = static_cast<VertexEdgeIndexType>(edgeInfo.size());
             edge.nextEdgeForSource = source.firstOutgoingEdgeIndex;
             edge.nextEdgeForTarget = target.firstIncomingEdgeIndex;
             source.firstOutgoingEdgeIndex = edgeIndex;
@@ -312,13 +312,13 @@ namespace _GraphBuilder {
         // Helper to validate vertex handle
         void validateVertexHandle(const VertexHandle &handle) const {
             assert(handle.builderVector == &vertexInfo, "Vertex handle must belong to this builder");
-            assert(handle.index < vertexInfo.getSize(), "Vertex handle index out of bounds");
+            assert(handle.index < vertexInfo.size(), "Vertex handle index out of bounds");
         }
 
         // Helper to validate edge handle
         void validateEdgeHandle(const EdgeHandle &handle) const {
             assert(handle.builderVector == &edgeInfo, "Edge handle must belong to this builder");
-            assert(handle.index < edgeInfo.getSize(), "Edge handle index out of bounds");
+            assert(handle.index < edgeInfo.size(), "Edge handle index out of bounds");
         }
 
         static size_t getIndexForEdgeHandle(const EdgeHandle &h) {
@@ -481,7 +481,7 @@ namespace _GraphBuilder {
                 for (const auto &vinfo: vertexInfo) {
                     labelSet.insert(*(vinfo.label));
                 }
-                if (labelSet.size() != vertexInfo.getSize()) {
+                if (labelSet.size() != vertexInfo.size()) {
                     return {}; // Duplicate labels
                 }
                 vertexLabels = make_shared<ImmutableIndexedHashSet<typename VertexDecorator::LabelType> >(
@@ -492,43 +492,43 @@ namespace _GraphBuilder {
                 for (const auto &einfo: edgeInfo) {
                     labelSet.insert(*(einfo.label));
                 }
-                if (labelSet.size() != edgeInfo.getSize()) {
+                if (labelSet.size() != edgeInfo.size()) {
                     return {}; // Duplicate labels
                 }
                 edgeLabels = make_shared<ImmutableIndexedHashSet<typename EdgeDecorator::LabelType> >(move(labelSet));
             }
 
             // Create mappings from internal IDs for edge/vertex info to edge/vertex IDs to be used by the graph
-            auto vertexIdMap = UniquePtr<VertexIndex[]>::make(vertexInfo.getSize());
-            auto edgeIdMap = UniquePtr<EdgeIndex[]>::make(edgeInfo.getSize());
+            auto vertexIdMap = UniquePtr<VertexIndex[]>::make(vertexInfo.size());
+            auto edgeIdMap = UniquePtr<EdgeIndex[]>::make(edgeInfo.size());
 
             _GraphInternal::BasicIndex vertexMetadataSize = 0;
             _GraphInternal::BasicIndex edgeMetadataSize = 0;
 
             if constexpr (VertexDecorator::is_labeled) {
-                for (size_t i = 0; i < vertexInfo.getSize(); i++) {
+                for (size_t i = 0; i < vertexInfo.size(); i++) {
                     auto index = *vertexLabels->indexOf(*vertexInfo[i].label);
                     vertexIdMap[i] = static_cast<VertexIndex>(index);
                     vertexMetadataSize = static_cast<_GraphInternal::BasicIndex>(max(
                         vertexMetadataSize, vertexIdMap[i] + 1));
                 }
             } else {
-                for (size_t i = 0; i < vertexInfo.getSize(); i++) {
+                for (size_t i = 0; i < vertexInfo.size(); i++) {
                     vertexIdMap[i] = i; // Identity mapping
                 }
-                vertexMetadataSize = vertexInfo.getSize();
+                vertexMetadataSize = vertexInfo.size();
             }
 
             if constexpr (EdgeDecorator::is_labeled) {
-                for (size_t i = 0; i < edgeInfo.getSize(); i++) {
+                for (size_t i = 0; i < edgeInfo.size(); i++) {
                     edgeIdMap[i] = static_cast<EdgeIndex>(*edgeLabels->indexOf(*edgeInfo[i].label));
                     edgeMetadataSize = static_cast<_GraphInternal::BasicIndex>(max(edgeMetadataSize, edgeIdMap[i] + 1));
                 }
             } else {
-                for (_GraphInternal::BasicIndex i = 0; i < edgeInfo.getSize(); i++) {
+                for (_GraphInternal::BasicIndex i = 0; i < edgeInfo.size(); i++) {
                     edgeIdMap[i] = i; // Identity mapping
                 }
-                edgeMetadataSize = static_cast<_GraphInternal::BasicIndex>(edgeInfo.getSize());
+                edgeMetadataSize = static_cast<_GraphInternal::BasicIndex>(edgeInfo.size());
             }
 
 
@@ -537,14 +537,14 @@ namespace _GraphBuilder {
             //The indices that we populate here need to be based on the edge/vertex IDs as given in the ID maps above
             if constexpr (EdgeDecorator::is_weighted) {
                 edgeWeights = SharedPtr<typename EdgeDecorator::WeightType[]>::make(edgeMetadataSize);
-                for (size_t i = 0; i < edgeInfo.getSize(); i++) {
+                for (size_t i = 0; i < edgeInfo.size(); i++) {
                     EdgeIndex graphEdgeId = edgeIdMap[i];
                     edgeWeights[graphEdgeId] = *edgeInfo[i].weight;
                 }
             }
             if constexpr (VertexDecorator::is_colored) {
                 vertexColors = SharedPtr<typename VertexDecorator::ColorType[]>::make(vertexMetadataSize);
-                for (size_t i = 0; i < vertexInfo.getSize(); i++) {
+                for (size_t i = 0; i < vertexInfo.size(); i++) {
                     VertexIndex graphVertexId = vertexIdMap[i];
                     vertexColors[graphVertexId] = *vertexInfo[i].color;
                 }
@@ -559,7 +559,7 @@ namespace _GraphBuilder {
             SharedPtr<EdgeMetadata[]> edgeMetadata = SharedPtr<EdgeMetadata[]>::make(edgeMetadataSize);
 
             // Populate edge metadata using graph IDs
-            for (size_t i = 0; i < edgeInfo.getSize(); i++) {
+            for (size_t i = 0; i < edgeInfo.size(); i++) {
                 EdgeIndex graphEdgeId = edgeIdMap[i];
                 edgeMetadata[graphEdgeId].from = vertexIdMap[edgeInfo[i].fromVertexId];
                 edgeMetadata[graphEdgeId].to = vertexIdMap[edgeInfo[i].toVertexId];
@@ -576,7 +576,7 @@ namespace _GraphBuilder {
                 incomingCounts[i] = 0;
             }
 
-            for (size_t i = 0; i < vertexInfo.getSize(); i++) {
+            for (size_t i = 0; i < vertexInfo.size(); i++) {
                 VertexIndex graphVertexId = vertexIdMap[i];
                 outgoingCounts[graphVertexId] = vertexInfo[i].outgoingEdgeCount;
                 incomingCounts[graphVertexId] = vertexInfo[i].incomingEdgeCount;
@@ -585,7 +585,7 @@ namespace _GraphBuilder {
             // Calculate incidence list offsets
             _GraphInternal::BasicIndex currentIncidenceOffset = 0;
             // Iterate through actual vertices that exist, using their graph IDs
-            for (size_t i = 0; i < vertexInfo.getSize(); i++) {
+            for (size_t i = 0; i < vertexInfo.size(); i++) {
                 VertexIndex vertexId = vertexIdMap[i]; // Get the actual graph vertex ID
                 if constexpr (StructureModifier::is_directed) {
                     vertexMetadata[vertexId].start = currentIncidenceOffset;
@@ -613,7 +613,7 @@ namespace _GraphBuilder {
                 incomingOffsets[i] = 0;
             }
 
-            for (size_t i = 0; i < edgeInfo.getSize(); i++) {
+            for (size_t i = 0; i < edgeInfo.size(); i++) {
                 const auto &edge = edgeInfo[i];
                 VertexIndex fromVertex = vertexIdMap[edge.fromVertexId];
                 VertexIndex toVertex = vertexIdMap[edge.toVertexId];
@@ -669,23 +669,23 @@ namespace _GraphBuilder {
         }
 
         VertexHandle getVertexHandle(VertexEdgeIndexType index) const {
-            assert(index < vertexInfo.getSize(), "Vertex index out of bounds");
+            assert(index < vertexInfo.size(), "Vertex index out of bounds");
             return VertexHandle(index, &vertexInfo);
         }
 
         EdgeHandle getEdgeHandle(VertexEdgeIndexType index) const {
-            assert(index < edgeInfo.getSize(), "Edge index out of bounds");
+            assert(index < edgeInfo.size(), "Edge index out of bounds");
             return EdgeHandle(index, &edgeInfo);
         }
 
     public:
         // Basic state queries
         [[nodiscard]] size_t getCurrentVertexCount() const {
-            return vertexInfo.getSize();
+            return vertexInfo.size();
         }
 
         [[nodiscard]] size_t getCurrentEdgeCount() const {
-            return edgeInfo.getSize();
+            return edgeInfo.size();
         }
 
         // Check if an edge exists between two vertices
@@ -810,14 +810,14 @@ namespace _GraphBuilder {
         IteratorRange<VertexIterator> currentVertices() const {
             return IteratorRange<VertexIterator>(
                 VertexIterator(0, &vertexInfo),
-                VertexIterator(vertexInfo.getSize(), &vertexInfo)
+                VertexIterator(vertexInfo.size(), &vertexInfo)
             );
         }
 
         IteratorRange<EdgeIterator> currentEdges() const {
             return IteratorRange<EdgeIterator>(
                 EdgeIterator(0, &edgeInfo),
-                EdgeIterator(static_cast<VertexEdgeIndexType>(edgeInfo.getSize()), &edgeInfo)
+                EdgeIterator(static_cast<VertexEdgeIndexType>(edgeInfo.size()), &edgeInfo)
             );
         }
 
@@ -1242,8 +1242,8 @@ private:
     template<typename VertexContainer>
     void populateVerticesFromContainer(const VertexContainer &vertices) {
         // Pre-allocate space if we can determine the size
-        if constexpr (requires { vertices.getSize(); }) {
-            immutableVertices.ensureRoom(vertices.getSize());
+        if constexpr (requires { vertices.size(); }) {
+            immutableVertices.ensureRoom(vertices.size());
         }
 
         for (const auto &vertexSpec: vertices) {
@@ -1299,7 +1299,7 @@ public:
 
     // Get immutable vertex by index
     VertexHandle getVertex(size_t index) const {
-        assert(index < immutableVertices.getSize(), "Vertex index out of bounds");
+        assert(index < immutableVertices.size(), "Vertex index out of bounds");
         return immutableVertices[index];
     }
 

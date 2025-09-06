@@ -42,13 +42,13 @@ constexpr bool before(int y, int m, int d) {
     return (curY < y) || (curY == y && curM < m) || (curY == y && curM == m && curD < d);
 }
 
-#ifdef DEBUG_BUILD
+#ifndef DEBUG_BUILD
 #define assert_base(condition, ...) if(!(condition)) PANIC(__VA_ARGS__)
 #define assert(condition, ...) assert_base((condition), "Assert failed: ", __VA_ARGS__)
 #define assertNotReached(...) assert_base(false, "Assert not reached ", __VA_ARGS__)
 #define assertUnimplemented(...) assert_base(false, "Assert unimplemented: ", __VA_ARGS__)
 #else
-#define assert(condition, message)
+#define assert(condition, message, ...) (void)(condition)
 #define assertNotReached(message)
 #define assertUnimplemented(message)
 #endif

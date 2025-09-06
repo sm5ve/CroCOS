@@ -183,7 +183,7 @@ namespace kernel::amd64::interrupts{
             hal::interrupts::topology::registerDomain(ioapic);
 
             auto apicConnector = make_shared<AffineConnector>(ioapic,
-            getCPUInterruptVectors(), IOAPIC_VECTOR_MAPPING_BASE, 0, ioapic -> getEmitterCount());
+            getLAPICDomain(), IOAPIC_VECTOR_MAPPING_BASE, 0, ioapic -> getEmitterCount());
             hal::interrupts::topology::registerConnector(apicConnector);
         }
     }
@@ -275,10 +275,6 @@ namespace kernel::amd64::interrupts{
         }
     }
 
-    SharedPtr<IRQDomain> getIRQDomain() {
-        return irqDomain;
-    }
-
     uint64_t getLAPICBaseMask() {
         uint32_t eax, ebx, ecx, edx;
         cpuid(eax, ebx, ecx, edx, 0x80000000);
@@ -295,36 +291,66 @@ namespace kernel::amd64::interrupts{
         return rdmsr(IA32_APIC_BASE_MSR) & getLAPICBaseMask();
     }
 
-    void* lapicBase = nullptr;
-
-    volatile uint32_t& lapicRegister(uint32_t registerNumber) {
-        return *reinterpret_cast<volatile uint32_t*>(reinterpret_cast<uintptr_t>(lapicBase) + registerNumber);
-    }
-
     constexpr uint32_t LAPIC_SPURIOUS_INTERRUPT_VECTOR_REGISTER = 0xF0;
     constexpr uint32_t LAPIC_EOI_REGISTER = 0xB0;
 
-    void lapicIssueEOI() {
-        lapicRegister(LAPIC_EOI_REGISTER) = 0;
+    LAPIC::LAPIC(mm::phys_addr paddr) {
+        auto mmio = PageTableManager::temporaryHackMapMMIOPage(paddr);
+        mmio_window = static_cast<volatile uint32_t *>(mmio);
+        reg(LAPIC_SPURIOUS_INTERRUPT_VECTOR_REGISTER) = 0x1F0;
     }
 
-    void enableLAPIC() {
+    volatile uint32_t &LAPIC::reg(size_t offset) {
+        return mmio_window[offset/sizeof(uint32_t)];
+    }
+
+
+    size_t LAPIC::getEmitterCount() {
+        return hal::CPU_INTERRUPT_COUNT;
+    }
+
+    size_t LAPIC::getReceiverCount() {
+        return hal::CPU_INTERRUPT_COUNT;
+    }
+
+    size_t LAPIC::getEmitterFor(size_t receiver) const {
+        return receiver;
+    }
+
+    void LAPIC::issueEOI(InterruptFrame &iframe) {
+        (void)iframe;
+        reg(LAPIC_EOI_REGISTER) = 0;
+    }
+
+    LAPIC::~LAPIC() {
+
+    }
+
+
+    SharedPtr<IRQDomain> getIRQDomain() {
+        return irqDomain;
+    }
+
+    SharedPtr<LAPIC> lapicDomain;
+
+    SharedPtr<LAPIC> getLAPICDomain() {
+        return  lapicDomain;
+    }
+
+    void setupAPICs(acpi::MADT& madt) {
         auto lapicBasePhysical = getLAPICBase();
         auto lapicMSRNewVal = lapicBasePhysical | IA32_APIC_BASE_MSR_ENABLE;
         klog << "Enabling APIC, writing MSR value " << reinterpret_cast<void*>(lapicMSRNewVal) << "\n";
         wrmsr(IA32_APIC_BASE_MSR, lapicMSRNewVal);
-        lapicBase = PageTableManager::temporaryHackMapMMIOPage(mm::phys_addr(lapicBasePhysical));
-        lapicRegister(LAPIC_SPURIOUS_INTERRUPT_VECTOR_REGISTER) = 0x1F0;
-        lapicIssueEOI();
+        lapicDomain = make_shared<LAPIC>(mm::phys_addr(lapicBasePhysical));
+        hal::interrupts::topology::registerDomain(lapicDomain);
+        auto lapicConnector = make_shared<AffineConnector>(lapicDomain, getCPUInterruptVectors(), 0, 0, hal::CPU_INTERRUPT_COUNT);
+        hal::interrupts::topology::registerConnector(lapicConnector);
+        createIOAPICStructures(madt);
+        createIRQDomainConnectorsAndConfigureIOAPICActivationType(madt);
         for (auto& ioapic : ioapicsByID.values()) {
             ioapic -> setUninitializedActivationTypes(hal::interrupts::activationTypeForLevelAndTriggerMode(true, false));
         }
         klog << "Enabled APIC\n";
-    }
-
-    void setupIOAPICs(acpi::MADT& madt) {
-        createIOAPICStructures(madt);
-        createIRQDomainConnectorsAndConfigureIOAPICActivationType(madt);
-        enableLAPIC();
     }
 }

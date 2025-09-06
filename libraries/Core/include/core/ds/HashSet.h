@@ -74,11 +74,13 @@ public:
     };
 
     auto begin(){
-        return TransformingIterator(this -> entryBuffer, this -> capacity, 0, IdentityTransform{});
+        using It = typename ParentTable::template TransformingIterator<IdentityTransform>;
+        return It(this -> entryBuffer, this -> capacity, 0, IdentityTransform{});
     }
 
     auto end(){
-        return TransformingIterator(this -> entryBuffer, this -> capacity, this -> capacity, IdentityTransform{});
+        using It = typename ParentTable::template TransformingIterator<IdentityTransform>;
+        return It(this -> entryBuffer, this -> capacity, this -> capacity, IdentityTransform{});
     }
 
     size_t getCapacity() const {

@@ -23,4 +23,6 @@ namespace kernel::hal::interrupts {
     }
 }
 
+#include <arch/hal/internal/_InterruptsExplicitTypes.h>
+
 #endif //INTERRUPTS_H

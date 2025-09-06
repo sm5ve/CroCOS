@@ -303,7 +303,7 @@ namespace kernel::amd64{
         cli();
         interrupts::disableLegacyPIC();
         hal::interrupts::platform::setupCPUInterruptVectorFile(INTERRUPT_VECTOR_COUNT);
-        interrupts::setupIOAPICs(madt);
+        interrupts::setupAPICs(madt);
         const auto exceptionVectors = make_shared<interrupts::ExceptionVectorDomain>(INTERRUPT_VECTOR_RESERVE_SIZE);
         hal::interrupts::topology::registerDomain(exceptionVectors);
         const auto exceptionVectorConnector =
