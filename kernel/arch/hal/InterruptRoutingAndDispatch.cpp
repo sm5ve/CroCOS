@@ -97,6 +97,7 @@ namespace kernel::hal::interrupts::managed {
             const auto& label = routingGraph.getVertexLabel(v);
             if (!label.domain() -> instanceof(TypeID_v<platform::InterruptReceiver>)) {
                 const auto vectorNumber = *annotation[v];
+                //klog << "Mapping " << label.domain() -> type_name() << " emitter " << label.index() << " -> " << vectorNumber << "\n";
                 if (!handlersByVector[vectorNumber]) {
                     handlersByVector[vectorNumber] = make_unique<InterruptHandlerListForVector>();
                 }
@@ -119,6 +120,7 @@ namespace kernel::hal::interrupts::managed {
             const auto t2 = routingGraph.getTarget(b);
             const auto& l1 = routingGraph.getVertexLabel(t1);
             const auto& l2 = routingGraph.getVertexLabel(t2);
+            if (l1.domain() == l2.domain()) {return l1.index() < l2.index();}
             return domainOrder[l1.domain()] > domainOrder[l2.domain()];
         });
 
@@ -202,7 +204,16 @@ namespace kernel::hal::interrupts::managed {
                 }
             }
         }
-        out.sort([](auto& a, auto& b) {
+        auto& topOrder = topology::topologicalOrderMap();
+        out.sort([&](auto& a, auto& b) {
+            if (a.second() == b.second()) {
+                auto la = routingGraph.getVertexLabel(a.first());
+                auto lb = routingGraph.getVertexLabel(b.first());
+                if (la.domain() == lb.domain()) {
+                    return la.index() < lb.index();
+                }
+                return topOrder[la.domain()] < topOrder[lb.domain()];
+            }
             return a.second() < b.second();
         });
         return out;
@@ -255,7 +266,7 @@ namespace kernel::hal::interrupts::managed {
         RoutingNodeTriggerType triggerType;
         SharedPtr<EOIChain> chain = SharedPtr<EOIChain>::null();
 
-        EOIBehaviorMetadata() : triggerType(TRIGGER_UNDETERMINED), chain(SharedPtr<EOIChain>::null()) {}
+        EOIBehaviorMetadata() : triggerType(TRIGGER_UNDETERMINED) {}
     };
 
     ARRAY_WITH_GLOBAL_CONSTRUCTOR(EOIBehaviorMetadata, CPU_INTERRUPT_COUNT, eoiBehaviorTable);
@@ -291,7 +302,6 @@ namespace kernel::hal::interrupts::managed {
 
     void updateRouting() {
         InterruptDisabler disabler;
-        //klog << "Here " << sizeof(size_t[CPU_INTERRUPT_COUNT]) << "\n";
         auto& policy = getRoutingPolicy();
         const auto routingGraph = policy.buildRoutingGraph(*createRoutingGraphBuilder());
         configureRoutableDomains(routingGraph);
@@ -309,6 +319,9 @@ namespace kernel::hal::interrupts::managed {
             for (auto d : eoiChain.sortedDomains) {
                 d -> issueEOI(frame);
             }
+        }
+        else {
+            assertUnimplemented("I don't yet have support for level-triggered interrupt EOIs");
         }
         if (handlersByVector[frame.vector_index].get() != nullptr) {
             for (auto& handler : *handlersByVector[frame.vector_index]) {

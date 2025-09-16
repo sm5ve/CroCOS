@@ -25,8 +25,9 @@ namespace kernel::amd64::timers{
     void timerTick(hal::InterruptFrame&) {
         static size_t ticks = 0;
         ticks++;
-        if (ticks % 20 == 0)
+        if (ticks % 20 == 0) {
             klog << "Tick " << ticks << "!\n";
+        }
     }
 
     void initPIT(){

@@ -46,7 +46,7 @@ target_link_options(Kernel PUBLIC
         -flto -Os -ffreestanding -mcmodel=kernel -nostdlib
         -T ${CMAKE_SOURCE_DIR}/kernel/linker.ld
         -Wl,--gc-sections
-        -Wl,--print-gc-sections  # Optional: shows what's being removed
+        #-Wl,--print-gc-sections
         -Wl,--build-id
 )
 target_include_directories(Kernel PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)

@@ -85,8 +85,11 @@ namespace kernel::hal::interrupts::managed {
 
         auto preexistingEdges = Vector<RoutingGraphBuilder::EdgeHandle>(builder.currentEdges());
         preexistingEdges.sort([&](const RoutingGraphBuilder::EdgeHandle& a, const RoutingGraphBuilder::EdgeHandle& b) {
-            const auto domainA = builder.getVertexLabel(builder.getEdgeSource(a)) -> domain();
-            const auto domainB = builder.getVertexLabel(builder.getEdgeSource(b)) -> domain();
+            auto la = builder.getVertexLabel(builder.getEdgeSource(a));
+            auto lb = builder.getVertexLabel(builder.getEdgeSource(b));
+            const auto domainA = la -> domain();
+            const auto domainB = lb -> domain();
+            if (domainA == domainB) return la -> index() < lb -> index();
             return domainOrder[domainA] > domainOrder[domainB];
         });
 

@@ -1,18 +1,18 @@
 1. (✅) Add unit tests for Variant and Optional – specifically stress test move and copy semantics
 2. (✅) Fix failing unit tests for InterruptGraph, figure out source of memory leaks
-3. Implement proper kmalloc to replace temporary bump allocator
-4. Unit test kmalloc with special attention to concurrency
-5. Wire up APIC, CPU interrupt vectors, legacy IRQ lines, and maybe HPET to interrupt topology graph
-6. Write initial basic RoutingPolicy. Unit test
-7. Write methods to configure InterruptDomains according to resulting RoutingGraph
-8. Allow registering interrupt handlers to interrupt sources, automatically determine final vector
+3. (✅) Implement proper kmalloc to replace temporary bump allocator
+4. (✅) Unit test kmalloc with special attention to concurrency
+5. (✅) Wire up APIC, CPU interrupt vectors, legacy IRQ lines, and maybe HPET to interrupt topology graph
+6. (✅) Write initial basic RoutingPolicy. Unit test
+7. (✅) Write methods to configure InterruptDomains according to resulting RoutingGraph
+8. (✅) Allow registering interrupt handlers to interrupt sources, automatically determine final vector
 
 ---
 At this point, we have a minimal implementation of the interrupt manager, we can begin to test it with real devices
 
 ---
 
-9. Create driver for PIT
+9. (✅) Create driver for PIT
 10. Implement timer manager, sleep()
 11. SMP bring up
 12. Unit test RingBuffer

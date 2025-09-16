@@ -4,13 +4,12 @@
 
 #ifndef CROCOS_TIMERS_H
 #define CROCOS_TIMERS_H
-
-#include "arch/hal/interrupts.h"
 #include <core/ds/Vector.h>
 
-class Timer{
+class TimerSource{
 public:
-    //virtual Vector<InterruptHandle> supportedInterruptLines() = 0;
 };
+
+
 
 #endif //CROCOS_TIMERS_H
