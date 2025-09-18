@@ -7,7 +7,7 @@ set(CMAKE_C_COMPILER x86_64-elf-gcc)
 set(CMAKE_CXX_COMPILER x86_64-elf-g++)
 
 # Set the assembler and linker
-set(CMAKE_ASM_COMPILER x86_64-elf-as)
+set(CMAKE_ASM_COMPILER x86_64-elf-gcc)
 set(CMAKE_LINKER x86_64-elf-ld)
 
 # Ensure that the cross-compiler does not add platform-specific flags (e.g., -arch for macOS)
