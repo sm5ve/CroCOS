@@ -15,7 +15,7 @@
 #include "interrupts.h"
 
 namespace kernel::hal::interrupts {
-   enum InterruptLineActivationType : uint8_t{
+   enum class InterruptLineActivationType : uint8_t{
       LEVEL_LOW = 0b00,
       LEVEL_HIGH = 0b01,
       EDGE_LOW = 0b10,
@@ -30,7 +30,7 @@ namespace kernel::hal::interrupts {
    }
 
    constexpr bool isLevelTriggered(const InterruptLineActivationType type){
-      return type == LEVEL_LOW || type == LEVEL_HIGH;
+      return type == InterruptLineActivationType::LEVEL_LOW || type == InterruptLineActivationType::LEVEL_HIGH;
    }
 
    constexpr bool isEdgeTriggered(const InterruptLineActivationType type){
@@ -38,7 +38,7 @@ namespace kernel::hal::interrupts {
    }
 
    constexpr bool isLowTriggered(const InterruptLineActivationType type){
-      return type == LEVEL_LOW || type == EDGE_LOW;
+      return type == InterruptLineActivationType::LEVEL_LOW || type == InterruptLineActivationType::EDGE_LOW;
    }
 
    constexpr bool isHighTriggered(const InterruptLineActivationType type){
@@ -196,14 +196,14 @@ struct DefaultHasher<kernel::hal::interrupts::managed::RoutingNodeLabel> {
 
 namespace kernel::hal::interrupts {
    namespace managed {
-      enum RoutingNodeTriggerType{
+      enum class RoutingNodeTriggerType : size_t {
          TRIGGER_LEVEL = 0,
          TRIGGER_EDGE = 1,
          TRIGGER_UNDETERMINED = 2
       };
 
       struct RoutingNodeMetadata {
-         RoutingNodeTriggerType triggerType = TRIGGER_UNDETERMINED;
+         RoutingNodeTriggerType triggerType = RoutingNodeTriggerType::TRIGGER_UNDETERMINED;
          Optional<SharedPtr<platform::InterruptDomain>> owner;
       };
 

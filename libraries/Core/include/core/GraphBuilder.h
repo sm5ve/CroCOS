@@ -444,13 +444,13 @@ namespace _GraphBuilder {
 
         Optional<EdgeHandle> _getNextOutgoingEdge(const EdgeHandle &edge) const {
             validateEdgeHandle(edge);
-            if (edge.index == INVALID_VERTEX_EDGE_INDEX) {}
+            if (edge.index == INVALID_VERTEX_EDGE_INDEX) return {};
             return EdgeHandle(edgeInfo[edge.index].nextEdgeForSource, &edgeInfo);
         }
 
         Optional<EdgeHandle> _getNextIncomingEdge(const EdgeHandle &edge) const {
             validateEdgeHandle(edge);
-            if (edge.index == INVALID_VERTEX_EDGE_INDEX) {}
+            if (edge.index == INVALID_VERTEX_EDGE_INDEX) return {};
             return EdgeHandle(edgeInfo[edge.index].nextEdgeForTarget, &edgeInfo);
         }
 

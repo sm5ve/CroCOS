@@ -12,7 +12,7 @@
 
 namespace kernel::amd64 {
     //Derived from https://wiki.osdev.org/CPUID, or tables 3-19 and 3-20 in volume 2 of the Intel manual.
-    enum CPUID_FEAT_LEAF_BITMAP{
+    enum class CPUID_FEAT_LEAF_BITMAP{
         ECX_SSE3         = 1 << 0,
         ECX_PCLMUL       = 1 << 1,
         ECX_DTES64       = 1 << 2,

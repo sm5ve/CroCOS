@@ -172,15 +172,15 @@ namespace kernel::hal::interrupts {
                 if (domain->instanceof(TypeID_v<platform::InterruptReceiver>)) {
                     const auto receiver = crocos_dynamic_cast<platform::InterruptReceiver>(domain);
                     for (size_t i = 0; i < receiver->getReceiverCount(); i++) {
-                        auto triggerType = TRIGGER_UNDETERMINED;
+                        auto triggerType = RoutingNodeTriggerType::TRIGGER_UNDETERMINED;
                         if (configurableTriggerDomain) {
                             auto activationType = configurableTriggerDomain -> getActivationType(i);
                             if (activationType) {
                                 if (isLevelTriggered(*activationType)) {
-                                    triggerType = TRIGGER_LEVEL;
+                                    triggerType = RoutingNodeTriggerType::TRIGGER_LEVEL;
                                 }
                                 else {
-                                    triggerType = TRIGGER_EDGE;
+                                    triggerType = RoutingNodeTriggerType::TRIGGER_EDGE;
                                 }
                             }
                         }
@@ -202,7 +202,7 @@ namespace kernel::hal::interrupts {
                         //to represent this concept, should it prove necessary.
                         routingVertices.push(RoutingVertexSpec{
                             RoutingNodeLabel(domain, i),
-                            {TRIGGER_UNDETERMINED, {}}
+                            {RoutingNodeTriggerType::TRIGGER_UNDETERMINED, {}}
                         });
                     }
                 }
@@ -276,15 +276,15 @@ namespace kernel::hal::interrupts {
             const auto targetActivationType = routingBuilder.getConnectedComponentTriggerType(target);
             //Allowed connections are LEVEL -> LEVEL, LEVEL -> UNDETERMINED, and any mix of EDGE and UNDETERMINED
             if (checkTriggerType) {
-                if (targetActivationType == TRIGGER_LEVEL) {
+                if (targetActivationType == RoutingNodeTriggerType::TRIGGER_LEVEL) {
                     //Except we do allow connecting an undetermined device to a level-triggered source
                     //We then conclude the device wants level-triggered interrupts and mark it as such.
-                    if (sourceActivationType != TRIGGER_LEVEL && sourceDomain -> instanceof(TypeID_v<platform::InterruptReceiver>)) {
+                    if (sourceActivationType != RoutingNodeTriggerType::TRIGGER_LEVEL && sourceDomain -> instanceof(TypeID_v<platform::InterruptReceiver>)) {
                         return false;
                     }
                 }
-                if (targetActivationType == TRIGGER_EDGE) {
-                    if (sourceActivationType == TRIGGER_LEVEL){
+                if (targetActivationType == RoutingNodeTriggerType::TRIGGER_EDGE) {
+                    if (sourceActivationType == RoutingNodeTriggerType::TRIGGER_LEVEL){
                         return false;
                     }
                 }
@@ -513,7 +513,7 @@ namespace kernel::hal::interrupts {
             const auto original = v;
             auto triggerType = getVertexColor(v)->triggerType;
             Optional<EdgeHandle> e;
-            while ((e = _getFirstEdgeFromVertex(v)) && triggerType == TRIGGER_UNDETERMINED) {
+            while ((e = _getFirstEdgeFromVertex(v)) && triggerType == RoutingNodeTriggerType::TRIGGER_UNDETERMINED) {
                 v = getEdgeTarget(*e);
                 triggerType = getVertexColor(v) -> triggerType;
             }
@@ -585,7 +585,7 @@ namespace kernel::hal::interrupts {
             const auto targetTriggerType = getConnectedComponentTriggerType(to);
             const auto out =  Base::addEdge(from, to);
             if (out.occupied()) {
-                if (targetTriggerType == TRIGGER_UNDETERMINED && sourceTriggerType != TRIGGER_UNDETERMINED) {
+                if (targetTriggerType == RoutingNodeTriggerType::TRIGGER_UNDETERMINED && sourceTriggerType != RoutingNodeTriggerType::TRIGGER_UNDETERMINED) {
                     setConnectedComponentTriggerType(to, sourceTriggerType);
                 }
             }

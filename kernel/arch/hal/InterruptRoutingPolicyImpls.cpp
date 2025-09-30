@@ -21,7 +21,7 @@ namespace kernel::hal::interrupts::managed {
         for (auto v : b.validEdgesFromIgnoringTriggerType(*node)) {
             auto targetLabel = b.getVertexLabel(v);
             auto targetTriggerType = b.getConnectedComponentTriggerType(v);
-            heaps[targetTriggerType].push(*targetLabel);
+            heaps[static_cast<size_t>(targetTriggerType)].push(*targetLabel);
         }
     }
 
@@ -46,28 +46,28 @@ namespace kernel::hal::interrupts::managed {
         Optional<RoutingNodeLabel> bestCandidate;
         Optional<RoutingNodeTriggerType> bestTriggerType;
         auto consider = [&](RoutingNodeTriggerType type) {
-            if (!heaps[type].empty()) {
-                auto cand = heaps[type].top();
+            if (!heaps[static_cast<size_t>(type)].empty()) {
+                auto cand = heaps[static_cast<size_t>(type)].top();
                 if (!bestCandidate.occupied() || comparator(*bestCandidate, cand)) {
                     bestCandidate = cand;
                     bestTriggerType = type;
                 }
             }
         };
-        consider(TRIGGER_UNDETERMINED);
-        consider(sourceTriggerType == TRIGGER_LEVEL ? TRIGGER_LEVEL : TRIGGER_EDGE);
+        consider(RoutingNodeTriggerType::TRIGGER_UNDETERMINED);
+        consider(sourceTriggerType == RoutingNodeTriggerType::TRIGGER_LEVEL ? RoutingNodeTriggerType::TRIGGER_LEVEL : RoutingNodeTriggerType::TRIGGER_EDGE);
         if (!bestCandidate.occupied()) {
             return {};
         }
         auto target = builder.getVertexByLabel(*bestCandidate);
         auto out = builder.addEdge(*builder.getVertexByLabel(sourceLabel), *target);
-        heaps[*bestTriggerType].pop();
+        heaps[static_cast<size_t>(*bestTriggerType)].pop();
         loads[*bestCandidate] += loads[sourceLabel];
-        if (*bestTriggerType == TRIGGER_UNDETERMINED) {
-            heaps[sourceTriggerType].push(*bestCandidate);
+        if (*bestTriggerType == RoutingNodeTriggerType::TRIGGER_UNDETERMINED) {
+            heaps[static_cast<size_t>(sourceTriggerType)].push(*bestCandidate);
         }
         else {
-            heaps[*bestTriggerType].push(*bestCandidate);
+            heaps[static_cast<size_t>(*bestTriggerType)].push(*bestCandidate);
         }
         return out;
     }

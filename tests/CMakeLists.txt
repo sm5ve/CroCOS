@@ -55,6 +55,7 @@ add_subdirectory(core)
 
 # Add a custom target to run all tests (core + kernel)
 add_custom_target(run_all_tests
+    USES_TERMINAL
     COMMAND core/CoreTestRunner
     #COMMAND kernel/KernelTestRunner
     COMMAND liballoc/LibAllocTestRunner

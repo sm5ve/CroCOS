@@ -266,7 +266,7 @@ namespace kernel::hal::interrupts::managed {
         RoutingNodeTriggerType triggerType;
         SharedPtr<EOIChain> chain = SharedPtr<EOIChain>::null();
 
-        EOIBehaviorMetadata() : triggerType(TRIGGER_UNDETERMINED) {}
+        EOIBehaviorMetadata() : triggerType(RoutingNodeTriggerType::TRIGGER_UNDETERMINED) {}
     };
 
     ARRAY_WITH_GLOBAL_CONSTRUCTOR(EOIBehaviorMetadata, CPU_INTERRUPT_COUNT, eoiBehaviorTable);
@@ -314,7 +314,7 @@ namespace kernel::hal::interrupts::managed {
 
     void dispatchInterrupt(InterruptFrame& frame) {
         auto& eoiBehavior = eoiBehaviorTable[frame.vector_index];
-        if (eoiBehavior.triggerType == TRIGGER_EDGE || eoiBehavior.triggerType == TRIGGER_UNDETERMINED) {
+        if (eoiBehavior.triggerType == RoutingNodeTriggerType::TRIGGER_EDGE || eoiBehavior.triggerType == RoutingNodeTriggerType::TRIGGER_UNDETERMINED) {
             auto& eoiChain = *(eoiBehavior.chain);
             for (auto d : eoiChain.sortedDomains) {
                 d -> issueEOI(frame);

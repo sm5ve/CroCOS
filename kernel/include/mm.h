@@ -65,13 +65,13 @@ namespace kernel::mm{
     }
 
     namespace vm {
-        enum PageFaultHandleResult {
+        enum class PageFaultHandleResult {
             HANDLED_IN_KERNEL,
             DEFERRED,
             UNHANDLED
         };
 
-        enum PageFaultType {
+        enum class PageFaultType {
             READ_FAULT,
             WRITE_FAULT
         };

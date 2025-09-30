@@ -33,20 +33,20 @@ namespace kernel{
             constexpr T* as_ptr(){return (T*)value;};
         };
 
-        enum PageMappingPermissions : uint8_t {
+        enum class PageMappingPermissions : uint8_t {
             READ  = 1 << 0,
             WRITE = 1 << 1,
             EXEC  = 1 << 2
         };
 
-        enum PageMappingCacheType {
+        enum class PageMappingCacheType {
             FULLY_CACHED,
             FULLY_UNCACHED,
             WRITE_THROUGH,
             WRITE_COMBINE
         };
 
-        enum PageSize{
+        enum class PageSize{
             BIG,
             SMALL
         };

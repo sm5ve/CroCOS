@@ -197,14 +197,14 @@ namespace kernel::acpi{
         }
     } __attribute__ ((packed));
 
-    enum ACPIDiscoveryResult{
+    enum class ACPIDiscoveryResult{
         NOT_FOUND,
         CHECKSUM_FAIL,
         MISMATCHED_SIGNATURE,
         SUCCESS
     };
 
-    enum ACPIChecksumResult{
+    enum class ACPIChecksumResult{
         FAIL = 0,
         PASS = 1
     };
