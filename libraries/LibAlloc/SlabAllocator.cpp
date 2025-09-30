@@ -249,7 +249,6 @@ namespace LibAlloc{
         numNonFullSlabs = 0;
         numFreeSlabs = 0;
         topOccupiedBucket = nullptr;
-        dummy = nullptr;
         for(auto & bucket : partiallyFullBuckets){
             bucket = nullptr;
         }

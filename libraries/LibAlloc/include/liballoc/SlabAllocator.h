@@ -107,7 +107,6 @@ namespace LibAlloc {
         const size_t desiredSlabSize;
         Slab* fullSlabs;
         Slab* partiallyFullBuckets[slabAllocatorBucketCount]{};
-        volatile Slab* dummy;
         Slab* freeSlabs;
         size_t numFreeSlabs;
         size_t numNonFullSlabs;
