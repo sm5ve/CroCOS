@@ -45,6 +45,13 @@ constexpr uint64_t log2floor(uint64_t value){
 #endif
 }
 
+constexpr __uint128_t log2floor(__uint128_t value){
+    if (value >> 64 == 0) {
+        return log2floor(static_cast<uint64_t>(value));
+    }
+    return log2floor(static_cast<uint64_t>(value >> 64)) + 64;
+}
+
 constexpr uint32_t log2floor(uint32_t value){
 #ifdef __x86_64__
     return static_cast<uint32_t>(63 - __builtin_clz(value));
@@ -85,6 +92,10 @@ constexpr size_t max(size_t a, size_t b) {
 template <typename... Rest>
 constexpr size_t max(size_t a, size_t b, Rest... rest) {
     return max(max(a, b), rest...);
+}
+
+constexpr uint64_t multShift64(uint64_t a, uint64_t mult, uint64_t shift) {
+    return static_cast<uint64_t>(static_cast<__uint128_t>(a) * mult) >> shift;
 }
 
 #endif //CROCOS_MATH_H

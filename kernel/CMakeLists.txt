@@ -18,7 +18,8 @@ set(KERNEL_SRC
         acpi/ACPIFixedTables.cpp
         mm/MemoryManager.cpp
         arch/amd64/PageTableManager.cpp
-        timing/TimerManager.cpp
+        timing/TimerQueues.cpp
+        timing/ClockManager.cpp
         arch/amd64/interrupts/LegacyPIC.cpp
         arch/amd64/smp/smp.cpp
         arch/amd64/interrupts/InterruptSetup.cpp
@@ -50,7 +51,7 @@ target_link_options(Kernel PUBLIC
         -Wl,--build-id
 )
 target_include_directories(Kernel PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(Kernel PRIVATE CoreKernel AllocKernel)
+target_link_libraries(Kernel PRIVATE CoreKernel AllocKernel gcc)
 
 add_custom_command(TARGET Kernel POST_BUILD
         COMMAND ${CMAKE_OBJCOPY} --only-keep-debug $<TARGET_FILE:Kernel> $<TARGET_FILE:Kernel>.debug

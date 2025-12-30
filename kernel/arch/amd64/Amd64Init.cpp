@@ -8,6 +8,7 @@
 #include <core/str.h>
 #include <acpi.h>
 #include <assert.h>
+#include <timing.h>
 #include <core/math.h>
 #include "multiboot.h"
 #include <arch/amd64/interrupts/LegacyPIC.h>
@@ -260,7 +261,7 @@ namespace kernel::amd64{
         //TODO implement a fallback method
         //really I ought to just do this with a proper GDT or whatever... but this should be enough
         //to get the rudiments of SMP working.
-        temporaryHack(10, 11, 2025, "Implement a proper GDT");
+        temporaryHack(3, 1, 2026, "Implement a proper GDT");
         assert(supportsFSGSBASE(), "Your CPU doesn't support FSGSBASE");
         uint64_t cr4;
         asm volatile ("mov %%cr4, %0" : "=r"(cr4));
@@ -369,6 +370,7 @@ namespace kernel::amd64{
 
         initializeInterrupts(madt);
         timers::initPIT();
+        timing::initialize();
 
         klog << "Finished initializing interrupts\n";
         //kernel::amd64::interrupts::buildApicTopology(madt); //Temporary ACPI initialization stuff...

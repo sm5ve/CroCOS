@@ -9,7 +9,7 @@ set(CORE_SOURCES
         include/core/preprocessor.h
         include/core/ds/IndexedHashtable.h
         mem.cpp
-        ChronoTypes.cpp
+        FrequencyData.cpp
 )
 
 #Special version of Core meant to be linked with the kernel

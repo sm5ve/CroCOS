@@ -319,4 +319,6 @@ namespace kernel::hal::interrupts {
    }
 }
 
+#include "internal/_InterruptsExplicitTypes.h"
+
 #endif //CROCOS_INTERRUPTS_H

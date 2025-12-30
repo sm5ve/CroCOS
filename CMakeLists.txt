@@ -30,7 +30,16 @@ add_custom_target(run
         USES_TERMINAL
 )
 
+add_custom_target(kdebug
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+        COMMAND qemu-system-x86_64 -kernel kernel/Kernel -s -S -no-reboot -nographic -smp 4 -m 256M -d guest_errors -cpu qemu64,+fsgsbase -serial file:qemu.log
+        COMMENT "Running QEMU"
+        USES_TERMINAL
+)
+
 add_dependencies(run Kernel)
+
+add_dependencies(kdebug Kernel)
 
 # Add unit test target that builds and runs all tests
 add_custom_target(unit_tests
