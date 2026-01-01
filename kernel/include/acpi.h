@@ -9,6 +9,7 @@
 #include <core/ds/Vector.h>
 #include <mm.h>
 #include <core/str.h>
+#include <core/PrintStream.h>
 
 #ifdef __x86_64__
 #include "arch/amd64/amd64.h"
@@ -52,6 +53,40 @@ namespace kernel::acpi{
     struct XSDT {
         struct SDTHeader h;
         uint64_t tablePointer;
+    } __attribute__ ((packed));
+
+    enum class GASAddressSpaceID : uint8_t{
+        SYSTEM_MEMORY = 0,
+        SYSTEM_IO = 1,
+        PCI_CONFIG_SPACE = 2,
+        EMBEDDED_CONTROLLER = 3,
+        SMBUS = 4,
+        SYSTEM_CMOS = 5,
+        PCI_BAR_TARGET = 6,
+        IPMI = 7,
+        GPIO = 8,
+        GENERIC_SERIAL_BUS = 9,
+        PCC = 10,
+        FUNCTIONAL_FIXED_HARDWARE = 0x7f
+    };
+
+    struct GenericAddressStructure {
+        GASAddressSpaceID addressSpaceID;
+        uint8_t bitWidth;
+        uint8_t bitOffset;
+        uint8_t accessSize;
+        uint64_t address;
+    } __attribute__ ((packed));
+
+    struct HPET {
+        SDTHeader h;
+        uint8_t revision;
+        uint8_t hpetComparatorInfo;
+        uint16_t pciVendorID;
+        GenericAddressStructure hpetBaseAddress;
+        uint8_t hpetNumber;
+        uint16_t minimumTick;
+        uint8_t pageProtection;
     } __attribute__ ((packed));
 
     struct MADTEntryHeader{
@@ -229,6 +264,11 @@ namespace kernel::acpi{
         static constexpr const char* value = "APIC";
     };
 
+    template <>
+    struct ACPISignature<HPET> {
+        static constexpr const char* value = "HPET";
+    };
+
     ACPIDiscoveryResult tryFindACPI();
     ACPIChecksumResult verifyTableChecksum(SDTHeader* header);
 
@@ -299,6 +339,16 @@ namespace kernel::acpi{
         assert(tables.size() > 0, "ACPI missing required table");
         return *tables[0];
     }
+
+    template<typename T>
+    T* optional(){
+        auto tables = getTables<T>();
+        assert(tables.size() < 2, "ACPI contains duplicate of a unique table");
+        if (tables.size() == 0) return nullptr;
+        return tables[0];
+    }
 }
+
+Core::PrintStream& operator<<(Core::PrintStream& out, kernel::acpi::GASAddressSpaceID result);
 #pragma GCC diagnostic pop
 #endif //CROCOS_ACPI_H

@@ -6,7 +6,6 @@
 #include <core/Object.h>
 #include <core/algo/GraphAlgorithms.h>
 #include <arch/hal/interrupts.h>
-#include <core/algo/GraphAlgorithms.h>
 #include <liballoc/InternalAllocatorDebug.h>
 #include <timing.h>
 
@@ -50,6 +49,8 @@ namespace kernel{
         hal::hwinit();
 
         klog << "Updating routing configuration\n";
+        //FIXME this seems to take approximately 200 ms on my computer.
+        //This seems oddly long...
         hal::interrupts::managed::updateRouting();
         klog << "Routing configuration updated\n";
         klog << "Total malloc usage " << LibAlloc::InternalAllocator::getAllocatorStats().totalBytesRequested << "\n";

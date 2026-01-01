@@ -16,6 +16,7 @@
 #include <arch/amd64/interrupts/APIC.h>
 #include <arch/amd64/interrupts/AuxiliaryDomains.h>
 #include <arch/amd64/timers/PIT.h>
+#include <arch/amd64/timers/HPET.h>
 
 extern uint32_t mboot_magic;
 extern uint32_t mboot_table;
@@ -370,6 +371,7 @@ namespace kernel::amd64{
 
         initializeInterrupts(madt);
         timers::initPIT();
+        timers::initHPET();
         timing::initialize();
 
         klog << "Finished initializing interrupts\n";

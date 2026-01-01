@@ -109,7 +109,9 @@ namespace kernel::hal::timing {
         [[nodiscard]] uint16_t quality() const {return _quality;}
 
         virtual void armOneshot(uint64_t deltaTicks) = 0;
+        [[nodiscard]] virtual uint64_t maxOneshotDelay() const = 0; //in ticks
         virtual void armPeriodic(uint64_t periodTicks) = 0;
+        [[nodiscard]] virtual uint64_t maxPeriod() const = 0; //in ticks
         virtual void disarm() = 0;
 
         [[nodiscard]] FrequencyData calibrationData() const {return _calibrationData;}

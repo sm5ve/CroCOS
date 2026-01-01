@@ -18,6 +18,8 @@ namespace kernel::amd64::interrupts{
     constexpr uint32_t IA32_APIC_BASE_MSR = 0x1B;
     constexpr uint32_t IA32_APIC_BASE_MSR_ENABLE = 1u << 11;
 
+    SharedPtr<IOAPIC> firstIOAPIC;
+
     IOAPIC::IOAPIC(const uint8_t i, void* m, const uint32_t g) : id(i), mmio_window(static_cast<volatile uint32_t*>(m)), gsi_base(g) {
         const uint32_t version = regRead(IOAPIC_REG_VERSION);
         lineCount = (version >> 16) & 0xffu;
@@ -175,9 +177,12 @@ namespace kernel::amd64::interrupts{
     void createIOAPICStructures(acpi::MADT& madt) {
         for (const auto ioapicEntry : madt.entries<acpi::MADT_IOAPIC_Entry>()) {
             uintptr_t base = ioapicEntry.ioapicAddress;
-            auto* mmio_window = amd64::PageTableManager::temporaryHackMapMMIOPage(mm::phys_addr(base));
+            auto* mmio_window = PageTableManager::temporaryHackMapMMIOPage(mm::phys_addr(base));
             auto gsiBase = ioapicEntry.gsiBase;
             auto ioapic = make_shared<IOAPIC>(ioapicEntry.ioapicID, mmio_window, gsiBase);
+            if (!firstIOAPIC || firstIOAPIC -> getGSIBase() > gsiBase) {
+                firstIOAPIC = ioapic;
+            }
             ioapicsByID[ioapicEntry.ioapicID] = ioapic;
             ioapicsByGSI.insert(ioapic);
             hal::interrupts::topology::registerDomain(ioapic);
@@ -326,7 +331,6 @@ namespace kernel::amd64::interrupts{
 
     }
 
-
     SharedPtr<IRQDomain> getIRQDomain() {
         return irqDomain;
     }
@@ -335,6 +339,11 @@ namespace kernel::amd64::interrupts{
 
     SharedPtr<LAPIC> getLAPICDomain() {
         return  lapicDomain;
+    }
+
+    //Used by HPET
+    SharedPtr<IOAPIC> getFirstIOAPIC() {
+        return firstIOAPIC;
     }
 
     void setupAPICs(acpi::MADT& madt) {

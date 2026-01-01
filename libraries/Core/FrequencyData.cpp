@@ -67,6 +67,12 @@ FrequencyData FrequencyData::fromGHz(uint64_t ghz) {
 
 // --- Convenience factory methods for creating from periods ---
 
+FrequencyData FrequencyData::fromPeriodFs(uint64_t fs) {
+    constexpr __uint128_t oneMillion = 1'000'000ULL;
+    __uint128_t m = (oneMillion << 64) / fs;
+    return FrequencyData(m);
+}
+
 /**
  * Create FrequencyData from a period in nanoseconds.
  * Example: FrequencyData::fromPeriodNs(1) creates data for a 1 GHz clock

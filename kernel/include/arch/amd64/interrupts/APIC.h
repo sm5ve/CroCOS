@@ -50,6 +50,7 @@ namespace kernel::amd64::interrupts{
 
     void setupAPICs(acpi::MADT& madt);
     SharedPtr<LAPIC> getLAPICDomain();
+    SharedPtr<IOAPIC> getFirstIOAPIC();
 }
 
 #endif //CROCOS_APIC_H

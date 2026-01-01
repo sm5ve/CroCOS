@@ -104,3 +104,49 @@ namespace kernel::acpi{
         return procCount;
     }
 }
+
+using namespace kernel::acpi;
+Core::PrintStream& operator<<(Core::PrintStream& out, GASAddressSpaceID addressSpaceID) {
+    switch (addressSpaceID) {
+        case GASAddressSpaceID::EMBEDDED_CONTROLLER:
+            out << "Embedded Controller";
+            break;
+        case GASAddressSpaceID::GENERIC_SERIAL_BUS:
+            out << "Generic Serial Bus";
+            break;
+        case GASAddressSpaceID::GPIO:
+            out << "GPIO";
+            break;
+        case GASAddressSpaceID::IPMI:
+            out << "IPMI";
+            break;
+        case GASAddressSpaceID::FUNCTIONAL_FIXED_HARDWARE:
+            out << "Functional Fixed Hardware";
+            break;
+        case GASAddressSpaceID::PCC:
+            out << "Platform Communications Channel";
+            break;
+        case GASAddressSpaceID::PCI_BAR_TARGET:
+            out << "PCI BAR Target";
+            break;
+        case GASAddressSpaceID::SYSTEM_MEMORY:
+            out << "System Memory";
+            break;
+        case GASAddressSpaceID::SYSTEM_IO:
+            out << "System IO";
+            break;
+        case GASAddressSpaceID::SMBUS:
+            out << "SMBus";
+            break;
+        case GASAddressSpaceID::SYSTEM_CMOS:
+            out << "System CMOS";
+            break;
+        case GASAddressSpaceID::PCI_CONFIG_SPACE:
+            out << "PCI Config Space";
+            break;
+        default:
+            out << "Unknown Address Space ID (" << (uint32_t)addressSpaceID << ")";
+            break;
+    }
+    return out;
+}

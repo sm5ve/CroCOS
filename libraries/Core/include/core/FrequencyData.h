@@ -64,6 +64,11 @@ namespace Core {
         // --- Convenience factory methods for creating from periods ---
 
         /**
+         * Create FrequencyData from a period in femtoseconds.
+         */
+        static FrequencyData fromPeriodFs(uint64_t fs);
+
+        /**
          * Create FrequencyData from a period in nanoseconds.
          * Example: FrequencyData::fromPeriodNs(1) creates data for a 1 GHz clock
          */

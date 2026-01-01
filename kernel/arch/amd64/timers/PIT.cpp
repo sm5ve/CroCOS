@@ -17,6 +17,8 @@ namespace kernel::amd64::timers{
     constexpr uint32_t PIT_CHANNEL_2 = 0x42;
     constexpr uint32_t PIT_COMMAND_PORT = 0x43;
 
+    using namespace hal::timing;
+
     using namespace kernel::hal::interrupts;
     CRClass(PITInterruptDomain, public platform::InterruptDomain, public platform::InterruptEmitter){
     public:
@@ -24,19 +26,6 @@ namespace kernel::amd64::timers{
             return 1;
         }
     };
-
-    void timerTick(hal::InterruptFrame&) {
-        static size_t ticks = 0;
-        ticks++;
-        if (ticks % 20 == 0) {
-            klog << "Tick " << ticks << "!\n";
-        }
-        if (ticks >= 100) {
-            asm volatile("outw %0, %1" ::"a"((uint16_t)0x2000), "Nd"((uint16_t)0x604));
-        }
-    }
-
-    using namespace hal::timing;
 
     void callPITEventCallback(hal::InterruptFrame& frame);
 
@@ -49,7 +38,7 @@ namespace kernel::amd64::timers{
             PERIODIC
         };
 
-        uint16_t reloadValue = 0;
+        uint64_t reloadValue = 0;
 
         PITState state = UNINITIALIZED;
 
@@ -65,10 +54,17 @@ namespace kernel::amd64::timers{
             state = target;
         }
 
-        void setReload(uint16_t value) {
+        void setReload(uint64_t value) {
             reloadValue = value;
-            outb(PIT_CHANNEL_0, static_cast<uint8_t>(value & 0xff));
-            outb(PIT_CHANNEL_0, static_cast<uint8_t>(value >> 8));
+            if (value == 0x10000) {
+                outb(PIT_CHANNEL_0, 0);
+                outb(PIT_CHANNEL_0, 0);
+            }
+            else {
+                assert(value < 0x10000, "Cannot set PIT reload value greater than 65536");
+                outb(PIT_CHANNEL_0, static_cast<uint8_t>(value & 0xff));
+                outb(PIT_CHANNEL_0, static_cast<uint8_t>(value >> 8));
+            }
         }
 
         Spinlock pitLock;
@@ -98,17 +94,23 @@ namespace kernel::amd64::timers{
         void armOneshot(uint64_t deltaTicks) override {
             LockGuard guard(pitLock);
             hal::InterruptDisabler disabler;
-            assert(deltaTicks < (1 << 16), "Cannot arm PIT with a deltaTicks greater than 2^16 - 1");
             ensureState(ONESHOT);
-            setReload(static_cast<uint16_t>(deltaTicks));
+            setReload(deltaTicks);
+        }
+
+        [[nodiscard]] uint64_t maxOneshotDelay() const override {
+            return 0x10000;
+        }
+
+        [[nodiscard]] uint64_t maxPeriod() const override {
+            return 0x10000;
         }
 
         void armPeriodic(uint64_t periodTicks) override {
             LockGuard guard(pitLock);
             hal::InterruptDisabler disabler;
-            assert(periodTicks < (1 << 16), "Cannot arm PIT with a periodTicks greater than 2^16 - 1");
             ensureState(PERIODIC);
-            setReload(static_cast<uint16_t>(periodTicks));
+            setReload(periodTicks);
         }
 
         void disarm() override {
@@ -124,6 +126,9 @@ namespace kernel::amd64::timers{
             uint64_t out = 0;
             out = inb(PIT_CHANNEL_0) & 0xff;
             out |= static_cast<uint64_t>(inb(PIT_CHANNEL_0) & 0xff) << 8;
+            if (out == 0) {
+                out = 0x10000;
+            }
             return reloadValue - out;
         }
     };

@@ -142,6 +142,9 @@ namespace kernel::hal::interrupts::managed {
                             }
                         }
                     }
+                    if (!bestCandidate.occupied()) {
+                        klog << "GreedyRoutingPolicy::buildRoutingGraph() failed to find a valid destination for receiver " << receiver -> type_name() << " at index " << i << "\n";
+                    }
                     assert(bestCandidate.occupied(), "No valid destination for interrupt receiver");
                     builder.addEdge(sourceNode, *bestCandidate);
                     receiverLoads[*builder.getVertexLabel(*bestCandidate)] += receiverLoads[label];
