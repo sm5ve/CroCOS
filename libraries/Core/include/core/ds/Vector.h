@@ -33,7 +33,8 @@ private:
                 data[i].~T();  // Explicitly call the destructor of old element
             }
         }
-        operator delete(data);  // Deallocate old buffer
+        if (data != nullptr)
+            operator delete(data);  // Deallocate old buffer
         data = new_data;  // Point to the new buffer
         capacity = new_capacity;  // Update capacity
     }
@@ -91,7 +92,8 @@ public:
         for(size_t i = 0; i < _size; i++){
             data[i].~T();
         }
-        operator delete(data);
+        if (data != nullptr)
+            operator delete(data);
         _size = other._size;
         capacity = other.capacity;
         data = static_cast<T*>(operator new(sizeof(T) * capacity, std::align_val_t{alignof(T)}));
@@ -115,7 +117,8 @@ public:
         for(size_t i = 0; i < _size; i++){
             data[i].~T();
         }
-        operator delete(data);
+        if (data != nullptr)
+            operator delete(data);
         data = other.data;
         _size = other._size;
         capacity = other.capacity;
@@ -133,10 +136,12 @@ public:
 
     //Destructor
     ~Vector() {
-        for (size_t i = 0; i < _size; ++i) {
-            data[i].~T();  //Remember to call the destructors for each element in our buffer
+        if (data != nullptr) {
+            for (size_t i = 0; i < _size; ++i) {
+                data[i].~T();  //Remember to call the destructors for each element in our buffer
+            }
+            operator delete(data);
         }
-        operator delete(data);
     }
 
     void push(const T& value) {
@@ -349,7 +354,9 @@ public:
         for (size_t i = 0; i < _size; ++i) {
             data[i].~T();  //Remember to call the destructors for each element in our buffer
         }
-        operator delete(data);
+        if (data != nullptr)
+            operator delete(data);
+        data = nullptr;
         _size = 0;
         capacity = 0;
     }

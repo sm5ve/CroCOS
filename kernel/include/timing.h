@@ -21,7 +21,7 @@ namespace kernel::timing {
     uint64_t monoTimens();  // Monotonic time in nanoseconds
     uint64_t monoTimems();  // Convenience: monotonic time in milliseconds
 
-    hal::timing::ClockSource& getClockSource();      // Current active source
+    hal::timing::ClockSource& getClockSource(); // Current active source
     hal::timing::EventSource& getEventSource(); // Per-CPU event source
 
     using ClockSourceChangeCallback = void(*)(hal::timing::ClockSource& oldClock, hal::timing::ClockSource& newClock);
@@ -30,7 +30,32 @@ namespace kernel::timing {
     void registerClockSourceChangeCallback(ClockSourceChangeCallback callback);
     void registerEventSourceChangeCallback(EventSourceChangeCallback callback);
 
+    class Stopwatch {
+        uint64_t start;
+
+    public:
+        Stopwatch();
+
+        [[nodiscard]] uint64_t elapsedNs() const;
+        [[nodiscard]] uint64_t elapsedUs() const;
+        [[nodiscard]] uint64_t elapsedMs() const;
+
+        void reset();
+        [[nodiscard]] uint64_t lap();
+    };
+
     // TimerQueues.cpp
+    using TimerEventCallback = Function<void()>;
+
+    struct QueuedEventHandle {
+        uint64_t id;
+
+        bool operator==(const QueuedEventHandle& other) const { return id == other.id; }
+    };
+
+    constexpr QueuedEventHandle EXPIRED_EVENT{static_cast<uint64_t>(-1)};
+
+    void test();
 }
 
 #endif //CROCOS_CLOCKMANAGER_H

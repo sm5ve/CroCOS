@@ -27,8 +27,6 @@ namespace kernel::amd64::timers{
         }
     };
 
-    void callPITEventCallback(hal::InterruptFrame& frame);
-
     class PITEventSource : public EventSource{
         static constexpr auto PIT_FLAGS = ES_FIXED_FREQUENCY | ES_KNOWN_STABLE | ES_ONESHOT | ES_PERIODIC | ES_TRACKS_INTERMEDIATE_TIME;
 
@@ -41,6 +39,7 @@ namespace kernel::amd64::timers{
         uint64_t reloadValue = 0;
 
         PITState state = UNINITIALIZED;
+        bool armed = false;
 
         void ensureState(PITState target) {
             assert(target != UNINITIALIZED, "Cannot de-initialize PIT");
@@ -81,18 +80,26 @@ namespace kernel::amd64::timers{
             return interruptDomain;
         }
 
-        friend void callPITEventCallback(hal::InterruptFrame& frame);
+        void triggerCallback(interrupts::InterruptFrame& iframe) {
+            (void)iframe;
+            if (callback && armed)
+                (*callback)();
+        }
+
+        using CBType = BOUND_METHOD_T(PITEventSource, triggerCallback);
+        CBType caller;
     public:
         PITEventSource() : EventSource("PIT", PIT_FLAGS) {
             _quality = 100;
             _calibrationData = FrequencyData::fromHz(PIT_FREQUENCY);
             auto interruptDomain = setupPITHardware();
-
-            managed::registerHandler(managed::InterruptSourceHandle(interruptDomain, 0), make_unique<managed::InterruptHandler>(callPITEventCallback));
+            caller = bind_method(this, &PITEventSource::triggerCallback);
+            managed::registerHandler(managed::InterruptSourceHandle(interruptDomain, 0), caller);
         }
 
         void armOneshot(uint64_t deltaTicks) override {
             LockGuard guard(pitLock);
+            armed = true;
             hal::InterruptDisabler disabler;
             ensureState(ONESHOT);
             setReload(deltaTicks);
@@ -108,15 +115,19 @@ namespace kernel::amd64::timers{
 
         void armPeriodic(uint64_t periodTicks) override {
             LockGuard guard(pitLock);
+            armed = true;
             hal::InterruptDisabler disabler;
             ensureState(PERIODIC);
             setReload(periodTicks);
         }
 
+        //To disable the PIT, we just set it to one-shot mode and then ignore the incoming interrupt
         void disarm() override {
             LockGuard guard(pitLock);
             hal::InterruptDisabler disabler;
-            assertUnimplemented("PIT Disarm");
+            armed = false;
+            ensureState(ONESHOT);
+            setReload(0xffff);
         }
 
         uint64_t ticksElapsed() override {
@@ -135,14 +146,9 @@ namespace kernel::amd64::timers{
 
     PITEventSource pitEventSource;
 
-    void callPITEventCallback(hal::InterruptFrame& frame) {
-        (void)frame;
-        if (pitEventSource.callback != nullptr)
-            pitEventSource.callback();
-    }
-
     void initPIT(){
         new(&pitEventSource) PITEventSource();
         timing::registerEventSource(pitEventSource);
+        pitEventSource.disarm();
     }
 }

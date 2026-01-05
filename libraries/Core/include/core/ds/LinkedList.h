@@ -299,6 +299,14 @@ public:
         return Base::head() == nullptr;
     }
 
+    Node* headNode() {
+        return Base::head();
+    }
+
+    Node* tailNode() {
+        return Base::tail();
+    }
+
     using Base::next;
     using Base::previous;
 };

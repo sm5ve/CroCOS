@@ -2,9 +2,11 @@
 // Created by Spencer Martin on 12/30/25.
 //
 #include <acpi.h>
+#include <timing.h>
 #include <arch/amd64/timers/HPET.h>
 #include <core/FrequencyData.h>
 #include <arch/amd64/interrupts/APIC.h>
+#include <arch/hal/Clock.h>
 
 #include <core/utility.h>
 
@@ -14,9 +16,9 @@ namespace kernel::amd64::timers{
     constexpr uint32_t maximumClockPeriod = 0x05F5E100; //according to the osdev wiki
 
     struct HPETComparatorRegisters {
-        uint32_t configCapabilities;
+        volatile uint32_t configCapabilities;
         uint32_t interruptRouteCapabilities;
-        uint64_t comparatorValue;
+        volatile uint64_t comparatorValue;
         uint64_t interruptRoute;
         uint64_t reserved2;
 
@@ -43,6 +45,10 @@ namespace kernel::amd64::timers{
 
         void set32BitCounter(bool shouldUse32Bit = true) {
             configCapabilities = (configCapabilities & ~(1u << 8)) | (shouldUse32Bit ? (1 << 8) : 0);
+        }
+
+        void setWritableAccumulator() {
+            configCapabilities |= 1u << 6;
         }
 
         [[nodiscard]] bool using32BitCounter() const {
@@ -197,13 +203,9 @@ namespace kernel::amd64::timers{
     class MonotonicBimap {
     private:
         Vector<uint8_t> values;
-        uint8_t valueMin = 0xff;
-        uint8_t valueMax = 0;
     public:
         void insert(uint8_t value) {
             values.push(value);
-            valueMin = min(valueMin, value);
-            valueMax = max(valueMax, value);
         }
 
         void finalize() {
@@ -217,6 +219,8 @@ namespace kernel::amd64::timers{
 
         [[nodiscard]] Optional<uint8_t> indexForValue(uint8_t value) const {
             if (values.empty()) return {};
+            const auto valueMin = values[0];
+            const auto valueMax = values[values.size() - 1];
             if (value < valueMin || value > valueMax) return {};
 
             // Handle single value case
@@ -306,8 +310,156 @@ namespace kernel::amd64::timers{
         }
     };
 
+    using namespace hal::timing;
+
+    constexpr auto hpetBaseFlags = ES_KNOWN_STABLE | ES_FIXED_FREQUENCY | ES_ONESHOT | ES_TRACKS_INTERMEDIATE_TIME;
+
+    esflags_t computeHPETComparatorFlags(HPETRegisters& regs, size_t index) {
+        return hpetBaseFlags | (regs.comparatorRegs(index).supportsPeriodicMode() ? ES_PERIODIC : 0);
+    }
+
+    class HPETComparatorEventSource : public EventSource {
+    private:
+        HPETRegisters& regs;
+        size_t index;
+        bool interruptsEnabled = false;
+        bool levelTriggered = false;
+
+        enum class Mode {
+            PERIODIC,
+            ONESHOT
+        };
+
+        Mode mode;
+
+        void ensureInterruptsEnabled(bool enabled = true) {
+            if (enabled == interruptsEnabled) return;
+            interruptsEnabled = enabled;
+            regs.comparatorRegs(index).enableInterrupt(enabled);
+        }
+
+        void ensureMode(Mode newMode) {
+            if (mode == newMode) return;
+            mode = newMode;
+            regs.comparatorRegs(index).setPeriodicMode(mode == Mode::PERIODIC);
+        }
+
+        void handleInterrupt(interrupts::InterruptFrame& iframe) {
+            (void)iframe;
+            //klog << "Here 1";
+            if (levelTriggered) {
+                if (!regs.didTimerRaiseInterrupt(index)) {
+                    return;
+                }
+                regs.acknowledgeTimerInterrupt(index);
+            }
+            if (callback) {
+                (*callback)();
+            }
+            //klog << "\n";
+        }
+
+        using CB = BOUND_METHOD_T(HPETComparatorEventSource, handleInterrupt);
+        CB cbhandler;
+    public:
+        HPETComparatorEventSource(HPETRegisters& r, size_t i, managed::InterruptSourceHandle handle) : EventSource("HPET Comparator", computeHPETComparatorFlags(r, i)), regs(r), index(i){
+            mode = r.comparatorRegs(index).isPeriodicMode() ? Mode::PERIODIC : Mode::ONESHOT;
+            useLevelTriggered(false);
+            _quality = 200;
+            _calibrationData = Core::FrequencyData::fromPeriodFs(r.clockPeriod);
+            cbhandler = bind_method(this, &HPETComparatorEventSource::handleInterrupt);
+            managed::registerHandler(handle, cbhandler);
+        }
+
+        void useLevelTriggered(bool lt) {
+            this->levelTriggered = lt;
+            regs.comparatorRegs(index).generateLevelTriggeredInterrupt(lt);
+        }
+
+        void armOneshot(uint64_t deltaTicks) override {
+            // Halt counter to avoid race
+            //bool wasEnabled = regs.enabled();
+            //regs.enable(false);
+            /*auto initialValue = regs.getMainTimerValue();
+            static uint64_t totalOverhead = 0;
+            static uint64_t totalTicks = 0;
+            totalTicks++;*/
+
+            //klog << "Arming for " << _calibrationData.ticksToNanos(deltaTicks) << "ns\n";
+
+            ensureInterruptsEnabled(false);
+            regs.comparatorRegs(index).comparatorValue = regs.getMainTimerValue() + deltaTicks;
+
+            ensureMode(Mode::ONESHOT);
+            ensureInterruptsEnabled();
+
+            //auto tickDuration = regs.getMainTimerValue() - initialValue;
+            //totalOverhead += tickDuration;
+            //klog << "Operation duration " << _calibrationData.ticksToNanos(tickDuration) << "\n";
+            //klog << "Average so far " << _calibrationData.ticksToNanos(totalOverhead / totalTicks) / 1000 << "us\n";
+            //regs.enable(wasEnabled);
+        }
+
+        [[nodiscard]] uint64_t maxOneshotDelay() const override {
+            constexpr uint64_t maxTicks = static_cast<uint64_t>(-1);
+            constexpr uint64_t maxTicks32 = (1ul << 32) - 1;
+            return regs.comparatorRegs(index).using32BitCounter() ? maxTicks32 : maxTicks;
+        }
+
+        void armPeriodic(uint64_t periodTicks) override {
+            // Halt counter to avoid race
+            bool wasEnabled = regs.enabled();
+            regs.enable(false);
+
+            ensureMode(Mode::PERIODIC);
+            ensureInterruptsEnabled();
+
+            // Set writable accumulator bit
+            regs.comparatorRegs(index).setWritableAccumulator();
+            regs.comparatorRegs(index).comparatorValue = periodTicks;
+
+            // Re-enable counter
+            regs.enable(wasEnabled);
+        }
+
+        [[nodiscard]] uint64_t maxPeriod() const override {
+            constexpr uint64_t maxTicks = static_cast<uint64_t>(-1);
+            constexpr uint64_t maxTicks32 = (1ul << 32) - 1;
+            return regs.comparatorRegs(index).using32BitCounter() ? maxTicks32 : maxTicks;
+        }
+
+        void disarm() override {
+            ensureInterruptsEnabled(false);
+        }
+
+        [[nodiscard]] uint64_t ticksElapsed() override {
+            return 0;
+        }
+    };
+
+    constexpr uint64_t getHPETCounterMask(HPETRegisters& regs) {
+        return regs.longCountersSupported() ? (-1ul) : ((1ul << 32) - 1);
+    }
+
+    class HPETClockSource : public ClockSource {
+        HPETRegisters* regs;
+    public:
+        HPETClockSource() : ClockSource("Uninitialized HPET Clock Source", 0, CS_FIXED_FREQUENCY | CS_KNOWN_STABLE), regs(nullptr) {}
+
+        HPETClockSource(HPETRegisters& r) : ClockSource("HPET Clock", getHPETCounterMask(r), CS_FIXED_FREQUENCY | CS_KNOWN_STABLE), regs(&r) {
+            _quality = 200;
+            _calibrationData = Core::FrequencyData::fromPeriodFs(regs -> clockPeriod);
+        }
+
+        [[nodiscard]] uint64_t read() const override {
+            return regs -> getMainTimerValue();
+        }
+    };
+
     //NOTE: according to https://barrelfish.org/publications/intern-rana-hpet.pdf, the HPET is generally assumed to
     //be connected to the first IOAPIC. We shall make that assumption
+
+    SharedPtr<HPETComparatorSourceDomain> comparatorSourceDomain;
 
     void setupHPETInterruptRouting(HPETRegisters& regs) {
         auto firstIOAPIC = interrupts::getFirstIOAPIC();
@@ -334,7 +486,7 @@ namespace kernel::amd64::timers{
         ioapicBimap.finalize();
 
         auto routingDomain = make_shared<HPETRoutingDomain>(regs);
-        auto comparatorSourceDomain = make_shared<HPETComparatorSourceDomain>();
+        comparatorSourceDomain = make_shared<HPETComparatorSourceDomain>();
         auto ioapicConnector = make_shared<HPETConnector>(routingDomain, firstIOAPIC);
         auto comparatorConnector = make_shared<platform::AffineConnector>(comparatorSourceDomain, routingDomain, 0, 0, comparatorBimap.size());
         topology::registerDomain(routingDomain);
@@ -342,6 +494,24 @@ namespace kernel::amd64::timers{
         topology::registerConnector(ioapicConnector);
         topology::registerConnector(comparatorConnector);
     }
+
+    void registerHPETEventSources(HPETRegisters& regs) {
+        auto firstIOAPIC = interrupts::getFirstIOAPIC();
+        const auto ioapicLineCount = firstIOAPIC -> getReceiverCount();
+        const uint32_t mask = static_cast<uint32_t>((1ul << ioapicLineCount) - 1);
+        size_t linearIndex = 0;
+        for (size_t i = 0; i < regs.comparatorCount(); i++) {
+            auto& comparator = regs.comparatorRegs(i);
+            if (comparator.interruptRouteCapabilities & mask) {
+                auto sourceHandle = managed::InterruptSourceHandle(comparatorSourceDomain, linearIndex);
+                linearIndex++;
+                auto* eventSource = new HPETComparatorEventSource(regs, i, sourceHandle);
+                timing::registerEventSource(*eventSource);
+            }
+        }
+    }
+
+    HPETClockSource cs;
 
     bool initHPET(){
         auto hpetTablePtr = acpi::optional<acpi::HPET>();
@@ -359,6 +529,11 @@ namespace kernel::amd64::timers{
         klog << "base.longCountersSupported() = " << base.longCountersSupported() << "\n";
 
         setupHPETInterruptRouting(base);
+        registerHPETEventSources(base);
+        new(&cs)HPETClockSource(base);
+        timing::registerClockSource(cs);
+
+        base.enable();
 
         return true;
     }

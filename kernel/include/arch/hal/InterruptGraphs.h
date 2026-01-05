@@ -85,10 +85,12 @@ namespace kernel::hal::interrupts {
       };
 
       CRClass(ConfigurableActivationTypeDomain) {
-      public:
+         public:
          virtual void setActivationType(size_t receiver, InterruptLineActivationType type) = 0;
          [[nodiscard]] virtual Optional<InterruptLineActivationType> getActivationType(size_t receiver) const = 0;
       };
+
+      //TODO make some sort of configurable/fixed activation type emitter
 
       CRClass(EOIDomain) {
       public:

@@ -8,6 +8,17 @@
 #include "TypeTraits.h"
 #include <stddef.h>
 
+template<typename T>
+struct TypeID {
+    constexpr static uint64_t value() {
+        static const uint64_t id = reinterpret_cast<uint64_t>(&id);
+        return id;
+    }
+};
+
+template<typename T>
+inline uint64_t TypeID_v = TypeID<T>::value();
+
 template <typename T, T v>
 struct integral_constant {
     static constexpr T value = v;
@@ -257,6 +268,17 @@ using type = conditional_t<
 };
 
 template<typename T>
+concept MoveConstructible = requires(T t) {
+    { T(move(t)) } -> IsSame<T>;
+};
+
+// Check if T is copy constructible
+template<typename T>
+concept CopyConstructible = requires(const T t) {
+    { T(t) } -> IsSame<T>;
+};
+
+template<typename T>
 using decay_t = typename decay<T>::type;
 
 template <typename... Ts>
@@ -338,6 +360,7 @@ class FunctionRef;
 template<typename Ret, typename... Args>
 class FunctionRef<Ret(Args...)> {
     using CallbackFn = Ret (*)(void*, Args...);
+    using DeleterFn = void (*)(void*);
 
     void* obj = nullptr;
     CallbackFn callback = nullptr;
@@ -347,6 +370,14 @@ public:
 
     template<typename Callable>
     FunctionRef(Callable& f) {
+        obj = reinterpret_cast<void*>(&f);
+        callback = [](void* o, Args... args) -> Ret {
+            return (*reinterpret_cast<Callable*>(o))(args...);
+        };
+    }
+
+    template<typename Callable>
+    FunctionRef(Callable&& f) {
         obj = reinterpret_cast<void*>(&f);
         callback = [](void* o, Args... args) -> Ret {
             return (*reinterpret_cast<Callable*>(o))(args...);
@@ -365,6 +396,90 @@ public:
         return (other.callback == callback) && (other.obj == obj);
     }
 };
+
+template<typename>
+class Function;
+
+template <typename Ret, typename... Args>
+class Function<Ret(Args...)> {
+    void* obj = nullptr;
+    Ret (*callback)(void*, Args...) = nullptr;
+    void (*deleter)(void*) = nullptr;
+
+public:
+    Function() = default;
+
+    // For callables
+    template <typename Callable>
+    Function(Callable c) {
+        using Stored = decay_t<Callable>;
+        obj = new Stored(move(c));
+        callback = [](void* o, Args... args) -> Ret {
+            return (*static_cast<Stored*>(o))(args...);
+        };
+        deleter = [](void* o) {
+            delete static_cast<Stored*>(o);
+        };
+    }
+
+    // For function pointers
+    Function(Ret (*fn)(Args...)) {
+        obj = reinterpret_cast<void*>(fn);
+        callback = [](void* p, Args... args) -> Ret {
+            return reinterpret_cast<Ret(*)(Args...)>(p)(args...);
+        };
+        deleter = nullptr;
+    }
+
+    ~Function() {
+        if (deleter) deleter(obj);
+    }
+
+    // Move-only (simplest)
+    Function(Function&& other) noexcept
+        : obj(other.obj), callback(other.callback), deleter(other.deleter) {
+        other.obj = nullptr;
+        other.callback = nullptr;
+        other.deleter = nullptr;
+    }
+
+    Function& operator=(Function&& other) noexcept {
+        if (this != &other) {
+            if (deleter) deleter(obj);
+            obj = other.obj;
+            callback = other.callback;
+            deleter = other.deleter;
+            other.obj = nullptr;
+            other.callback = nullptr;
+            other.deleter = nullptr;
+        }
+        return *this;
+    }
+
+    Function(const Function&) = delete;
+    Function& operator=(const Function&) = delete;
+
+    Ret operator()(Args... args) const {
+        return callback(obj, args...);
+    }
+};
+
+template<typename T, typename Ret, typename... Args>
+auto bind_method(T* obj, Ret (T::*method)(Args...)) {
+    // Returns a callable that FunctionRef can wrap
+    struct MethodCaller {
+        T* object;
+        Ret (T::*func)(Args...);
+
+        Ret operator()(Args... args) const {
+            return (object->*func)(args...);
+        }
+    };
+
+    return MethodCaller{obj, method};
+}
+
+#define BOUND_METHOD_T(Class, Method) decltype(bind_method((Class*)nullptr, &Class::Method))
 
 template <typename>
 struct NoncapturingLambdaRef;
@@ -424,17 +539,6 @@ struct monostate {
         return false;
     }
 };
-
-template<typename T>
-struct TypeID {
-    constexpr static uint64_t value() {
-        static const uint64_t id = reinterpret_cast<uint64_t>(&id);
-        return id;
-    }
-};
-
-template<typename T>
-inline uint64_t TypeID_v = TypeID<T>::value();
 
 template<typename Base, typename Derived>
 struct is_base_of {

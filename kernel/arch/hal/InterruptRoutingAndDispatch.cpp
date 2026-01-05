@@ -82,7 +82,7 @@ namespace kernel::hal::interrupts::managed {
         }
     }
 
-    using InterruptHandlerPointerRef = SharedPtr<UniquePtr<InterruptHandler>>;
+    using InterruptHandlerPointerRef = SharedPtr<InterruptHandler>;
     using InterruptHandlerListForVector = Vector<InterruptHandlerPointerRef>;
     using SourceToHandlerMap = HashMap<InterruptSourceHandle, InterruptHandlerPointerRef>;
     WITH_GLOBAL_CONSTRUCTOR(SourceToHandlerMap, registeredHandlers);
@@ -136,7 +136,7 @@ namespace kernel::hal::interrupts::managed {
             finalVectorNumber[source] = finalVectorNumber[target];
             if (!sourceLabel.domain() -> instanceof(TypeID_v<platform::InterruptReceiver>)) {
                 if (!registeredHandlers.contains(sourceLabel)) {
-                    registeredHandlers.insert(sourceLabel, make_shared<UniquePtr<InterruptHandler>>(nullptr));
+                    registeredHandlers.insert(sourceLabel, SharedPtr<InterruptHandler>());
                 }
                 const size_t vectorNumber = *finalVectorNumber[source];
                 if (!handlersByVector[vectorNumber]) {
@@ -149,12 +149,12 @@ namespace kernel::hal::interrupts::managed {
         return finalVectorNumber;
     }
 
-    void registerHandler(const InterruptSourceHandle& interruptSource, UniquePtr<InterruptHandler>&& handler) {
+    void registerHandler(const InterruptSourceHandle& interruptSource, InterruptHandler&& handler) {
         if (registeredHandlers.contains(interruptSource)) {
             *registeredHandlers[interruptSource] = move(handler);
         }
         else {
-            registeredHandlers.insert(interruptSource, make_shared<UniquePtr<InterruptHandler>>(move(handler)));
+            registeredHandlers.insert(interruptSource, make_shared<InterruptHandler>(move(handler)));
         }
     }
 
@@ -327,8 +327,8 @@ namespace kernel::hal::interrupts::managed {
             for (auto& handler : *handlersByVector[frame.vector_index]) {
                 //It is possible that we have some uninitialized handlers for emitters routed to this vector, hence
                 //we must check for null
-                if (*handler)
-                    (**handler)(frame);
+                if (handler)
+                    (*handler)(frame);
             }
         }
     }

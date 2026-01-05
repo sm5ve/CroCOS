@@ -262,7 +262,7 @@ namespace kernel::amd64{
         //TODO implement a fallback method
         //really I ought to just do this with a proper GDT or whatever... but this should be enough
         //to get the rudiments of SMP working.
-        temporaryHack(3, 1, 2026, "Implement a proper GDT");
+        temporaryHack(3, 3, 2026, "Implement a proper GDT");
         assert(supportsFSGSBASE(), "Your CPU doesn't support FSGSBASE");
         uint64_t cr4;
         asm volatile ("mov %%cr4, %0" : "=r"(cr4));
@@ -314,7 +314,7 @@ namespace kernel::amd64{
         hal::interrupts::topology::registerExclusiveConnector(exceptionVectorConnector);
 
         using namespace hal::interrupts::managed;
-        registerHandler(InterruptSourceHandle(exceptionVectors, 14), make_unique<InterruptHandler>(temporaryPageFaultHandler));
+        registerHandler(InterruptSourceHandle(exceptionVectors, 14), temporaryPageFaultHandler);
     }
 
     void hwinit(){

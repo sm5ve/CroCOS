@@ -12,8 +12,6 @@
 extern "C" void (*__init_array_start[])(void) __attribute__((weak));
 extern "C" void (*__init_array_end[])(void) __attribute__((weak));
 
-extern void testGraph();
-
 namespace kernel{
     hal::SerialPrintStream EarlyBootStream;
     Core::PrintStream& klog = EarlyBootStream;
@@ -21,17 +19,6 @@ namespace kernel{
     void run_global_constructors(){
         for (void (**ctor)() = __init_array_start; ctor != __init_array_end; ctor++) {
             (*ctor)();
-        }
-    }
-
-    void timerTick() {
-        static uint64_t ticks = 0;
-        ticks += 10;
-        if (ticks % 500 == 0) {
-            klog << ticks << " ms elapsed\n";
-        }
-        if (ticks == 8000) {
-            asm volatile("outw %0, %1" ::"a"((uint16_t)0x2000), "Nd"((uint16_t)0x604));
         }
     }
 
@@ -55,12 +42,9 @@ namespace kernel{
         klog << "Routing configuration updated\n";
         klog << "Total malloc usage " << LibAlloc::InternalAllocator::getAllocatorStats().totalBytesRequested << "\n";
 
-        timing::getEventSource().registerCallback(timerTick);
-
         amd64::sti();
 
-        auto delayInTicks = timing::getEventSource().calibrationData().nanosToTicks(10'000'000UL);
-        timing::getEventSource().armPeriodic(delayInTicks);
+        timing::test();
 
         for (;;)
             asm volatile("hlt");

@@ -406,8 +406,12 @@ public:
 		}
 	}
 
-	NodeType *getRoot() {
+	NodeType*& getRoot() {
 		return root;
+	}
+
+	bool empty() const {
+		return root == nullptr;
 	}
 };
 
@@ -1085,6 +1089,7 @@ public:
 	using Parent::visitDepthFirstReverseOrder;
 	using Parent::visitDepthFirstPostOrder;
 	using Parent::getRoot;
+	using Parent::empty;
 
 	void insert(NodeType *node) requires (!AugmentedNode || HasParentPointer) {
 		this->insert(node, this->root);
@@ -2128,6 +2133,7 @@ public:
 	using BSTParent::successor;
 	using BSTParent::predecessor;
 	using BSTParent::getRoot;
+	using BSTParent::empty;
 
 	template<typename StackType>
 		requires IsStack<NodeType **, StackType>
@@ -2909,7 +2915,9 @@ public:
 template<typename T, typename AugmentationInfo = NoAugmentation, typename Comparator = DefaultComparator<T> >
 class GeneralRedBlackTree : private IntrusiveRedBlackTree<RedBlackTreeNode<T, AugmentationInfo, true>,
 			RedBlackTreeInfoExtractor<T, AugmentationInfo, true>, Comparator> {
+public:
 	using Node = RedBlackTreeNode<T, AugmentationInfo, true>;
+private:
 	using Parent = IntrusiveRedBlackTree<Node, RedBlackTreeInfoExtractor<T, AugmentationInfo, true>, Comparator>;
 
 	void deleteSubtree(Node *node) {

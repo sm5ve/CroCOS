@@ -5,6 +5,7 @@
 #include <timing.h>
 #include <kernel.h>
 #include <arch/hal/hal.h>
+#include <core/atomic.h>
 #include <core/ds/Vector.h>
 
 using namespace kernel::hal::timing;
@@ -103,7 +104,7 @@ namespace kernel::timing {
 
     void initializeWatchdogClock() {
         auto bootstrapClockSource = findBootstrapClock();
-        assert(watchdogClockSource != nullptr, "No bootstrap clock source found");
+        assert(bootstrapClockSource != nullptr, "No bootstrap clock source found");
         watchdogClockSource = findBestWatchdogClock();
         if (!watchdogClockSource->isCalibrated()) {
             calibrateClockSource(*bootstrapClockSource, *watchdogClockSource);
@@ -124,12 +125,6 @@ namespace kernel::timing {
         }
     }
 
-    void setupWatchdogClockEvent() {
-        if (!bestClockSource -> hasStableFrequency()) {
-            //TODO
-        }
-    }
-
     void initializeEventSource() {
         EventSource* best = nullptr;
         for (auto* es : eventSources) {
@@ -140,15 +135,21 @@ namespace kernel::timing {
         bestEventSource = best;
         assert(bestEventSource != nullptr, "No event source found");
         if (!bestEventSource -> isCalibrated()) {
+            assertUnimplemented("Event source calibration");
             //TODO implement event source calibration
         }
     }
 
+    Atomic<uint64_t> lastReadCSTimestamp = 0;
+
+    void initTimerQueues();
+
     void initialize() {
-        //initializeWatchdogClock();
-        //initializeBestClockSource();
+        initializeWatchdogClock();
+        initializeBestClockSource();
         initializeEventSource();
-        //setupWatchdogClockEvent();
+        lastReadCSTimestamp = getClockSource().read();
+        initTimerQueues();
     }
 
     ClockSource& getClockSource(){
@@ -157,5 +158,49 @@ namespace kernel::timing {
 
     EventSource& getEventSource(){
         return *bestEventSource;
+    }
+
+    Atomic<uint64_t> monotimestamp = 0;
+
+    uint64_t monoTimens() {
+        uint64_t oldTime = 0;
+        uint64_t newTime = 0;
+        do {
+            oldTime = lastReadCSTimestamp.load(RELAXED);
+            newTime = getClockSource().read();
+        } while (!lastReadCSTimestamp.compare_exchange(oldTime, newTime, RELAXED));
+        const auto delta = (newTime - oldTime) & getClockSource().mask;
+        const auto deltaNs = getClockSource().calibrationData().ticksToNanos(delta);
+        return monotimestamp.add_fetch(deltaNs, RELAXED);
+    }
+
+    uint64_t monoTimems() {
+        return monoTimens() / 1'000'000;
+    }
+
+    Stopwatch::Stopwatch() {
+        start = monoTimens();
+    }
+
+    uint64_t Stopwatch::elapsedMs() const {
+        return (monoTimens() - start) / 1'000'000;
+    }
+
+    uint64_t Stopwatch::elapsedUs() const {
+        return (monoTimens() - start) / 1'000;
+    }
+
+    uint64_t Stopwatch::elapsedNs() const {
+        return monoTimens() - start;
+    }
+
+    void Stopwatch::reset() {
+        start = monoTimens();
+    }
+
+    uint64_t Stopwatch::lap() {
+        uint64_t prev = start;
+        start = monoTimens();
+        return start - prev;
     }
 }

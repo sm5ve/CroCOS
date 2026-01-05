@@ -206,7 +206,7 @@ namespace LibAlloc{
         assert(contains(ptr), "Freeing pointer not contained in allocator");
 #endif
 #ifdef SLAB_ALLOCATOR_KEEP_FREE_LIST
-        assert(!isSlotFree(ptr), "Freeing pointer not marked as free");
+        assert(!isSlotFree(ptr), "Double-freeing pointer");
         markSlotFreeState(ptr, true);
 #endif
         void*& nextFreeSlot = *reinterpret_cast<void**>(ptr);

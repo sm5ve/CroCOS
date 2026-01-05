@@ -14,12 +14,12 @@
 
 namespace kernel::hal::interrupts {
     namespace managed {
-        using InterruptHandler = FunctionRef<void(hal::InterruptFrame&)>;
+        using InterruptHandler = Function<void(hal::InterruptFrame&)>;
         using InterruptSourceHandle = RoutingNodeLabel;
 
         void updateRouting();
         void dispatchInterrupt(InterruptFrame& frame);
-        void registerHandler(const InterruptSourceHandle& interruptSource, UniquePtr<InterruptHandler>&& handler);
+        void registerHandler(const InterruptSourceHandle& interruptSource, InterruptHandler&& handler);
     }
 }
 

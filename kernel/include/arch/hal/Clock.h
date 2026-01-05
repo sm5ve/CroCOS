@@ -7,6 +7,7 @@
 
 #include <stdint.h>
 #include <core/FrequencyData.h>
+#include <core/ds/SmartPointer.h>
 
 namespace kernel::hal::timing {
     class ClockSource;
@@ -75,13 +76,14 @@ namespace kernel::hal::timing {
     constexpr esflags_t ES_STOPS_IN_SLEEP = 1 << 5;  // Stops in C3/deeper
     constexpr esflags_t ES_TRACKS_INTERMEDIATE_TIME = 1 << 6;  // Is ticksElapsed implemented
 
-    using ClockEventCallback = void (*)();
+    using ClockEventCallback = SharedPtr<FunctionRef<void()>>;
+#define MAKE_EVENT_CALLBACK(func) make_shared<FunctionRef<void()>>(func)
 
     class EventSource {
     protected:
         FrequencyData _calibrationData;
         uint16_t _quality;
-        ClockEventCallback callback = nullptr;
+        ClockEventCallback callback;
 
         virtual void setConversion(FrequencyData data) {
             _calibrationData = data;
@@ -117,8 +119,8 @@ namespace kernel::hal::timing {
         [[nodiscard]] FrequencyData calibrationData() const {return _calibrationData;}
 
         [[nodiscard]] virtual uint64_t ticksElapsed() = 0;
-        void registerCallback(ClockEventCallback cb){callback = cb;}
-        void unregisterCallback(){callback = nullptr;}
+        void registerCallback(ClockEventCallback cb){callback = move(cb);}
+        void unregisterCallback(){callback.reset();}
         [[nodiscard]] ClockEventCallback callbackFunction() const {return callback;}
     };
 }

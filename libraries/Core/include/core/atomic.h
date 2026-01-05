@@ -250,7 +250,7 @@ public:
     }
 
     T add_fetch(T val, MemoryOrder mem_order = SEQ_CST){
-        return atomic_and_fetch(value, val, mem_order);
+        return atomic_add_fetch(value, val, mem_order);
     }
 
     T sub_fetch(T val, MemoryOrder mem_order = SEQ_CST){
@@ -285,6 +285,7 @@ public:
 template<typename LockType>
 class LockGuard {
     LockType& lock;
+    bool manuallyUnlocked = false;
 
 public:
     explicit LockGuard(LockType& l) : lock(l) {
@@ -292,7 +293,13 @@ public:
     }
 
     ~LockGuard() {
+        if (!manuallyUnlocked)
+            lock.release();
+    }
+
+    void unlock() {
         lock.release();
+        manuallyUnlocked = true;
     }
 
     // Non-copyable
