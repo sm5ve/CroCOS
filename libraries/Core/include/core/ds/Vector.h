@@ -15,6 +15,8 @@
 #include <initializer_list.h>
 #include <core/Iterator.h>
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wstringop-overflow"
 template <typename T>
 class Vector {
 private:
@@ -361,5 +363,5 @@ public:
         capacity = 0;
     }
 };
-
+#pragma GCC diagnostic pop
 #endif //CROCOS_VECTOR_H

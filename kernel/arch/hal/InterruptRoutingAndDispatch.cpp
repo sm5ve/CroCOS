@@ -301,14 +301,16 @@ namespace kernel::hal::interrupts::managed {
     }
 
     void updateRouting() {
-        InterruptDisabler disabler;
         auto& policy = getRoutingPolicy();
         const auto routingGraph = policy.buildRoutingGraph(*createRoutingGraphBuilder());
-        configureRoutableDomains(routingGraph);
-        auto finalVectorNumbers = computeFinalVectorNumbers(routingGraph);
-        populateHandlerTable(routingGraph, finalVectorNumbers);
-        enableOnlyMappedInterrupts(routingGraph);
-        populateEOIBehaviorTable(routingGraph, finalVectorNumbers);
+        {
+            InterruptDisabler disabler;
+            configureRoutableDomains(routingGraph);
+            auto finalVectorNumbers = computeFinalVectorNumbers(routingGraph);
+            populateHandlerTable(routingGraph, finalVectorNumbers);
+            enableOnlyMappedInterrupts(routingGraph);
+            populateEOIBehaviorTable(routingGraph, finalVectorNumbers);
+        }
         topology::releaseCachedTopologicalOrdering();
     }
 

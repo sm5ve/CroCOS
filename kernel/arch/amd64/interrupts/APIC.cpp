@@ -71,7 +71,6 @@ namespace kernel::amd64::interrupts{
         }
     }
 
-
     void IOAPIC::setNonmaskable(uint32_t gsi, bool nonmaskable) {
         assert(gsi - gsi_base < lineCount, "gsi out of range");
         auto regVal = regRead(getRegStartForLineIndex(gsi - gsi_base));
@@ -357,7 +356,7 @@ namespace kernel::amd64::interrupts{
         hal::interrupts::topology::registerConnector(lapicConnector);
         createIOAPICStructures(madt);
         createIRQDomainConnectorsAndConfigureIOAPICActivationType(madt);
-        for (auto& ioapic : ioapicsByID.values()) {
+        for (const auto& ioapic : ioapicsByID.values()) {
             ioapic -> setUninitializedActivationTypes(hal::interrupts::activationTypeForLevelAndTriggerMode(true, false));
         }
         klog << "Enabled APIC\n";

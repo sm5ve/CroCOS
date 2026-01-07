@@ -13,8 +13,8 @@ project(CroCOS LANGUAGES C CXX ASM)
 set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -DDEBUG_BUILD -O0 -fno-omit-frame-pointer")
-set(CMAKE_C_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -DDEBUG_BUILD -O0 -fno-omit-frame-pointer")
+set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -DDEBUG_BUILD -O0 -fno-omit-frame-pointer -Wno-error=inline")
+set(CMAKE_C_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -DDEBUG_BUILD -O0 -fno-omit-frame-pointer -Wno-error=inline")
 
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Debug CACHE STRING "Choose the type of build." FORCE)
@@ -25,7 +25,7 @@ add_subdirectory(kernel)
 
 add_custom_target(run
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-        COMMAND qemu-system-x86_64 -kernel kernel/Kernel -no-reboot -nographic -smp 4 -m 256M -d guest_errors -cpu qemu64,+fsgsbase
+        COMMAND time qemu-system-x86_64 -kernel kernel/Kernel -no-reboot -nographic -smp 4 -m 256M -d guest_errors -cpu qemu64,+fsgsbase
         COMMENT "Running QEMU"
         USES_TERMINAL
 )

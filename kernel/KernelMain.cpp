@@ -36,10 +36,9 @@ namespace kernel{
         hal::hwinit();
 
         klog << "Updating routing configuration\n";
-        //FIXME this seems to take approximately 200 ms on my computer.
-        //This seems oddly long...
+        timing::Stopwatch sw;
         hal::interrupts::managed::updateRouting();
-        klog << "Routing configuration updated\n";
+        klog << "Routing configuration updated in " << sw.elapsedMs() << "ms\n";
         klog << "Total malloc usage " << LibAlloc::InternalAllocator::getAllocatorStats().totalBytesRequested << "\n";
 
         amd64::sti();

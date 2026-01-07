@@ -7,6 +7,7 @@
 #include <core/FrequencyData.h>
 #include <arch/amd64/interrupts/APIC.h>
 #include <arch/hal/Clock.h>
+#include <mmio/Register.h>
 
 #include <core/utility.h>
 
@@ -16,10 +17,10 @@ namespace kernel::amd64::timers{
     constexpr uint32_t maximumClockPeriod = 0x05F5E100; //according to the osdev wiki
 
     struct HPETComparatorRegisters {
-        volatile uint32_t configCapabilities;
-        uint32_t interruptRouteCapabilities;
-        volatile uint64_t comparatorValue;
-        uint64_t interruptRoute;
+        Register<uint32_t> configCapabilities;
+        Register<uint32_t> interruptRouteCapabilities;
+        Register<uint64_t> comparatorValue;
+        Register<uint64_t> interruptRoute;
         uint64_t reserved2;
 
         [[nodiscard]] bool supportsFSBRouting() const {
@@ -90,21 +91,21 @@ namespace kernel::amd64::timers{
 
     struct HPETRegisters {
         //Starts at 0x00
-        uint32_t deviceInfo;
+        Register<uint32_t> deviceInfo;
         /*uint8_t revisionID;
         uint8_t capabilities;
         uint16_t vendorID;*/
-        uint32_t clockPeriod;
-        uint64_t rsv0;
+        Register<uint32_t> clockPeriod;
+        Register<uint64_t> rsv0;
         //Starts at 0x10
-        uint64_t generalConfiguration;
-        uint64_t rsv1;
+        Register<uint64_t> generalConfiguration;
+        Register<uint64_t> rsv1;
         //Starts at 0x20
-        volatile uint64_t interruptStatusRegister;
+        Register<uint64_t> interruptStatusRegister;
         //0x28
         uint8_t rsv2[0xf0 - 0x28];
         //Starts at 0xf0
-        volatile uint64_t mainCounter;
+        Register<uint64_t> mainCounter;
         uint64_t rsv3;
         //Starts at 0x100
         HPETComparatorRegisters _comparators;
