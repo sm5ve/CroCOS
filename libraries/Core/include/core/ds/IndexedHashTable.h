@@ -110,19 +110,22 @@ protected:
         entryBuffer = newEntries;
     }
 
-    void resizeIfNecessary(){
+    bool resizeIfNecessary(){
         if (capacity == 0) {
             resize(8);
-            return;
+            return true;
         }
         size_t loadFactorPercentage = divideAndRoundDown(count * 100, capacity);
         if(loadFactorPercentage > LOAD_FACTOR_PERCENTAGE_INCREASE_THRESHOLD){
             resize(count * 2);
+            return true;
         }
         if((loadFactorPercentage < LOAD_FACTOR_PERCENTAGE_DECREASE_THRESHOLD) && (capacity > 16)){
             auto newCapacity = max(divideAndRoundUp(count * 6, 5ul), 16ul);
             resize(newCapacity);
+            return true;
         }
+        return false;
     }
 
     Entry& probeEntry(const Key& key) const {

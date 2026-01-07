@@ -105,7 +105,10 @@ public:
             new(&entry.value) Tuple<K, V>(key, V{});
             entry.state = ParentTable::EntryState::occupied;
             ++(this -> count);
-            this -> resizeIfNecessary();
+            if (this -> resizeIfNecessary()) {
+                auto& newEntry = this -> probeEntry(key);
+                return newEntry.value.second();
+            }
         }
         return entry.value.second();
     }
