@@ -99,18 +99,17 @@ public:
     }
 
     V& operator[](const K& key) {
-        auto& entry = this -> probeEntry(key);
-        if (entry.state != ParentTable::EntryState::occupied) {
+        auto* entry = &(this -> probeEntry(key));
+        if (entry -> state != ParentTable::EntryState::occupied) {
             // Inserting a new entry - construct the entire Tuple at once
-            new(&entry.value) Tuple<K, V>(key, V{});
-            entry.state = ParentTable::EntryState::occupied;
             ++(this -> count);
             if (this -> resizeIfNecessary()) {
-                auto& newEntry = this -> probeEntry(key);
-                return newEntry.value.second();
+                entry = &(this -> probeEntry(key));
             }
+            new(&entry -> value) Tuple<K, V>(key, V{});
+            entry -> state = ParentTable::EntryState::occupied;
         }
-        return entry.value.second();
+        return entry -> value.second();
     }
 
     struct KVPTransform {
