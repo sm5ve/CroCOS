@@ -33,6 +33,7 @@ set(KERNEL_SRC
         arch/hal/InterruptRoutingPolicyImpls.cpp
         arch/hal/ExplicitTypes.cpp
         timing/BlockingSleep.cpp
+        arch/amd64/smp/smpboot.asm
 )
 
 set_source_files_properties(

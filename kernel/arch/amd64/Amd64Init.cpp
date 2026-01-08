@@ -370,6 +370,10 @@ namespace kernel::amd64{
         klog << "Finished initializing page table manager\n";
 
         initializeInterrupts(madt);
+
+        smp::populateProcessorInfo(madt);
+        smp::setLogicalProcessorID(0);
+
         timers::initPIT();
         timers::initHPET();
         timing::initialize();

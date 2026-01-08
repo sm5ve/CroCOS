@@ -37,6 +37,19 @@ namespace kernel::amd64::interrupts{
         void setUninitializedActivationTypes(hal::interrupts::InterruptLineActivationType type);
     };
 
+    enum IPIType {
+        STANDARD,
+        INIT,
+        SIPI
+    };
+
+    struct IPIRequest {
+        IPIType type;
+        bool level; //Only for init deassert
+        uint8_t vector;
+        hal::ProcessorID target;
+    };
+
     CRClass(LAPIC, public InterruptDomain, public FixedRoutingDomain, public EOIDomain) {
         Register<uint32_t>* mmio_window;
         Register<uint32_t>& reg(size_t offset);
@@ -49,6 +62,11 @@ namespace kernel::amd64::interrupts{
         void issueEOI(InterruptFrame& iframe) override;
         size_t getReceiverCount() override;
         size_t getEmitterCount() override;
+        uint32_t getID();
+        bool issueIPI(IPIRequest request);
+        void issueIPISync(IPIRequest request);
+        bool ipiStillSending();
+        void waitForIPIToSend();
     };
 
     void setupAPICs(acpi::MADT& madt);

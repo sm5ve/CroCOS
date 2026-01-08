@@ -4,6 +4,7 @@
 #include <timing.h>
 #include <arch/amd64/interrupts/APIC.h>
 #include <arch/amd64/amd64.h>
+#include <arch/amd64/smp.h>
 #include <core/ds/Trees.h>
 #include <arch/amd64/interrupts/AuxiliaryDomains.h>
 #include <arch/amd64/interrupts/LegacyPIC.h>
@@ -322,6 +323,65 @@ namespace kernel::amd64::interrupts{
         return receiver;
     }
 
+    constexpr size_t destinationOffset = 24;
+    constexpr size_t ipiRegHigh = 0x310;
+    constexpr size_t ipiRegLow = 0x300;
+
+    constexpr uint32_t sendPendingBit = 1 << 12;
+
+    bool LAPIC::issueIPI(IPIRequest request) {
+        uint32_t lowDWord = reg(ipiRegLow);
+        if (lowDWord & sendPendingBit) {
+            return false;
+        }
+
+        uint32_t highDWord = reg(ipiRegHigh);
+
+        highDWord &= ~(0xfffu << destinationOffset);
+        auto destinationLAPIC = static_cast<uint32_t>(smp::getProcessorInfoForProcessorID(request.target).lapicID);
+        //klog << "destinationLAPIC: " << destinationLAPIC << "\n";
+        highDWord |= (destinationLAPIC << destinationOffset);
+
+        lowDWord &= ~(0xffffu | (3 << 18));
+        lowDWord |= request.vector;
+
+        switch (request.type) {
+            case STANDARD:
+                lowDWord |= (0 << 8); break;
+            case INIT:
+                lowDWord |= (5 << 8); break;
+            case SIPI:
+                lowDWord |= (6 << 8); break;
+        }
+
+        lowDWord |= (request.level ? (1 << 14) : 0);
+
+        reg(ipiRegHigh) = highDWord;
+        reg(ipiRegLow) = lowDWord;
+        return true;
+    }
+
+    void LAPIC::issueIPISync(IPIRequest request) {
+        while (!issueIPI(request)) {
+            asm volatile("pause");
+        }
+        waitForIPIToSend();
+    }
+
+
+    bool LAPIC::ipiStillSending() {
+        return reg(ipiRegLow) & sendPendingBit;
+    }
+
+    void LAPIC::waitForIPIToSend() {
+        auto& r = reg(ipiRegLow);
+        while (r & sendPendingBit) {
+            asm volatile("pause");
+        }
+    }
+
+
+
     void LAPIC::issueEOI(InterruptFrame &iframe) {
         (void)iframe;
         reg(LAPIC_EOI_REGISTER) = 0;
@@ -562,5 +622,11 @@ namespace kernel::amd64::interrupts{
 
         auto timer = new LAPICTimer(*lapicDomain);
         timing::registerEventSource(*timer);
+    }
+
+    constexpr size_t LAPIC_ID_REG = 0x20;
+
+    uint32_t LAPIC::getID() {
+        return reg(LAPIC_ID_REG);
     }
 }

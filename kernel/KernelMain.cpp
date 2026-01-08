@@ -8,6 +8,7 @@
 #include <arch/hal/interrupts.h>
 #include <liballoc/InternalAllocatorDebug.h>
 #include <timing.h>
+#include <arch/amd64/smp.h>
 
 extern "C" void (*__init_array_start[])(void) __attribute__((weak));
 extern "C" void (*__init_array_end[])(void) __attribute__((weak));
@@ -42,14 +43,14 @@ namespace kernel{
         klog << "Total malloc usage " << LibAlloc::InternalAllocator::getAllocatorStats().totalBytesRequested << "\n";
 
         amd64::sti();
-
-        klog << "1\n";
+        amd64::smp::smpInit();
+        /*klog << "1\n";
         timing::blockingSleep(500);
         klog << "2\n";
         timing::blockingSleep(500);
         klog << "3\n";
         timing::blockingSleep(500);
-        asm volatile("outw %0, %1" ::"a"((uint16_t)0x2000), "Nd"((uint16_t)0x604));
+        asm volatile("outw %0, %1" ::"a"((uint16_t)0x2000), "Nd"((uint16_t)0x604));*/
 
         for (;;)
             asm volatile("hlt");

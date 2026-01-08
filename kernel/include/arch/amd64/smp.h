@@ -7,6 +7,7 @@
 
 #include <arch/amd64/amd64.h>
 #include <arch/hal/hal.h>
+#include <acpi.h>
 
 namespace kernel::amd64::smp{
     struct ProcessorInfo{
@@ -20,6 +21,10 @@ namespace kernel::amd64::smp{
 
     const ProcessorInfo& getProcessorInfoForLapicID(uint8_t lapicID);
     const ProcessorInfo& getProcessorInfoForAcpiID(uint8_t acpiID);
+    const ProcessorInfo& getProcessorInfoForProcessorID(hal::ProcessorID pid);
+
+    void populateProcessorInfo(acpi::MADT& madt);
+    void smpInit();
 }
 
 #endif //CROCOS_SMP_H
