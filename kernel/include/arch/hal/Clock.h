@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <core/FrequencyData.h>
 #include <core/ds/SmartPointer.h>
+#include <core/ds/Optional.h>
 
 namespace kernel::hal::timing {
     class ClockSource;
@@ -16,7 +17,7 @@ namespace kernel::hal::timing {
 
 namespace kernel::timing {
     void calibrateClockSource(kernel::hal::timing::ClockSource& knownReference, kernel::hal::timing::ClockSource& toCalibrate);
-    void calibrateEventSource(kernel::hal::timing::EventSource& knownReference, kernel::hal::timing::EventSource& toCalibrate);
+    void calibrateECEventSource(hal::timing::EventSource&);
 }
 
 namespace kernel::hal::timing {
@@ -76,14 +77,13 @@ namespace kernel::hal::timing {
     constexpr esflags_t ES_STOPS_IN_SLEEP = 1 << 5;  // Stops in C3/deeper
     constexpr esflags_t ES_TRACKS_INTERMEDIATE_TIME = 1 << 6;  // Is ticksElapsed implemented
 
-    using ClockEventCallback = SharedPtr<FunctionRef<void()>>;
-#define MAKE_EVENT_CALLBACK(func) make_shared<FunctionRef<void()>>(func)
+    using ClockEventCallback = Function<void()>;
 
     class EventSource {
     protected:
         FrequencyData _calibrationData;
         uint16_t _quality;
-        ClockEventCallback callback;
+        Optional<ClockEventCallback> callback;
 
         virtual void setConversion(FrequencyData data) {
             _calibrationData = data;
@@ -92,7 +92,7 @@ namespace kernel::hal::timing {
         EventSource(const char* n, esflags_t f)
             : name(n), flags(f) {}
 
-        friend void kernel::timing::calibrateEventSource(EventSource&, EventSource&);
+        friend void kernel::timing::calibrateECEventSource(EventSource&);
     public:
         virtual ~EventSource() = default;
 
@@ -120,8 +120,7 @@ namespace kernel::hal::timing {
 
         [[nodiscard]] virtual uint64_t ticksElapsed() = 0;
         void registerCallback(ClockEventCallback cb){callback = move(cb);}
-        void unregisterCallback(){callback.reset();}
-        [[nodiscard]] ClockEventCallback callbackFunction() const {return callback;}
+        void unregisterCallback(){callback = {};}
     };
 }
 

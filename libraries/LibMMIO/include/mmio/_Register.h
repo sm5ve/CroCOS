@@ -33,8 +33,14 @@ public:
     operator T() const { return read(); }
     Register& operator=(T t) { write(t); return *this; }
 
+    //These could surely be done in a smarter way
     Register& operator |=(T t) {
         write(read() | t);
+        return *this;
+    }
+
+    Register& operator &=(T t) {
+        write(read() & t);
         return *this;
     }
 } __attribute__((packed));

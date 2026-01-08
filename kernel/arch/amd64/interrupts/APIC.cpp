@@ -1,6 +1,7 @@
 //
 // Created by Spencer Martin on 8/27/25.
 //
+#include <timing.h>
 #include <arch/amd64/interrupts/APIC.h>
 #include <arch/amd64/amd64.h>
 #include <core/ds/Trees.h>
@@ -296,18 +297,18 @@ namespace kernel::amd64::interrupts{
     }
 
     constexpr uint32_t LAPIC_SPURIOUS_INTERRUPT_VECTOR_REGISTER = 0xF0;
+    constexpr uint8_t LAPIC_SPURIOUS_INTERRUPT_VECTOR = 0xFF;
     constexpr uint32_t LAPIC_EOI_REGISTER = 0xB0;
 
     LAPIC::LAPIC(mm::phys_addr paddr) {
         auto mmio = PageTableManager::temporaryHackMapMMIOPage(paddr);
-        mmio_window = static_cast<volatile uint32_t *>(mmio);
-        reg(LAPIC_SPURIOUS_INTERRUPT_VECTOR_REGISTER) = 0x1F0;
+        mmio_window = static_cast<Register<uint32_t>*>(mmio);
+        reg(LAPIC_SPURIOUS_INTERRUPT_VECTOR_REGISTER) = (0x100u | LAPIC_SPURIOUS_INTERRUPT_VECTOR);
     }
 
-    volatile uint32_t &LAPIC::reg(size_t offset) {
+    Register<uint32_t>& LAPIC::reg(size_t offset) {
         return mmio_window[offset/sizeof(uint32_t)];
     }
-
 
     size_t LAPIC::getEmitterCount() {
         return hal::CPU_INTERRUPT_COUNT;
@@ -345,6 +346,192 @@ namespace kernel::amd64::interrupts{
         return firstIOAPIC;
     }
 
+    CRClass(SpuriousInterruptDomain, public InterruptDomain, public InterruptEmitter) {
+    public:
+        size_t getEmitterCount() override {
+            return 1;
+        }
+    };
+
+    constexpr size_t MAX_LVT_SIZE = 7;
+    constexpr uint32_t LVT_OFFSETS[MAX_LVT_SIZE] = {0x2f0, 0x320, 0x330, 0x340, 0x350, 0x360, 0x370};
+    constexpr uint32_t LAPIC_TIMER_LVT_ENTRY = 0x320;
+    constexpr uint32_t LAPIC_TIMER_MODE_OFFSET = 17;
+
+    constexpr uint32_t LAPIC_EOI_REG = 0xB0;
+
+    enum class LAPICTimerMode : uint32_t {
+        OneShot = 0,
+        Periodic = 1,
+        TSCDeadline = 2
+    };
+
+    class LAPICLocalDeviceRoutingDomain;
+    class LAPICLocalDeviceEmitters;
+
+    SharedPtr<SpuriousInterruptDomain> spuriousInterruptDomain;
+    SharedPtr<LAPICLocalDeviceEmitters> localDeviceEmitters;
+    SharedPtr<LAPICLocalDeviceRoutingDomain> localDeviceRouter;
+
+    using namespace hal::interrupts;
+
+    CRClass(LAPICLocalDeviceRoutingDomain, public FreeRoutableDomain, public InterruptDomain, public EOIDomain, public ConfigurableActivationTypeDomain) {
+        LAPIC& lapic;
+        public:
+        LAPICLocalDeviceRoutingDomain(LAPIC& l) : lapic(l) {
+            for (size_t i = 0; i < MAX_LVT_SIZE; i++) {
+                maskInterrupt(i, true);
+            }
+        }
+
+        size_t getEmitterCount() override {
+            return hal::CPU_INTERRUPT_COUNT;
+        }
+
+        size_t getReceiverCount() override {
+            //Not all processors will support all 7 LVT entries... but anything modern should.
+            //We'll expose them all for now and refine this if needed.
+            return MAX_LVT_SIZE;
+        }
+
+        bool routeInterrupt(size_t fromReceiver, size_t toEmitter) override {
+            assert(fromReceiver < MAX_LVT_SIZE, "fromReceiver out of range");
+            auto& reg = lapic.reg(LVT_OFFSETS[fromReceiver]);
+            reg &= ~(0xffu);
+            reg |= toEmitter & 0xffu;
+            return true;
+        }
+
+        void issueEOI(InterruptFrame &iframe) override {
+            (void)iframe;
+            lapic.reg(LAPIC_EOI_REG) = 0;
+        }
+
+        void maskInterrupt(size_t index, bool shouldMask = true) {
+            assert(index < MAX_LVT_SIZE, "index out of range");
+            auto& reg = lapic.reg(LVT_OFFSETS[index]);
+            if (shouldMask) {
+                reg |= 1u << 16;
+            }
+            else {
+                reg &= ~(1u << 16);
+            }
+        }
+
+        void setActivationType(size_t index, InterruptLineActivationType activationType) override {
+            (void)index; (void)activationType;
+            //TODO implement
+        }
+
+        Optional<InterruptLineActivationType> getActivationType(size_t receiver) const override {
+            (void)receiver;
+            //TODO implement
+            return InterruptLineActivationType::EDGE_HIGH;
+        }
+
+        //TODO expose methods to set delivery mode, polarity, trigger mode, remote IRR
+    };
+
+    CRClass(LAPICLocalDeviceEmitters, public InterruptDomain, public InterruptEmitter) {
+        public:
+        size_t getEmitterCount() override {
+            return MAX_LVT_SIZE;
+        }
+
+        static managed::InterruptSourceHandle timerHandle() {
+            return {static_pointer_cast<InterruptDomain>(localDeviceEmitters), 1};
+        }
+    };
+
+    using namespace kernel::hal::timing;
+
+    constexpr uint32_t LAPIC_TIMER_INITIAL_COUNT_REGISTER = 0x380;
+    constexpr uint32_t LAPIC_TIMER_CURRENT_COUNT_REGISTER = 0x390;
+    constexpr uint32_t LAPIC_TIMER_DIVIDE_CONFIG_REGISTER = 0x3E0;
+    constexpr auto LAPIC_MAX_TIMER_VALUE = static_cast<uint32_t>(-1);
+
+
+    class LAPICTimer : public EventSource{
+        static constexpr auto deviceFlags = ES_KNOWN_STABLE | ES_ONESHOT | ES_PERIODIC | ES_PERCPU | ES_TRACKS_INTERMEDIATE_TIME;
+        LAPIC& lapic;
+        uint64_t lastArmCounter;
+
+        void executeCallback(InterruptFrame& iframe) {
+            (void)iframe;
+            if (callback) {
+                (*callback)();
+            }
+        }
+
+        BOUND_METHOD_T(LAPICTimer, executeCallback) callbackExecuter = bind_method(this, &LAPICTimer::executeCallback);
+        LAPICTimerMode currentMode;
+        bool disarmed = true;
+
+        void ensureMode(LAPICTimerMode mode) {
+            if (currentMode != mode) {
+                auto& reg = lapic.reg(LAPIC_TIMER_DIVIDE_CONFIG_REGISTER);
+                reg &= ~(0b11u << LAPIC_TIMER_MODE_OFFSET);
+                reg |= (static_cast<uint32_t>(mode) << LAPIC_TIMER_MODE_OFFSET);
+                currentMode = mode;
+            }
+        }
+
+        void ensureDisarmed(const bool status = true) {
+            if (status != disarmed) {
+                disarmed = status;
+                localDeviceRouter -> maskInterrupt(1, status);
+            }
+        }
+    public:
+        LAPICTimer(LAPIC& l) : EventSource("LAPIC", deviceFlags), lapic(l) {
+            managed::registerHandler(LAPICLocalDeviceEmitters::timerHandle(), callbackExecuter);
+
+            auto& modeReg = lapic.reg(LAPIC_TIMER_LVT_ENTRY);
+            modeReg &= ~(0b11u << LAPIC_TIMER_MODE_OFFSET);
+            modeReg |= (static_cast<uint32_t>(LAPICTimerMode::OneShot) << LAPIC_TIMER_MODE_OFFSET);
+            currentMode = LAPICTimerMode::OneShot;
+
+            auto& dividerReg = lapic.reg(LAPIC_TIMER_DIVIDE_CONFIG_REGISTER);
+            dividerReg &= ~(0xbu);
+            dividerReg |= 0xbu;
+
+            _quality = 300;
+        };
+
+        void armOneshot(uint64_t deltaTicks) override {
+            ensureMode(LAPICTimerMode::OneShot);
+            ensureDisarmed(false);
+            //TODO add support for TSC deadline
+            const auto initialCount = static_cast<uint32_t>(deltaTicks);
+            lastArmCounter = initialCount;
+            lapic.reg(LAPIC_TIMER_INITIAL_COUNT_REGISTER) = initialCount;
+        }
+
+        [[nodiscard]] uint64_t maxOneshotDelay() const override {
+            return LAPIC_MAX_TIMER_VALUE;
+        }
+
+        void armPeriodic(uint64_t periodTicks) override {
+            ensureMode(LAPICTimerMode::Periodic);
+            ensureDisarmed(false);
+            const auto initialCount = static_cast<uint32_t>(periodTicks);
+            lastArmCounter = initialCount;
+            lapic.reg(LAPIC_TIMER_INITIAL_COUNT_REGISTER) = initialCount;
+        }
+
+        [[nodiscard]] uint64_t maxPeriod() const override{
+            return LAPIC_MAX_TIMER_VALUE;
+        }
+
+        void disarm() override {
+            ensureDisarmed();
+        }
+
+        [[nodiscard]] uint64_t ticksElapsed() override {
+            return lastArmCounter - lapic.reg(LAPIC_TIMER_CURRENT_COUNT_REGISTER);
+        }
+    };
+
     void setupAPICs(acpi::MADT& madt) {
         auto lapicBasePhysical = getLAPICBase();
         auto lapicMSRNewVal = lapicBasePhysical | IA32_APIC_BASE_MSR_ENABLE;
@@ -354,11 +541,26 @@ namespace kernel::amd64::interrupts{
         hal::interrupts::topology::registerDomain(lapicDomain);
         auto lapicConnector = make_shared<AffineConnector>(lapicDomain, getCPUInterruptVectors(), 0, 0, hal::CPU_INTERRUPT_COUNT);
         hal::interrupts::topology::registerConnector(lapicConnector);
+        spuriousInterruptDomain = make_shared<SpuriousInterruptDomain>();
+        hal::interrupts::topology::registerDomain(spuriousInterruptDomain);
+        auto spuriousConnector = make_shared<AffineConnector>(spuriousInterruptDomain, getCPUInterruptVectors(), LAPIC_SPURIOUS_INTERRUPT_VECTOR, 0, 1);
+        hal::interrupts::topology::registerExclusiveConnector(spuriousConnector);
+        localDeviceEmitters = make_shared<LAPICLocalDeviceEmitters>();
+        localDeviceRouter = make_shared<LAPICLocalDeviceRoutingDomain>(*lapicDomain);
+        hal::interrupts::topology::registerDomain(localDeviceEmitters);
+        hal::interrupts::topology::registerDomain(localDeviceRouter);
+        auto localDeviceEmitterConnector = make_shared<AffineConnector>(localDeviceEmitters, localDeviceRouter, 0, 0, MAX_LVT_SIZE);
+        hal::interrupts::topology::registerConnector(localDeviceEmitterConnector);
+        auto localDeviceRouterConnector = make_shared<AffineConnector>(localDeviceRouter, getCPUInterruptVectors(), 0, 0, hal::CPU_INTERRUPT_COUNT);
+        hal::interrupts::topology::registerConnector(localDeviceRouterConnector);
         createIOAPICStructures(madt);
         createIRQDomainConnectorsAndConfigureIOAPICActivationType(madt);
         for (const auto& ioapic : ioapicsByID.values()) {
             ioapic -> setUninitializedActivationTypes(hal::interrupts::activationTypeForLevelAndTriggerMode(true, false));
         }
         klog << "Enabled APIC\n";
+
+        auto timer = new LAPICTimer(*lapicDomain);
+        timing::registerEventSource(*timer);
     }
 }

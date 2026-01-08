@@ -8,6 +8,7 @@
 #include <core/Object.h>
 #include <arch/hal/interrupts.h>
 #include <acpi.h>
+#include <mmio/Register.h>
 
 namespace kernel::amd64::interrupts{
     using namespace hal::interrupts::platform;
@@ -37,8 +38,10 @@ namespace kernel::amd64::interrupts{
     };
 
     CRClass(LAPIC, public InterruptDomain, public FixedRoutingDomain, public EOIDomain) {
-        volatile uint32_t* mmio_window;
-        volatile uint32_t& reg(size_t offset);
+        Register<uint32_t>* mmio_window;
+        Register<uint32_t>& reg(size_t offset);
+        friend class LAPICTimer;
+        friend class LAPICLocalDeviceRoutingDomain;
     public:
         LAPIC(mm::phys_addr paddr);
         ~LAPIC() override;

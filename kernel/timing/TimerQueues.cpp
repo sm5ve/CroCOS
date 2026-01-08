@@ -237,7 +237,7 @@ namespace kernel::timing {
         explicit TimerQueue(hal::timing::EventSource& eventSource) : es(eventSource) {
             assert(es.supportsOneshot(), "We don't support periodic timers for this system right now");
             esCallback = bind_method(this, &TimerQueue::flushExpiredEvents);
-            es.registerCallback(MAKE_EVENT_CALLBACK(esCallback));
+            es.registerCallback(esCallback);
         }
     };
 

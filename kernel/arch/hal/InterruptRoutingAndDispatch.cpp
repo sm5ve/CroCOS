@@ -315,11 +315,18 @@ namespace kernel::hal::interrupts::managed {
     }
 
     void dispatchInterrupt(InterruptFrame& frame) {
+        if (frame.vector_index == 14) {
+            klog << "Pagefault at " << reinterpret_cast<void*>(frame.rip) << "\n";
+            print_stacktrace(&frame.rbp);
+            asm volatile("outw %0, %1" ::"a"((uint16_t)0x2000), "Nd"((uint16_t)0x604));
+        }
         auto& eoiBehavior = eoiBehaviorTable[frame.vector_index];
         if (eoiBehavior.triggerType == RoutingNodeTriggerType::TRIGGER_EDGE || eoiBehavior.triggerType == RoutingNodeTriggerType::TRIGGER_UNDETERMINED) {
-            auto& eoiChain = *(eoiBehavior.chain);
-            for (auto d : eoiChain.sortedDomains) {
-                d -> issueEOI(frame);
+            if (eoiBehavior.chain) {
+                auto& eoiChain = *(eoiBehavior.chain);
+                for (auto d : eoiChain.sortedDomains) {
+                    d -> issueEOI(frame);
+                }
             }
         }
         else {
@@ -332,6 +339,9 @@ namespace kernel::hal::interrupts::managed {
                 if (handler)
                     (*handler)(frame);
             }
+        }
+        else {
+            klog << "No interrupt handler for vector " << frame.vector_index << "\n";
         }
     }
 }

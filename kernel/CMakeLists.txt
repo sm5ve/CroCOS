@@ -52,7 +52,7 @@ target_link_options(Kernel PUBLIC
         -Wl,--build-id
 )
 target_include_directories(Kernel PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(Kernel PRIVATE CoreKernel AllocKernel gcc)
+target_link_libraries(Kernel PRIVATE CoreKernel AllocKernel MMIOKernel gcc)
 
 add_custom_command(TARGET Kernel POST_BUILD
         COMMAND ${CMAKE_OBJCOPY} --only-keep-debug $<TARGET_FILE:Kernel> $<TARGET_FILE:Kernel>.debug

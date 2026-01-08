@@ -125,6 +125,44 @@ namespace kernel::timing {
         }
     }
 
+    //TODO figure out a way to gracefully recalibrate an event source if it's running a touch faster than
+    //we expect and the timer queue spams the event source
+    void calibrateECEventSource(EventSource& evt) {
+        assert(evt.supportsTicksElapsed(), "Event source must track ticks elapsed");
+        //Weak assumption to simplify calibration
+        assert(evt.maxOneshotDelay() > 4 * calibrationPrecision, "Event source must be able to track at least (4 * calibrationPrecision) ticks");
+        auto& clock = getClockSource();
+        uint64_t csTotalElapsedTicks = 0;
+        uint64_t evtTotalElapsedTicks = 0;
+        for (auto i = 0; i < 10; i++) {
+            evt.armOneshot(evt.maxOneshotDelay()); //Assumed to be expensive relative to clock.read()
+            uint64_t firstRead = clock.read();
+            while (true) {
+                uint64_t secondRead = clock.read();
+                uint64_t evtTicks = evt.ticksElapsed();
+                if ((((secondRead - firstRead) & clock.mask) > calibrationPrecision) && (evtTicks > calibrationPrecision)) {
+                    break;
+                }
+                if (evt.maxOneshotDelay() - evtTicks < calibrationPrecision) {
+                    klog << "Event source " << evt.name << " ticks significantly faster than main clock source, calibration is not as precise as desired\n";
+                    break;
+                }
+                asm volatile("pause");
+            }
+            uint64_t csElapsedTicks = (clock.read() - firstRead) & clock.mask;
+            uint64_t evtElapsedTicks = evt.ticksElapsed();
+            evt.disarm();
+            //Discard the first sample in case there's any warm-up delay that skews results. This is a phenomenon I'm observing in QEMU
+            if (i > 0) {
+                csTotalElapsedTicks += csElapsedTicks;
+                evtTotalElapsedTicks += evtElapsedTicks;
+            }
+        }
+        auto evtCalibration = clock.calibrationData().scaledFrequency(evtTotalElapsedTicks, csTotalElapsedTicks);
+        evt.setConversion(evtCalibration);
+        klog << "Calibrated event source " << evt.name << " against clock source " << clock.name << " to " << evtCalibration << "\n";
+    }
+
     void initializeEventSource() {
         EventSource* best = nullptr;
         for (auto* es : eventSources) {
@@ -135,7 +173,14 @@ namespace kernel::timing {
         bestEventSource = best;
         assert(bestEventSource != nullptr, "No event source found");
         if (!bestEventSource -> isCalibrated()) {
-            assertUnimplemented("Event source calibration");
+            if (bestEventSource -> supportsTicksElapsed()) {
+                Stopwatch watch;
+                calibrateECEventSource(*bestEventSource);
+                klog << "Event source calibration took " << watch.elapsedUs() << " microseconds\n";
+            }
+            else {
+                assertUnimplemented("Event source calibration");
+            }
             //TODO implement event source calibration
         }
     }
