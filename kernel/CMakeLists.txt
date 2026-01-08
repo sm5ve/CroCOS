@@ -32,6 +32,7 @@ set(KERNEL_SRC
         arch/hal/InterruptRoutingAndDispatch.cpp
         arch/hal/InterruptRoutingPolicyImpls.cpp
         arch/hal/ExplicitTypes.cpp
+        timing/BlockingSleep.cpp
 )
 
 set_source_files_properties(

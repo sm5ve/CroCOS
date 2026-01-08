@@ -74,7 +74,11 @@ namespace kernel::timing {
         }
     };
 
+    void dispatchTimerEvent();
+
     class TimerQueue {
+        friend void dispatchTimerEvent();
+
         struct EventIDInfo {
             uint64_t id;
             QueuedTimerEvent* event;
@@ -229,30 +233,35 @@ namespace kernel::timing {
                 }
             }
         }
-    private:
-        BOUND_METHOD_T(TimerQueue, TimerQueue::flushExpiredEvents) esCallback;
-    public:
+
         explicit TimerQueue(hal::timing::EventSource& eventSource) : es(eventSource) {
             assert(es.supportsOneshot(), "We don't support periodic timers for this system right now");
-            esCallback = bind_method(this, &TimerQueue::flushExpiredEvents);
-            es.registerCallback(esCallback);
         }
+
+        TimerQueue() : TimerQueue(getEventSource()){}
     };
 
-    TimerQueue* globalTimerQueue;
-
-    void enqueueEvent(TimerEventCallback&& cb, uint64_t delayInMs) {
-        globalTimerQueue->enqueueTimerEvent(move(cb), monoTimens() + delayInMs * 1'000'000, 100'000, 0);
-    }
+    TimerQueue* localTimerQueues;
 
     void initTimerQueues() {
-        globalTimerQueue = new TimerQueue(getEventSource());
+        localTimerQueues = new TimerQueue[hal::processorCount()];
+        getEventSource().registerCallback(dispatchTimerEvent);
     }
 
-    void test() {
-        enqueueEvent([] {asm volatile("outw %0, %1" ::"a"((uint16_t)0x2000), "Nd"((uint16_t)0x604));}, 4000); //shutdown qemu
-        enqueueEvent([]{klog << "Here 1\n";}, 1000);
-        enqueueEvent([]{klog << "Here 3\n";}, 3000);
-        enqueueEvent([]{klog << "Here 2\n";}, 2000);
+    TimerQueue& localQueue() {
+        return localTimerQueues[hal::getCurrentProcessorID()];
+    }
+
+    void dispatchTimerEvent() {
+        localQueue().flushExpiredEvents();
+    }
+
+    QueuedEventHandle enqueueEvent(TimerEventCallback&& cb, uint64_t preferredDelayMs, uint64_t lateTolerance, uint64_t earlyTolerance) {
+        return localQueue().enqueueTimerEvent(move(cb), monoTimens() + preferredDelayMs * 1'000'000,
+            lateTolerance * 1'000'000, earlyTolerance * 1'000'000);
+    }
+
+    bool cancelEvent(QueuedEventHandle handle) {
+        return localQueue().cancelTimerEvent(handle);
     }
 }

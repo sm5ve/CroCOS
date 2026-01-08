@@ -55,7 +55,13 @@ namespace kernel::timing {
 
     constexpr QueuedEventHandle EXPIRED_EVENT{static_cast<uint64_t>(-1)};
 
-    void test();
+    QueuedEventHandle enqueueEvent(TimerEventCallback&&, uint64_t preferredDelayMs, uint64_t lateTolerance = 5, uint64_t earlyTolerance = 0);
+    bool cancelEvent(QueuedEventHandle handle);
+
+    //BlockingSleep.cpp
+
+    void blockingSleep(uint64_t ms);
+    void sleepns(uint64_t ns);
 }
 
 #endif //CROCOS_CLOCKMANAGER_H

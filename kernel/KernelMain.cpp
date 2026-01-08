@@ -43,7 +43,13 @@ namespace kernel{
 
         amd64::sti();
 
-        timing::test();
+        klog << "1\n";
+        timing::blockingSleep(500);
+        klog << "2\n";
+        timing::blockingSleep(500);
+        klog << "3\n";
+        timing::blockingSleep(500);
+        asm volatile("outw %0, %1" ::"a"((uint16_t)0x2000), "Nd"((uint16_t)0x604));
 
         for (;;)
             asm volatile("hlt");
