@@ -36,4 +36,26 @@ namespace kernel::hal{
     void SerialPrintStream::putString(const char * str){
         kernel::hal::serialOutputString(str);
     }
+
+    InterruptDisabler::InterruptDisabler() {
+        active = true;
+        wasEnabled = areInterruptsEnabled();
+    }
+
+    void InterruptDisabler::release() {
+        if (active) {
+            active = false;
+            if (wasEnabled) {
+                enableInterrupts();
+            }
+            else {
+                disableInterrupts();
+            }
+        }
+    }
+
+    InterruptDisabler::~InterruptDisabler() {
+        release();
+    }
+
 }

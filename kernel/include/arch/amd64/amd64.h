@@ -239,12 +239,7 @@ namespace kernel::amd64 {
 
         void init();
 
-        class InterruptDisabler {
-            bool reenable;
-        public:
-            InterruptDisabler();
-            ~InterruptDisabler();
-        };
+        bool areInterruptsEnabled();
     }
 }
 

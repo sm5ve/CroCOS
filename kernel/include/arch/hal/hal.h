@@ -21,7 +21,9 @@ namespace kernel::hal{
     constexpr size_t MAX_PROCESSOR_COUNT = 256;
     constexpr size_t CACHE_LINE_SIZE = 64;
     using InterruptFrame = amd64::interrupts::InterruptFrame;
-    using InterruptDisabler = amd64::interrupts::InterruptDisabler;
+    constexpr auto enableInterrupts = amd64::sti;
+    constexpr auto disableInterrupts = amd64::cli;
+    constexpr auto areInterruptsEnabled = amd64::interrupts::areInterruptsEnabled;
     constexpr size_t CPU_INTERRUPT_COUNT = amd64::INTERRUPT_VECTOR_COUNT;
 #endif
 
@@ -29,9 +31,20 @@ namespace kernel::hal{
     ProcessorID getCurrentProcessorID();
     size_t processorCount();
 
-class SerialPrintStream : public Core::PrintStream{
+    class SerialPrintStream : public Core::PrintStream{
     protected:
         void putString(const char*) override;
+    };
+
+    class InterruptDisabler {
+    private:
+        bool wasEnabled;
+        bool active;
+    public:
+        InterruptDisabler();
+        ~InterruptDisabler();
+
+        void release();
     };
 }
 

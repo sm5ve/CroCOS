@@ -65,22 +65,11 @@ namespace kernel::amd64::interrupts{
         //asm volatile("sti");
     }
 
-    InterruptDisabler::InterruptDisabler() {
+    bool areInterruptsEnabled() {
         uint64_t rflags;
         asm volatile("pushfq; pop %0" : "=r"(rflags));
-        if (rflags & (1 << 9))
-            reenable = true;
-        else
-            reenable = false;
-        cli();
+        return rflags & (1 << 9);
     }
-
-    InterruptDisabler::~InterruptDisabler() {
-        if (reenable)
-            sti();
-    }
-
-
 }
 
 Core::PrintStream& operator<<(Core::PrintStream& ps, kernel::amd64::interrupts::InterruptFrame& iframe){

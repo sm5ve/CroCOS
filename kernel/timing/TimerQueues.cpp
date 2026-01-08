@@ -3,6 +3,7 @@
 //
 #include <timing.h>
 #include <arch/hal/Clock.h>
+#include <arch/hal/hal.h>
 #include <core/atomic.h>
 #include <core/ds/LinkedList.h>
 #include <core/ds/Trees.h>
@@ -86,7 +87,6 @@ namespace kernel::timing {
 
         IntrusiveRedBlackTree<QueuedTimerEvent, QueuedEventInfoExtractor> timerQueue;
         RedBlackTree<EventIDInfo> idToEventMap;
-        Spinlock lock;
         uint64_t globalCounter;
 
         void removeIDFromEventMap(const uint64_t id) {
@@ -133,6 +133,7 @@ namespace kernel::timing {
         hal::timing::EventSource& es;
     public:
         QueuedEventHandle enqueueTimerEvent(TimerEventCallback&& cb, uint64_t expirationTime, uint64_t lateTolerance, uint64_t earlyTolerance) {
+            hal::InterruptDisabler id;
             uint64_t earlyTime = expirationTime - earlyTolerance;
             uint64_t lateTime = expirationTime + lateTolerance;
 
@@ -141,28 +142,26 @@ namespace kernel::timing {
                 return EXPIRED_EVENT;
             }
             QueuedEventHandle handle;
-            {
-                LockGuard guard(lock);
-                if (const auto coalescable = findCoalescableEvent(earlyTime, lateTime)) {
-                    handle = {globalCounter++};
-                    CallbackWithHandle cbWithHandle{move(cb), handle};
-                    coalescable->callbacks.pushBack(move(cbWithHandle));
-                    idToEventMap.insert({handle.id, coalescable});
-                }
-                else {
-                    handle = {globalCounter++};
-                    CallbackWithHandle cbWithHandle{move(cb), handle};
-                    const auto event = new QueuedTimerEvent(move(cbWithHandle), expirationTime);
-                    timerQueue.insert(event);
-                    idToEventMap.insert({handle.id, event});
-                }
+            if (const auto coalescable = findCoalescableEvent(earlyTime, lateTime)) {
+                handle = {globalCounter++};
+                CallbackWithHandle cbWithHandle{move(cb), handle};
+                coalescable->callbacks.pushBack(move(cbWithHandle));
+                idToEventMap.insert({handle.id, coalescable});
             }
+            else {
+                handle = {globalCounter++};
+                CallbackWithHandle cbWithHandle{move(cb), handle};
+                const auto event = new QueuedTimerEvent(move(cbWithHandle), expirationTime);
+                timerQueue.insert(event);
+                idToEventMap.insert({handle.id, event});
+            }
+            id.release();
             flushExpiredEvents();
             return handle;
         }
 
         bool cancelTimerEvent(QueuedEventHandle handle) {
-            LockGuard guard(lock);
+            hal::InterruptDisabler id;
             auto* event = findQueuedEventFromID(handle.id);
             if (event == nullptr) return false;
             if (event->callbacks.headNode() == event -> callbacks.tailNode()) {
@@ -171,30 +170,29 @@ namespace kernel::timing {
                 }
                 timerQueue.erase(event);
                 removeIDFromEventMap(handle.id);
-                guard.unlock();
+                id.release();
                 delete event;
+                //If there's only one event scheduled for the time, then we may need to reprogram the event source
                 flushExpiredEvents();
                 return true;
             }
-            else {
-                auto* currNode = event->callbacks.headNode();
-                while (currNode != nullptr) {
-                    if (currNode->data.handle.id == handle.id) {
-                        event -> callbacks.remove(currNode);
-                        removeIDFromEventMap(handle.id);
-                        return true;
-                    }
-                    currNode = currNode -> next;
+            auto* currNode = event->callbacks.headNode();
+            while (currNode != nullptr) {
+                if (currNode->data.handle.id == handle.id) {
+                    event -> callbacks.remove(currNode);
+                    removeIDFromEventMap(handle.id);
+                    return true;
                 }
-                return false;
+                currNode = currNode -> next;
             }
+            return false;
         }
 
         void flushExpiredEvents() {
             Vector<TimerEventCallback> callbacks;
             while (true) {
                 {
-                    LockGuard guard(lock);
+                    hal::InterruptDisabler id;
                     while (auto* root = timerQueue.getRoot()) {
                         auto* event = root->augmentedData.nextEvent;
                         if (monoTimens() < event->expirationTime) break;
@@ -213,7 +211,7 @@ namespace kernel::timing {
                 }
                 callbacks.clear();
                 {
-                    LockGuard guard(lock);
+                    hal::InterruptDisabler id;
                     if (auto* root = timerQueue.getRoot()) {
                         auto*& event = root->augmentedData.nextEvent;
                         uint64_t now = monoTimens();
