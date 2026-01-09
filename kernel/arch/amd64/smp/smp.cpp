@@ -7,6 +7,7 @@
 #include <arch/amd64/smp.h>
 #include <arch/amd64/interrupts/APIC.h>
 #include <kconfig.h>
+#include "../amd64internal.h"
 
 namespace kernel::amd64::smp{
     ProcessorInfo* pinfo;
@@ -77,7 +78,12 @@ namespace kernel::amd64::smp{
     extern "C" {
         extern uint8_t trampoline_template_start;
         extern uint8_t trampoline_template_end;
+        extern uint64_t smp_bringup_pml4;
+        extern uint64_t smp_bringup_stack;
     }
+
+    using SMPStack = uint8_t[KERNEL_STACK_SIZE];
+    SMPStack stacks[3];
 
     void initProcessor(ProcessorID pid) {
         auto lapic = interrupts::getLAPICDomain();
@@ -97,13 +103,27 @@ namespace kernel::amd64::smp{
     void setupTrampoline() {
         auto trampolineSize = static_cast<uint64_t>(&trampoline_template_end - &trampoline_template_start);
         auto trampolineDestination = early_boot_phys_to_virt(mm::phys_addr(0x1000 * SMP_TRAMPOLINE_START)).as_ptr<uint8_t>();
+        asm volatile("mov %%cr3, %0" : "=r"(smp_bringup_pml4));
+        klog << "set pml4 to " << (void*)smp_bringup_pml4 << "\n";
         memcpy(trampolineDestination, &trampoline_template_start, trampolineSize);
+    }
+
+    void setupStack(ProcessorID pid) {
+        smp_bringup_stack = (uint64_t)&stacks[pid];
     }
 
     void smpInit() {
         setupTrampoline();
+        remapIdentity();
         for (size_t i = 1; i < hal::processorCount(); i++) {
-            initProcessor(static_cast<ProcessorID>(i));
+            const auto pid = static_cast<ProcessorID>(i);
+            setupStack(pid);
+            initProcessor(pid);
         }
+        unmapIdentity();
     }
+}
+
+extern "C" void smpEntry() {
+    kernel::klog << "HERE!!!!\n";
 }

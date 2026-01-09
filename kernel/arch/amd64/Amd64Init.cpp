@@ -17,6 +17,7 @@
 #include <arch/amd64/interrupts/AuxiliaryDomains.h>
 #include <arch/amd64/timers/PIT.h>
 #include <arch/amd64/timers/HPET.h>
+#include "amd64internal.h"
 
 extern uint32_t mboot_magic;
 extern uint32_t mboot_table;
@@ -94,6 +95,12 @@ namespace kernel::amd64{
         boot_pml4[0] = 0;
         boot_page_directory_pointer_table[0] = 0;
         boot_page_directory_pointer_table[1] = 0;
+    }
+
+    void remapIdentity(){
+        boot_pml4[0] = boot_pml4[511];
+        boot_page_directory_pointer_table[0] = boot_page_directory_pointer_table[510];
+        boot_page_directory_pointer_table[1] = boot_page_directory_pointer_table[511];
     }
 
     //Window MUST start at 2MiB aligned base
