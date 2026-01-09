@@ -83,7 +83,7 @@ namespace kernel::amd64::smp{
     }
 
     using SMPStack = uint8_t[KERNEL_STACK_SIZE];
-    SMPStack stacks[3];
+    SMPStack stacks[3]; //TODO replace temporary hack
 
     void initProcessor(ProcessorID pid) {
         auto lapic = interrupts::getLAPICDomain();
@@ -93,7 +93,6 @@ namespace kernel::amd64::smp{
         timing::blockingSleep(10);
         lapic -> issueIPISync({interrupts::INIT, false, 0, pid});
         timing::blockingSleep(10);
-        klog << "Init IPI sent... now issuing SIPIs\n";
         for (size_t i = 0; i < 2; i++) {
             lapic -> issueIPISync({interrupts::SIPI, false, SMP_TRAMPOLINE_START, pid});
             timing::sleepns(200'000);
@@ -124,6 +123,13 @@ namespace kernel::amd64::smp{
     }
 }
 
+using namespace kernel;
 extern "C" void smpEntry() {
-    kernel::klog << "HERE!!!!\n";
+    amd64::interrupts::enableAPICOnAP();
+    auto lapic = amd64::interrupts::getLAPICDomain();
+    auto lapicID = amd64::interrupts::getLAPICDomain() -> getID();
+    auto pinfo = amd64::smp::getProcessorInfoForLapicID(static_cast<uint8_t>(lapicID));
+    amd64::enableFSGSBase();
+    amd64::smp::setLogicalProcessorID(pinfo.logicalID);
+    klog << "Hello from processor " << hal::getCurrentProcessorID() << "\n";
 }

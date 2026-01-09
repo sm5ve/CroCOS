@@ -69,6 +69,7 @@ namespace kernel::amd64::interrupts{
         void waitForIPIToSend();
     };
 
+    uint64_t enableAPICOnAP();
     void setupAPICs(acpi::MADT& madt);
     SharedPtr<LAPIC> getLAPICDomain();
     SharedPtr<IOAPIC> getFirstIOAPIC();

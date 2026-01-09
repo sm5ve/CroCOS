@@ -7,5 +7,6 @@
 namespace kernel::amd64 {
     void unmapIdentity();
     void remapIdentity();
+    void enableFSGSBase();
 }
 #endif //CROCOS_AMD64INTERNAL_H
