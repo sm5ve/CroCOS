@@ -1,8 +1,8 @@
 //
 // Created by Spencer Martin on 4/10/25.
 //
-#include <timing.h>
-#include <arch/hal/Clock.h>
+#include <../include/timing/timing.h>
+#include <timing/Clock.h>
 #include <arch/hal/hal.h>
 #include <core/atomic.h>
 #include <core/ds/LinkedList.h>

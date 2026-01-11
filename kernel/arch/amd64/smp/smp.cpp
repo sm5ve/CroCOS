@@ -3,7 +3,7 @@
 //
 
 #include <acpi.h>
-#include <timing.h>
+#include <timing/timing.h>
 #include <arch/amd64/smp.h>
 #include <arch/amd64/interrupts/APIC.h>
 #include <kconfig.h>

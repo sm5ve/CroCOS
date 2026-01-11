@@ -1,7 +1,7 @@
 //
 // Created by Spencer Martin on 8/29/25.
 //
-#include <arch/hal/interrupts.h>
+#include <interrupts/interrupts.h>
 #include <core/algo/GraphAlgorithms.h>
 #include <kernel.h>
 
@@ -129,6 +129,7 @@ namespace kernel::hal::interrupts::managed {
                     auto sourceNode = *builder.getVertexByLabel(label);
                     Optional<RoutingGraphBuilder::VertexHandle> bestCandidate;
                     size_t bestLoad = 0;
+                    //TODO ensure compatible activation types
                     for (auto dest : builder.getValidEdgesFrom(sourceNode)) {
                         if (!bestCandidate.occupied()) {
                             bestCandidate = dest;

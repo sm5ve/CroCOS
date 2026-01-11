@@ -2,7 +2,7 @@
 // Created by Spencer Martin on 9/5/25.
 //
 
-#include <arch/hal/interrupts.h>
+#include <interrupts/interrupts.h>
 #include <core/ds/SmartPointer.h>
 
 template class SharedPtr<kernel::hal::interrupts::platform::InterruptDomain>;

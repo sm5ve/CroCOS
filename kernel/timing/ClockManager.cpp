@@ -2,7 +2,7 @@
 // Created by Spencer Martin on 12/22/25.
 //
 
-#include <timing.h>
+#include <../include/timing/timing.h>
 #include <kernel.h>
 #include <arch/hal/hal.h>
 #include <core/atomic.h>

@@ -2,11 +2,11 @@
 // Created by Spencer Martin on 12/30/25.
 //
 #include <acpi.h>
-#include <timing.h>
+#include <timing/timing.h>
 #include <arch/amd64/timers/HPET.h>
 #include <core/FrequencyData.h>
 #include <arch/amd64/interrupts/APIC.h>
-#include <arch/hal/Clock.h>
+#include <timing/Clock.h>
 #include <mmio/Register.h>
 
 #include <core/utility.h>

@@ -7,8 +7,8 @@
 
 #include <stdint.h>
 
-#include <arch/hal/InterruptGraphs.h>
-#include <arch/hal/InterruptRoutingPolicy.h>
+#include <interrupts/InterruptGraphs.h>
+#include <interrupts/InterruptRoutingPolicy.h>
 
 #include <arch/hal/hal.h>
 

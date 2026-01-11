@@ -8,7 +8,7 @@
 #include "kconfig.h"
 #include "kernel.h"
 #include <core/ds/Vector.h>
-#include "FlushPlanner.h"
+#include "../../mem/FlushPlanner.h"
 
 namespace kernel::amd64 {
     //Derived from https://wiki.osdev.org/CPUID, or tables 3-19 and 3-20 in volume 2 of the Intel manual.

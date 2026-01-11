@@ -5,7 +5,7 @@
 #include "kernel.h"
 #include "arch/hal/hal.h"
 #include "arch/amd64/amd64.h"
-#include <mm.h>
+#include <mem/mm.h>
 #include <assert.h>
 #include <core/math.h>
 #include <core/utility.h>

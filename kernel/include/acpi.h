@@ -7,7 +7,7 @@
 
 #include "stdint.h"
 #include <core/ds/Vector.h>
-#include <mm.h>
+#include <mem/mm.h>
 #include <core/str.h>
 #include <core/PrintStream.h>
 

@@ -6,7 +6,7 @@
 #define CROCOS_APIC_H
 
 #include <core/Object.h>
-#include <arch/hal/interrupts.h>
+#include <interrupts/interrupts.h>
 #include <acpi.h>
 #include <mmio/Register.h>
 

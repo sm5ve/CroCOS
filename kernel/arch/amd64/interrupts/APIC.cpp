@@ -1,7 +1,7 @@
 //
 // Created by Spencer Martin on 8/27/25.
 //
-#include <timing.h>
+#include <timing/timing.h>
 #include <arch/amd64/interrupts/APIC.h>
 #include <arch/amd64/amd64.h>
 #include <arch/amd64/smp.h>

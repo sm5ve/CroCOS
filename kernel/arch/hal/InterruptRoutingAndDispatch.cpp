@@ -1,7 +1,7 @@
 //
 // Created by Spencer Martin on 8/29/25.
 //
-#include <arch/hal/interrupts.h>
+#include <interrupts/interrupts.h>
 #include <core/algo/GraphAlgorithms.h>
 #include <core/ds/LinkedList.h>
 #include <liballoc/InternalAllocator.h>

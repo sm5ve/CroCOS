@@ -5,7 +5,7 @@
 #ifndef CROCOS_CLOCKMANAGER_H
 #define CROCOS_CLOCKMANAGER_H
 
-#include <arch/hal/Clock.h>
+#include <timing/Clock.h>
 
 namespace kernel::timing {
     // ClockManager.cpp

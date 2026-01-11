@@ -6,7 +6,7 @@
 #define CROCOS_IRQDOMAIN_H
 
 #include <core/Object.h>
-#include <arch/hal/interrupts.h>
+#include <interrupts/interrupts.h>
 #include <core/ds/Bimap.h>
 #include <core/ds/SmartPointer.h>
 

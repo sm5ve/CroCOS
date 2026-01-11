@@ -1,13 +1,13 @@
 //
 // Created by Spencer Martin on 8/28/25.
 //
-#include <timing.h>
+#include <timing/timing.h>
 #include <arch/amd64/timers/PIT.h>
-#include <arch/hal/interrupts.h>
+#include <interrupts/interrupts.h>
 #include <arch/amd64/interrupts/AuxiliaryDomains.h>
 #include <arch/amd64/amd64.h>
 #include <arch/amd64/interrupts/APIC.h>
-#include <arch/hal/Clock.h>
+#include <timing/Clock.h>
 #include <core/atomic.h>
 
 namespace kernel::amd64::timers{

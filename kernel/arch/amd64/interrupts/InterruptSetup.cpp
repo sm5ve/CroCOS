@@ -3,7 +3,7 @@
 //
 
 #include <arch/amd64/amd64.h>
-#include <arch/hal/interrupts.h>
+#include <interrupts/interrupts.h>
 
 #define ISR(n) extern "C" void isr_##n();
 #define SET_ISR(n) set_idt_entry(n, isr_##n, is_trap_gate(n));

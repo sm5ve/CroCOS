@@ -2,7 +2,7 @@
 // Created by Spencer Martin on 4/25/25.
 //
 
-#include <arch/hal/interrupts.h>
+#include <interrupts/interrupts.h>
 #include <core/ds/Graph.h>
 #include <core/utility.h>
 #include <core/algo/GraphAlgorithms.h>

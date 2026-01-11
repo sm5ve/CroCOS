@@ -2,7 +2,7 @@
 // Created by Spencer Martin on 1/8/26.
 //
 
-#include <timing.h>
+#include <../include/timing/timing.h>
 
 namespace kernel::timing {
     void blockingSleep(uint64_t ms) {

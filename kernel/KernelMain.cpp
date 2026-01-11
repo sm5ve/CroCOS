@@ -5,9 +5,9 @@
 #include <kernel.h>
 #include <core/Object.h>
 #include <core/algo/GraphAlgorithms.h>
-#include <arch/hal/interrupts.h>
+#include <interrupts/interrupts.h>
 #include <liballoc/InternalAllocatorDebug.h>
-#include <timing.h>
+#include <timing/timing.h>
 #include <arch/amd64/smp.h>
 
 extern "C" void (*__init_array_start[])(void) __attribute__((weak));
@@ -44,13 +44,11 @@ namespace kernel{
 
         amd64::sti();
         amd64::smp::smpInit();
-        /*klog << "1\n";
-        timing::blockingSleep(500);
-        klog << "2\n";
-        timing::blockingSleep(500);
-        klog << "3\n";
-        timing::blockingSleep(500);
-        asm volatile("outw %0, %1" ::"a"((uint16_t)0x2000), "Nd"((uint16_t)0x604));*/
+
+        timing::enqueueEvent([] {
+            klog << "Goodbye :)\n";
+            asm volatile("outw %0, %1" ::"a"((uint16_t)0x2000), "Nd"((uint16_t)0x604));
+        }, 1500);
 
         for (;;)
             asm volatile("hlt");

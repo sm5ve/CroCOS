@@ -8,7 +8,7 @@
 #include <core/str.h>
 #include <acpi.h>
 #include <assert.h>
-#include <timing.h>
+#include <timing/timing.h>
 #include <core/math.h>
 #include "multiboot.h"
 #include <arch/amd64/interrupts/LegacyPIC.h>

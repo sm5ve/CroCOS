@@ -11,8 +11,8 @@
 #include <core/ds/SmartPointer.h>
 #include <core/Hasher.h>
 
-#include "hal.h"
-#include "interrupts.h"
+#include <arch/hal/hal.h>
+#include <interrupts/interrupts.h>
 
 namespace kernel::hal::interrupts {
    enum class InterruptLineActivationType : uint8_t{
@@ -321,6 +321,6 @@ namespace kernel::hal::interrupts {
    }
 }
 
-#include "internal/_InterruptsExplicitTypes.h"
+#include "../arch/hal/internal/_InterruptsExplicitTypes.h"
 
 #endif //CROCOS_INTERRUPTS_H
