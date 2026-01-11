@@ -3,7 +3,6 @@ set(CMAKE_ASM_FLAGS "-ffreestanding -mcmodel=kernel  -fno-exceptions -nostdlib -
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fimplicit-constexpr -fno-use-cxa-atexit -mno-sse -mno-sse2 -mno-avx -ffreestanding -fno-rtti -fno-exceptions -fno-sized-deallocation -fconcepts -nostdlib -Wall -Wextra -pedantic -Wshadow -Wcast-align -Wwrite-strings -Wredundant-decls -Winline -Wno-long-long -Wconversion -Werror -mno-red-zone -mcmodel=kernel -masm=att -fconcepts-diagnostics-depth=3 -DKERNEL")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-use-cxa-atexit -mno-sse -mno-sse2 -mno-avx -ffreestanding -fno-rtti -fno-exceptions -nostdlib -Wall -Wextra -pedantic -Wshadow -Wcast-align -Wwrite-strings -Wredundant-decls -Winline -Wno-long-long -Wconversion -Werror -mno-red-zone -mcmodel=kernel  -masm=att")
 
-
 set(KERNEL_SRC
         arch/amd64/Amd64Init.cpp
         arch/amd64/InstructionWrappers.cpp
@@ -43,7 +42,22 @@ set_source_files_properties(
         PROPERTIES COMPILE_FLAGS "-O2 -ftemplate-backtrace-limit=0"
 )
 
+file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/generated)
+
+add_custom_command(
+        OUTPUT ${CMAKE_BINARY_DIR}/generated/isr.inc, ${CMAKE_BINARY_DIR}/generated/isr_set.inc
+        COMMAND python3 ${CMAKE_SOURCE_DIR}/tools/gen_idt_install_macros.py
+        -o ${CMAKE_BINARY_DIR}/generated/
+        DEPENDS ${INIT_DEF_FILES} ${CMAKE_SOURCE_DIR}/tools/gen_idt_install_macros.py
+        COMMENT "Generating init registry"
+)
+
+add_custom_target(generate_idt_macros
+    DEPENDS ${CMAKE_BINARY_DIR}/generated/isr.inc, ${CMAKE_BINARY_DIR}/generated/isr_set.inc
+)
+
 add_executable(Kernel ${KERNEL_SRC})
+add_dependencies(Kernel generate_idt_macros)
 target_compile_options(Kernel PRIVATE -gdwarf-4)
 target_compile_options(Kernel PRIVATE -ffunction-sections -fdata-sections)
 target_link_options(Kernel PUBLIC
@@ -54,6 +68,7 @@ target_link_options(Kernel PUBLIC
         -Wl,--build-id
 )
 target_include_directories(Kernel PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_include_directories(Kernel PRIVATE ${CMAKE_BINARY_DIR}/generated)
 target_link_libraries(Kernel PRIVATE CoreKernel AllocKernel MMIOKernel gcc)
 
 add_custom_command(TARGET Kernel POST_BUILD
