@@ -300,7 +300,7 @@ namespace kernel::hal::interrupts::managed {
         delete[] indices;
     }
 
-    void updateRouting() {
+    bool updateRouting() {
         auto& policy = getRoutingPolicy();
         const auto routingGraph = policy.buildRoutingGraph(*createRoutingGraphBuilder());
         {
@@ -312,6 +312,7 @@ namespace kernel::hal::interrupts::managed {
             populateEOIBehaviorTable(routingGraph, finalVectorNumbers);
         }
         topology::releaseCachedTopologicalOrdering();
+        return true;
     }
 
     void dispatchInterrupt(InterruptFrame& frame) {

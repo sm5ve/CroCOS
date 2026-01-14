@@ -15,7 +15,6 @@
 #include <arch/amd64/smp.h>
 #include <arch/amd64/interrupts/APIC.h>
 #include <arch/amd64/interrupts/AuxiliaryDomains.h>
-#include <arch/amd64/timers/PIT.h>
 #include <arch/amd64/timers/HPET.h>
 #include "amd64internal.h"
 
@@ -265,7 +264,7 @@ namespace kernel::amd64{
         return (ebx & (1 << 0)) != 0;
     }
 
-    void enableFSGSBase(){
+    bool enableFSGSBase(){
         //TODO implement a fallback method
         //really I ought to just do this with a proper GDT or whatever... but this should be enough
         //to get the rudiments of SMP working.
@@ -275,6 +274,7 @@ namespace kernel::amd64{
         asm volatile ("mov %%cr4, %0" : "=r"(cr4));
         cr4 |= (1 << 16);
         asm volatile ("mov %0, %%cr4" :: "r"(cr4));
+        return true;
     }
 
     const uint64_t kernel_code_descriptor =
@@ -301,15 +301,44 @@ namespace kernel::amd64{
 
     extern "C" void load_gdt(void*);
 
+    bool initGDT() {
+        load_gdt(&gdtr);
+        return true;
+    }
+
+    bool searchForACPITables() {
+        if (acpi::tryFindACPI() != acpi::ACPIDiscoveryResult::SUCCESS) {
+            return false;
+        }
+        auto& madt = kernel::acpi::the<acpi::MADT>();
+        archProcessorCount = madt.getEnabledProcessorCount();
+        if (archProcessorCount == 0) {
+            return false;
+        }
+        return true;
+    }
+
+    bool bspSetPID() {
+        smp::setLogicalProcessorID(0);
+        return true;
+    }
+
+    bool apSetPID() {
+        auto lapic = interrupts::getLAPICDomain();
+        auto lapicID = interrupts::getLAPICDomain() -> getID();
+        auto pinfo = smp::getProcessorInfoForLapicID(static_cast<uint8_t>(lapicID));
+        smp::setLogicalProcessorID(pinfo.logicalID);
+        return true;
+    }
+
     void temporaryPageFaultHandler(hal::InterruptFrame& frame) {
         kernel::klog << "Page fault at " << reinterpret_cast<void*>(frame.rip) << "\n";
         print_stacktrace(&frame.rbp);
         asm volatile("outw %0, %1" ::"a"((uint16_t)0x2000), "Nd"((uint16_t)0x604));
     }
 
-    void initializeInterrupts(acpi::MADT& madt) {
-        interrupts::init();
-        cli();
+    bool setupInterruptControllers() {
+        auto& madt = kernel::acpi::the<acpi::MADT>();
         interrupts::disableLegacyPIC();
         hal::interrupts::platform::setupCPUInterruptVectorFile(INTERRUPT_VECTOR_COUNT);
         interrupts::setupAPICs(madt);
@@ -322,27 +351,13 @@ namespace kernel::amd64{
 
         using namespace hal::interrupts::managed;
         registerHandler(InterruptSourceHandle(exceptionVectors, 14), temporaryPageFaultHandler);
+
+        return true;
     }
 
-    void hwinit(){
+    bool initPageTableAllocator() {
         assert(mboot_magic == 0x2BADB002, "Somehow the multiboot magic number is wrong. How did we get here?");
-
         unmapIdentity();
-        load_gdt(&gdtr);
-        enableFSGSBase();
-        smp::setLogicalProcessorID(0);
-
-        flushTLB();
-        //Our first goal is to find the MADT, so we will have the right info to properly init the
-        //page allocator.
-        kernel::acpi::tryFindACPI();
-        auto& madt = kernel::acpi::the<acpi::MADT>();
-
-        archProcessorCount = madt.getEnabledProcessorCount();
-        assert(archProcessorCount > 0, "MADT has no LAPIC entry");
-
-        kernel::klog << "Processor count: " << archProcessorCount << "\n";
-
         Vector<mm::PageAllocator::page_allocator_range_info> free_memory_regions;
 
         mboot_info* mbootInfo = amd64::early_boot_phys_to_virt(mm::phys_addr(mboot_table)).as_ptr<mboot_info>();
@@ -361,33 +376,19 @@ namespace kernel::amd64{
                     free_memory_regions.push({range, buff});
                 }
             }
-        }
+            }
 
         unmapTemporaryWindow();
 
-        kernel::mm::PageAllocator::init(free_memory_regions, archProcessorCount);
+        kernel::mm::PageAllocator::init(free_memory_regions, hal::processorCount());
         //Find the memory range where the kernel resides and reserve it so we don't overwrite anything!
         mm::phys_memory_range range{.start=mm::phys_addr(nullptr), .end=mm::phys_addr(&phys_end)};
-        kernel::mm::PageAllocator::reservePhysicalRange(range);
+        mm::PageAllocator::reservePhysicalRange(range);
+        return true;
+    }
 
-        kernel::klog << "Finished initializing page allocator\n";
-
-        kernel::amd64::PageTableManager::init(archProcessorCount);
-
-        klog << "Finished initializing page table manager\n";
-
-        initializeInterrupts(madt);
-
-        smp::populateProcessorInfo(madt);
-        smp::setLogicalProcessorID(0);
-
-        timers::initPIT();
-        timers::initHPET();
-        timing::initialize();
-
-        klog << "Finished initializing interrupts\n";
-        //kernel::amd64::interrupts::buildApicTopology(madt); //Temporary ACPI initialization stuff...
-
-        //kernel::amd64::PageTableManager::runSillyTest();
+    bool initPageTableManager() {
+        PageTableManager::init(hal::processorCount());
+        return true;
     }
 }

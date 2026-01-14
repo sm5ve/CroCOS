@@ -33,7 +33,11 @@ set(KERNEL_SRC
         arch/hal/ExplicitTypes.cpp
         timing/BlockingSleep.cpp
         arch/amd64/smp/smpboot.asm
+        init.cpp
 )
+
+file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/generated_headers)
+file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/generated_source)
 
 set_source_files_properties(
         InterruptGraphManager.cpp
@@ -42,22 +46,50 @@ set_source_files_properties(
         PROPERTIES COMPILE_FLAGS "-O2 -ftemplate-backtrace-limit=0"
 )
 
-file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/generated)
+#We need to be smarter to split out architecture-specific source files
+file(GLOB_RECURSE COMMON_INIT_FILES
+        "${CMAKE_SOURCE_DIR}/kernel/*.icd"
+)
+
+set(INIT_DSL_FILES ${COMMON_INIT_FILES})
+
+# Define output location
+set(GENERATED_INIT_CPP "${CMAKE_BINARY_DIR}/generated_source/init_registry.cpp")
+
+# Custom command to generate the header
+add_custom_command(
+        OUTPUT ${GENERATED_INIT_CPP}
+        COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_SOURCE_DIR}/tools/gen_init_registry.py"
+        -o ${GENERATED_INIT_CPP}
+        ${INIT_DSL_FILES}
+        DEPENDS
+        ${INIT_DSL_FILES}
+        "${CMAKE_SOURCE_DIR}/tools/gen_init_registry.py"
+        "${CMAKE_SOURCE_DIR}/tools/toollib.py"  # If you have helper modules
+        COMMENT "Generating initialization registry from ICD files"
+        VERBATIM
+)
+
+# Create a custom target for the generated header
+add_custom_target(generate_init_registry
+        DEPENDS ${GENERATED_INIT_HEADER}
+)
 
 add_custom_command(
-        OUTPUT ${CMAKE_BINARY_DIR}/generated/isr.inc, ${CMAKE_BINARY_DIR}/generated/isr_set.inc
-        COMMAND python3 ${CMAKE_SOURCE_DIR}/tools/gen_idt_install_macros.py
-        -o ${CMAKE_BINARY_DIR}/generated/
+        OUTPUT ${CMAKE_BINARY_DIR}/generated_headers/isr.inc, ${CMAKE_BINARY_DIR}/generated_headers/isr_set.inc
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/gen_idt_install_macros.py
+        -o ${CMAKE_BINARY_DIR}/generated_headers/
         DEPENDS ${INIT_DEF_FILES} ${CMAKE_SOURCE_DIR}/tools/gen_idt_install_macros.py
         COMMENT "Generating init registry"
 )
 
 add_custom_target(generate_idt_macros
-    DEPENDS ${CMAKE_BINARY_DIR}/generated/isr.inc, ${CMAKE_BINARY_DIR}/generated/isr_set.inc
+    DEPENDS ${CMAKE_BINARY_DIR}/generated_headers/isr.inc, ${CMAKE_BINARY_DIR}/generated_headers/isr_set.inc
 )
 
-add_executable(Kernel ${KERNEL_SRC})
-add_dependencies(Kernel generate_idt_macros)
+add_executable(Kernel ${KERNEL_SRC} ${GENERATED_INIT_CPP})
+add_dependencies(Kernel generate_idt_macros generate_init_registry)
 target_compile_options(Kernel PRIVATE -gdwarf-4)
 target_compile_options(Kernel PRIVATE -ffunction-sections -fdata-sections)
 target_link_options(Kernel PUBLIC
@@ -68,7 +100,7 @@ target_link_options(Kernel PUBLIC
         -Wl,--build-id
 )
 target_include_directories(Kernel PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_include_directories(Kernel PRIVATE ${CMAKE_BINARY_DIR}/generated)
+target_include_directories(Kernel PRIVATE ${CMAKE_BINARY_DIR}/generated_headers)
 target_link_libraries(Kernel PRIVATE CoreKernel AllocKernel MMIOKernel gcc)
 
 add_custom_command(TARGET Kernel POST_BUILD

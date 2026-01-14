@@ -105,8 +105,6 @@ namespace kernel::amd64 {
     void wrmsr(uint32_t msr, uint64_t value);
     uint64_t rdmsr(uint32_t msr);
 
-    void hwinit();
-
     inline void mfence() {
         asm volatile("mfence" ::: "memory");
     }
@@ -236,8 +234,6 @@ namespace kernel::amd64 {
             uint64_t rsp;
             uint64_t ss;
         };
-
-        void init();
 
         bool areInterruptsEnabled();
     }

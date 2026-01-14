@@ -17,12 +17,6 @@ namespace kernel::hal{
 #endif
     }
 
-    void hwinit(){
-#ifdef __x86_64__
-        kernel::amd64::hwinit();
-#endif
-    }
-
     size_t processorCount(){
         return archProcessorCount;
     }

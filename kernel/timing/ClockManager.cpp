@@ -189,12 +189,13 @@ namespace kernel::timing {
 
     void initTimerQueues();
 
-    void initialize() {
+    bool initialize() {
         initializeWatchdogClock();
         initializeBestClockSource();
         initializeEventSource();
         lastReadCSTimestamp = getClockSource().read();
         initTimerQueues();
+        return true;
     }
 
     ClockSource& getClockSource(){

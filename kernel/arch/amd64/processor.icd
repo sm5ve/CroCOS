@@ -1,0 +1,105 @@
+[GDT]
+
+name = "GDT Setup"
+required = true
+per_cpu = true
+phase = "processor_early"
+routine = "kernel::amd64::initGDT"
+
+[FSGS]
+
+name = "FS/GS Base"
+required = true
+per_cpu = true
+provides_capabilities = ["cpu_local_storage"]
+phase = "processor_early"
+depends_on = ["GDT"]
+routine = "kernel::amd64::enableFSGSBase"
+
+[IDT]
+
+name = "IDT"
+required = true
+per_cpu = true
+provides_capabilities = ["cpu_interrupt_setup"]
+phase = "processor_early"
+depends_on = ["GDT"]
+ap_routine = "kernel::counter"
+bootstrap_routine = "kernel::amd64::interrupts::init"
+
+[ACPISearch]
+
+name = "ACPI Table Search"
+required = true
+per_cpu = false
+provides_capabilities = ["cpu_count"]
+phase = "processor_early"
+depends_on = ["GDT"]
+routine = "kernel::amd64::searchForACPITables"
+
+[APICEnable]
+
+name = "Enable APIC"
+required = true
+per_cpu = true
+phase = "processor_early"
+depends_on = ["IDT"]
+routine = "kernel::amd64::interrupts::enableAPIC"
+
+[PIDSet]
+
+name = "Set Logical Processor ID"
+required = true
+per_cpu = true
+phase = "processor_early"
+depends_on = ["APICEnable"]
+ap_depends_on_capabilities = ["mmio"]
+provides_capabilities = ["logical_cpu_id"]
+bootstrap_routine = "kernel::amd64::bspSetPID"
+ap_routine = "kernel::amd64::apSetPID"
+
+[InterruptControllers]
+
+name = "Setup Interrupt Controllers"
+required = true
+per_cpu = false
+phase = "core_devices"
+depends_on_capabilities = ["mmio"]
+provides_capabilities = ["clock_source", "event_source", "core_device"]
+routine = "kernel::amd64::setupInterruptControllers"
+
+[SMPTableInit]
+name = "Setup SMP Tables"
+required = true
+per_cpu = false
+phase = "core_devices"
+depends_on = ["InterruptControllers"]
+routine = "kernel::amd64::smp::populateProcessorInfo"
+
+[PIT]
+
+name = "PIT"
+required = true
+per_cpu = false
+depends_on = ["InterruptControllers"]
+provides_capabilities = ["core_device", "event_source"]
+phase = "core_devices"
+routine = "kernel::amd64::timers::initPIT"
+
+[HPET]
+
+name = "HPET"
+required = false
+per_cpu = false
+depends_on = ["InterruptControllers"]
+provides_capabilities = ["core_device", "event_source", "clock_source"]
+phase = "core_devices"
+routine = "kernel::amd64::timers::initHPET"
+
+[SMP]
+
+name = "SMP Bringup"
+required = true
+per_cpu = false
+phase = "smp_bringup"
+routine = "kernel::amd64::smp::smpInit"

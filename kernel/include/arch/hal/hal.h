@@ -14,7 +14,6 @@
 
 namespace kernel::hal{
     void serialOutputString(const char* str);
-    void hwinit();
 
 #ifdef __x86_64__
     using ProcessorID = amd64::ProcessorID;

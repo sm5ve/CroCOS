@@ -2,7 +2,6 @@
 // Created by Spencer Martin on 8/28/25.
 //
 #include <timing/timing.h>
-#include <arch/amd64/timers/PIT.h>
 #include <interrupts/interrupts.h>
 #include <arch/amd64/interrupts/AuxiliaryDomains.h>
 #include <arch/amd64/amd64.h>
@@ -146,9 +145,10 @@ namespace kernel::amd64::timers{
 
     PITEventSource pitEventSource;
 
-    void initPIT(){
+    bool initPIT(){
         new(&pitEventSource) PITEventSource();
         timing::registerEventSource(pitEventSource);
         pitEventSource.disarm();
+        return true;
     }
 }

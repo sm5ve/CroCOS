@@ -57,12 +57,14 @@ namespace kernel::amd64::interrupts{
         };
     }
 
-    void init(){
+    bool init(){
+        cli();
         //actually populate the IDT using the auto-generated macro file
         #include "isr_set.inc"
         asm volatile("lidt %0" : : "m"(idtr));
         //Probably we should defer calling sti until the system is in a more stable state.
         //asm volatile("sti");
+        return true;
     }
 
     bool areInterruptsEnabled() {

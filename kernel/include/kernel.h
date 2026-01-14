@@ -12,7 +12,7 @@
 
 namespace kernel{
     extern Core::PrintStream& klog;
-    void heapEarlyInit();
+    bool heapEarlyInit();
     void* kmalloc(size_t size, std::align_val_t = std::align_val_t{1});
     void kfree(void* ptr);
 

@@ -24,7 +24,8 @@ namespace kernel::amd64::smp{
     const ProcessorInfo& getProcessorInfoForProcessorID(hal::ProcessorID pid);
 
     void populateProcessorInfo(acpi::MADT& madt);
-    void smpInit();
+
+    bool smpInit();
 }
 
 #endif //CROCOS_SMP_H

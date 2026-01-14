@@ -3,6 +3,7 @@
 //
 
 #include <acpi.h>
+#include <init.h>
 #include <timing/timing.h>
 #include <arch/amd64/smp.h>
 #include <arch/amd64/interrupts/APIC.h>
@@ -27,7 +28,8 @@ namespace kernel::amd64::smp{
         return currentGsBase & 0xff;
     }
 
-    void populateProcessorInfo(acpi::MADT& madt) {
+    bool populateProcessorInfo() {
+        auto& madt = acpi::the<acpi::MADT>();
         pinfo = new ProcessorInfo[hal::processorCount()];
         size_t countedAPs = 0; //minus the BSP
         auto bspLapicID = interrupts::getLAPICDomain() -> getID();
@@ -51,6 +53,7 @@ namespace kernel::amd64::smp{
                 }
             }
         }
+        return true;
     }
 
     const ProcessorInfo &getProcessorInfoForAcpiID(uint8_t acpiID) {
@@ -111,7 +114,8 @@ namespace kernel::amd64::smp{
         smp_bringup_stack = (uint64_t)&stacks[pid];
     }
 
-    void smpInit() {
+    bool smpInit() {
+        sti();
         setupTrampoline();
         remapIdentity();
         for (size_t i = 1; i < hal::processorCount(); i++) {
@@ -120,16 +124,11 @@ namespace kernel::amd64::smp{
             initProcessor(pid);
         }
         unmapIdentity();
+        return true;
     }
 }
 
 using namespace kernel;
 extern "C" void smpEntry() {
-    amd64::interrupts::enableAPICOnAP();
-    auto lapic = amd64::interrupts::getLAPICDomain();
-    auto lapicID = amd64::interrupts::getLAPICDomain() -> getID();
-    auto pinfo = amd64::smp::getProcessorInfoForLapicID(static_cast<uint8_t>(lapicID));
-    amd64::enableFSGSBase();
-    amd64::smp::setLogicalProcessorID(pinfo.logicalID);
-    klog << "Hello from processor " << hal::getCurrentProcessorID() << "\n";
+    kernel::init::kinit(false, KERNEL_INIT_LOG_LEVEL, false);
 }

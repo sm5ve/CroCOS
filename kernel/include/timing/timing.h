@@ -14,7 +14,7 @@ namespace kernel::timing {
     void registerEventSource(hal::timing::EventSource& source);
 
     //Convenience method for calibrating and selecting sources
-    void initialize();
+    bool initialize();
 
     void dumpTimerInfo();
 

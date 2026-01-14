@@ -9,7 +9,7 @@ parser = argparse.ArgumentParser(description='Generate IDT install macros')
 
 
 parser.add_argument('-o', type=dir_path,
-                    help='')
+                    help='Output directory')
 
 args = parser.parse_args()
 

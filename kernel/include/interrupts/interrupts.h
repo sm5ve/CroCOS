@@ -17,7 +17,7 @@ namespace kernel::hal::interrupts {
         using InterruptHandler = Function<void(hal::InterruptFrame&)>;
         using InterruptSourceHandle = RoutingNodeLabel;
 
-        void updateRouting();
+        bool updateRouting();
         void dispatchInterrupt(InterruptFrame& frame);
         void registerHandler(const InterruptSourceHandle& interruptSource, InterruptHandler&& handler);
     }

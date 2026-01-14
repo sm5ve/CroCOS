@@ -592,16 +592,17 @@ namespace kernel::amd64::interrupts{
         }
     };
 
-    uint64_t enableAPICOnAP() {
+    bool enableAPIC() {
         auto lapicBasePhysical = getLAPICBase();
         auto lapicMSRNewVal = lapicBasePhysical | IA32_APIC_BASE_MSR_ENABLE;
         klog << "Enabling APIC, writing MSR value " << reinterpret_cast<void*>(lapicMSRNewVal) << "\n";
         wrmsr(IA32_APIC_BASE_MSR, lapicMSRNewVal);
-        return lapicBasePhysical;
+        return true;
     }
 
     void setupAPICs(acpi::MADT& madt) {
-        auto lapicBasePhysical = enableAPICOnAP();
+        enableAPIC();
+        auto lapicBasePhysical = getLAPICBase();
         lapicDomain = make_shared<LAPIC>(mm::phys_addr(lapicBasePhysical));
         hal::interrupts::topology::registerDomain(lapicDomain);
         auto lapicConnector = make_shared<AffineConnector>(lapicDomain, getCPUInterruptVectors(), 0, 0, hal::CPU_INTERRUPT_COUNT);

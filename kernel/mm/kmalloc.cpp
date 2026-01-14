@@ -10,8 +10,9 @@
 uint8_t heap_buffer[KERNEL_INIT_HEAP_BUFFER];
 
 namespace kernel{
-    void heapEarlyInit() {
+    bool heapEarlyInit() {
         la_init(heap_buffer, sizeof(heap_buffer));
+        return true;
     }
 
     void* kmalloc(size_t size, std::align_val_t align){
