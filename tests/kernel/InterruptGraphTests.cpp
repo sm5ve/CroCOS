@@ -9,11 +9,11 @@
 #include <TestHarness.h>
 #include <cstdlib>
 
-#include <arch/hal/InterruptGraphs.h>
+#include <interrupts/InterruptGraphs.h>
 #include <core/ds/Vector.h>
 #include <core/ds/SmartPointer.h>
 
-using namespace kernel::hal::interrupts;
+using namespace kernel::interrupts;
 using namespace CroCOSTest;
 
 // ============================================================================

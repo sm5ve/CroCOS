@@ -5,7 +5,7 @@
 #include <core/algo/GraphAlgorithms.h>
 #include <kernel.h>
 
-namespace kernel::hal::interrupts::managed {
+namespace kernel::interrupts::managed {
     InterruptReceiverLoadComparator::InterruptReceiverLoadComparator(HashMap<RoutingNodeLabel, size_t>& loads) : receiverLoads(loads) {}
     // Returns true if a is "heavier" than b, so that the heap promotes the least-loaded.
     bool InterruptReceiverLoadComparator::operator()(const RoutingNodeLabel& a, const RoutingNodeLabel& b) const{

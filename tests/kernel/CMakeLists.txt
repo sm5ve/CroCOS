@@ -22,7 +22,7 @@ target_include_directories(KernelTests PUBLIC
 
 # Add kernel source files that we're testing
 target_sources(KernelTests PRIVATE
-    ../../kernel/arch/hal/InterruptGraphManager.cpp
+        ../../kernel/interrupts/InterruptGraphManager.cpp
 )
 
 # Add Core library sources needed for kernel code

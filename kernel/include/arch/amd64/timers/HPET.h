@@ -5,7 +5,7 @@
 #ifndef CROCOS_HPET_H
 #define CROCOS_HPET_H
 
-namespace kernel::amd64::timers{
+namespace arch::amd64::timers{
     bool initHPET();
 }
 

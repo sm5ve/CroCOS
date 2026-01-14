@@ -3,7 +3,7 @@
 //
 #include <../include/timing/timing.h>
 #include <timing/Clock.h>
-#include <arch/hal/hal.h>
+#include <arch.h>
 #include <core/atomic.h>
 #include <core/ds/LinkedList.h>
 #include <core/ds/Trees.h>
@@ -134,10 +134,10 @@ namespace kernel::timing {
             return searchSubtree(node->right, early, late);
         }
 
-        hal::timing::EventSource& es;
+        EventSource& es;
     public:
         QueuedEventHandle enqueueTimerEvent(TimerEventCallback&& cb, uint64_t expirationTime, uint64_t lateTolerance, uint64_t earlyTolerance) {
-            hal::InterruptDisabler id;
+            arch::InterruptDisabler id;
             uint64_t earlyTime = expirationTime - earlyTolerance;
             uint64_t lateTime = expirationTime + lateTolerance;
 
@@ -165,7 +165,7 @@ namespace kernel::timing {
         }
 
         bool cancelTimerEvent(QueuedEventHandle handle) {
-            hal::InterruptDisabler id;
+            arch::InterruptDisabler id;
             auto* event = findQueuedEventFromID(handle.id);
             if (event == nullptr) return false;
             if (event->callbacks.headNode() == event -> callbacks.tailNode()) {
@@ -196,7 +196,7 @@ namespace kernel::timing {
             Vector<TimerEventCallback> callbacks;
             while (true) {
                 {
-                    hal::InterruptDisabler id;
+                    arch::InterruptDisabler id;
                     while (auto* root = timerQueue.getRoot()) {
                         auto* event = root->augmentedData.nextEvent;
                         if (monoTimens() < event->expirationTime) break;
@@ -215,7 +215,7 @@ namespace kernel::timing {
                 }
                 callbacks.clear();
                 {
-                    hal::InterruptDisabler id;
+                    arch::InterruptDisabler id;
                     if (auto* root = timerQueue.getRoot()) {
                         auto*& event = root->augmentedData.nextEvent;
                         uint64_t now = monoTimens();
@@ -234,7 +234,7 @@ namespace kernel::timing {
             }
         }
 
-        explicit TimerQueue(hal::timing::EventSource& eventSource) : es(eventSource) {
+        explicit TimerQueue(EventSource& eventSource) : es(eventSource) {
             assert(es.supportsOneshot(), "We don't support periodic timers for this system right now");
         }
 
@@ -244,12 +244,12 @@ namespace kernel::timing {
     TimerQueue* localTimerQueues;
 
     void initTimerQueues() {
-        localTimerQueues = new TimerQueue[hal::processorCount()];
+        localTimerQueues = new TimerQueue[arch::processorCount()];
         getEventSource().registerCallback(dispatchTimerEvent);
     }
 
     TimerQueue& localQueue() {
-        return localTimerQueues[hal::getCurrentProcessorID()];
+        return localTimerQueues[arch::getCurrentProcessorID()];
     }
 
     void dispatchTimerEvent() {

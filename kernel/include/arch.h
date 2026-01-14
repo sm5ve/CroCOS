@@ -2,8 +2,8 @@
 // Created by Spencer Martin on 2/15/25.
 //
 
-#ifndef CROCOS_HAL_H
-#define CROCOS_HAL_H
+#ifndef CROCOS_ARCH_H
+#define CROCOS_ARCH_H
 
 #include "stdint.h"
 #include "stddef.h"
@@ -12,7 +12,7 @@
 #include "arch/amd64/amd64.h"
 #endif
 
-namespace kernel::hal{
+namespace arch{
     void serialOutputString(const char* str);
 
 #ifdef __x86_64__
@@ -47,4 +47,4 @@ namespace kernel::hal{
     };
 }
 
-#endif //CROCOS_HAL_H
+#endif //CROCOS_ARCH_H

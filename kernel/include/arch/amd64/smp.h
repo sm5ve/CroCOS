@@ -6,24 +6,25 @@
 #define CROCOS_SMP_H
 
 #include <arch/amd64/amd64.h>
-#include <arch/hal/hal.h>
+#include <arch.h>
 #include <acpi.h>
 
-namespace kernel::amd64::smp{
+using namespace kernel::acpi;
+namespace arch::amd64::smp{
     struct ProcessorInfo{
-        hal::ProcessorID logicalID;
+        ProcessorID logicalID;
         uint8_t lapicID;
         uint8_t acpiProcessorID;
     };
 
-    void setLogicalProcessorID(hal::ProcessorID pid);
-    hal::ProcessorID getLogicalProcessorID();
+    void setLogicalProcessorID(ProcessorID pid);
+    ProcessorID getLogicalProcessorID();
 
     const ProcessorInfo& getProcessorInfoForLapicID(uint8_t lapicID);
     const ProcessorInfo& getProcessorInfoForAcpiID(uint8_t acpiID);
-    const ProcessorInfo& getProcessorInfoForProcessorID(hal::ProcessorID pid);
+    const ProcessorInfo& getProcessorInfoForProcessorID(ProcessorID pid);
 
-    void populateProcessorInfo(acpi::MADT& madt);
+    void populateProcessorInfo(MADT& madt);
 
     bool smpInit();
 }

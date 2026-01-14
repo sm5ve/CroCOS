@@ -3,7 +3,7 @@
 //
 
 #include <../include/mem/mm.h>
-#include "arch/hal/hal.h"
+#include <arch.h>
 #include "core/atomic.h"
 #include <core/ds/Vector.h>
 #include <kernel.h>
@@ -13,8 +13,8 @@
 
 namespace kernel::mm::PageAllocator{
 
-    using BufferId = SmallestUInt_t<RequiredBits(hal::MAX_PROCESSOR_COUNT)>;
-    const BufferId GLOBAL_POOL = hal::MAX_PROCESSOR_COUNT;
+    using BufferId = SmallestUInt_t<RequiredBits(arch::MAX_PROCESSOR_COUNT)>;
+    const BufferId GLOBAL_POOL = arch::MAX_PROCESSOR_COUNT;
 
     struct ContiguousRangeAllocator{
     private:
@@ -480,7 +480,7 @@ namespace kernel::mm::PageAllocator{
             }
         };
 
-        struct alignas(hal::CACHE_LINE_SIZE) LocalPool{
+        struct alignas(arch::CACHE_LINE_SIZE) LocalPool{
         private:
             SuperpagePool& spp;
             SuperpageStackMarker fullyOccupiedZoneStart;
@@ -818,8 +818,8 @@ namespace kernel::mm::PageAllocator{
         phys_memory_range range;
 
         static void incrementPtrCacheAligned(void*& ptr, size_t amt){
-            assert((uint64_t)ptr % hal::CACHE_LINE_SIZE == 0, "buffer not cache line aligned");
-            amt = divideAndRoundUp(amt, hal::CACHE_LINE_SIZE) * hal::CACHE_LINE_SIZE;
+            assert((uint64_t)ptr % arch::CACHE_LINE_SIZE == 0, "buffer not cache line aligned");
+            amt = divideAndRoundUp(amt, arch::CACHE_LINE_SIZE) * arch::CACHE_LINE_SIZE;
             ptr = (void*)((size_t)ptr + amt);
         }
 
@@ -920,9 +920,9 @@ namespace kernel::mm::PageAllocator{
             incrementPtrCacheAligned(buffPtr, sizeof(RawSubpagePool) * totalSuperpages);
             subpageFreeMarkers = (SubpageStackMarker*)buffPtr;
             incrementPtrCacheAligned(buffPtr, sizeof(SubpageStackMarker) * totalSuperpages);
-            superpagePools = (SuperpagePool*) kmalloc(sizeof(SuperpagePool) * (processorCount + 1), std::align_val_t{hal::CACHE_LINE_SIZE});
-            localPools = (LocalPool*) kmalloc(sizeof(LocalPool) * processorCount, std::align_val_t{hal::CACHE_LINE_SIZE});
-            localAllocators = (LocalAllocator*) kmalloc(sizeof(LocalAllocator) * processorCount, std::align_val_t{hal::CACHE_LINE_SIZE});
+            superpagePools = (SuperpagePool*) kmalloc(sizeof(SuperpagePool) * (processorCount + 1), std::align_val_t{arch::CACHE_LINE_SIZE});
+            localPools = (LocalPool*) kmalloc(sizeof(LocalPool) * processorCount, std::align_val_t{arch::CACHE_LINE_SIZE});
+            localAllocators = (LocalAllocator*) kmalloc(sizeof(LocalAllocator) * processorCount, std::align_val_t{arch::CACHE_LINE_SIZE});
 
             superpageFreeIndices = (SuperpagePool::SuperpageFreeStackIndex*) buffPtr;
             incrementPtrCacheAligned(buffPtr, sizeof(SuperpagePool::SuperpageFreeStackIndex) * totalSuperpages);
@@ -956,7 +956,7 @@ namespace kernel::mm::PageAllocator{
         }
 
         phys_addr allocateSmallPage(){
-            auto allocator = localAllocators[hal::getCurrentProcessorID()];
+            auto allocator = localAllocators[arch::getCurrentProcessorID()];
             return allocator.allocateSmallPage();
         }
 
@@ -981,7 +981,7 @@ namespace kernel::mm::PageAllocator{
     }
 
     void incrementSizeWithAlignment(size_t& size, size_t amount){
-        size += divideAndRoundUp(amount, hal::CACHE_LINE_SIZE) * hal::CACHE_LINE_SIZE;
+        size += divideAndRoundUp(amount, arch::CACHE_LINE_SIZE) * arch::CACHE_LINE_SIZE;
     }
 
     size_t requestedBufferSizeForRange(mm::phys_memory_range range, size_t processor_count){

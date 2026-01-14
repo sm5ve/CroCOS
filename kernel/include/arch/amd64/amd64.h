@@ -5,12 +5,13 @@
 #ifndef CROCOS_AMD64_TABLES_H
 #define CROCOS_AMD64_TABLES_H
 
-#include "kconfig.h"
+#include <kconfig.h>
 #include "kernel.h"
 #include <core/ds/Vector.h>
-#include "../../mem/FlushPlanner.h"
+#include <mem/FlushPlanner.h>
 
-namespace kernel::amd64 {
+using namespace kernel;
+namespace arch::amd64 {
     //Derived from https://wiki.osdev.org/CPUID, or tables 3-19 and 3-20 in volume 2 of the Intel manual.
     enum class CPUID_FEAT_LEAF_BITMAP{
         ECX_SSE3         = 1 << 0,
@@ -239,6 +240,6 @@ namespace kernel::amd64 {
     }
 }
 
-Core::PrintStream& operator<<(Core::PrintStream& ps, kernel::amd64::interrupts::InterruptFrame& iframe);
+Core::PrintStream& operator<<(Core::PrintStream& ps, arch::amd64::interrupts::InterruptFrame& iframe);
 
 #endif //CROCOS_AMD64_TABLES_H

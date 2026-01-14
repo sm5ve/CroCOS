@@ -11,7 +11,7 @@
 #define PIC2_COMMAND	PIC2
 #define PIC2_DATA	(PIC2+1)
 
-namespace kernel::amd64::interrupts{
+namespace arch::amd64::interrupts{
     void disableLegacyPIC(){
         outb(PIC1_DATA, 0xff);
         outb(PIC2_DATA, 0xff);

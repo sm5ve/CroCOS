@@ -9,16 +9,14 @@
 #include <timing/Clock.h>
 #include <core/atomic.h>
 
-namespace kernel::amd64::timers{
+namespace arch::amd64::timers{
     constexpr uint32_t PIT_FREQUENCY = 1193182; //In Hz
     constexpr uint32_t PIT_CHANNEL_0 = 0x40;
     constexpr uint32_t PIT_CHANNEL_1 = 0x41;
     constexpr uint32_t PIT_CHANNEL_2 = 0x42;
     constexpr uint32_t PIT_COMMAND_PORT = 0x43;
 
-    using namespace hal::timing;
-
-    using namespace kernel::hal::interrupts;
+    using namespace kernel::interrupts;
     CRClass(PITInterruptDomain, public platform::InterruptDomain, public platform::InterruptEmitter){
     public:
         size_t getEmitterCount() override {
@@ -26,6 +24,7 @@ namespace kernel::amd64::timers{
         }
     };
 
+    using namespace kernel::timing;
     class PITEventSource : public EventSource{
         static constexpr auto PIT_FLAGS = ES_FIXED_FREQUENCY | ES_KNOWN_STABLE | ES_ONESHOT | ES_PERIODIC | ES_TRACKS_INTERMEDIATE_TIME;
 
@@ -99,7 +98,7 @@ namespace kernel::amd64::timers{
         void armOneshot(uint64_t deltaTicks) override {
             LockGuard guard(pitLock);
             armed = true;
-            hal::InterruptDisabler disabler;
+            InterruptDisabler disabler;
             ensureState(ONESHOT);
             setReload(deltaTicks);
         }
@@ -115,7 +114,7 @@ namespace kernel::amd64::timers{
         void armPeriodic(uint64_t periodTicks) override {
             LockGuard guard(pitLock);
             armed = true;
-            hal::InterruptDisabler disabler;
+            InterruptDisabler disabler;
             ensureState(PERIODIC);
             setReload(periodTicks);
         }
@@ -123,7 +122,7 @@ namespace kernel::amd64::timers{
         //To disable the PIT, we just set it to one-shot mode and then ignore the incoming interrupt
         void disarm() override {
             LockGuard guard(pitLock);
-            hal::InterruptDisabler disabler;
+            InterruptDisabler disabler;
             armed = false;
             ensureState(ONESHOT);
             setReload(0xffff);
@@ -131,7 +130,7 @@ namespace kernel::amd64::timers{
 
         uint64_t ticksElapsed() override {
             LockGuard guard(pitLock);
-            hal::InterruptDisabler disabler;
+            InterruptDisabler disabler;
             outb(PIT_COMMAND_PORT, 0x00); //Read latched count
             uint64_t out = 0;
             out = inb(PIT_CHANNEL_0) & 0xff;

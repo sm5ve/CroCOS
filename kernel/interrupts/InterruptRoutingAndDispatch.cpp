@@ -6,9 +6,9 @@
 #include <core/ds/LinkedList.h>
 #include <liballoc/InternalAllocator.h>
 #include <liballoc/SlabAllocator.h>
-#include <arch/hal/hal.h>
+#include <arch.h>
 
-namespace kernel::hal::interrupts::managed {
+namespace kernel::interrupts::managed {
     struct EOIChain {
         Vector<SharedPtr<platform::EOIDomain>> sortedDomains;
         bool operator==(const EOIChain & other) const {
@@ -29,8 +29,8 @@ namespace kernel::hal::interrupts::managed {
 }
 
 template<>
-struct DefaultHasher<kernel::hal::interrupts::managed::EOIChain> {
-    size_t operator()(const kernel::hal::interrupts::managed::EOIChain& chain) const {
+struct DefaultHasher<interrupts::managed::EOIChain> {
+    size_t operator()(const interrupts::managed::EOIChain& chain) const {
         size_t hash = 0xcbf29ce484222325ULL; // FNV offset basis for 64-bit
 
         for (auto& ptr : chain.sortedDomains) {
@@ -44,7 +44,7 @@ struct DefaultHasher<kernel::hal::interrupts::managed::EOIChain> {
     }
 };
 
-namespace kernel::hal::interrupts::managed {
+namespace kernel::interrupts::managed {
     UniquePtr<InterruptRoutingPolicy> currentRoutingPolicy;
 
     UniquePtr<InterruptRoutingPolicy> createDefaultRoutingPolicy(){
@@ -86,7 +86,7 @@ namespace kernel::hal::interrupts::managed {
     using InterruptHandlerListForVector = Vector<InterruptHandlerPointerRef>;
     using SourceToHandlerMap = HashMap<InterruptSourceHandle, InterruptHandlerPointerRef>;
     WITH_GLOBAL_CONSTRUCTOR(SourceToHandlerMap, registeredHandlers);
-    ARRAY_WITH_GLOBAL_CONSTRUCTOR(UniquePtr<InterruptHandlerListForVector>, CPU_INTERRUPT_COUNT, handlersByVector);
+    ARRAY_WITH_GLOBAL_CONSTRUCTOR(UniquePtr<InterruptHandlerListForVector>, arch::CPU_INTERRUPT_COUNT, handlersByVector);
 
     void populateHandlerTable(const RoutingGraph& routingGraph, VertexAnnotation<Optional<size_t>, RoutingGraph>& annotation) {
         for (auto& ptr : handlersByVector) {
@@ -269,14 +269,14 @@ namespace kernel::hal::interrupts::managed {
         EOIBehaviorMetadata() : triggerType(RoutingNodeTriggerType::TRIGGER_UNDETERMINED) {}
     };
 
-    ARRAY_WITH_GLOBAL_CONSTRUCTOR(EOIBehaviorMetadata, CPU_INTERRUPT_COUNT, eoiBehaviorTable);
+    ARRAY_WITH_GLOBAL_CONSTRUCTOR(EOIBehaviorMetadata, arch::CPU_INTERRUPT_COUNT, eoiBehaviorTable);
 
     void populateEOIBehaviorTable(const RoutingGraph& routingGraph, VertexAnnotation<Optional<size_t>, RoutingGraph>& vectorNumberMap) {
         auto orderedSources = getSourcesByResultingVector(vectorNumberMap, routingGraph);
         auto eoiDeviceLimit = countEOIDomains();
         HashMap<EOIChain, size_t> eoiChains;
-        auto indices = new size_t[CPU_INTERRUPT_COUNT];
-        for (int i = CPU_INTERRUPT_COUNT - 1; i >= 0; --i) {
+        auto indices = new size_t[arch::CPU_INTERRUPT_COUNT];
+        for (int i = arch::CPU_INTERRUPT_COUNT - 1; i >= 0; --i) {
             const auto vectorNumber = static_cast<size_t>(i);
             auto eoiChain = buildChainForVector(orderedSources, routingGraph, vectorNumber, eoiDeviceLimit);
             if (!eoiChains.contains(eoiChain)) {
@@ -288,7 +288,7 @@ namespace kernel::hal::interrupts::managed {
         for (auto pair : eoiChains.entries()) {
             eoiChainArray[pair.second()] = make_shared<EOIChain>(move(pair.first()));
         }
-        for (size_t i = 0; i < CPU_INTERRUPT_COUNT; ++i) {
+        for (size_t i = 0; i < arch::CPU_INTERRUPT_COUNT; ++i) {
             eoiBehaviorTable[i].chain = eoiChainArray[indices[i]];
             auto vlabel = RoutingNodeLabel(platform::getCPUInterruptVectors(), i);
             auto vertex = routingGraph.getVertexByLabel(vlabel);
@@ -304,7 +304,7 @@ namespace kernel::hal::interrupts::managed {
         auto& policy = getRoutingPolicy();
         const auto routingGraph = policy.buildRoutingGraph(*createRoutingGraphBuilder());
         {
-            InterruptDisabler disabler;
+            arch::InterruptDisabler disabler;
             configureRoutableDomains(routingGraph);
             auto finalVectorNumbers = computeFinalVectorNumbers(routingGraph);
             populateHandlerTable(routingGraph, finalVectorNumbers);
@@ -315,7 +315,7 @@ namespace kernel::hal::interrupts::managed {
         return true;
     }
 
-    void dispatchInterrupt(InterruptFrame& frame) {
+    void dispatchInterrupt(arch::InterruptFrame& frame) {
         if (frame.vector_index == 14) {
             klog << "Pagefault at " << reinterpret_cast<void*>(frame.rip) << "\n";
             print_stacktrace(&frame.rbp);

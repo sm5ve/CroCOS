@@ -10,8 +10,8 @@
 namespace kernel::timing {
     // ClockManager.cpp
     // Initialization
-    void registerClockSource(hal::timing::ClockSource& source);
-    void registerEventSource(hal::timing::EventSource& source);
+    void registerClockSource(ClockSource& source);
+    void registerEventSource(EventSource& source);
 
     //Convenience method for calibrating and selecting sources
     bool initialize();
@@ -21,11 +21,11 @@ namespace kernel::timing {
     uint64_t monoTimens();  // Monotonic time in nanoseconds
     uint64_t monoTimems();  // Convenience: monotonic time in milliseconds
 
-    hal::timing::ClockSource& getClockSource(); // Current active source
-    hal::timing::EventSource& getEventSource(); // Per-CPU event source
+    ClockSource& getClockSource(); // Current active source
+    EventSource& getEventSource(); // Per-CPU event source
 
-    using ClockSourceChangeCallback = void(*)(hal::timing::ClockSource& oldClock, hal::timing::ClockSource& newClock);
-    using EventSourceChangeCallback = void(*)(hal::timing::EventSource& oldEventSource, hal::timing::EventSource& newEventSource);
+    using ClockSourceChangeCallback = void(*)(ClockSource& oldClock, ClockSource& newClock);
+    using EventSourceChangeCallback = void(*)(EventSource& oldEventSource, EventSource& newEventSource);
 
     void registerClockSourceChangeCallback(ClockSourceChangeCallback callback);
     void registerEventSourceChangeCallback(EventSourceChangeCallback callback);

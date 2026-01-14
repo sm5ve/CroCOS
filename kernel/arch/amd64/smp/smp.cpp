@@ -10,11 +10,11 @@
 #include <kconfig.h>
 #include "../amd64internal.h"
 
-namespace kernel::amd64::smp{
+namespace arch::amd64::smp{
     ProcessorInfo* pinfo;
 
-    void setLogicalProcessorID(hal::ProcessorID pid){
-        static_assert(sizeof(hal::ProcessorID) <= sizeof(uint8_t), "You need to update your use of gsbase to support a larger processor ID");
+    void setLogicalProcessorID(ProcessorID pid){
+        static_assert(sizeof(ProcessorID) <= sizeof(uint8_t), "You need to update your use of gsbase to support a larger processor ID");
         uint64_t currentGsBase;
         asm volatile("rdgsbase %0" : "=r"(currentGsBase));
         currentGsBase &= ~0xfful;
@@ -22,18 +22,18 @@ namespace kernel::amd64::smp{
         asm volatile("wrgsbase %0" : : "r"(currentGsBase));
     }
 
-    hal::ProcessorID getLogicalProcessorID(){
+    ProcessorID getLogicalProcessorID(){
         uint64_t currentGsBase;
         asm volatile("rdgsbase %0" : "=r"(currentGsBase));
         return currentGsBase & 0xff;
     }
 
     bool populateProcessorInfo() {
-        auto& madt = acpi::the<acpi::MADT>();
-        pinfo = new ProcessorInfo[hal::processorCount()];
+        auto& madt = acpi::the<MADT>();
+        pinfo = new ProcessorInfo[processorCount()];
         size_t countedAPs = 0; //minus the BSP
         auto bspLapicID = interrupts::getLAPICDomain() -> getID();
-        for(auto& entry : madt.entries<acpi::MADT_LAPIC_Entry>()){
+        for(auto& entry : madt.entries<MADT_LAPIC_Entry>()){
             if((entry.flags & 3) == 1){
                 //Always ensure the BSP is marked as CPU 0
                 if (entry.apicID == bspLapicID) {
@@ -57,7 +57,7 @@ namespace kernel::amd64::smp{
     }
 
     const ProcessorInfo &getProcessorInfoForAcpiID(uint8_t acpiID) {
-        for (size_t i = 0; i < hal::processorCount(); i++) {
+        for (size_t i = 0; i < processorCount(); i++) {
             if (pinfo[i].acpiProcessorID == acpiID) {
                 return pinfo[i];
             }
@@ -66,7 +66,7 @@ namespace kernel::amd64::smp{
     }
 
     const ProcessorInfo &getProcessorInfoForLapicID(uint8_t lapicID) {
-        for (size_t i = 0; i < hal::processorCount(); i++) {
+        for (size_t i = 0; i < processorCount(); i++) {
             if (pinfo[i].lapicID == lapicID) {
                 return pinfo[i];
             }
@@ -74,7 +74,7 @@ namespace kernel::amd64::smp{
         assertNotReached("Tried to look up processor info for absent APIC ID");
     }
 
-    const ProcessorInfo &getProcessorInfoForProcessorID(hal::ProcessorID pid) {
+    const ProcessorInfo &getProcessorInfoForProcessorID(ProcessorID pid) {
         return pinfo[pid];
     }
 
@@ -118,7 +118,7 @@ namespace kernel::amd64::smp{
         sti();
         setupTrampoline();
         remapIdentity();
-        for (size_t i = 1; i < hal::processorCount(); i++) {
+        for (size_t i = 1; i < processorCount(); i++) {
             const auto pid = static_cast<ProcessorID>(i);
             setupStack(pid);
             initProcessor(pid);

@@ -4,7 +4,7 @@
 
 #include "arch/amd64/amd64.h"
 
-namespace kernel::amd64 {
+namespace arch::amd64 {
     //Wrapper for the CPUID instruction. The first four parameters are references to uint32_t's corresponding to
     //the registers EAX-EDX. The last parameter is the value to load into EAX (the "leaf" per the
     //Intel manual) before calling CPUID.

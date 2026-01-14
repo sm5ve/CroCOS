@@ -10,8 +10,8 @@
 #include <core/ds/Bimap.h>
 #include <core/ds/SmartPointer.h>
 
-namespace kernel::amd64::interrupts{
-    using namespace kernel::hal::interrupts::platform;
+namespace arch::amd64::interrupts{
+    using namespace kernel::interrupts::platform;
     CRClass(IRQDomain, public InterruptDomain, public FixedRoutingDomain){
         size_t surjectiveMapping[16];
         size_t maxMapping;

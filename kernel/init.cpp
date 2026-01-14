@@ -4,7 +4,7 @@
 
 #include <init.h>
 #include <kernel.h>
-#include <arch/hal/hal.h>
+#include <arch.h>
 
 namespace kernel::init {
     void resetComponentStates() {
@@ -35,7 +35,7 @@ namespace kernel::init {
     void printAPBadge(bool phaseMarker, bool hasPID) {
         klog << "[AP ";
         if (hasPID) {
-            klog << hal::getCurrentProcessorID();
+            klog << arch::getCurrentProcessorID();
         }
         else {
             klog << "?";

@@ -9,7 +9,7 @@
 #include <arch/amd64/interrupts/AuxiliaryDomains.h>
 #include <arch/amd64/interrupts/LegacyPIC.h>
 
-namespace kernel::amd64::interrupts{
+namespace arch::amd64::interrupts{
     constexpr uint32_t IOAPIC_REG_ID = 0x00;
     constexpr uint32_t IOAPIC_REG_VERSION = 0x01;
     constexpr uint32_t IOAPIC_REG_ARBITRATION_PRIORITY = 0x02;
@@ -25,7 +25,7 @@ namespace kernel::amd64::interrupts{
     IOAPIC::IOAPIC(const uint8_t i, void* m, const uint32_t g) : id(i), mmio_window(static_cast<volatile uint32_t*>(m)), gsi_base(g) {
         const uint32_t version = regRead(IOAPIC_REG_VERSION);
         lineCount = (version >> 16) & 0xffu;
-        activationTypes = make_unique_array<Optional<hal::interrupts::InterruptLineActivationType>>(lineCount);
+        activationTypes = make_unique_array<Optional<kernel::interrupts::InterruptLineActivationType>>(lineCount);
     }
 
     IOAPIC::~IOAPIC() {}
@@ -44,11 +44,11 @@ namespace kernel::amd64::interrupts{
         return static_cast<uint8_t>(lineIndex * 2 + 0x10);
     }
 
-    void IOAPIC::setActivationTypeByGSI(const uint32_t gsi, const hal::interrupts::InterruptLineActivationType type) {
+    void IOAPIC::setActivationTypeByGSI(const uint32_t gsi, const kernel::interrupts::InterruptLineActivationType type) {
         setActivationType(gsi + gsi_base, type);
     }
 
-    void IOAPIC::setActivationType(const size_t receiver, const hal::interrupts::InterruptLineActivationType type) {
+    void IOAPIC::setActivationType(const size_t receiver, const kernel::interrupts::InterruptLineActivationType type) {
         assert(receiver < lineCount, "gsi out of range");
         auto regVal = regRead(getRegStartForLineIndex(receiver));
         constexpr uint32_t polarity_mask = 1u << 13;
@@ -60,12 +60,12 @@ namespace kernel::amd64::interrupts{
         activationTypes[receiver] = type;
     }
 
-    Optional<hal::interrupts::InterruptLineActivationType> IOAPIC::getActivationType(size_t receiver) const {
+    Optional<kernel::interrupts::InterruptLineActivationType> IOAPIC::getActivationType(size_t receiver) const {
         if (receiver >= lineCount) return {};
         return activationTypes[receiver];
     }
-    
-    void IOAPIC::setUninitializedActivationTypes(hal::interrupts::InterruptLineActivationType type) {
+
+    void IOAPIC::setUninitializedActivationTypes(kernel::interrupts::InterruptLineActivationType type) {
         for (size_t i = 0; i < lineCount; i++) {
             if (!activationTypes[i].occupied()) {
                 setActivationType(i, type);
@@ -186,11 +186,11 @@ namespace kernel::amd64::interrupts{
             }
             ioapicsByID[ioapicEntry.ioapicID] = ioapic;
             ioapicsByGSI.insert(ioapic);
-            hal::interrupts::topology::registerDomain(ioapic);
+            kernel::interrupts::topology::registerDomain(ioapic);
 
             auto apicConnector = make_shared<AffineConnector>(ioapic,
             getLAPICDomain(), IOAPIC_VECTOR_MAPPING_BASE, 0, ioapic -> getEmitterCount());
-            hal::interrupts::topology::registerConnector(apicConnector);
+            kernel::interrupts::topology::registerConnector(apicConnector);
         }
     }
 
@@ -206,10 +206,10 @@ namespace kernel::amd64::interrupts{
         return apicForGSI;
     }
 
-    hal::interrupts::InterruptLineActivationType getActivationTypeFromMADTFlags(uint16_t flags) {
+    kernel::interrupts::InterruptLineActivationType getActivationTypeFromMADTFlags(uint16_t flags) {
         bool activeHigh = (flags & 2) == 0;
         bool edgeTriggered = (flags & 8) == 0;
-        return hal::interrupts::activationTypeForLevelAndTriggerMode(activeHigh, edgeTriggered);
+        return kernel::interrupts::activationTypeForLevelAndTriggerMode(activeHigh, edgeTriggered);
     }
 
     SharedPtr<IOAPIC> addIRQDomainConectorMapping(Optional<size_t>* irqToEmitterMap, size_t& emitterMax, HashMap<SharedPtr<IOAPIC>, SharedPtr<Bimap<size_t, size_t>>>& connectorMapsByIOAPIC, uint8_t irqSource, uint32_t gsi) {
@@ -272,12 +272,12 @@ namespace kernel::amd64::interrupts{
         }
 
         irqDomain = make_shared<IRQDomain>(finalizedEmitterMap);
-        hal::interrupts::topology::registerDomain(irqDomain);
+        kernel::interrupts::topology::registerDomain(irqDomain);
         for (const auto& connectorInfo : connectorMapsByIOAPIC) {
             auto ioapic = connectorInfo.first();
             auto bimap = connectorInfo.second();
             auto connector = make_shared<IRQToIOAPICConnector>(irqDomain, ioapic, move(*bimap));
-            hal::interrupts::topology::registerConnector(connector);
+            kernel::interrupts::topology::registerConnector(connector);
         }
     }
 
@@ -312,11 +312,11 @@ namespace kernel::amd64::interrupts{
     }
 
     size_t LAPIC::getEmitterCount() {
-        return hal::CPU_INTERRUPT_COUNT;
+        return CPU_INTERRUPT_COUNT;
     }
 
     size_t LAPIC::getReceiverCount() {
-        return hal::CPU_INTERRUPT_COUNT;
+        return CPU_INTERRUPT_COUNT;
     }
 
     size_t LAPIC::getEmitterFor(size_t receiver) const {
@@ -433,7 +433,7 @@ namespace kernel::amd64::interrupts{
     SharedPtr<LAPICLocalDeviceEmitters> localDeviceEmitters;
     SharedPtr<LAPICLocalDeviceRoutingDomain> localDeviceRouter;
 
-    using namespace hal::interrupts;
+    using namespace kernel::interrupts;
 
     CRClass(LAPICLocalDeviceRoutingDomain, public FreeRoutableDomain, public InterruptDomain, public EOIDomain, public ConfigurableActivationTypeDomain) {
         LAPIC& lapic;
@@ -445,7 +445,7 @@ namespace kernel::amd64::interrupts{
         }
 
         size_t getEmitterCount() override {
-            return hal::CPU_INTERRUPT_COUNT;
+            return CPU_INTERRUPT_COUNT;
         }
 
         size_t getReceiverCount() override {
@@ -503,7 +503,7 @@ namespace kernel::amd64::interrupts{
         }
     };
 
-    using namespace kernel::hal::timing;
+    using namespace kernel::timing;
 
     constexpr uint32_t LAPIC_TIMER_INITIAL_COUNT_REGISTER = 0x380;
     constexpr uint32_t LAPIC_TIMER_CURRENT_COUNT_REGISTER = 0x390;
@@ -604,25 +604,25 @@ namespace kernel::amd64::interrupts{
         enableAPIC();
         auto lapicBasePhysical = getLAPICBase();
         lapicDomain = make_shared<LAPIC>(mm::phys_addr(lapicBasePhysical));
-        hal::interrupts::topology::registerDomain(lapicDomain);
-        auto lapicConnector = make_shared<AffineConnector>(lapicDomain, getCPUInterruptVectors(), 0, 0, hal::CPU_INTERRUPT_COUNT);
-        hal::interrupts::topology::registerConnector(lapicConnector);
+        kernel::interrupts::topology::registerDomain(lapicDomain);
+        auto lapicConnector = make_shared<AffineConnector>(lapicDomain, getCPUInterruptVectors(), 0, 0, CPU_INTERRUPT_COUNT);
+        kernel::interrupts::topology::registerConnector(lapicConnector);
         spuriousInterruptDomain = make_shared<SpuriousInterruptDomain>();
-        hal::interrupts::topology::registerDomain(spuriousInterruptDomain);
+        kernel::interrupts::topology::registerDomain(spuriousInterruptDomain);
         auto spuriousConnector = make_shared<AffineConnector>(spuriousInterruptDomain, getCPUInterruptVectors(), LAPIC_SPURIOUS_INTERRUPT_VECTOR, 0, 1);
-        hal::interrupts::topology::registerExclusiveConnector(spuriousConnector);
+        kernel::interrupts::topology::registerExclusiveConnector(spuriousConnector);
         localDeviceEmitters = make_shared<LAPICLocalDeviceEmitters>();
         localDeviceRouter = make_shared<LAPICLocalDeviceRoutingDomain>(*lapicDomain);
-        hal::interrupts::topology::registerDomain(localDeviceEmitters);
-        hal::interrupts::topology::registerDomain(localDeviceRouter);
+        kernel::interrupts::topology::registerDomain(localDeviceEmitters);
+        kernel::interrupts::topology::registerDomain(localDeviceRouter);
         auto localDeviceEmitterConnector = make_shared<AffineConnector>(localDeviceEmitters, localDeviceRouter, 0, 0, MAX_LVT_SIZE);
-        hal::interrupts::topology::registerConnector(localDeviceEmitterConnector);
-        auto localDeviceRouterConnector = make_shared<AffineConnector>(localDeviceRouter, getCPUInterruptVectors(), 0, 0, hal::CPU_INTERRUPT_COUNT);
-        hal::interrupts::topology::registerConnector(localDeviceRouterConnector);
+        kernel::interrupts::topology::registerConnector(localDeviceEmitterConnector);
+        auto localDeviceRouterConnector = make_shared<AffineConnector>(localDeviceRouter, getCPUInterruptVectors(), 0, 0, CPU_INTERRUPT_COUNT);
+        kernel::interrupts::topology::registerConnector(localDeviceRouterConnector);
         createIOAPICStructures(madt);
         createIRQDomainConnectorsAndConfigureIOAPICActivationType(madt);
         for (const auto& ioapic : ioapicsByID.values()) {
-            ioapic -> setUninitializedActivationTypes(hal::interrupts::activationTypeForLevelAndTriggerMode(true, false));
+            ioapic -> setUninitializedActivationTypes(kernel::interrupts::activationTypeForLevelAndTriggerMode(true, false));
         }
         klog << "Enabled APIC\n";
 

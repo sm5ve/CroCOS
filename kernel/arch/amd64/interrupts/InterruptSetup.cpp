@@ -8,7 +8,7 @@
 #define ISR(n) extern "C" void isr_##n();
 #define SET_ISR(n) set_idt_entry(n, isr_##n, is_trap_gate(n));
 
-namespace kernel::amd64::interrupts{
+namespace arch::amd64::interrupts{
     //Use the python-generated string collection of macros to get access to our various ISRs
     #include "isr.inc"
 
@@ -57,13 +57,17 @@ namespace kernel::amd64::interrupts{
         };
     }
 
-    bool init(){
-        cli();
+    bool initBSP(){
+        arch::amd64::cli();
         //actually populate the IDT using the auto-generated macro file
         #include "isr_set.inc"
         asm volatile("lidt %0" : : "m"(idtr));
-        //Probably we should defer calling sti until the system is in a more stable state.
-        //asm volatile("sti");
+        return true;
+    }
+
+    bool initAP() {
+        cli();
+        asm volatile("lidt %0" : : "m"(idtr));
         return true;
     }
 
@@ -74,7 +78,7 @@ namespace kernel::amd64::interrupts{
     }
 }
 
-Core::PrintStream& operator<<(Core::PrintStream& ps, kernel::amd64::interrupts::InterruptFrame& iframe){
+Core::PrintStream& operator<<(Core::PrintStream& ps, arch::amd64::interrupts::InterruptFrame& iframe){
     kernel::klog << "Interrupt frame for vector " << iframe.vector_index << " error code " << iframe.error_code << "\n";
     kernel::klog << "RIP " << (void*)iframe.rip << "    ";
     kernel::klog << "FLG " << (void*)iframe.rflags << "    ";
@@ -99,7 +103,7 @@ Core::PrintStream& operator<<(Core::PrintStream& ps, kernel::amd64::interrupts::
     return ps;
 }
 
-extern "C" void interrupt_common_handler(kernel::amd64::interrupts::InterruptFrame& frame){
-    kernel::hal::interrupts::managed::dispatchInterrupt(frame);
+extern "C" void interrupt_common_handler(arch::amd64::interrupts::InterruptFrame& frame){
+    interrupts::managed::dispatchInterrupt(frame);
     //kernel::print_stacktrace(reinterpret_cast<uintptr_t*>(&frame.rbp));
 }

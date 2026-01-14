@@ -8,7 +8,7 @@
 #include <interrupts/InterruptGraphs.h>
 #include <core/ds/Heap.h>
 
-namespace kernel::hal::interrupts::managed{
+namespace kernel::interrupts::managed{
     using DomainReceiverLoadMap = HashMap<RoutingNodeLabel, size_t>;
 
     struct InterruptReceiverLoadComparator {

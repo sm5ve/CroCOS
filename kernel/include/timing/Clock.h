@@ -10,17 +10,17 @@
 #include <core/ds/SmartPointer.h>
 #include <core/ds/Optional.h>
 
-namespace kernel::hal::timing {
+namespace kernel::timing {
     class ClockSource;
     class EventSource;
 }
 
 namespace kernel::timing {
-    void calibrateClockSource(kernel::hal::timing::ClockSource& knownReference, kernel::hal::timing::ClockSource& toCalibrate);
-    void calibrateECEventSource(hal::timing::EventSource&);
+    void calibrateClockSource(ClockSource& knownReference, ClockSource& toCalibrate);
+    void calibrateECEventSource(EventSource&);
 }
 
-namespace kernel::hal::timing {
+namespace kernel::timing {
     using FrequencyData = Core::FrequencyData;
 
     using csflags_t = uint8_t;

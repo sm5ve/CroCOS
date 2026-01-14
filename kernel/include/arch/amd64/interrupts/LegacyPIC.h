@@ -5,7 +5,7 @@
 #ifndef CROCOS_LEGACYPIC_H
 #define CROCOS_LEGACYPIC_H
 
-namespace kernel::amd64::interrupts{
+namespace arch::amd64::interrupts{
     void disableLegacyPIC();
 }
 

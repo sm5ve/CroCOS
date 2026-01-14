@@ -3,7 +3,7 @@
 //
 
 #include "kernel.h"
-#include "arch/hal/hal.h"
+#include <arch.h>
 #include "arch/amd64/amd64.h"
 #include <mem/mm.h>
 #include <assert.h>
@@ -36,7 +36,7 @@ extern volatile uint64_t boot_page_directory_pointer_table[ENTRIES_PER_TABLE];
 #define LOCAL_VIRT_ADDR 12, 31
 #define LOCAL_OCCUPIED_BIT 9, 9
 
-namespace kernel::amd64::PageTableManager{
+namespace arch::amd64::PageTableManager{
 
     struct PageDirectoryEntry;
     struct PTMetadata;
@@ -242,7 +242,7 @@ namespace kernel::amd64::PageTableManager{
     static_assert(sizeof(PTMetadata) == 8, "PTMetadata of wrong size");
     static_assert(sizeof(PageDirectoryEntry[512]) == 4096, "PageDirectoryEntry improperly packed");
 
-    uint64_t toProcessBitmapBlank[divideAndRoundUp(kernel::hal::MAX_PROCESSOR_COUNT,sizeof(uint64_t))];
+    uint64_t toProcessBitmapBlank[divideAndRoundUp(arch::MAX_PROCESSOR_COUNT,sizeof(uint64_t))];
     size_t meaningfulBitmapPages;
 
     struct PageInfo{
@@ -261,7 +261,7 @@ namespace kernel::amd64::PageTableManager{
     struct OverflowPoolEntry{
         PageInfo pageInfo;
         bool readyToProcess;
-        uint64_t toProcessBitmap[kernel::hal::MAX_PROCESSOR_COUNT / sizeof(uint64_t)];
+        uint64_t toProcessBitmap[arch::MAX_PROCESSOR_COUNT / sizeof(uint64_t)];
 
         constexpr OverflowPoolEntry() = default;
 
@@ -367,13 +367,13 @@ namespace kernel::amd64::PageTableManager{
         thread_fence();
         m.readyToProcess = true;
         if(singleProcessorMode){
-            processOverflowPool();
+            arch::amd64::PageTableManager::processOverflowPool();
         }
         return true;
     }
 
     void processOverflowPool(){
-        auto pid = hal::getCurrentProcessorID();
+        auto pid = arch::getCurrentProcessorID();
         auto processorInd = divideAndRoundDown((size_t)pid, sizeof(uint64_t));
         auto mask = (1ul << (pid % sizeof(uint64_t)));
         for(auto index = freeOverflowReadHead; index != freeOverflowWriteHead; index = (index + 1) % FREE_OVERFLOW_POOL_SIZE){
@@ -386,7 +386,7 @@ namespace kernel::amd64::PageTableManager{
             if((entry.toProcessBitmap[processorInd] & mask) == 0)
                 continue;
             //If we haven't processed this entry in the freeOverflowPool yet, flush the TLB entry for the corresponding page!
-            kernel::amd64::invlpg(entry.pageInfo.virtualAddress.value);
+            arch::amd64::invlpg(entry.pageInfo.virtualAddress.value);
             //Then flip the bit indicating we've processed this TLB flush
             atomic_and_fetch(entry.toProcessBitmap[processorInd], ~mask, MemoryOrder::ACQUIRE);
             //If all other processors have processed this page, increment the freeOverflowReadHead!
@@ -800,13 +800,13 @@ namespace kernel::amd64::PageTableManager{
     }
 
     void pushFlushPlanner(mm::FlushPlanner& planner){
-        auto pid = hal::getCurrentProcessorID();
+        auto pid = arch::getCurrentProcessorID();
         planner._ptmInternal_setPreviousPlanner(flushPlanners[pid]);
         flushPlanners[pid] = &planner;
     }
 
     void popFlushPlanner(){
-        auto pid = hal::getCurrentProcessorID();
+        auto pid = arch::getCurrentProcessorID();
         assert(flushPlanners[pid] != nullptr, "Tried to pop flush planner from empty stack");
         flushPlanners[pid] = flushPlanners[pid] -> _ptmInternal_getPreviousPlanner();
     }

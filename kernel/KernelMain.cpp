@@ -1,7 +1,6 @@
 //
 // Created by Spencer Martin on 2/13/25.
 //
-#include <arch/hal/hal.h>
 #include <kernel.h>
 #include <core/Object.h>
 #include <core/algo/GraphAlgorithms.h>
@@ -10,22 +9,19 @@
 #include <timing/timing.h>
 #include <arch/amd64/smp.h>
 #include <init.h>
+#include <arch.h>
 
 extern "C" void (*__init_array_start[])(void) __attribute__((weak));
 extern "C" void (*__init_array_end[])(void) __attribute__((weak));
 
 namespace kernel{
-    hal::SerialPrintStream EarlyBootStream;
+    arch::SerialPrintStream EarlyBootStream;
     Core::PrintStream& klog = EarlyBootStream;
 
     bool runGlobalConstructors(){
         for (void (**ctor)() = __init_array_start; ctor != __init_array_end; ctor++) {
             (*ctor)();
         }
-        return true;
-    }
-
-    bool counter() {
         return true;
     }
 

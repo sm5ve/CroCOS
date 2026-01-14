@@ -10,19 +10,19 @@
 #include <interrupts/InterruptGraphs.h>
 #include <interrupts/InterruptRoutingPolicy.h>
 
-#include <arch/hal/hal.h>
+#include <arch.h>
 
-namespace kernel::hal::interrupts {
+namespace kernel::interrupts {
     namespace managed {
-        using InterruptHandler = Function<void(hal::InterruptFrame&)>;
+        using InterruptHandler = Function<void(arch::InterruptFrame&)>;
         using InterruptSourceHandle = RoutingNodeLabel;
 
         bool updateRouting();
-        void dispatchInterrupt(InterruptFrame& frame);
+        void dispatchInterrupt(arch::InterruptFrame& frame);
         void registerHandler(const InterruptSourceHandle& interruptSource, InterruptHandler&& handler);
     }
 }
 
-#include <arch/hal/internal/_InterruptsExplicitTypes.h>
+#include <interrupts/_InterruptsExplicitTypes.h>
 
 #endif //INTERRUPTS_H

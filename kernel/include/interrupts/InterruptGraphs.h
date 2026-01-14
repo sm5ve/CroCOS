@@ -11,10 +11,10 @@
 #include <core/ds/SmartPointer.h>
 #include <core/Hasher.h>
 
-#include <arch/hal/hal.h>
+#include <arch.h>
 #include <interrupts/interrupts.h>
 
-namespace kernel::hal::interrupts {
+namespace kernel::interrupts {
    enum class InterruptLineActivationType : uint8_t{
       LEVEL_LOW = 0b00,
       LEVEL_HIGH = 0b01,
@@ -94,7 +94,7 @@ namespace kernel::hal::interrupts {
 
       CRClass(EOIDomain) {
       public:
-         virtual void issueEOI(InterruptFrame& iframe) = 0;
+         virtual void issueEOI(arch::InterruptFrame& iframe) = 0;
       };
 
       CRClass(CPUInterruptVectorFile, public InterruptDomain, public InterruptReceiver) {
@@ -192,11 +192,11 @@ namespace kernel::hal::interrupts {
 }
 
 template<>
-struct DefaultHasher<kernel::hal::interrupts::managed::RoutingNodeLabel> {
-   size_t operator()(const kernel::hal::interrupts::managed::RoutingNodeLabel& label) const;
+struct DefaultHasher<interrupts::managed::RoutingNodeLabel> {
+   size_t operator()(const interrupts::managed::RoutingNodeLabel& label) const;
 };
 
-namespace kernel::hal::interrupts {
+namespace kernel::interrupts {
    namespace managed {
       enum class RoutingNodeTriggerType : size_t {
          TRIGGER_LEVEL = 0,
@@ -321,6 +321,6 @@ namespace kernel::hal::interrupts {
    }
 }
 
-#include "../arch/hal/internal/_InterruptsExplicitTypes.h"
+#include <interrupts/_InterruptsExplicitTypes.h>
 
 #endif //CROCOS_INTERRUPTS_H

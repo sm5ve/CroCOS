@@ -13,7 +13,7 @@
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Waddress-of-packed-member"
-namespace kernel::amd64::timers{
+namespace arch::amd64::timers{
     constexpr uint32_t maximumClockPeriod = 0x05F5E100; //according to the osdev wiki
 
     struct HPETComparatorRegisters {
@@ -254,7 +254,7 @@ namespace kernel::amd64::timers{
     WITH_GLOBAL_CONSTRUCTOR(MonotonicBimap, comparatorBimap);
     WITH_GLOBAL_CONSTRUCTOR(MonotonicBimap, ioapicBimap);
 
-    using namespace hal::interrupts;
+    using namespace kernel::interrupts;
     CRClass(HPETComparatorSourceDomain, public platform::InterruptDomain, public platform::InterruptEmitter) {
     public:
         size_t getEmitterCount() override {
@@ -311,7 +311,7 @@ namespace kernel::amd64::timers{
         }
     };
 
-    using namespace hal::timing;
+    using namespace kernel::timing;
 
     constexpr auto hpetBaseFlags = ES_KNOWN_STABLE | ES_FIXED_FREQUENCY | ES_ONESHOT | ES_TRACKS_INTERMEDIATE_TIME;
 

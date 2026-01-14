@@ -7,7 +7,7 @@
 #include <core/utility.h>
 #include <core/algo/GraphAlgorithms.h>
 
-namespace kernel::hal::interrupts {
+namespace kernel::interrupts {
     namespace topology {
         
 #ifdef CROCOS_TESTING
@@ -147,7 +147,7 @@ namespace kernel::hal::interrupts {
 
     namespace managed {
         size_t RoutingNodeLabel::hash() const {
-            const size_t domainHash = DefaultHasher<SharedPtr<kernel::hal::interrupts::platform::InterruptDomain>>{}(this -> domain());
+            const size_t domainHash = DefaultHasher<SharedPtr<platform::InterruptDomain>>{}(this -> domain());
             const size_t indexHash = this -> index();
 
             return domainHash ^ (indexHash << 1);
@@ -679,10 +679,10 @@ namespace kernel::hal::interrupts {
     }
 }
 
-size_t DefaultHasher<kernel::hal::interrupts::managed::RoutingNodeLabel>::operator()(const kernel::hal::interrupts::managed::RoutingNodeLabel& label) const {
+size_t DefaultHasher<interrupts::managed::RoutingNodeLabel>::operator()(const interrupts::managed::RoutingNodeLabel& label) const {
     return label.hash();
 }
 
 // Explicit template instantiations to force code generation
-template class kernel::hal::interrupts::managed::PotentialEdgeIterator<true>;
-template class kernel::hal::interrupts::managed::PotentialEdgeIterator<false>;
+template class interrupts::managed::PotentialEdgeIterator<true>;
+template class interrupts::managed::PotentialEdgeIterator<false>;

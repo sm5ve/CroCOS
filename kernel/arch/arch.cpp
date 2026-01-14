@@ -2,7 +2,7 @@
 // Created by Spencer Martin on 2/15/25.
 //
 
-#include "arch/hal/hal.h"
+#include <arch.h>
 
 #ifdef __x86_64__
 #include "arch/amd64/amd64.h"
@@ -10,10 +10,10 @@
 #endif
 extern size_t archProcessorCount;
 
-namespace kernel::hal{
+namespace arch{
     void serialOutputString(const char *str) {
 #ifdef __x86_64__
-        kernel::amd64::serialOutputString(str);
+        amd64::serialOutputString(str);
 #endif
     }
 
@@ -28,7 +28,7 @@ namespace kernel::hal{
     }
 
     void SerialPrintStream::putString(const char * str){
-        kernel::hal::serialOutputString(str);
+        serialOutputString(str);
     }
 
     InterruptDisabler::InterruptDisabler() {
@@ -51,5 +51,4 @@ namespace kernel::hal{
     InterruptDisabler::~InterruptDisabler() {
         release();
     }
-
 }

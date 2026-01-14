@@ -83,7 +83,7 @@ extern uint32_t phys_end;
 
 size_t archProcessorCount;
 
-namespace kernel::amd64{
+namespace arch::amd64{
 
     void flushTLB(){
         asm volatile("mov %cr3, %rax\n"
@@ -331,8 +331,8 @@ namespace kernel::amd64{
         return true;
     }
 
-    void temporaryPageFaultHandler(hal::InterruptFrame& frame) {
-        kernel::klog << "Page fault at " << reinterpret_cast<void*>(frame.rip) << "\n";
+    void temporaryPageFaultHandler(InterruptFrame& frame) {
+        klog << "Page fault at " << reinterpret_cast<void*>(frame.rip) << "\n";
         print_stacktrace(&frame.rbp);
         asm volatile("outw %0, %1" ::"a"((uint16_t)0x2000), "Nd"((uint16_t)0x604));
     }
@@ -340,16 +340,16 @@ namespace kernel::amd64{
     bool setupInterruptControllers() {
         auto& madt = kernel::acpi::the<acpi::MADT>();
         interrupts::disableLegacyPIC();
-        hal::interrupts::platform::setupCPUInterruptVectorFile(INTERRUPT_VECTOR_COUNT);
+        interrupts::platform::setupCPUInterruptVectorFile(INTERRUPT_VECTOR_COUNT);
         interrupts::setupAPICs(madt);
         const auto exceptionVectors = make_shared<interrupts::ExceptionVectorDomain>(INTERRUPT_VECTOR_RESERVE_SIZE);
-        hal::interrupts::topology::registerDomain(exceptionVectors);
+        interrupts::topology::registerDomain(exceptionVectors);
         const auto exceptionVectorConnector =
-            make_shared<hal::interrupts::platform::AffineConnector>(exceptionVectors,
-            hal::interrupts::platform::getCPUInterruptVectors(), INTERRUPT_VECTOR_RESERVE_START, 0, INTERRUPT_VECTOR_RESERVE_SIZE);
-        hal::interrupts::topology::registerExclusiveConnector(exceptionVectorConnector);
+            make_shared<interrupts::platform::AffineConnector>(exceptionVectors,
+            interrupts::platform::getCPUInterruptVectors(), INTERRUPT_VECTOR_RESERVE_START, 0, INTERRUPT_VECTOR_RESERVE_SIZE);
+        interrupts::topology::registerExclusiveConnector(exceptionVectorConnector);
 
-        using namespace hal::interrupts::managed;
+        using namespace interrupts::managed;
         registerHandler(InterruptSourceHandle(exceptionVectors, 14), temporaryPageFaultHandler);
 
         return true;
@@ -376,11 +376,11 @@ namespace kernel::amd64{
                     free_memory_regions.push({range, buff});
                 }
             }
-            }
+        }
 
         unmapTemporaryWindow();
 
-        kernel::mm::PageAllocator::init(free_memory_regions, hal::processorCount());
+        kernel::mm::PageAllocator::init(free_memory_regions, processorCount());
         //Find the memory range where the kernel resides and reserve it so we don't overwrite anything!
         mm::phys_memory_range range{.start=mm::phys_addr(nullptr), .end=mm::phys_addr(&phys_end)};
         mm::PageAllocator::reservePhysicalRange(range);
@@ -388,7 +388,7 @@ namespace kernel::amd64{
     }
 
     bool initPageTableManager() {
-        PageTableManager::init(hal::processorCount());
+        PageTableManager::init(arch::processorCount());
         return true;
     }
 }

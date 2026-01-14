@@ -11,7 +11,7 @@ set(KERNEL_SRC
         arch/amd64/multiboot1.asm
         arch/amd64/interrupts/InterruptVectorTrampolines.asm
         KernelMain.cpp
-        arch/hal/hal.cpp
+        arch/arch.cpp
         panic.cpp
         mm/kmalloc.cpp
         acpi/ACPIFixedTables.cpp
@@ -23,14 +23,14 @@ set(KERNEL_SRC
         arch/amd64/smp/smp.cpp
         arch/amd64/interrupts/InterruptSetup.cpp
         arch/amd64/lgdt.asm
-        arch/hal/InterruptGraphManager.cpp
+        interrupts/InterruptGraphManager.cpp
         cxxcompat.cpp
         arch/amd64/interrupts/APIC.cpp
         arch/amd64/timers/PIT.cpp
         arch/amd64/timers/HPET.cpp
-        arch/hal/InterruptRoutingAndDispatch.cpp
-        arch/hal/InterruptRoutingPolicyImpls.cpp
-        arch/hal/ExplicitTypes.cpp
+        interrupts/InterruptRoutingAndDispatch.cpp
+        interrupts/InterruptRoutingPolicyImpls.cpp
+        interrupts/ExplicitTypes.cpp
         timing/BlockingSleep.cpp
         arch/amd64/smp/smpboot.asm
         init.cpp
@@ -42,7 +42,7 @@ file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/generated_source)
 set_source_files_properties(
         InterruptGraphManager.cpp
         InterruptRoutingAndDispatch.cpp
-        arch/hal/InterruptRoutingPolicyImpls.cpp
+        interrupts/InterruptRoutingPolicyImpls.cpp
         PROPERTIES COMPILE_FLAGS "-O2 -ftemplate-backtrace-limit=0"
 )
 

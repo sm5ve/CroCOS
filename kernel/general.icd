@@ -30,7 +30,7 @@ required = true
 per_cpu = false
 phase = "memory_management"
 depends_on_capabilities = ["cpu_count"]
-routine = "kernel::amd64::initPageTableAllocator" #FIXME make this platform independent
+routine = "arch::amd64::initPageTableAllocator" #FIXME make this platform independent
 
 [PTM]
 
@@ -41,7 +41,7 @@ phase = "memory_management"
 depends_on = ["PageAllocator"]
 provides_capabilities = ["mmio"]
 depends_on_capabilities = ["logical_cpu_id"]
-routine = "kernel::amd64::initPageTableManager" #FIXME make this platform independent
+routine = "arch::amd64::initPageTableManager" #FIXME make this platform independent
 
 [InterruptManager]
 
@@ -50,7 +50,7 @@ required = true
 per_cpu = false
 phase = "core_devices"
 depends_on_capabilities = ["cpu_interrupt_setup", "core_device"]
-routine = "kernel::hal::interrupts::managed::updateRouting"
+routine = "kernel::interrupts::managed::updateRouting"
 
 [TimerManager]
 

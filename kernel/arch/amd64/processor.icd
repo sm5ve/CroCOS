@@ -4,7 +4,7 @@ name = "GDT Setup"
 required = true
 per_cpu = true
 phase = "processor_early"
-routine = "kernel::amd64::initGDT"
+routine = "arch::amd64::initGDT"
 
 [FSGS]
 
@@ -14,7 +14,7 @@ per_cpu = true
 provides_capabilities = ["cpu_local_storage"]
 phase = "processor_early"
 depends_on = ["GDT"]
-routine = "kernel::amd64::enableFSGSBase"
+routine = "arch::amd64::enableFSGSBase"
 
 [IDT]
 
@@ -24,8 +24,8 @@ per_cpu = true
 provides_capabilities = ["cpu_interrupt_setup"]
 phase = "processor_early"
 depends_on = ["GDT"]
-ap_routine = "kernel::counter"
-bootstrap_routine = "kernel::amd64::interrupts::init"
+ap_routine = "arch::amd64::interrupts::initAP"
+bootstrap_routine = "arch::amd64::interrupts::initBSP"
 
 [ACPISearch]
 
@@ -35,7 +35,7 @@ per_cpu = false
 provides_capabilities = ["cpu_count"]
 phase = "processor_early"
 depends_on = ["GDT"]
-routine = "kernel::amd64::searchForACPITables"
+routine = "arch::amd64::searchForACPITables"
 
 [APICEnable]
 
@@ -44,7 +44,7 @@ required = true
 per_cpu = true
 phase = "processor_early"
 depends_on = ["IDT"]
-routine = "kernel::amd64::interrupts::enableAPIC"
+routine = "arch::amd64::interrupts::enableAPIC"
 
 [PIDSet]
 
@@ -55,8 +55,8 @@ phase = "processor_early"
 depends_on = ["APICEnable"]
 ap_depends_on_capabilities = ["mmio"]
 provides_capabilities = ["logical_cpu_id"]
-bootstrap_routine = "kernel::amd64::bspSetPID"
-ap_routine = "kernel::amd64::apSetPID"
+bootstrap_routine = "arch::amd64::bspSetPID"
+ap_routine = "arch::amd64::apSetPID"
 
 [InterruptControllers]
 
@@ -66,7 +66,7 @@ per_cpu = false
 phase = "core_devices"
 depends_on_capabilities = ["mmio"]
 provides_capabilities = ["clock_source", "event_source", "core_device"]
-routine = "kernel::amd64::setupInterruptControllers"
+routine = "arch::amd64::setupInterruptControllers"
 
 [SMPTableInit]
 name = "Setup SMP Tables"
@@ -74,7 +74,7 @@ required = true
 per_cpu = false
 phase = "core_devices"
 depends_on = ["InterruptControllers"]
-routine = "kernel::amd64::smp::populateProcessorInfo"
+routine = "arch::amd64::smp::populateProcessorInfo"
 
 [PIT]
 
@@ -84,7 +84,7 @@ per_cpu = false
 depends_on = ["InterruptControllers"]
 provides_capabilities = ["core_device", "event_source"]
 phase = "core_devices"
-routine = "kernel::amd64::timers::initPIT"
+routine = "arch::amd64::timers::initPIT"
 
 [HPET]
 
@@ -94,7 +94,7 @@ per_cpu = false
 depends_on = ["InterruptControllers"]
 provides_capabilities = ["core_device", "event_source", "clock_source"]
 phase = "core_devices"
-routine = "kernel::amd64::timers::initHPET"
+routine = "arch::amd64::timers::initHPET"
 
 [SMP]
 
@@ -102,4 +102,4 @@ name = "SMP Bringup"
 required = true
 per_cpu = false
 phase = "smp_bringup"
-routine = "kernel::amd64::smp::smpInit"
+routine = "arch::amd64::smp::smpInit"

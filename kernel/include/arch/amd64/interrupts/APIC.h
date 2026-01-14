@@ -10,8 +10,9 @@
 #include <acpi.h>
 #include <mmio/Register.h>
 
-namespace kernel::amd64::interrupts{
-    using namespace hal::interrupts::platform;
+namespace arch::amd64::interrupts{
+    using namespace kernel::interrupts::platform;
+    using namespace kernel::interrupts;
     CRClass(IOAPIC, public InterruptDomain, public FreeRoutableDomain, public MaskableDomain,
         public ConfigurableActivationTypeDomain){
         uint8_t id;
@@ -19,12 +20,12 @@ namespace kernel::amd64::interrupts{
         uint32_t gsi_base;
         [[nodiscard]] uint32_t regRead(uint8_t index) const;
         size_t lineCount;
-        UniquePtr<Optional<hal::interrupts::InterruptLineActivationType>[]> activationTypes;
+        UniquePtr<Optional<InterruptLineActivationType>[]> activationTypes;
         void regWrite(uint8_t index, uint32_t value);
     public:
         IOAPIC(uint8_t id, void* mmio_window, uint32_t gsi_base);
         ~IOAPIC() override;
-        void setActivationTypeByGSI(uint32_t gsi, hal::interrupts::InterruptLineActivationType type);
+        void setActivationTypeByGSI(uint32_t gsi, InterruptLineActivationType type);
         void setNonmaskable(uint32_t gsi, bool nonmaskable = true);
         size_t getReceiverCount() override;
         size_t getEmitterCount() override;
@@ -32,9 +33,9 @@ namespace kernel::amd64::interrupts{
         [[nodiscard]] bool isReceiverMasked(size_t receiver) const override;
         void setReceiverMask(size_t receiver, bool shouldMask) override;
         [[nodiscard]] uint32_t getGSIBase() const;
-        void setActivationType(size_t receiver, hal::interrupts::InterruptLineActivationType type) override;
-        [[nodiscard]] Optional<hal::interrupts::InterruptLineActivationType> getActivationType(size_t receiver) const override;
-        void setUninitializedActivationTypes(hal::interrupts::InterruptLineActivationType type);
+        void setActivationType(size_t receiver, InterruptLineActivationType type) override;
+        [[nodiscard]] Optional<InterruptLineActivationType> getActivationType(size_t receiver) const override;
+        void setUninitializedActivationTypes(InterruptLineActivationType type);
     };
 
     enum IPIType {
@@ -47,7 +48,7 @@ namespace kernel::amd64::interrupts{
         IPIType type;
         bool level; //Only for init deassert
         uint8_t vector;
-        hal::ProcessorID target;
+        arch::ProcessorID target;
     };
 
     CRClass(LAPIC, public InterruptDomain, public FixedRoutingDomain, public EOIDomain) {
@@ -59,7 +60,7 @@ namespace kernel::amd64::interrupts{
         LAPIC(mm::phys_addr paddr);
         ~LAPIC() override;
         [[nodiscard]] size_t getEmitterFor(size_t receiver) const override;
-        void issueEOI(InterruptFrame& iframe) override;
+        void issueEOI(arch::InterruptFrame& iframe) override;
         size_t getReceiverCount() override;
         size_t getEmitterCount() override;
         uint32_t getID();

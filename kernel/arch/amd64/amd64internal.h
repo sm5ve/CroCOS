@@ -4,7 +4,7 @@
 
 #ifndef CROCOS_AMD64INTERNAL_H
 #define CROCOS_AMD64INTERNAL_H
-namespace kernel::amd64 {
+namespace arch::amd64 {
     void unmapIdentity();
     void remapIdentity();
 }

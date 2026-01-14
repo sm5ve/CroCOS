@@ -4,11 +4,9 @@
 
 #include <../include/timing/timing.h>
 #include <kernel.h>
-#include <arch/hal/hal.h>
+#include <arch.h>
 #include <core/atomic.h>
 #include <core/ds/Vector.h>
-
-using namespace kernel::hal::timing;
 
 namespace kernel::timing {
     using ClockSourceVec = Vector<ClockSource*>;
@@ -71,7 +69,7 @@ namespace kernel::timing {
     }
 
     TimerComparisonData compareTimerTicks(ClockSource& a, ClockSource& b, uint64_t minTicks) {
-        hal::InterruptDisabler disabler;
+        arch::InterruptDisabler disabler;
         assert(minTicks < (a.mask >> 1), "minTicks too large, risk of double wrap");
         assert(minTicks < (b.mask >> 1), "minTicks too large, risk of double wrap");
         const uint64_t aTimerInitTicks = a.read();

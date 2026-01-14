@@ -285,7 +285,7 @@ namespace kernel::acpi{
             for(uint32_t* tablePhysAddress = &(root -> tablePointer); (uint64_t)tablePhysAddress <
             (uint64_t)root + (root -> h.length); tablePhysAddress++){
 #ifdef __x86_64__
-                SDTHeader* table = amd64::early_boot_phys_to_virt(mm::phys_addr((uint64_t)*tablePhysAddress)).as_ptr<SDTHeader>();
+                SDTHeader* table = arch::amd64::early_boot_phys_to_virt(mm::phys_addr((uint64_t)*tablePhysAddress)).as_ptr<SDTHeader>();
 #endif
                 if(startsWith(table -> signature, ACPISignature<T>::value) && verifyTableChecksum(table) == ACPIChecksumResult::PASS){
                     tableCount++;
@@ -295,7 +295,7 @@ namespace kernel::acpi{
             for(uint32_t* tablePhysAddress = &(root -> tablePointer); (uint64_t)tablePhysAddress <
             (uint64_t)root + (root -> h.length); tablePhysAddress++){
 #ifdef __x86_64__
-                SDTHeader* table = amd64::early_boot_phys_to_virt(mm::phys_addr(*tablePhysAddress)).as_ptr<SDTHeader>();
+                SDTHeader* table = arch::amd64::early_boot_phys_to_virt(mm::phys_addr(*tablePhysAddress)).as_ptr<SDTHeader>();
 #endif
                 if(startsWith(table -> signature, ACPISignature<T>::value) && verifyTableChecksum(table) == ACPIChecksumResult::PASS){
                     out.push((T*)table);
@@ -310,7 +310,7 @@ namespace kernel::acpi{
             for(uint64_t* tablePhysAddress = &(root -> tablePointer); (uint64_t)tablePhysAddress <
             (uint64_t)root + (root -> h.length); tablePhysAddress++){
 #ifdef __x86_64__
-                SDTHeader* table = amd64::early_boot_phys_to_virt(mm::phys_addr(*tablePhysAddress)).as_ptr<SDTHeader>();
+                SDTHeader* table = arch::amd64::early_boot_phys_to_virt(mm::phys_addr(*tablePhysAddress)).as_ptr<SDTHeader>();
 #endif
                 if(startsWith(table -> signature, ACPISignature<T>::value) && verifyTableChecksum(table) == ACPIChecksumResult::PASS){
                     tableCount++;
@@ -320,7 +320,7 @@ namespace kernel::acpi{
             for(uint64_t* tablePhysAddress = &(root -> tablePointer); (uint64_t)tablePhysAddress <
             (uint64_t)root + (root -> h.length); tablePhysAddress++){
 #ifdef __x86_64__
-                SDTHeader* table = amd64::early_boot_phys_to_virt(mm::phys_addr(*tablePhysAddress)).as_ptr<SDTHeader>();
+                SDTHeader* table = arch::amd64::early_boot_phys_to_virt(mm::phys_addr(*tablePhysAddress)).as_ptr<SDTHeader>();
 #endif
                 if(startsWith(table -> signature, ACPISignature<T>::value) && verifyTableChecksum(table) == ACPIChecksumResult::PASS){
                     out.push((T*)table);
