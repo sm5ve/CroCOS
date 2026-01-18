@@ -348,7 +348,7 @@ private:
     class SharedPtrArrayControlBlock {
     public:
         T* ptr;
-        size_t refcount;
+        Atomic<size_t> refcount;
 
         SharedPtrArrayControlBlock(T* val_ptr) : ptr(val_ptr), refcount(1) {}
         ~SharedPtrArrayControlBlock() {
