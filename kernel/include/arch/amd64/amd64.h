@@ -6,6 +6,8 @@
 #define CROCOS_AMD64_TABLES_H
 
 #include <kconfig.h>
+#include <arch/PageTableSpecification.h>
+
 #include "kernel.h"
 #include <core/ds/Vector.h>
 #include <mem/FlushPlanner.h>
@@ -238,6 +240,109 @@ namespace arch::amd64 {
 
         bool areInterruptsEnabled();
     }
+
+    constexpr PageTableLevelDescriptor::PropertyBits pageEntryProperties{
+        .userAccessible = 2,
+        .writable = 1,
+        .executable = 63,
+        .global = 8,
+        .accessed = 5,
+        .dirty = 6,
+        .writeableOnOne = true,
+        .executeOnOne = false,
+        .globalOnOne = true
+    };
+
+    constexpr PageTableLevelDescriptor::PropertyBits subtableEntryProperties{
+        .userAccessible = 2,
+        .writable = 1,
+        .executable = 63,
+        .global = BIT_NOT_PRESENT,
+        .accessed = 5,
+        .dirty = BIT_NOT_PRESENT,
+        .writeableOnOne = true,
+        .executeOnOne = false,
+        .globalOnOne = true,
+    };
+
+    constexpr PageTableLevelDescriptor pageTableEntry{
+        .canBeLeaf = true,
+        .canBeSubtable = false,
+        .leafIndexBit = 7,
+        .isLeafOnOne = true,
+        .entryWidth = 64,
+        .present = 0,
+        .subtableEncoding = PageTableLevelDescriptor::EMPTY_ENTRY,
+        .leafEncoding = PageTableLevelDescriptor::EntryEncoding{
+            .properties = pageEntryProperties,
+            .physAddrLowestBit = 12,
+            .physAddrTotalBits = 40,
+            .addrStartInEntry = 12,
+        }
+    };
+
+    constexpr PageTableLevelDescriptor pageDirectoryEntry{
+        .canBeLeaf = true,
+        .canBeSubtable = true,
+        .leafIndexBit = 7,
+        .isLeafOnOne = true,
+        .entryWidth = 64,
+        .present = 0,
+        .subtableEncoding = PageTableLevelDescriptor::EntryEncoding{
+            .properties = subtableEntryProperties,
+            .physAddrLowestBit = 12,
+            .physAddrTotalBits = 40,
+            .addrStartInEntry = 12,
+        },
+        .leafEncoding = PageTableLevelDescriptor::EntryEncoding{
+            .properties = pageEntryProperties,
+            .physAddrLowestBit = 21,
+            .physAddrTotalBits = 31,
+            .addrStartInEntry = 21,
+        }
+    };
+
+    constexpr PageTableLevelDescriptor pdptEntry{
+        .canBeLeaf = true,
+        .canBeSubtable = true,
+        .leafIndexBit = 7,
+        .isLeafOnOne = true,
+        .entryWidth = 64,
+        .present = 0,
+        .subtableEncoding = PageTableLevelDescriptor::EntryEncoding{
+            .properties = subtableEntryProperties,
+            .physAddrLowestBit = 12,
+            .physAddrTotalBits = 40,
+            .addrStartInEntry = 12,
+        },
+        .leafEncoding = PageTableLevelDescriptor::EntryEncoding{
+            .properties = pageEntryProperties,
+            .physAddrLowestBit = 30,
+            .physAddrTotalBits = 22,
+            .addrStartInEntry = 30,
+        }
+    };
+
+    constexpr PageTableLevelDescriptor pml4Entry{
+        .canBeLeaf = false,
+        .canBeSubtable = true,
+        .leafIndexBit = 7,
+        .isLeafOnOne = true,
+        .entryWidth = 64,
+        .present = 0,
+        .subtableEncoding = PageTableLevelDescriptor::EntryEncoding{
+            .properties = subtableEntryProperties,
+            .physAddrLowestBit = 12,
+            .physAddrTotalBits = 40,
+            .addrStartInEntry = 12,
+        },
+        .leafEncoding = PageTableLevelDescriptor::EMPTY_ENTRY
+    };
+
+    constexpr PageTableDescriptor<4> pageTableDescriptor{
+        .levels = {pml4Entry, pdptEntry, pageDirectoryEntry, pageTableEntry},
+        .entryCount = {512, 512, 512, 512}
+    };
 }
 
 Core::PrintStream& operator<<(Core::PrintStream& ps, arch::amd64::interrupts::InterruptFrame& iframe);

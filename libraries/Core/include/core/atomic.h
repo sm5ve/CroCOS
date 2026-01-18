@@ -111,10 +111,34 @@ inline T atomic_add_fetch(T& src, T val, MemoryOrder mem_order = SEQ_CST){
 }
 
 template<typename T>
+inline T atomic_fetch_add(T& src, T val, MemoryOrder mem_order = SEQ_CST){
+    if constexpr(_use_intrinsic_atomic_ops<T>){
+#ifdef __GNUC__
+        return __atomic_fetch_add(&src, val, mem_order);
+#endif
+    }
+    else{
+        static_assert(_use_intrinsic_atomic_ops<T>, "Unimplemented");
+    }
+}
+
+template<typename T>
 inline T atomic_sub_fetch(T& src, T val, MemoryOrder mem_order = SEQ_CST){
     if constexpr(_use_intrinsic_atomic_ops<T>){
 #ifdef __GNUC__
         return __atomic_sub_fetch(&src, val, mem_order);
+#endif
+    }
+    else{
+        static_assert(_use_intrinsic_atomic_ops<T>, "Unimplemented");
+    }
+}
+
+template<typename T>
+inline T atomic_fetch_sub(T& src, T val, MemoryOrder mem_order = SEQ_CST){
+    if constexpr(_use_intrinsic_atomic_ops<T>){
+#ifdef __GNUC__
+        return __atomic_fetch_sub(&src, val, mem_order);
 #endif
     }
     else{
@@ -255,6 +279,22 @@ public:
 
     T sub_fetch(T val, MemoryOrder mem_order = SEQ_CST){
         return atomic_sub_fetch(value, val, mem_order);
+    }
+
+    T operator++(int) {
+        return add_fetch(1);
+    }
+
+    T operator--(int) {
+        return sub_fetch(1);
+    }
+
+    T operator++() {
+        return atomic_fetch_add<T>(value, 1);
+    }
+
+    T operator--() {
+        return atomic_fetch_sub<T>(value, 1);
     }
 };
 

@@ -7,6 +7,7 @@
 
 #include "stdint.h"
 #include "stddef.h"
+#include <arch/PageTableSpecification.h>
 
 #ifdef __x86_64__
 #include "arch/amd64/amd64.h"
@@ -24,7 +25,13 @@ namespace arch{
     constexpr auto disableInterrupts = amd64::cli;
     constexpr auto areInterruptsEnabled = amd64::interrupts::areInterruptsEnabled;
     constexpr size_t CPU_INTERRUPT_COUNT = amd64::INTERRUPT_VECTOR_COUNT;
+    constexpr auto pageTableDescriptor = amd64::pageTableDescriptor;
 #endif
+
+    template <size_t level>
+    using PTE = PageTableEntry<pageTableDescriptor.levels[level]>;
+    template <size_t level>
+    using PageTable = PTE<level>[pageTableDescriptor.entryCount[level]];
 
     //Guaranteed to be between 0 and (the total number of logical processors - 1)
     ProcessorID getCurrentProcessorID();

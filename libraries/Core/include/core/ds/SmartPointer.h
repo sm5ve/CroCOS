@@ -5,6 +5,8 @@
 #ifndef CROCOS_SMARTPOINTER_H
 #define CROCOS_SMARTPOINTER_H
 
+#include <core/atomic.h>
+
 #include "stddef.h"
 #include <core/utility.h>
 #include <core/TypeTraits.h>
@@ -147,8 +149,7 @@ class SharedPtrControlBlock {
 public:
     void* original_ptr;
     void (*deleter)(void*);
-    //TODO make atomic?
-    size_t refcount;
+    Atomic<size_t> refcount;
 
     template<typename U>
     SharedPtrControlBlock(U* val_ptr) : original_ptr(val_ptr), refcount(1) {
