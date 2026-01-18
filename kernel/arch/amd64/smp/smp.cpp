@@ -107,11 +107,8 @@ namespace arch::amd64::smp{
         auto trampolineDestination = early_boot_phys_to_virt(mm::phys_addr(0x1000 * SMP_TRAMPOLINE_START)).as_ptr<uint8_t>();
         asm volatile("mov %%cr3, %0" : "=r"(smp_bringup_pml4));
         klog << "set pml4 to " << (void*)smp_bringup_pml4 << "\n";
+        smp_bringup_stack = reinterpret_cast<uint64_t>(&stacks[0]);
         memcpy(trampolineDestination, &trampoline_template_start, trampolineSize);
-    }
-
-    void setupStack(ProcessorID pid) {
-        smp_bringup_stack = (uint64_t)&stacks[pid];
     }
 
     bool smpInit() {
@@ -120,7 +117,6 @@ namespace arch::amd64::smp{
         remapIdentity();
         for (size_t i = 1; i < processorCount(); i++) {
             const auto pid = static_cast<ProcessorID>(i);
-            setupStack(pid);
             initProcessor(pid);
         }
         unmapIdentity();

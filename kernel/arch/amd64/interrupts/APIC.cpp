@@ -604,30 +604,30 @@ namespace arch::amd64::interrupts{
         enableAPIC();
         auto lapicBasePhysical = getLAPICBase();
         lapicDomain = make_shared<LAPIC>(mm::phys_addr(lapicBasePhysical));
-        kernel::interrupts::topology::registerDomain(lapicDomain);
+        topology::registerDomain(lapicDomain);
         auto lapicConnector = make_shared<AffineConnector>(lapicDomain, getCPUInterruptVectors(), 0, 0, CPU_INTERRUPT_COUNT);
-        kernel::interrupts::topology::registerConnector(lapicConnector);
+        topology::registerConnector(lapicConnector);
         spuriousInterruptDomain = make_shared<SpuriousInterruptDomain>();
-        kernel::interrupts::topology::registerDomain(spuriousInterruptDomain);
+        topology::registerDomain(spuriousInterruptDomain);
         auto spuriousConnector = make_shared<AffineConnector>(spuriousInterruptDomain, getCPUInterruptVectors(), LAPIC_SPURIOUS_INTERRUPT_VECTOR, 0, 1);
-        kernel::interrupts::topology::registerExclusiveConnector(spuriousConnector);
+        topology::registerExclusiveConnector(spuriousConnector);
         localDeviceEmitters = make_shared<LAPICLocalDeviceEmitters>();
         localDeviceRouter = make_shared<LAPICLocalDeviceRoutingDomain>(*lapicDomain);
-        kernel::interrupts::topology::registerDomain(localDeviceEmitters);
-        kernel::interrupts::topology::registerDomain(localDeviceRouter);
+        topology::registerDomain(localDeviceEmitters);
+        topology::registerDomain(localDeviceRouter);
         auto localDeviceEmitterConnector = make_shared<AffineConnector>(localDeviceEmitters, localDeviceRouter, 0, 0, MAX_LVT_SIZE);
-        kernel::interrupts::topology::registerConnector(localDeviceEmitterConnector);
+        topology::registerConnector(localDeviceEmitterConnector);
         auto localDeviceRouterConnector = make_shared<AffineConnector>(localDeviceRouter, getCPUInterruptVectors(), 0, 0, CPU_INTERRUPT_COUNT);
-        kernel::interrupts::topology::registerConnector(localDeviceRouterConnector);
+        topology::registerConnector(localDeviceRouterConnector);
         createIOAPICStructures(madt);
         createIRQDomainConnectorsAndConfigureIOAPICActivationType(madt);
         for (const auto& ioapic : ioapicsByID.values()) {
-            ioapic -> setUninitializedActivationTypes(kernel::interrupts::activationTypeForLevelAndTriggerMode(true, false));
+            ioapic -> setUninitializedActivationTypes(activationTypeForLevelAndTriggerMode(true, false));
         }
         klog << "Enabled APIC\n";
 
         auto timer = new LAPICTimer(*lapicDomain);
-        timing::registerEventSource(*timer);
+        registerEventSource(*timer);
     }
 
     constexpr size_t LAPIC_ID_REG = 0x20;

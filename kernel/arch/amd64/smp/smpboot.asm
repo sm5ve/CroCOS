@@ -111,8 +111,11 @@ trampoline_template_end:
 
 .globl smp_bringup_stack
 smp_bringup_stack:
-.long 0
+.quad 0
 .extern smpEntry
+
+proc_bringup_count:
+.quad 0
 
 .section .text
 higher_half:
@@ -123,7 +126,11 @@ higher_half:
     mov %ax, %gs
     mov %ax, %ss
 
-    mov (smp_bringup_stack), %rsp
+    mov $1, %rax
+    lock xadd %rax, proc_bringup_count
+
+    imul $KERNEL_STACK_SIZE, %rax, %rax
+    lea smp_bringup_stack(%rax), %rsp
 
     call smpEntry
 2:

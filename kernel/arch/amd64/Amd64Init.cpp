@@ -324,7 +324,6 @@ namespace arch::amd64{
     }
 
     bool apSetPID() {
-        auto lapic = interrupts::getLAPICDomain();
         auto lapicID = interrupts::getLAPICDomain() -> getID();
         auto pinfo = smp::getProcessorInfoForLapicID(static_cast<uint8_t>(lapicID));
         smp::setLogicalProcessorID(pinfo.logicalID);
