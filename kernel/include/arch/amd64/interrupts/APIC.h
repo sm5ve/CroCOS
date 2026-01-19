@@ -44,11 +44,19 @@ namespace arch::amd64::interrupts{
         SIPI
     };
 
+    enum IPIDestination {
+        ALL_CPUS,
+        OTHER_CPUS,
+        SELF,
+        SPECIFIC_LAPIC
+    };
+
     struct IPIRequest {
         IPIType type;
         bool level; //Only for init deassert
         uint8_t vector;
         arch::ProcessorID target;
+        IPIDestination destination;
     };
 
     CRClass(LAPIC, public InterruptDomain, public FixedRoutingDomain, public EOIDomain) {

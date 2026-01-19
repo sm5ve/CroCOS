@@ -200,7 +200,7 @@ namespace kernel::interrupts::managed {
                     out.push({v, *destination});
                 }
                 else {
-                    klog << "Warning: " << label.domain() -> type_name() << " emitter number " << label.index() << " was not routed to an interrupt vector\n";
+                    klog() << "Warning: " << label.domain() -> type_name() << " emitter number " << label.index() << " was not routed to an interrupt vector\n";
                 }
             }
         }
@@ -295,7 +295,7 @@ namespace kernel::interrupts::managed {
             assert(vertex.occupied(), "Vertex does not exist");
             eoiBehaviorTable[i].triggerType = routingGraph.getVertexColor(*vertex).triggerType;
         }
-        klog << "Number of EOI chains: " << eoiChains.size() << "\n";
+        klog() << "Number of EOI chains: " << eoiChains.size() << "\n";
         delete[] eoiChainArray;
         delete[] indices;
     }
@@ -317,7 +317,7 @@ namespace kernel::interrupts::managed {
 
     void dispatchInterrupt(arch::InterruptFrame& frame) {
         if (frame.vector_index == 14) {
-            klog << "Pagefault at " << reinterpret_cast<void*>(frame.rip) << "\n";
+            klog() << "Pagefault at " << reinterpret_cast<void*>(frame.rip) << "\n";
             print_stacktrace(&frame.rbp);
             asm volatile("outw %0, %1" ::"a"((uint16_t)0x2000), "Nd"((uint16_t)0x604));
         }
@@ -342,7 +342,7 @@ namespace kernel::interrupts::managed {
             }
         }
         else {
-            klog << "No interrupt handler for vector " << frame.vector_index << "\n";
+            klog() << "No interrupt handler for vector " << frame.vector_index << "\n";
         }
     }
 }

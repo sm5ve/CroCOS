@@ -32,7 +32,7 @@ namespace kernel::interrupts::managed {
         for (size_t i = 0; i < receiverCount; i++) {
             auto didRouteSuccessfully = route(i).occupied();
             if (!didRouteSuccessfully) {
-                klog << "FreelyRoutableDomainGreedyRouter::routeAll() failed on domain of type " <<
+                klog() << "FreelyRoutableDomainGreedyRouter::routeAll() failed on domain of type " <<
                     receiver -> type_name() << " at receiver index " << i << "\n";
                 success = false;
             }
@@ -144,7 +144,7 @@ namespace kernel::interrupts::managed {
                         }
                     }
                     if (!bestCandidate.occupied()) {
-                        klog << "GreedyRoutingPolicy::buildRoutingGraph() failed to find a valid destination for receiver " << receiver -> type_name() << " at index " << i << "\n";
+                        klog() << "GreedyRoutingPolicy::buildRoutingGraph() failed to find a valid destination for receiver " << receiver -> type_name() << " at index " << i << "\n";
                     }
                     assert(bestCandidate.occupied(), "No valid destination for interrupt receiver");
                     builder.addEdge(sourceNode, *bestCandidate);

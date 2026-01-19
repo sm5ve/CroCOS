@@ -27,7 +27,7 @@ add_subdirectory(kernel)
 
 add_custom_target(run
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-        COMMAND time qemu-system-x86_64 -kernel kernel/Kernel -no-reboot -nographic -smp 128 -m 256M -d int,cpu_reset,guest_errors -D guestErrors.log -cpu qemu64,+fsgsbase
+        COMMAND time qemu-system-x86_64 -kernel kernel/Kernel -no-reboot -nographic -smp 4 -m 256M -d int,cpu_reset,guest_errors -D guestErrors.log -cpu qemu64,+fsgsbase
         COMMENT "Running QEMU"
         USES_TERMINAL
 )

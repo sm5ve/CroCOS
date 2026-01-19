@@ -142,7 +142,7 @@ namespace kernel::timing {
                     break;
                 }
                 if (evt.maxOneshotDelay() - evtTicks < calibrationPrecision) {
-                    klog << "Event source " << evt.name << " ticks significantly faster than main clock source, calibration is not as precise as desired\n";
+                    klog() << "Event source " << evt.name << " ticks significantly faster than main clock source, calibration is not as precise as desired\n";
                     break;
                 }
                 asm volatile("pause");
@@ -158,7 +158,7 @@ namespace kernel::timing {
         }
         auto evtCalibration = clock.calibrationData().scaledFrequency(evtTotalElapsedTicks, csTotalElapsedTicks);
         evt.setConversion(evtCalibration);
-        klog << "Calibrated event source " << evt.name << " against clock source " << clock.name << " to " << evtCalibration << "\n";
+        klog() << "Calibrated event source " << evt.name << " against clock source " << clock.name << " to " << evtCalibration << "\n";
     }
 
     void initializeEventSource() {
@@ -174,7 +174,7 @@ namespace kernel::timing {
             if (bestEventSource -> supportsTicksElapsed()) {
                 Stopwatch watch;
                 calibrateECEventSource(*bestEventSource);
-                klog << "Event source calibration took " << watch.elapsedUs() << " microseconds\n";
+                klog() << "Event source calibration took " << watch.elapsedUs() << " microseconds\n";
             }
             else {
                 assertUnimplemented("Event source calibration");

@@ -10,6 +10,8 @@
 #include <kconfig.h>
 #include "../amd64internal.h"
 
+Atomic<size_t> upCount;
+
 namespace arch::amd64::smp{
     ProcessorInfo* pinfo;
 
@@ -88,16 +90,15 @@ namespace arch::amd64::smp{
     using SMPStack = uint8_t[KERNEL_STACK_SIZE];
     SMPStack stacks[128]; //TODO replace temporary hack
 
-    void initProcessor(ProcessorID pid) {
+    void initProcessors() {
         auto lapic = interrupts::getLAPICDomain();
         //Just make sure there's nothing trying to be sent already... there really shouldn't be
-        klog << "Initializing processor " << pid << "\n";
-        lapic -> issueIPISync({interrupts::INIT, true, 0, pid});
+        lapic -> issueIPISync({interrupts::INIT, true, 0, 0, interrupts::OTHER_CPUS});
         timing::blockingSleep(10);
-        lapic -> issueIPISync({interrupts::INIT, false, 0, pid});
+        lapic -> issueIPISync({interrupts::INIT, false, 0, 0, interrupts::OTHER_CPUS});
         timing::blockingSleep(10);
         for (size_t i = 0; i < 2; i++) {
-            lapic -> issueIPISync({interrupts::SIPI, false, SMP_TRAMPOLINE_START, pid});
+            lapic -> issueIPISync({interrupts::SIPI, false, SMP_TRAMPOLINE_START, 0, interrupts::OTHER_CPUS});
             timing::sleepns(200'000);
         }
     }
@@ -106,7 +107,7 @@ namespace arch::amd64::smp{
         auto trampolineSize = static_cast<uint64_t>(&trampoline_template_end - &trampoline_template_start);
         auto trampolineDestination = early_boot_phys_to_virt(mm::phys_addr(0x1000 * SMP_TRAMPOLINE_START)).as_ptr<uint8_t>();
         asm volatile("mov %%cr3, %0" : "=r"(smp_bringup_pml4));
-        klog << "set pml4 to " << (void*)smp_bringup_pml4 << "\n";
+        klog() << "set pml4 to " << (void*)smp_bringup_pml4 << "\n";
         smp_bringup_stack = reinterpret_cast<uint64_t>(&stacks[0]);
         memcpy(trampolineDestination, &trampoline_template_start, trampolineSize);
     }
@@ -115,16 +116,22 @@ namespace arch::amd64::smp{
         sti();
         setupTrampoline();
         remapIdentity();
-        for (size_t i = 1; i < processorCount(); i++) {
-            const auto pid = static_cast<ProcessorID>(i);
-            initProcessor(pid);
-        }
+        initProcessors();
+        timing::blockingSleep(50);
         unmapIdentity();
+
+        timing::enqueueEvent([] {
+            klog() << "All " << upCount + 1 << " processors up!\n";
+        }, 900);
+
         return true;
     }
 }
 
 using namespace kernel;
+
+
 extern "C" void smpEntry() {
+    upCount++;
     kernel::init::kinit(false, KERNEL_INIT_LOG_LEVEL, false);
 }

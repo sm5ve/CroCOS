@@ -15,9 +15,9 @@ namespace kernel{
     template <typename... Args>
     [[noreturn]]
     void panic(const char* filename, const uint32_t line, Args&&... args){
-        kernel::klog << "Panic: ";
-        (kernel::klog << ... << forward<Args>(args));
-        kernel::klog << "\nIn file " << filename << " line " << line << "\n";
+        kernel::klog() << "Panic: ";
+        (kernel::klog() << ... << forward<Args>(args));
+        kernel::klog() << "\nIn file " << filename << " line " << line << "\n";
         print_stacktrace();
 #ifdef __x86_64__
         //Give QEMU some time to actually print the panic message before quitting

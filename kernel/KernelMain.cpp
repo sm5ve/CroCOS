@@ -16,7 +16,11 @@ extern "C" void (*__init_array_end[])(void) __attribute__((weak));
 
 namespace kernel{
     arch::SerialPrintStream EarlyBootStream;
-    Core::PrintStream& klog = EarlyBootStream;
+    Core::PrintStream& klogStream = EarlyBootStream;
+
+    Core::AtomicPrintStream klog() {
+        return Core::AtomicPrintStream(klogStream);
+    }
 
     bool runGlobalConstructors(){
         for (void (**ctor)() = __init_array_start; ctor != __init_array_end; ctor++) {
@@ -31,11 +35,11 @@ namespace kernel{
     }
 
     extern "C" void kernel_main() {
-        klog << "\n"; // newline to separate from the "Booting from ROM.." message from qemu
+        klog() << "\n"; // newline to separate from the "Booting from ROM.." message from qemu
         init::kinit(true, KERNEL_INIT_LOG_LEVEL, false);
 
         timing::enqueueEvent([] {
-            klog << "\nGoodbye :)\n";
+            klog() << "\nGoodbye :)\n";
             asm volatile("outw %0, %1" ::"a"((uint16_t)0x2000), "Nd"((uint16_t)0x604));
         }, 1000);
 

@@ -6,6 +6,8 @@
 #define CROCOS_PRINTSTREAM_H
 
 #include <stdint.h>
+
+#include "atomic.h"
 #include "utility.h"
 
 namespace Core{
@@ -14,6 +16,8 @@ namespace Core{
         virtual void putString(const char*) = 0;  // Make it pure virtual if meant to be overridden
 
     public:
+        virtual ~PrintStream() = default;
+
         PrintStream& operator<<(const char);
         PrintStream& operator<<(const char*);
         PrintStream& operator<<(const void*);
@@ -31,6 +35,40 @@ namespace Core{
     concept Printable = requires(T t, PrintStream& ps)
     {
         ps << t;
+    };
+
+    class AtomicPrintStream final : public PrintStream {
+    private:
+        static inline Spinlock lock;
+        bool alive;
+        PrintStream* stream;
+    protected:
+        void putString(const char* str) override {
+            *stream << str;
+        }
+    public:
+        explicit AtomicPrintStream(PrintStream& s) : alive(true), stream(&s) {
+            lock.acquire();
+        }
+
+        AtomicPrintStream(AtomicPrintStream&& other) noexcept : alive(true), stream(other.stream) {
+            other.alive = false;
+            other.stream = nullptr;
+        }
+
+        ~AtomicPrintStream() override {
+            if (alive)
+                lock.release();
+        }
+
+        AtomicPrintStream& operator=(const AtomicPrintStream&) = delete;
+        AtomicPrintStream& operator=(AtomicPrintStream&& other) noexcept {
+            other.alive = false;
+            stream = other.stream;
+            other.stream = nullptr;
+            alive = true;
+            return *this;
+        };
     };
 
 #ifdef CROCOS_TESTING

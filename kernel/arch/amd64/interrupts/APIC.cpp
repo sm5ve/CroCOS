@@ -249,10 +249,10 @@ namespace arch::amd64::interrupts{
         //and add the mapping to a bimap
         for (const auto& sourceOverride : madt.entries<acpi::MADT_IOAPIC_Source_Override_Entry>()) {
             if (sourceOverride.busSource != 0) {
-                klog << "Warning: MADT interrupt source override entry lists non-ISA bus source.\n";
+                klog() << "Warning: MADT interrupt source override entry lists non-ISA bus source.\n";
             }
             if (mappedIRQs & (1u << sourceOverride.irqSource)) {
-                klog << "Warning: MADT interrupt source override entry lists duplicate interrupt source. Skipping.\n";
+                klog() << "Warning: MADT interrupt source override entry lists duplicate interrupt source. Skipping.\n";
                 continue;
             }
             auto ioapic = addIRQDomainConectorMapping(irqToEmitterMap, emitterMax, connectorMapsByIOAPIC, sourceOverride.irqSource, sourceOverride.gsi);
@@ -352,6 +352,17 @@ namespace arch::amd64::interrupts{
                 lowDWord |= (5 << 8); break;
             case SIPI:
                 lowDWord |= (6 << 8); break;
+        }
+
+        switch (request.destination) {
+            case OTHER_CPUS:
+                lowDWord |= (3 << 18); break;
+            case SELF:
+                lowDWord |= (1 << 18); break;
+            case ALL_CPUS:
+                lowDWord |= (2 << 18); break;
+            case SPECIFIC_LAPIC:
+                break;
         }
 
         lowDWord |= (request.level ? (1 << 14) : 0);
@@ -595,7 +606,7 @@ namespace arch::amd64::interrupts{
     bool enableAPIC() {
         auto lapicBasePhysical = getLAPICBase();
         auto lapicMSRNewVal = lapicBasePhysical | IA32_APIC_BASE_MSR_ENABLE;
-        klog << "Enabling APIC, writing MSR value " << reinterpret_cast<void*>(lapicMSRNewVal) << "\n";
+        klog() << "Enabling APIC, writing MSR value " << reinterpret_cast<void*>(lapicMSRNewVal) << "\n";
         wrmsr(IA32_APIC_BASE_MSR, lapicMSRNewVal);
         return true;
     }
@@ -624,7 +635,7 @@ namespace arch::amd64::interrupts{
         for (const auto& ioapic : ioapicsByID.values()) {
             ioapic -> setUninitializedActivationTypes(activationTypeForLevelAndTriggerMode(true, false));
         }
-        klog << "Enabled APIC\n";
+        klog() << "Enabled APIC\n";
 
         auto timer = new LAPICTimer(*lapicDomain);
         registerEventSource(*timer);

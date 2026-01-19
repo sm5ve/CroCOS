@@ -79,27 +79,27 @@ namespace arch::amd64::interrupts{
 }
 
 Core::PrintStream& operator<<(Core::PrintStream& ps, arch::amd64::interrupts::InterruptFrame& iframe){
-    kernel::klog << "Interrupt frame for vector " << iframe.vector_index << " error code " << iframe.error_code << "\n";
-    kernel::klog << "RIP " << (void*)iframe.rip << "    ";
-    kernel::klog << "FLG " << (void*)iframe.rflags << "    ";
-    kernel::klog << "CS  " << (void*)iframe.cs << "    ";
-    kernel::klog << "SS  " << (void*)iframe.ss << "    " << "\n";
-    kernel::klog << "RAX " << (void*)iframe.rax << "    ";
-    kernel::klog << "RBX " << (void*)iframe.rbx << "    ";
-    kernel::klog << "RCX " << (void*)iframe.rcx << "    ";
-    kernel::klog << "RDX " << (void*)iframe.rdx << "    " << "\n";
-    kernel::klog << "RDI " << (void*)iframe.rdi << "    ";
-    kernel::klog << "RSI " << (void*)iframe.rsi << "    ";
-    kernel::klog << "RBP " << (void*)iframe.rbp << "    ";
-    kernel::klog << "RSP " << (void*)iframe.rsp << "    " << "\n";
-    kernel::klog << "R8  " << (void*)iframe.r8 << "    ";
-    kernel::klog << "R9  " << (void*)iframe.r9 << "    ";
-    kernel::klog << "R10 " << (void*)iframe.r10 << "    ";
-    kernel::klog << "R11 " << (void*)iframe.r11 << "    " << "\n";
-    kernel::klog << "R12 " << (void*)iframe.r12 << "    ";
-    kernel::klog << "R13 " << (void*)iframe.r13 << "    ";
-    kernel::klog << "R14 " << (void*)iframe.r14 << "    ";
-    kernel::klog << "R15 " << (void*)iframe.r15 << "    " << "\n";
+    ps << "Interrupt frame for vector " << iframe.vector_index << " error code " << iframe.error_code << "\n";
+    ps << "RIP " << (void*)iframe.rip << "    ";
+    ps << "FLG " << (void*)iframe.rflags << "    ";
+    ps << "CS  " << (void*)iframe.cs << "    ";
+    ps << "SS  " << (void*)iframe.ss << "    " << "\n";
+    ps << "RAX " << (void*)iframe.rax << "    ";
+    ps << "RBX " << (void*)iframe.rbx << "    ";
+    ps << "RCX " << (void*)iframe.rcx << "    ";
+    ps << "RDX " << (void*)iframe.rdx << "    " << "\n";
+    ps << "RDI " << (void*)iframe.rdi << "    ";
+    ps << "RSI " << (void*)iframe.rsi << "    ";
+    ps << "RBP " << (void*)iframe.rbp << "    ";
+    ps << "RSP " << (void*)iframe.rsp << "    " << "\n";
+    ps << "R8  " << (void*)iframe.r8 << "    ";
+    ps << "R9  " << (void*)iframe.r9 << "    ";
+    ps << "R10 " << (void*)iframe.r10 << "    ";
+    ps << "R11 " << (void*)iframe.r11 << "    " << "\n";
+    ps << "R12 " << (void*)iframe.r12 << "    ";
+    ps << "R13 " << (void*)iframe.r13 << "    ";
+    ps << "R14 " << (void*)iframe.r14 << "    ";
+    ps << "R15 " << (void*)iframe.r15 << "    " << "\n";
     return ps;
 }
 

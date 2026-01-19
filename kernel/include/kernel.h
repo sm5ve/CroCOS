@@ -11,7 +11,7 @@
 #include <core/utility.h>
 
 namespace kernel{
-    extern Core::PrintStream& klog;
+    Core::AtomicPrintStream klog();
     bool heapEarlyInit();
     void* kmalloc(size_t size, std::align_val_t = std::align_val_t{1});
     void kfree(void* ptr);
