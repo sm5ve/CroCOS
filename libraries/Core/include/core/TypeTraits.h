@@ -52,12 +52,34 @@ using SmallestUInt_t = typename SmallestUInt<
         64
         >::Type;
 
+// Template to choose the smallest unsigned integer type
+template <size_t Bits>
+struct SmallestUInt;
+template <size_t Bits>
+struct SmallestInt;
+
+template <> struct SmallestInt<0> { using Type = int8_t; };
+template <> struct SmallestInt<1> { using Type = int8_t; };
+template <> struct SmallestInt<8> { using Type = int8_t; };
+template <> struct SmallestInt<16> { using Type = int16_t; };
+template <> struct SmallestInt<32> { using Type = int32_t; };
+template <> struct SmallestInt<64> { using Type = int64_t; };
+
+// Helper type alias
+template <size_t Bits>
+using SmallestInt_t = typename SmallestInt<
+        (Bits <= 8) ? 8 :
+        (Bits <= 16) ? 16 :
+        (Bits <= 32) ? 32 :
+        64
+        >::Type;
+
 template <typename T>
 struct is_trivially_copyable {
     static constexpr bool value = __is_trivially_copyable(T);
 };
 
-#ifndef CORE_LIBRARY_TESTING
+#if !(defined(CORE_LIBRARY_TESTING) || defined(HOSTED))
 static constexpr size_t strlen(const char * str) {
     size_t out = 0;
     while(str[out] != 0){
@@ -68,14 +90,6 @@ static constexpr size_t strlen(const char * str) {
 #else
 // When testing with standard library, use system strlen
 #include <cstring>
-static constexpr size_t strlen_impl(const char * str) {
-    size_t out = 0;
-    while(str[out] != 0){
-        out++;
-    }
-    return out;
-}
-#define strlen strlen_impl
 #endif
 
 static constexpr size_t find(const char * str, const char * substr) {

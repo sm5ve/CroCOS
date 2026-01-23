@@ -15,6 +15,10 @@
 #include <initializer_list.h>
 #include <core/Iterator.h>
 
+#ifdef HOSTED
+#include <initializer_list>
+#endif
+
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wstringop-overflow"
 template <typename T>

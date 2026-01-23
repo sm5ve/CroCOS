@@ -606,7 +606,7 @@ namespace arch::amd64::interrupts{
     bool enableAPIC() {
         auto lapicBasePhysical = getLAPICBase();
         auto lapicMSRNewVal = lapicBasePhysical | IA32_APIC_BASE_MSR_ENABLE;
-        klog() << "Enabling APIC, writing MSR value " << reinterpret_cast<void*>(lapicMSRNewVal) << "\n";
+        //klog() << "Enabling APIC, writing MSR value " << reinterpret_cast<void*>(lapicMSRNewVal) << "\n";
         wrmsr(IA32_APIC_BASE_MSR, lapicMSRNewVal);
         return true;
     }

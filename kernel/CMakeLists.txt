@@ -38,6 +38,7 @@ set(KERNEL_SRC
 
 file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/generated_headers)
 file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/generated_source)
+file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/generated_other)
 
 set_source_files_properties(
         InterruptGraphManager.cpp
@@ -71,6 +72,21 @@ add_custom_command(
         VERBATIM
 )
 
+set(LINKER_SCRIPT_TEMPLATE "${CMAKE_SOURCE_DIR}/kernel/arch/amd64/linker.ld")
+set(GENERATED_LINKER_SCRIPT "${CMAKE_BINARY_DIR}/generated_other/linker.ld")
+set(GENERATED_BASE_HEADER "${CMAKE_BINARY_DIR}/generated_headers/kbase.h")
+
+add_custom_command(
+        OUTPUT ${GENERATED_LINKER_SCRIPT} ${GENERATED_BASE_HEADER}
+        DEPENDS "${CMAKE_SOURCE_DIR}/tools/DeriveKernelLayout.cpp"
+        generate_linker_script
+        COMMAND ${CMAKE_BINARY_DIR}/tools/generate_linker_script ${LINKER_SCRIPT_TEMPLATE} ${GENERATED_LINKER_SCRIPT} ${GENERATED_BASE_HEADER}
+)
+
+add_custom_target(create_linker_script
+    DEPENDS ${GENERATED_LINKER_SCRIPT} ${GENERATED_BASE_HEADER}
+)
+
 # Create a custom target for the generated header
 add_custom_target(generate_init_registry
         DEPENDS ${GENERATED_INIT_HEADER}
@@ -89,12 +105,12 @@ add_custom_target(generate_idt_macros
 )
 
 add_executable(Kernel ${KERNEL_SRC} ${GENERATED_INIT_CPP})
-add_dependencies(Kernel generate_idt_macros generate_init_registry)
+add_dependencies(Kernel generate_idt_macros generate_init_registry create_linker_script create_linker_script)
 target_compile_options(Kernel PRIVATE -gdwarf-4)
 target_compile_options(Kernel PRIVATE -ffunction-sections -fdata-sections)
 target_link_options(Kernel PUBLIC
         -flto -Os -ffreestanding -mcmodel=kernel -nostdlib
-        -T ${CMAKE_SOURCE_DIR}/kernel/linker.ld
+        -T ${GENERATED_LINKER_SCRIPT}
         -Wl,--gc-sections
         #-Wl,--print-gc-sections
         -Wl,--build-id

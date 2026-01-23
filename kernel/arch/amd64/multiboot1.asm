@@ -92,9 +92,7 @@ boot_pml4:
 .global boot_page_directory_pointer_table
 boot_page_directory_pointer_table:
     .skip 4096
-boot_page_directory1:
-    .skip 4096
-boot_page_directory2:
+boot_page_directory:
     .skip 4096
 
 .section .text.bootstrap
@@ -124,13 +122,9 @@ _start:
     mov %eax, (boot_pml4 + 511 * 8 - VMEM_OFFSET)
 
     # Set up page directory pointer table
-    mov $(boot_page_directory1 - VMEM_OFFSET), %eax
+    mov $(boot_page_directory - VMEM_OFFSET), %eax
     or $3, %eax
     mov %eax, (boot_page_directory_pointer_table - VMEM_OFFSET)
-    mov %eax, (boot_page_directory_pointer_table + 510 * 8 - VMEM_OFFSET)
-    mov $(boot_page_directory2 - VMEM_OFFSET), %eax
-    or $3, %eax
-    mov %eax, (boot_page_directory_pointer_table + 1 * 8 - VMEM_OFFSET)
     mov %eax, (boot_page_directory_pointer_table + 511 * 8 - VMEM_OFFSET)
 
     # Populate page directories using 4 MiB pages
@@ -144,14 +138,7 @@ _start:
         mov %eax, %ebx
         shl $21, %ebx
         or $((1 << 7) | 3), %ebx
-        mov %ebx, (boot_page_directory1 - VMEM_OFFSET)(,%eax,8)
-
-        # boot_page_directory2[i] = ((i + 512) << 21) | (1 << 7) | 3
-        mov %eax, %ebx
-        add $512, %ebx
-        shl $21, %ebx
-        or $((1 << 7) | 3), %ebx
-        mov %ebx, (boot_page_directory2 - VMEM_OFFSET)(,%eax,8)
+        mov %ebx, (boot_page_directory - VMEM_OFFSET)(,%eax,8)
 
         # Increment counter
         inc %eax

@@ -111,7 +111,7 @@ namespace arch::amd64 {
     inline void mfence() {
         asm volatile("mfence" ::: "memory");
     }
-
+#ifndef HOSTED
     inline constexpr mm::virt_addr early_boot_phys_to_virt(mm::phys_addr x){
         return mm::virt_addr(x.value + VMEM_OFFSET);
     }
@@ -119,6 +119,7 @@ namespace arch::amd64 {
     inline constexpr mm::phys_addr early_boot_virt_to_phys(mm::virt_addr x){
         return mm::phys_addr(x.value - VMEM_OFFSET);
     }
+#endif
 
     namespace PageTableManager{
         struct CompositeHandle{
@@ -303,7 +304,7 @@ namespace arch::amd64 {
     };
 
     constexpr PageTableLevelDescriptor pdptEntry{
-        .canBeLeaf = true,
+        .canBeLeaf = false, //Let's not support 1GiB pages for now
         .canBeSubtable = true,
         .leafIndexBit = 7,
         .isLeafOnOne = true,
@@ -315,12 +316,12 @@ namespace arch::amd64 {
             .physAddrTotalBits = 40,
             .addrStartInEntry = 12,
         },
-        .leafEncoding = PageTableLevelDescriptor::EntryEncoding{
+        .leafEncoding = PageTableLevelDescriptor::EMPTY_ENTRY/*PageTableLevelDescriptor::EntryEncoding{
             .properties = pageEntryProperties,
             .physAddrLowestBit = 30,
             .physAddrTotalBits = 22,
             .addrStartInEntry = 30,
-        }
+        }*/
     };
 
     constexpr PageTableLevelDescriptor pml4Entry{

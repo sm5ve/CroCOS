@@ -9,14 +9,20 @@
 #include "stddef.h"
 #include <arch/PageTableSpecification.h>
 
+#ifndef ARCH_OVERRIDE
 #ifdef __x86_64__
+#define ARCH_AMD64
+#endif
+#endif
+
+#ifdef ARCH_AMD64
 #include "arch/amd64/amd64.h"
 #endif
 
 namespace arch{
     void serialOutputString(const char* str);
 
-#ifdef __x86_64__
+#ifdef ARCH_AMD64
     using ProcessorID = amd64::ProcessorID;
     constexpr size_t MAX_PROCESSOR_COUNT = 256;
     constexpr size_t CACHE_LINE_SIZE = 64;
@@ -52,6 +58,15 @@ namespace arch{
 
         void release();
     };
+
+    static_assert([] {
+        for (const auto e : pageTableDescriptor.entryCount) {
+            if (largestPowerOf2Dividing(e) != e) {
+                return false;
+            }
+        }
+       return true;
+    }(), "Page tables must have a power-of-two number of entries");
 }
 
 #endif //CROCOS_ARCH_H

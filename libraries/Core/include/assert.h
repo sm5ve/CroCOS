@@ -37,9 +37,9 @@
 #else
 
 // When not in kernel or testing mode, provide empty macros
-#define assert(condition, message)
-#define assertNotReached(message)
-#define assertUnimplemented(message)
+#define assert(condition, ...)
+#define assertNotReached(...)
+#define assertUnimplemented(...)
 
 #endif
 

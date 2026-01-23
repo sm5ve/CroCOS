@@ -8,6 +8,7 @@
 #include <core/utility.h>
 #include <assert.h>
 #include <kernel.h>
+#include <core/math.h>
 
 #define PARANOID_PAGING_ASSERTIONS
 
@@ -68,10 +69,38 @@ namespace arch{
 
     template <size_t levelCount>
     struct PageTableDescriptor {
+        static constexpr auto LEVEL_COUNT = levelCount;
+        //level[0] should be the top level page table, so on amd64 this would be the pml4 (or pml5 if you're using 5 level paging)
         PageTableLevelDescriptor levels[levelCount];
-        size_t entryCount[levelCount];
+        size_t entryCount[levelCount]; //These should be powers of 2
 
         [[nodiscard]] constexpr size_t getTableSize(size_t level) const {
+            return entryCount[level] * levels[level].entryWidth / 8;
+        }
+
+        [[nodiscard]] constexpr size_t getVirtualAddressBitCount(const size_t level = 0) const {
+            size_t bitCount = 0;
+            for (size_t i = level; i < LEVEL_COUNT; i++) {
+                bitCount += log2floor(entryCount[i]);
+            }
+            bitCount += levels[LEVEL_COUNT - 1].leafEncoding.physAddrLowestBit;
+            return bitCount;
+        }
+
+        [[nodiscard]] constexpr size_t getVirtualAddressMask() const {
+            return (1 << getVirtualAddressBitCount()) - 1;
+        }
+
+        [[nodiscard]] constexpr kernel::mm::virt_addr canonicalizeVirtualAddress(const kernel::mm::virt_addr addr) const {
+            const auto shift = sizeof(addr.value) * 8 - getVirtualAddressBitCount();
+            using UnsignedType = SmallestUInt_t<sizeof(addr.value) * 8>;
+            using SignedType = SmallestInt_t<sizeof(addr.value) * 8>;
+            const UnsignedType shifted = (addr.value << shift);
+            const auto sgn = static_cast<SignedType>(shifted) >> shift;
+            return kernel::mm::virt_addr(static_cast<UnsignedType>(sgn));
+        }
+
+        [[nodiscard]] constexpr size_t getTableSize(size_t level) {
             return entryCount[level] * levels[level].entryWidth / 8;
         }
     };

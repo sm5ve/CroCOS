@@ -10,6 +10,10 @@
 #include <core/mem.h>
 #include <core/utility.h>
 
+#ifdef HOSTED
+#include <new>
+#endif
+
 namespace kernel{
     Core::AtomicPrintStream klog();
     bool heapEarlyInit();

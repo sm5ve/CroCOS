@@ -305,6 +305,7 @@ template <typename... Ts>
 overload(Ts...) -> overload<Ts...>;
 
 #ifndef CORE_LIBRARY_TESTING
+#ifdef KERNEL
 // Non-allocating placement new - only define if not testing with standard library
 inline void* operator new(size_t, void* ptr) noexcept {
     return ptr;
@@ -312,6 +313,7 @@ inline void* operator new(size_t, void* ptr) noexcept {
 
 // Matching placement delete (not required, but good practice)
 inline void operator delete(void*, void*) noexcept {}
+#endif
 #endif
 
 template <typename T>
