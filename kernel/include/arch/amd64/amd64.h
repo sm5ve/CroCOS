@@ -111,15 +111,6 @@ namespace arch::amd64 {
     inline void mfence() {
         asm volatile("mfence" ::: "memory");
     }
-#ifndef HOSTED
-    inline constexpr mm::virt_addr early_boot_phys_to_virt(mm::phys_addr x){
-        return mm::virt_addr(x.value + VMEM_OFFSET);
-    }
-
-    inline constexpr mm::phys_addr early_boot_virt_to_phys(mm::virt_addr x){
-        return mm::phys_addr(x.value - VMEM_OFFSET);
-    }
-#endif
 
     namespace PageTableManager{
         struct CompositeHandle{

@@ -7,6 +7,7 @@
 #include <kernel.h>
 #include <core/ds/Vector.h>
 #include <core/str.h>
+#include <kmemlayout.h>
 
 #ifdef __x86_64__
 #include "arch/amd64/amd64.h"
@@ -33,8 +34,8 @@ namespace kernel::acpi{
         struct RSDP* rsdp = nullptr;
 #ifdef __x86_64__
         //FIXME: this is a very naive way of finding the RDSP
-        for(char* ptr = arch::amd64::early_boot_phys_to_virt(mm::phys_addr((uint64_t)0)).as_ptr<char>();
-        ptr < arch::amd64::early_boot_phys_to_virt(mm::phys_addr((uint64_t)0x100000)).as_ptr<char>(); ptr += 16){
+        for(char* ptr = mm::early_boot_phys_to_virt(mm::phys_addr((uint64_t)0)).as_ptr<char>();
+        ptr < mm::early_boot_phys_to_virt(mm::phys_addr((uint64_t)0x100000)).as_ptr<char>(); ptr += 16){
             if(startsWith(ptr, "RSD PTR ")){
                 rsdp = (RSDP*)ptr;
             }
@@ -72,14 +73,10 @@ namespace kernel::acpi{
         }
 
         if(rsdp -> revision == 0){
-#ifdef __x86_64__
-            rsdt = arch::amd64::early_boot_phys_to_virt(mm::phys_addr(rsdp -> rsdtAddress)).as_ptr<SDTHeader>();
-#endif
+            rsdt = mm::early_boot_phys_to_virt(mm::phys_addr(rsdp -> rsdtAddress)).as_ptr<SDTHeader>();
         }
         else{
-#ifdef __x86_64__
-            rsdt = arch::amd64::early_boot_phys_to_virt(mm::phys_addr(rsdp -> xsdtAddress)).as_ptr<SDTHeader>();
-#endif
+            rsdt = mm::early_boot_phys_to_virt(mm::phys_addr(rsdp -> xsdtAddress)).as_ptr<SDTHeader>();
         }
 
         if(verifyTableChecksum(rsdt) == ACPIChecksumResult::FAIL){

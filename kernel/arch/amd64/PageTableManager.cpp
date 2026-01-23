@@ -10,6 +10,7 @@
 #include <core/math.h>
 #include <core/utility.h>
 #include <core/atomic.h>
+#include <kmemlayout.h>
 
 //I just set these constants arbitrarily. They feel right, but I should experiment with other values at some point
 #define FREE_OVERFLOW_POOL_SIZE 128
@@ -852,16 +853,16 @@ namespace arch::amd64::PageTableManager{
         auto entryInInitialPT_for_PDir = (PageDirectoryEntry*)&initialInternalPageTable[0];
 
         //Populate the entryBuffer by hand
-        entryInMappingPT_for_PTMap -> setAndPreserveMetadata(PageDirectoryEntry(amd64::early_boot_virt_to_phys(mm::virt_addr(internalPageTableMapping)).value | 3 | (1 << 8)));
-        entryInMappingPT_for_PTMetadataMap -> setAndPreserveMetadata(PageDirectoryEntry(amd64::early_boot_virt_to_phys(mm::virt_addr(internalTableMetadataMapping)).value | 3 | (1 << 8)));
-        entryInMappingPT_for_initialPT -> setAndPreserveMetadata(PageDirectoryEntry(amd64::early_boot_virt_to_phys(mm::virt_addr(initialInternalPageTable)).value | 3 | (1 << 8)));
-        entryInInitialPT_for_PDir -> setAndPreserveMetadata(PageDirectoryEntry(amd64::early_boot_virt_to_phys(mm::virt_addr(bootstrapPageDir)).value | 3 | (1 << 8)));
+        entryInMappingPT_for_PTMap -> setAndPreserveMetadata(PageDirectoryEntry(early_boot_virt_to_phys(mm::virt_addr(internalPageTableMapping)).value | 3 | (1 << 8)));
+        entryInMappingPT_for_PTMetadataMap -> setAndPreserveMetadata(PageDirectoryEntry(early_boot_virt_to_phys(mm::virt_addr(internalTableMetadataMapping)).value | 3 | (1 << 8)));
+        entryInMappingPT_for_initialPT -> setAndPreserveMetadata(PageDirectoryEntry(early_boot_virt_to_phys(mm::virt_addr(initialInternalPageTable)).value | 3 | (1 << 8)));
+        entryInInitialPT_for_PDir -> setAndPreserveMetadata(PageDirectoryEntry(early_boot_virt_to_phys(mm::virt_addr(bootstrapPageDir)).value | 3 | (1 << 8)));
 
         //Set up the initial state of the page directory - internalPageTableMapping goes in the bottom, then the metadata mapping,
         //and finally initialInternalPageTable which maps in the page directory and acts as our first general purpose internal page table
-        bootstrapPageDir[0] = amd64::early_boot_virt_to_phys(mm::virt_addr(internalPageTableMapping)).value | 3;
-        bootstrapPageDir[1] = amd64::early_boot_virt_to_phys(mm::virt_addr(internalTableMetadataMapping)).value | 3;
-        bootstrapPageDir[2] = amd64::early_boot_virt_to_phys(mm::virt_addr(initialInternalPageTable)).value | 3;
+        bootstrapPageDir[0] = early_boot_virt_to_phys(mm::virt_addr(internalPageTableMapping)).value | 3;
+        bootstrapPageDir[1] = early_boot_virt_to_phys(mm::virt_addr(internalTableMetadataMapping)).value | 3;
+        bootstrapPageDir[2] = early_boot_virt_to_phys(mm::virt_addr(initialInternalPageTable)).value | 3;
 
         //Set up our initial metadata page
         for(auto i = 0; i < 3; i++){
@@ -875,7 +876,7 @@ namespace arch::amd64::PageTableManager{
         //initializeSetupInternalPageTableFreeMetadata(getPageTableForIndex(0));
 
         //install the page directory
-        boot_page_directory_pointer_table[509] = amd64::early_boot_virt_to_phys(mm::virt_addr(bootstrapPageDir)).value | 3;
+        boot_page_directory_pointer_table[509] = early_boot_virt_to_phys(mm::virt_addr(bootstrapPageDir)).value | 3;
         memset(pageTableGlobalMetadataBase, 0, mm::PageAllocator::smallPageSize * 3);
         //Since we're now storing the free list head metadata in the metadata pages, we have to initialize things in
         //a rather particular order. Namely, we have to map everything in and clear out the metadata pages, and only
@@ -891,7 +892,6 @@ namespace arch::amd64::PageTableManager{
     }
 
     void* temporaryHackMapMMIOPage(mm::phys_addr paddr){
-        temporaryHack(3, 3, 2026, "Use a proper MMIO mapping function!");
         assert(paddr.value % mm::PageAllocator::smallPageSize == 0, "Misaligned physical page address");
         auto entry = allocateInternalPageTableEntry();
         //Map page as global, R/W permissions, and uncachable

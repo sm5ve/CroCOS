@@ -16,14 +16,12 @@
 #include <arch/amd64/interrupts/APIC.h>
 #include <arch/amd64/interrupts/AuxiliaryDomains.h>
 #include <arch/amd64/timers/HPET.h>
-#include "amd64internal.h"
 #include <kmemlayout.h>
 
 extern uint32_t mboot_magic;
 extern uint32_t mboot_table;
 
 alignas(4096) uint64_t bootstrapPageDir[512];
-extern volatile uint64_t boot_pml4[512];
 extern volatile uint64_t boot_page_directory_pointer_table[512];
 
 //The following describes the memory map layout for the early boot kernel
@@ -91,19 +89,6 @@ namespace arch::amd64{
                      "mov %rax, %cr3");
     }
 
-    void unmapIdentity(){
-        boot_pml4[0] = 0;
-        boot_page_directory_pointer_table[0] = 0;
-        //boot_page_directory_pointer_table[1] = 0;
-    }
-
-    void remapIdentity(){
-        boot_pml4[0] = boot_pml4[511];
-        boot_page_directory_pointer_table[0] = boot_page_directory_pointer_table[511];
-        //boot_page_directory_pointer_table[0] = boot_page_directory_pointer_table[510];
-        //boot_page_directory_pointer_table[1] = boot_page_directory_pointer_table[511];
-    }
-
     //Window MUST start at 2MiB aligned base
     void* mapTemporary1GiBWindow(const mm::phys_addr base){
         assert((base.value & (kernel::mm::PageAllocator::bigPageSize - 1)) == 0, "Misaligned window");
@@ -114,7 +99,7 @@ namespace arch::amd64{
         }
         //add a reference to our page directory to the page directory pointer table
         boot_page_directory_pointer_table[510] = early_boot_virt_to_phys(mm::virt_addr(&bootstrapPageDir)).value | 3;
-        return getKernelMemRegionStart(1).as_ptr<void>();
+        return mm::getKernelMemRegionStart(1).as_ptr<void>();
     }
 
     void unmapTemporaryWindow(){
@@ -243,7 +228,7 @@ namespace arch::amd64{
         //0xffffff8000000000 is the lowest virtual address mappable by the PDPT. It is -512GiB.
         assert(pdptIndex > 0, "Too many memory regions!");
         //Make sure we cast everything in sight to a long, so there are no intermediate truncations
-        uint64_t pd_vmem_base = getKernelMemRegionStart(511 - pdptIndex).value;
+        uint64_t pd_vmem_base = mm::getKernelMemRegionStart(511 - pdptIndex).value;
         //The buffer doesn't necessarily lie on a big page aligned boundary, so we need to add back in the offset
         void* buffer_base_virt = (void*)(pd_vmem_base + buffer_offset);
         //decrement our pdpt index, so we don't overwrite our entry when we process the next memory range!
@@ -357,11 +342,11 @@ namespace arch::amd64{
 
     bool initPageTableAllocator() {
         assert(mboot_magic == 0x2BADB002, "Somehow the multiboot magic number is wrong. How did we get here?");
-        unmapIdentity();
+        mm::unmapIdentity();
         Vector<mm::PageAllocator::page_allocator_range_info> free_memory_regions;
 
-        mboot_info* mbootInfo = amd64::early_boot_phys_to_virt(mm::phys_addr(mboot_table)).as_ptr<mboot_info>();
-        mboot_mmap_entry* mbootMmapBase = amd64::early_boot_phys_to_virt(mm::phys_addr(mbootInfo -> mmap_ptr)).as_ptr<mboot_mmap_entry>();
+        mboot_info* mbootInfo = early_boot_phys_to_virt(mm::phys_addr(mboot_table)).as_ptr<mboot_info>();
+        mboot_mmap_entry* mbootMmapBase = early_boot_phys_to_virt(mm::phys_addr(mbootInfo -> mmap_ptr)).as_ptr<mboot_mmap_entry>();
 
         //Extract a list of free memory regions from the multiboot header, reserve the buffers requested by
         //the page allocator, and package that up to pass along to the page allocator

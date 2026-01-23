@@ -213,6 +213,10 @@ namespace arch{
             return !isLeafEntry();
         }
 
+        [[nodiscard]] constexpr bool operator==(const PageTableEntry & other) const {
+            return other.data == data;
+        }
+
         void enableWrite(const bool enabled = true) {
             const PageTableEntryBit writeBit = encoding.getEncoding(isLeafEntry()).properties.writable;
 #ifdef PARANOID_PAGING_ASSERTIONS

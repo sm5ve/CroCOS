@@ -8,10 +8,12 @@
 #include <arch.h>
 #include <stdint.h>
 
-namespace kernel{
+extern "C" arch::PageTable<0> bootPageTable;
+
+namespace kernel::mm{
     constexpr size_t MINIMUM_KERNEL_MEM_REGION_SIZE_LOG2 = 28; // 256 MiB
 
-    [[nodiscard]] constexpr size_t pageTableLevelForKMemRegion(const size_t regionSizeLog2) {
+    [[nodiscard]] constexpr size_t pageTableLevelForKMemRegion(const size_t regionSizeLog2 = MINIMUM_KERNEL_MEM_REGION_SIZE_LOG2) {
         for(size_t i = 0; i < arch::pageTableDescriptor.LEVEL_COUNT; i++) {
             const auto level = arch::pageTableDescriptor.LEVEL_COUNT - i;
             if (arch::pageTableDescriptor.getVirtualAddressBitCount(level) >= regionSizeLog2) {
@@ -22,14 +24,26 @@ namespace kernel{
     }
 
     [[nodiscard]] constexpr size_t getKernelMemRegionSize() {
-        return 1 << arch::pageTableDescriptor.getVirtualAddressBitCount(pageTableLevelForKMemRegion(MINIMUM_KERNEL_MEM_REGION_SIZE_LOG2));
+        return 1 << arch::pageTableDescriptor.getVirtualAddressBitCount(pageTableLevelForKMemRegion());
     }
 
-    [[nodiscard]] constexpr mm::virt_addr getKernelMemRegionStart(size_t index) {
-        auto address = mm::virt_addr{static_cast<uint64_t>(-(index + 1) * getKernelMemRegionSize())};
+    [[nodiscard]] constexpr virt_addr getKernelMemRegionStart(size_t index) {
+        auto address = virt_addr{static_cast<uint64_t>(-(index + 1) * getKernelMemRegionSize())};
         return arch::pageTableDescriptor.canonicalizeVirtualAddress(address);
     }
 
+    constexpr size_t kStart = getKernelMemRegionStart(0).value;
+
+    constexpr virt_addr early_boot_phys_to_virt(phys_addr x){
+        return virt_addr(x.value + kStart);
+    }
+
+    constexpr phys_addr early_boot_virt_to_phys(virt_addr x){
+        return phys_addr(x.value - kStart);
+    }
+
+    void unmapIdentity();
+    void remapIdentity();
 }
 
 #endif //CROCOS_KMEMLAYOUT_H

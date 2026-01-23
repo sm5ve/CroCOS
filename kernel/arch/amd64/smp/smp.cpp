@@ -8,7 +8,7 @@
 #include <arch/amd64/smp.h>
 #include <arch/amd64/interrupts/APIC.h>
 #include <kconfig.h>
-#include "../amd64internal.h"
+#include <kmemlayout.h>
 
 Atomic<size_t> upCount;
 
@@ -115,10 +115,10 @@ namespace arch::amd64::smp{
     bool smpInit() {
         sti();
         setupTrampoline();
-        remapIdentity();
+        mm::remapIdentity();
         initProcessors();
         timing::blockingSleep(50);
-        unmapIdentity();
+        mm::unmapIdentity();
 
         timing::enqueueEvent([] {
             klog() << "All " << upCount + 1 << " processors up!\n";

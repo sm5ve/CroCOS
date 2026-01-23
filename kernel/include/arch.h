@@ -37,7 +37,10 @@ namespace arch{
     template <size_t level>
     using PTE = PageTableEntry<pageTableDescriptor.levels[level]>;
     template <size_t level>
-    using PageTable = PTE<level>[pageTableDescriptor.entryCount[level]];
+    struct PageTable{
+        PTE<level> data alignas(sizeof(PTE<level>) * pageTableDescriptor.entryCount[level]) [pageTableDescriptor.entryCount[level]];
+        PTE<level>& operator[](size_t index){return data[index];}
+    } __attribute__((packed));
 
     //Guaranteed to be between 0 and (the total number of logical processors - 1)
     ProcessorID getCurrentProcessorID();

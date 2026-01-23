@@ -86,8 +86,8 @@ mboot_table:
 #Allocate initial space for bootstrapping page tables/data structures
 
 .align 4096
-.global boot_pml4
-boot_pml4:
+.global bootPageTable
+bootPageTable:
     .skip 4096
 .global boot_page_directory_pointer_table
 boot_page_directory_pointer_table:
@@ -107,7 +107,7 @@ _start:
     #zero out the tables pml4 - boot_page_directory2
 
     # Zero out the tables pml4 - boot_page_directory2
-    lea (boot_pml4 - VMEM_OFFSET), %edi
+    lea (bootPageTable - VMEM_OFFSET), %edi
     mov $0, %eax
     mov $4096, %ecx  # 4096 bytes = 512 entryBuffer * 8 bytes each
     zero_loop:
@@ -118,8 +118,8 @@ _start:
     # Set the top and bottom entryBuffer in the PML4
     mov $(boot_page_directory_pointer_table - VMEM_OFFSET), %eax
     or $3, %eax
-    mov %eax, (boot_pml4 - VMEM_OFFSET)
-    mov %eax, (boot_pml4 + 511 * 8 - VMEM_OFFSET)
+    mov %eax, (bootPageTable - VMEM_OFFSET)
+    mov %eax, (bootPageTable + 511 * 8 - VMEM_OFFSET)
 
     # Set up page directory pointer table
     mov $(boot_page_directory - VMEM_OFFSET), %eax
@@ -150,7 +150,7 @@ _start:
     mov %ebx, %cr0
 
     # Load the base address of PML4 into CR3
-    mov $(boot_pml4 - VMEM_OFFSET), %eax
+    mov $(bootPageTable - VMEM_OFFSET), %eax
     mov %eax, %cr3
 
     # Enable PAE (bit 5 in CR4)
