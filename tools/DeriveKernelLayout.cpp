@@ -25,8 +25,7 @@ void replace_all(std::string& str, const std::string& from, const std::string& t
 
 int main(int argc, char** argv) {
     // Compute the kernel memory layout
-    constexpr auto kernelBase = kernel::mm::getKernelMemRegionStart(0);
-    std::cout << "Kernel base: " << std::hex << kernelBase.value << '\n';
+    constexpr auto kernelBase = mm::getKernelMemRegionStart(mm::KERNEL_ZONE);
 
     if (argc != 4) {
         std::cerr << "Usage: " << argv[0] << " <template_file> <output_linker_file> <output_header_file>\n";

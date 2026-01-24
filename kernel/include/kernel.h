@@ -26,6 +26,10 @@ namespace kernel{
             constexpr explicit phys_addr(uint64_t v) : value(v) {}
             constexpr explicit phys_addr() : value(0) {}
             explicit phys_addr(void* v) : value((uint64_t)v) {}
+            phys_addr operator+(const size_t offset) const {return phys_addr(value + offset);}
+            phys_addr operator-(const size_t offset) const {return phys_addr(value - offset);}
+            phys_addr operator+=(const size_t offset) {value += offset; return *this;}
+            phys_addr operator-=(const size_t offset) {value -= offset; return *this;}
         };
 
         struct virt_addr {
@@ -35,6 +39,10 @@ namespace kernel{
             explicit virt_addr(void* v) : value((uint64_t)v) {}
             template <typename T>
             constexpr T* as_ptr(){return (T*)value;};
+            virt_addr operator+(const size_t offset) const {return virt_addr(value + offset);}
+            virt_addr operator-(const size_t offset) const {return virt_addr(value - offset);}
+            virt_addr operator+=(const size_t offset) {value += offset; return *this;}
+            virt_addr operator-=(const size_t offset) {value -= offset; return *this;}
         };
 
         enum class PageMappingPermissions : uint8_t {

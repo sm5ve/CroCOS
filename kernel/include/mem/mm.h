@@ -21,16 +21,14 @@ namespace kernel::mm{
     struct phys_memory_range {
         phys_addr start;
         phys_addr end;
-        [[nodiscard]]
-        size_t getSize();
-        bool contains(phys_addr);
+        [[nodiscard]] size_t getSize() const;
+        [[nodiscard]] bool contains(phys_addr) const;
     };
 
     struct virt_memory_range {
         virt_addr start;
         virt_addr end;
-        [[nodiscard]]
-        size_t getSize();
+        [[nodiscard]] size_t getSize() const;
     };
 
     namespace PageAllocator{

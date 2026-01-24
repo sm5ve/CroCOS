@@ -32,6 +32,9 @@ namespace arch{
     constexpr auto areInterruptsEnabled = amd64::interrupts::areInterruptsEnabled;
     constexpr size_t CPU_INTERRUPT_COUNT = amd64::INTERRUPT_VECTOR_COUNT;
     constexpr auto pageTableDescriptor = amd64::pageTableDescriptor;
+    inline void flushTLB() {
+        amd64::flushTLB();
+    }
 #endif
 
     template <size_t level>
@@ -40,6 +43,7 @@ namespace arch{
     struct PageTable{
         PTE<level> data alignas(sizeof(PTE<level>) * pageTableDescriptor.entryCount[level]) [pageTableDescriptor.entryCount[level]];
         PTE<level>& operator[](size_t index){return data[index];}
+        const PTE<level>& operator[](size_t index) const {return data[index];}
     } __attribute__((packed));
 
     //Guaranteed to be between 0 and (the total number of logical processors - 1)

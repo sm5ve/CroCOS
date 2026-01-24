@@ -121,6 +121,14 @@ namespace arch{
         using DataType = SmallestUInt_t<encoding.entryWidth>;
         DataType data;
 
+        [[nodiscard]] static constexpr bool canBeSubtable() {
+            return encoding.canBeSubtable;
+        }
+
+        [[nodiscard]] static constexpr bool canBeLeaf() {
+            return encoding.canBeLeaf;
+        }
+
         [[nodiscard]] static constexpr bool hasUserAccessibleBit(const bool leaf) {
             return encoding.getEncoding(leaf).properties.userAccessible != BIT_NOT_PRESENT;
         }
@@ -169,11 +177,10 @@ namespace arch{
             return hasDirtyBit(isLeafEntry());
         }
 
-        [[nodiscard]] constexpr static PageTableEntry subtableEntry(kernel::mm::phys_addr addr) {
+        [[nodiscard]] constexpr static PageTableEntry subtableEntry(kernel::mm::phys_addr addr) requires (encoding.canBeSubtable){
             //Ensure the address is properly aligned
 #ifdef PARANOID_PAGING_ASSERTIONS
             assert((addr.value & (~encoding.subtableEncoding.physAddrMask())) == 0, "");
-            assert(encoding.canBeSubtable, "There is no sensible subtable entry at this level");
 #endif
             DataType out = (addr.value >> encoding.subtableEncoding.physAddrLowestBit) << encoding.subtableEncoding.addrStartInEntry;
             DataType subtableBit = 1ULL << encoding.leafIndexBit;
@@ -184,7 +191,7 @@ namespace arch{
             return {out};
         }
 
-        [[nodiscard]] constexpr static PageTableEntry leafEntry(kernel::mm::phys_addr addr) {
+        [[nodiscard]] constexpr static PageTableEntry leafEntry(kernel::mm::phys_addr addr) requires (encoding.canBeLeaf){
             //Ensure the address is properly aligned
 #ifdef PARANOID_PAGING_ASSERTIONS
             assert((addr.value & (~encoding.leafEncoding.physAddrMask())) == 0, "");
@@ -254,7 +261,7 @@ namespace arch{
             data = newData;
         }
 
-        void markGlobal(const bool global = true) {
+        void markGlobal(const bool global = true) requires (encoding.getEncoding(isLeafEntry()).properties.global != BIT_NOT_PRESENT){
             const PageTableEntryBit globalBit = encoding.getEncoding(isLeafEntry()).properties.global;
 #ifdef PARANOID_PAGING_ASSERTIONS
             assert(hasGlobalBit(), "Cannot mark global on this entry");

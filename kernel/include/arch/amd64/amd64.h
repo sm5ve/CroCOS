@@ -335,6 +335,8 @@ namespace arch::amd64 {
         .levels = {pml4Entry, pdptEntry, pageDirectoryEntry, pageTableEntry},
         .entryCount = {512, 512, 512, 512}
     };
+
+    void flushTLB();
 }
 
 Core::PrintStream& operator<<(Core::PrintStream& ps, arch::amd64::interrupts::InterruptFrame& iframe);

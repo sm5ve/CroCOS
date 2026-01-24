@@ -89,24 +89,6 @@ namespace arch::amd64{
                      "mov %rax, %cr3");
     }
 
-    //Window MUST start at 2MiB aligned base
-    void* mapTemporary1GiBWindow(const mm::phys_addr base){
-        assert((base.value & (kernel::mm::PageAllocator::bigPageSize - 1)) == 0, "Misaligned window");
-        for(size_t x = 0; x < 512; x++){
-            //Write 2MiB page address to page table entry, truncate appropriately
-            bootstrapPageDir[x] = (base.value + x * mm::PageAllocator::bigPageSize) & (mm::PageAllocator::maxMemorySupported - 1);
-            bootstrapPageDir[x] |= (1 << 7) | 3; //Indicate this is a big page, it's R/W and present
-        }
-        //add a reference to our page directory to the page directory pointer table
-        boot_page_directory_pointer_table[510] = early_boot_virt_to_phys(mm::virt_addr(&bootstrapPageDir)).value | 3;
-        return mm::getKernelMemRegionStart(1).as_ptr<void>();
-    }
-
-    void unmapTemporaryWindow(){
-        boot_page_directory_pointer_table[510] = 0;
-        flushTLB();
-    }
-
     //highest entry in the page directory pointer table that is free
     //pdpt[511] and pdpt[510] are kernel memory
     //pdpt[509] is the 1 GiB window
@@ -163,7 +145,7 @@ namespace arch::amd64{
         //but also we need to remember our offset into this differently aligned window
         const size_t paging_offset = paging_phys_base.value - window_phys_base.value;
         //map the relevant memory into our window
-        void* window_virt_base = mapTemporary1GiBWindow(window_phys_base);
+        void* window_virt_base = mm::mapTemporaryWindow(window_phys_base);
         flushTLB(); //very necessary on the second memory range we process (and all thereafter)
         void* page_structures_begin = (void*)((uint64_t)window_virt_base + paging_offset);
         //clear the buffer
@@ -232,7 +214,7 @@ namespace arch::amd64{
         //The buffer doesn't necessarily lie on a big page aligned boundary, so we need to add back in the offset
         void* buffer_base_virt = (void*)(pd_vmem_base + buffer_offset);
         //decrement our pdpt index, so we don't overwrite our entry when we process the next memory range!
-        pdptIndex--;
+        pdptIndex++;
 
         //clear the buffer memory
         memset(buffer_base_virt, 0, buffer_space_needed);
@@ -363,7 +345,7 @@ namespace arch::amd64{
             }
         }
 
-        unmapTemporaryWindow();
+        mm::unmapTemporaryWindow();
 
         kernel::mm::PageAllocator::init(free_memory_regions, processorCount());
         //Find the memory range where the kernel resides and reserve it so we don't overwrite anything!
