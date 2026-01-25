@@ -11,6 +11,9 @@
 #include "kernel.h"
 #include <core/ds/Vector.h>
 #include <mem/FlushPlanner.h>
+#include <arch/memmap.h>
+
+struct mboot_mmap_entry;
 
 using namespace kernel;
 namespace arch::amd64 {
@@ -337,6 +340,17 @@ namespace arch::amd64 {
     };
 
     void flushTLB();
+
+    class MultibootMMapIterator {
+        mboot_mmap_entry* currentEntry;
+    public:
+        explicit MultibootMMapIterator(mboot_mmap_entry* start) : currentEntry(start) {}
+        MultibootMMapIterator& operator++();
+        [[nodiscard]] bool operator!=(const MultibootMMapIterator& other) const;
+        [[nodiscard]] MemoryMapEntry operator*();
+    };
+
+    IteratorRange<MultibootMMapIterator> getMemoryMap();
 }
 
 Core::PrintStream& operator<<(Core::PrintStream& ps, arch::amd64::interrupts::InterruptFrame& iframe);

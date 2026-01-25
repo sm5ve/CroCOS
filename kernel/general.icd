@@ -30,7 +30,7 @@ required = true
 per_cpu = false
 phase = "memory_management"
 depends_on_capabilities = ["cpu_count"]
-routine = "arch::amd64::initPageTableAllocator" #FIXME make this platform independent
+routine = "kernel::mm::initPageAllocator"
 
 [PTM]
 

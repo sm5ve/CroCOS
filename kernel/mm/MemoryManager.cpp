@@ -7,6 +7,8 @@
 #include <kernel.h>
 #include <kmemlayout.h>
 
+extern uint32_t phys_end;
+
 namespace kernel::mm{
     size_t phys_memory_range::getSize() const {
         return this -> end.value - this -> start.value;
@@ -366,5 +368,27 @@ namespace kernel::mm{
             return mappedAddress.as_ptr<void>();
         }
         static_assert(supportsSimpleBootstrapPageAllocatorMapping, "Page allocator buffer mapping not supported on this architecture with the simple mapping construction");
+    }
+
+    bool initPageAllocator() {
+        Vector<PageAllocator::page_allocator_range_info> free_memory_regions;
+
+        for (auto entry : arch::getMemoryMap()) {
+            if (entry.type == arch::USABLE) {
+                if(entry.range.getSize() > (arch::bigPageSize * 2)){
+                    auto range = entry.range;
+                    const auto buff = static_cast<uint64_t*>(reservePageAllocatorBufferForRange(range));
+                    free_memory_regions.push({range, buff});
+                }
+            }
+        }
+
+        unmapTemporaryWindow();
+
+        kernel::mm::PageAllocator::init(free_memory_regions, arch::processorCount());
+        //Find the memory range where the kernel resides and reserve it so we don't overwrite anything!
+        phys_memory_range range{.start=mm::phys_addr(nullptr), .end=mm::phys_addr(&phys_end)};
+        PageAllocator::reservePhysicalRange(range);
+        return true;
     }
 }

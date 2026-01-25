@@ -51,4 +51,10 @@ namespace arch{
     InterruptDisabler::~InterruptDisabler() {
         release();
     }
+
+    IteratorRange<MemMapIterator> getMemoryMap() {
+#ifdef ARCH_AMD64
+        return amd64::getMemoryMap();
+#endif
+    }
 }

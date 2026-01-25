@@ -19,6 +19,8 @@
 #include "arch/amd64/amd64.h"
 #endif
 
+#include <arch/memmap.h>
+
 namespace arch{
     void serialOutputString(const char* str);
 
@@ -35,6 +37,7 @@ namespace arch{
     inline void flushTLB() {
         amd64::flushTLB();
     }
+    using MemMapIterator = amd64::MultibootMMapIterator;
 #endif
 
     template <size_t level>
@@ -53,6 +56,10 @@ namespace arch{
     //Guaranteed to be between 0 and (the total number of logical processors - 1)
     ProcessorID getCurrentProcessorID();
     size_t processorCount();
+
+    static_assert(MemoryMapIterator<MemMapIterator>);
+
+    IteratorRange<MemMapIterator> getMemoryMap();
 
     class SerialPrintStream : public Core::PrintStream{
     protected:

@@ -24,8 +24,6 @@ extern uint32_t mboot_table;
 alignas(4096) uint64_t bootstrapPageDir[512];
 extern volatile uint64_t boot_page_directory_pointer_table[512];
 
-extern uint32_t phys_end;
-
 size_t archProcessorCount;
 
 namespace arch::amd64{
@@ -135,40 +133,52 @@ namespace arch::amd64{
         return true;
     }
 
-    bool initPageTableAllocator() {
-        assert(mboot_magic == 0x2BADB002, "Somehow the multiboot magic number is wrong. How did we get here?");
-        mm::unmapIdentity();
-        Vector<mm::PageAllocator::page_allocator_range_info> free_memory_regions;
+    MultibootMMapIterator &MultibootMMapIterator::operator++() {
+        currentEntry++;
+        return *this;
+    }
 
-        mboot_info* mbootInfo = early_boot_phys_to_virt(mm::phys_addr(mboot_table)).as_ptr<mboot_info>();
-        mboot_mmap_entry* mbootMmapBase = early_boot_phys_to_virt(mm::phys_addr(mbootInfo -> mmap_ptr)).as_ptr<mboot_mmap_entry>();
-
-        //Extract a list of free memory regions from the multiboot header, reserve the buffers requested by
-        //the page allocator, and package that up to pass along to the page allocator
-        //TODO make sure we double-check that the LAPIC/IOAPIC address ranges are completely reserved
-        for(mboot_mmap_entry* mbootMmapEntry = mbootMmapBase;
-            (uint64_t)mbootMmapEntry < (uint64_t)mbootMmapBase + mbootInfo -> mmap_len; mbootMmapEntry++){
-            if(mbootMmapEntry -> type == 0x1){ //If the memory region is free, we'll add it to the list!
-                mm::phys_memory_range range = {mm::phys_addr(mbootMmapEntry -> addr),
-                                               mm::phys_addr(mbootMmapEntry -> addr + mbootMmapEntry -> len)};
-                if(range.getSize() > (bigPageSize * 2)){
-                    const auto buff = static_cast<uint64_t*>(mm::reservePageAllocatorBufferForRange(range));
-                    free_memory_regions.push({range, buff});
-                }
-            }
+    MemoryMapEntry MultibootMMapIterator::operator*() {
+        mm::phys_memory_range range = {mm::phys_addr(currentEntry -> addr),
+            mm::phys_addr(currentEntry -> addr + currentEntry -> len)};
+        MemoryMapEntryType type;
+        switch(currentEntry -> type) {
+            case MEM_ACPI_RECLAIMABLE:
+                type = ACPI_RECLAIMABLE;
+                break;
+            case MEM_AVAILABLE:
+                type = USABLE;
+                break;
+            case MEM_BAD:
+                type = BAD;
+                break;
+            case MEM_NVS:
+                type = ACPI_NVS;
+                break;
+            case MEM_RESERVED:
+                type = RESERVED;
+                break;
+            default:
+                type = UNKNOWN;
         }
 
-        mm::unmapTemporaryWindow();
+        return {range,type};
+    }
 
-        kernel::mm::PageAllocator::init(free_memory_regions, processorCount());
-        //Find the memory range where the kernel resides and reserve it so we don't overwrite anything!
-        mm::phys_memory_range range{.start=mm::phys_addr(nullptr), .end=mm::phys_addr(&phys_end)};
-        mm::PageAllocator::reservePhysicalRange(range);
-        return true;
+    bool MultibootMMapIterator::operator!=(const MultibootMMapIterator &other) const {
+        return currentEntry != other.currentEntry;
+    }
+
+    IteratorRange<MultibootMMapIterator> getMemoryMap() {
+        assert(mboot_magic == 0x2BADB002, "Somehow the multiboot magic number is wrong. How did we get here?");
+        const auto mbootInfo = early_boot_phys_to_virt(mm::phys_addr(mboot_table)).as_ptr<mboot_info>();
+        const auto mbootMmapBase = early_boot_phys_to_virt(mm::phys_addr(mbootInfo -> mmap_ptr)).as_ptr<mboot_mmap_entry>();
+        return {MultibootMMapIterator(mbootMmapBase),
+                MultibootMMapIterator(mbootMmapBase + mbootInfo -> mmap_len)};
     }
 
     bool initPageTableManager() {
-        PageTableManager::init(arch::processorCount());
+        PageTableManager::init(processorCount());
         return true;
     }
 }
