@@ -507,7 +507,7 @@ namespace arch::amd64::timers{
                 auto sourceHandle = managed::InterruptSourceHandle(comparatorSourceDomain, linearIndex);
                 linearIndex++;
                 auto* eventSource = new HPETComparatorEventSource(regs, i, sourceHandle);
-                timing::registerEventSource(*eventSource);
+                registerEventSource(*eventSource);
             }
         }
     }
@@ -520,19 +520,13 @@ namespace arch::amd64::timers{
             return false;
         }
         auto& hpetTable = *hpetTablePtr;
-        klog() << "Found HPET with address info " << (void*)hpetTable.hpetBaseAddress.address << "\n";
-        klog() << "HPET address space ID is " << hpetTable.hpetBaseAddress.addressSpaceID << "\n";
         auto& base = mapHPET(hpetTable);
         assert(base.clockPeriod <= maximumClockPeriod, "HPET clock period is too large");
-        auto hpetFreq = Core::FrequencyData::fromPeriodFs(base.clockPeriod);
-        klog() << "HPET clock frequency is " << hpetFreq << "\n";
-        klog() << "base.comparatorCount() = " << base.comparatorCount() << "\n";
-        klog() << "base.longCountersSupported() = " << base.longCountersSupported() << "\n";
 
         setupHPETInterruptRouting(base);
         registerHPETEventSources(base);
         new(&cs)HPETClockSource(base);
-        timing::registerClockSource(cs);
+        registerClockSource(cs);
 
         base.enable();
 
