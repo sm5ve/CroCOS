@@ -18,26 +18,7 @@ namespace kernel::mm{
         size_t globalPoolSize;
     };
 
-    struct phys_memory_range {
-        phys_addr start;
-        phys_addr end;
-        [[nodiscard]] size_t getSize() const;
-        [[nodiscard]] bool contains(phys_addr) const;
-    };
-
-    struct virt_memory_range {
-        virt_addr start;
-        virt_addr end;
-        [[nodiscard]] size_t getSize() const;
-    };
-
     namespace PageAllocator{
-#ifdef __x86_64__
-        constexpr size_t smallPageSize = 0x1000; //4KiB
-        constexpr size_t bigPageSize = 0x200000; //2MiB
-        constexpr size_t maxMemorySupported = (1ULL << 48); //256 TiB
-#endif
-
         struct page_allocator_range_info{
             phys_memory_range range;
             //The architecture initialization routine MUST reserve adequately sized buffers for each
@@ -46,8 +27,8 @@ namespace kernel::mm{
             void* buffer_start;
         };
         // Calculate the maximum page counts
-        constexpr size_t smallPagesPerBigPage = bigPageSize / smallPageSize;
-        constexpr size_t bigPagesInMaxMemory = maxMemorySupported / bigPageSize;
+        constexpr size_t smallPagesPerBigPage = arch::bigPageSize / arch::smallPageSize;
+        constexpr size_t bigPagesInMaxMemory = arch::maxMemorySupported / arch::bigPageSize;
         void init(Vector<page_allocator_range_info>& regions, size_t processor_count);
         size_t requestedBufferSizeForRange(mm::phys_memory_range range, size_t processor_count);
         void reservePhysicalRange(phys_memory_range);

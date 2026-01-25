@@ -47,8 +47,10 @@ namespace kernel::mm{
 
     void unmapIdentity();
     void remapIdentity();
-    void* mapTemporaryWindow(phys_addr base);
+    virt_addr mapTemporaryWindow(phys_addr base);
     void unmapTemporaryWindow();
+
+    void* reservePageAllocatorBufferForRange(phys_memory_range& range);
 }
 
 #endif //CROCOS_KMEMLAYOUT_H

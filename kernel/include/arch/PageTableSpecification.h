@@ -29,6 +29,10 @@ namespace arch{
             bool writeableOnOne;
             bool executeOnOne;
             bool globalOnOne;
+
+            bool canBeGlobal() const {
+                return global != BIT_NOT_PRESENT;
+            }
         };
 
         struct EntryEncoding {
@@ -213,6 +217,7 @@ namespace arch{
             if (!encoding.canBeLeaf) {
                 return false;
             }
+            static_assert(encoding.leafIndexBit != BIT_NOT_PRESENT, "Cannot be a leaf entry if there is no leaf index bit");
             return ((data >> encoding.leafIndexBit) & 1) == encoding.isLeafOnOne;
         }
 
@@ -261,7 +266,7 @@ namespace arch{
             data = newData;
         }
 
-        void markGlobal(const bool global = true) requires (encoding.getEncoding(isLeafEntry()).properties.global != BIT_NOT_PRESENT){
+        void markGlobal(const bool global = true){
             const PageTableEntryBit globalBit = encoding.getEncoding(isLeafEntry()).properties.global;
 #ifdef PARANOID_PAGING_ASSERTIONS
             assert(hasGlobalBit(), "Cannot mark global on this entry");

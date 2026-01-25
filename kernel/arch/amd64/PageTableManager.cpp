@@ -101,7 +101,7 @@ namespace arch::amd64::PageTableManager{
         template <size_t bitIndex, size_t length, size_t startEntry>
         [[nodiscard]]
         static uint64_t get_inline_global_metadata(const PageDirectoryEntry* table) {
-            assert((uint64_t)table % mm::PageAllocator::smallPageSize == 0, "Page table improperly aligned");
+            assert((uint64_t)table % smallPageSize == 0, "Page table improperly aligned");
             //global metadata should support both big page entryBuffer and entryBuffer mapping to page tables, hence the
             //more restrictive assert.
             static_assert((bitIndex >= 9 && bitIndex <= 11) || (bitIndex >= 52 && bitIndex <= 58),
@@ -115,7 +115,7 @@ namespace arch::amd64::PageTableManager{
 
         template <size_t bitIndex, size_t length, size_t startEntry>
         static void set_inline_global_metadata(PageDirectoryEntry* table, uint64_t value) {
-            assert((uint64_t)table % mm::PageAllocator::smallPageSize == 0, "Page table improperly aligned");
+            assert((uint64_t)table % smallPageSize == 0, "Page table improperly aligned");
             static_assert((bitIndex >= 9 && bitIndex <= 11) || (bitIndex >= 52 && bitIndex <= 58),
                           "Metadata out of bounds");
             const uint64_t mask = (1ul << bitIndex);
@@ -126,8 +126,8 @@ namespace arch::amd64::PageTableManager{
         }
 
         static PTMetadata& fast_global_metadata(PageDirectoryEntry* table){
-            assert((uint64_t)table % mm::PageAllocator::smallPageSize == 0, "misaligned page table");
-            auto absolutePageIndex = ((uint64_t)table - (uint64_t)pageStructureVirtualBase) / mm::PageAllocator::smallPageSize;
+            assert((uint64_t)table % smallPageSize == 0, "misaligned page table");
+            auto absolutePageIndex = ((uint64_t)table - (uint64_t)pageStructureVirtualBase) / smallPageSize;
             return (PTMetadata&)pageTableGlobalMetadataBase[absolutePageIndex];
         }
     };
@@ -280,14 +280,14 @@ namespace arch::amd64::PageTableManager{
     void freeInternalPageTableEntry(PageDirectoryEntry& entry);
 
     PageDirectoryEntry& getInternalPDEntryForVaddr(mm::virt_addr vaddr){
-        uint64_t index = (vaddr.value - (uint64_t) pageStructureVirtualBase) / mm::PageAllocator::smallPageSize;
+        uint64_t index = (vaddr.value - (uint64_t) pageStructureVirtualBase) / smallPageSize;
         return *reinterpret_cast<PageDirectoryEntry*>((uint64_t)pageStructureVirtualBase
                                                            + index * sizeof(PageDirectoryEntry));
     }
 
     mm::virt_addr internalPageMappingToPTAddr(PageDirectoryEntry* entry){
         auto index = ((uint64_t)entry - (uint64_t)pageStructureVirtualBase) / sizeof(PageDirectoryEntry);
-        return mm::virt_addr((uint64_t)pageStructureVirtualBase + index * mm::PageAllocator::smallPageSize);
+        return mm::virt_addr((uint64_t)pageStructureVirtualBase + index * smallPageSize);
     }
 
     void markPageTableVaddrFree(mm::virt_addr vaddr){
@@ -457,7 +457,7 @@ namespace arch::amd64::PageTableManager{
     //Note that this is only to be used internally by the page table manager – in the broader kernel, the higher level
     //abstraction of VirtualMemoryZones will solve virtual address allocation using an augmented AVL tree.
     void initializeInternalPageTableFreeMetadata(PageDirectoryEntry* table){
-        assert((uint64_t) table % mm::PageAllocator::smallPageSize == 0, "misaligned page table");
+        assert((uint64_t) table % smallPageSize == 0, "misaligned page table");
         for(uint64_t i = 0; i < ENTRIES_PER_TABLE; i++){
             //We will say any offset with the highest bit set is invalid - in particular this enforces that there is
             //no "next" free entry after the last one, and this is recorded by the fact that the next entry offset
@@ -469,7 +469,7 @@ namespace arch::amd64::PageTableManager{
     }
 
     void initializeSetupInternalPageTableFreeMetadata(PageDirectoryEntry* table){
-        assert((uint64_t) table % mm::PageAllocator::smallPageSize == 0, "misaligned page table");
+        assert((uint64_t) table % smallPageSize == 0, "misaligned page table");
         uint64_t firstUnoccupied = ENTRIES_PER_TABLE;
         for(int i = ENTRIES_PER_TABLE - 1; i >= 0; i--){
             if(table[i].value == 0){
@@ -555,7 +555,7 @@ namespace arch::amd64::PageTableManager{
 
     void markTableAsFull(PageDirectoryEntry* table){
         auto index = static_cast<uint16_t>(((uint64_t) table - (uint64_t) pageStructureVirtualBase) /
-                                               mm::PageAllocator::smallPageSize);
+                                               smallPageSize);
         if(markFullState(index, true)){
             //If we're the ones to mark the state as full, we're responsible for removing the index from the queue
             assert(partiallyOccupiedRingBuffer[poQueueReadHead] == index,
@@ -569,7 +569,7 @@ namespace arch::amd64::PageTableManager{
 
     void markTableAsPartiallyOccupied(PageDirectoryEntry* table){
         auto index = static_cast<uint16_t>(((uint64_t) table - (uint64_t) pageStructureVirtualBase) /
-                                               mm::PageAllocator::smallPageSize);
+                                               smallPageSize);
         if(markPartiallyOccupiedState(index, true)){
             //If we're the ones to mark the state as partially occupied, we're responsible for pushing this to the queue
             //unlike in the above case, it is expected that we may try to mark many different indices as partially occupied
@@ -595,7 +595,7 @@ namespace arch::amd64::PageTableManager{
     }
 
     PageDirectoryEntry* getPageTableForIndex(uint64_t index){
-        return (PageDirectoryEntry*)((uint64_t)pageStructureVirtualBase + index * mm::PageAllocator::smallPageSize);
+        return (PageDirectoryEntry*)((uint64_t)pageStructureVirtualBase + index * smallPageSize);
     }
 
     PageDirectoryEntry* allocateInternalPageTableEntryForTable(PageDirectoryEntry* table){
@@ -624,7 +624,7 @@ namespace arch::amd64::PageTableManager{
 
     void freeInternalPageTableEntry(PageDirectoryEntry& entry){
         auto tableBase = (PageDirectoryEntry*)((uint64_t)&entry & (uint64_t)~((1 << 12) - 1));
-        assert(((uint64_t)tableBase - (uint64_t)pageStructureVirtualBase)/mm::PageAllocator::smallPageSize < unpopulatedHead, "Tried to free entry in nonexistent page table");
+        assert(((uint64_t)tableBase - (uint64_t)pageStructureVirtualBase)/smallPageSize < unpopulatedHead, "Tried to free entry in nonexistent page table");
         uint64_t entryIndex = ((uint64_t)&entry - (uint64_t)tableBase) / sizeof(PageDirectoryEntry);
         assert(entry.get_local_metadata<LOCAL_OCCUPIED_BIT>(), "Tried to free a page table entry that was already freed");
         bool didFree;
@@ -659,8 +659,8 @@ namespace arch::amd64::PageTableManager{
                 auto metadataPageAddr = mm::PageAllocator::allocateSmallPage();
                 internalTableMetadataMapping[unpopulatedHead] = PageDirectoryEntry(metadataPageAddr.value | (1 << 8) | 3);
                 //clear the page table and its metadata
-                memset((void*)((uint64_t)pageStructureVirtualBase + unpopulatedHead * mm::PageAllocator::smallPageSize), 0, mm::PageAllocator::smallPageSize);
-                memset((void*)((uint64_t)pageTableGlobalMetadataBase + unpopulatedHead * mm::PageAllocator::smallPageSize), 0, mm::PageAllocator::smallPageSize);
+                memset((void*)((uint64_t)pageStructureVirtualBase + unpopulatedHead * smallPageSize), 0, smallPageSize);
+                memset((void*)((uint64_t)pageTableGlobalMetadataBase + unpopulatedHead * smallPageSize), 0, smallPageSize);
                 //initialize the page table
                 initializeInternalPageTableFreeMetadata(getPageTableForIndex(unpopulatedHead));
                 //put it in the queue
@@ -753,7 +753,7 @@ namespace arch::amd64::PageTableManager{
         //if the reserve pool is empty, try to steal a page from the overflow pool
         if(stealFromOverflowPool(out)){
             //if we were able to steal a page, we have to be sure to remap it in the internal page table.
-            auto index = (out.virtualAddress.value - (uint64_t)pageStructureVirtualBase) / mm::PageAllocator::smallPageSize;
+            auto index = (out.virtualAddress.value - (uint64_t)pageStructureVirtualBase) / smallPageSize;
             PageDirectoryEntry* entry = (PageDirectoryEntry*)((uint64_t)pageStructureVirtualBase + index * sizeof(PageDirectoryEntry));
             entry -> setAndPreserveMetadata(PageDirectoryEntry(out.physicalAddress.value | 3 | (1 << 8)));
             return out;
@@ -870,14 +870,14 @@ namespace arch::amd64::PageTableManager{
         }
 
         //set up our pointers
-        pageStructureVirtualBase = reinterpret_cast<PageDirectoryEntry *>(-3ul << 30); //-3 GiB
+        pageStructureVirtualBase = reinterpret_cast<PageDirectoryEntry *>(-2ul << 30); //-3 GiB
         pageTableGlobalMetadataBase = reinterpret_cast<uint64_t *>((uint64_t)pageStructureVirtualBase + (1ul << 21));
         pageMappingDirectory = (PageDirectoryEntry*)((uint64_t)pageTableGlobalMetadataBase + (1ul << 21));
         //initializeSetupInternalPageTableFreeMetadata(getPageTableForIndex(0));
 
         //install the page directory
-        boot_page_directory_pointer_table[509] = early_boot_virt_to_phys(mm::virt_addr(bootstrapPageDir)).value | 3;
-        memset(pageTableGlobalMetadataBase, 0, mm::PageAllocator::smallPageSize * 3);
+        boot_page_directory_pointer_table[510] = early_boot_virt_to_phys(mm::virt_addr(bootstrapPageDir)).value | 3;
+        memset(pageTableGlobalMetadataBase, 0, smallPageSize * 3);
         //Since we're now storing the free list head metadata in the metadata pages, we have to initialize things in
         //a rather particular order. Namely, we have to map everything in and clear out the metadata pages, and only
         //later can we actually initialize the metadata on our first page.
@@ -892,7 +892,7 @@ namespace arch::amd64::PageTableManager{
     }
 
     void* temporaryHackMapMMIOPage(mm::phys_addr paddr){
-        assert(paddr.value % mm::PageAllocator::smallPageSize == 0, "Misaligned physical page address");
+        assert(paddr.value % smallPageSize == 0, "Misaligned physical page address");
         auto entry = allocateInternalPageTableEntry();
         //Map page as global, R/W permissions, and uncachable
         entry->setAndPreserveMetadata(PageDirectoryEntry(paddr.value | 3 | (1 << 8) | (1 << 4)));

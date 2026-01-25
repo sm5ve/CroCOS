@@ -28,8 +28,10 @@ namespace kernel{
             explicit phys_addr(void* v) : value((uint64_t)v) {}
             phys_addr operator+(const size_t offset) const {return phys_addr(value + offset);}
             phys_addr operator-(const size_t offset) const {return phys_addr(value - offset);}
-            phys_addr operator+=(const size_t offset) {value += offset; return *this;}
-            phys_addr operator-=(const size_t offset) {value -= offset; return *this;}
+            phys_addr& operator+=(const size_t offset) {value += offset; return *this;}
+            phys_addr& operator-=(const size_t offset) {value -= offset; return *this;}
+            phys_addr operator&(const size_t mask) const {return phys_addr(value & mask);}
+            phys_addr& operator&=(const size_t mask) {value &= mask; return *this;}
         };
 
         struct virt_addr {
@@ -41,8 +43,21 @@ namespace kernel{
             constexpr T* as_ptr(){return (T*)value;};
             virt_addr operator+(const size_t offset) const {return virt_addr(value + offset);}
             virt_addr operator-(const size_t offset) const {return virt_addr(value - offset);}
-            virt_addr operator+=(const size_t offset) {value += offset; return *this;}
-            virt_addr operator-=(const size_t offset) {value -= offset; return *this;}
+            virt_addr& operator+=(const size_t offset) {value += offset; return *this;}
+            virt_addr& operator-=(const size_t offset) {value -= offset; return *this;}
+        };
+
+        struct phys_memory_range {
+            phys_addr start;
+            phys_addr end;
+            [[nodiscard]] size_t getSize() const;
+            [[nodiscard]] bool contains(phys_addr) const;
+        };
+
+        struct virt_memory_range {
+            virt_addr start;
+            virt_addr end;
+            [[nodiscard]] size_t getSize() const;
         };
 
         enum class PageMappingPermissions : uint8_t {

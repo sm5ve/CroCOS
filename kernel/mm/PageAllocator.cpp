@@ -13,6 +13,8 @@
 
 namespace kernel::mm::PageAllocator{
 
+    using namespace arch;
+
     using BufferId = SmallestUInt_t<RequiredBits(arch::MAX_PROCESSOR_COUNT)>;
     const BufferId GLOBAL_POOL = arch::MAX_PROCESSOR_COUNT;
 
