@@ -22,6 +22,10 @@ namespace kernel{
         return Core::AtomicPrintStream(klogStream);
     }
 
+    Core::PrintStream& emergencyLog() {
+        return klogStream;
+    }
+
     bool runGlobalConstructors(){
         for (void (**ctor)() = __init_array_start; ctor != __init_array_end; ctor++) {
             (*ctor)();
@@ -34,14 +38,31 @@ namespace kernel{
         return true;
     }
 
-    extern "C" void kernel_main() {
-        klog() << "\n"; // newline to separate from the "Booting from ROM.." message from qemu
-        init::kinit(true, KERNEL_INIT_LOG_LEVEL, false);
+    [[noreturn]] bool naiveTest() {
+        mm::phys_addr pages[1024];
+        klog() << "Running test on CPU " << arch::getCurrentProcessorID() << "\n";
+        while (true) {
+            for (auto& page : pages) {
+                page = mm::PageAllocator::allocateSmallPage();
+            }
+            for (auto& page : pages) {
+                mm::PageAllocator::freeSmallPage(page);
+            }
+        }
+    }
 
+    bool enqueueShutdown() {
+        arch::amd64::sti();
         timing::enqueueEvent([] {
             klog() << "\nGoodbye :)\n";
             asm volatile("outw %0, %1" ::"a"((uint16_t)0x2000), "Nd"((uint16_t)0x604));
-        }, 1000);
+        }, 2000);
+        return true;
+    }
+
+    extern "C" void kernel_main() {
+        klog() << "\n"; // newline to separate from the "Booting from ROM.." message from qemu
+        init::kinit(true, KERNEL_INIT_LOG_LEVEL, false);
 
         for (;;)
             asm volatile("hlt");

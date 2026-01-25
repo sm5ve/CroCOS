@@ -7,11 +7,11 @@
 namespace kernel{
 
     void print_stacktrace(uintptr_t* rbp) {
-        kernel::klog() << "Stack trace:\n";
+        emergencyLog() << "Stack trace:\n";
 
         for (int i = 0; (i < 20) && rbp; i++) {
             uintptr_t rip = rbp[1];
-            kernel::klog() << "[" << i << "] " << (void*)rip << "\n";
+            emergencyLog() << "[" << i << "] " << (void*)rip << "\n";
             rbp = (uintptr_t*)rbp[0];
         }
     }
