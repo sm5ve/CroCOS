@@ -181,4 +181,10 @@ namespace arch::amd64{
         PageTableManager::init(processorCount());
         return true;
     }
+
+    size_t debugEarlyBootCPUID() {
+        uint32_t eax, ebx, ecx, edx;
+        cpuid(eax, ebx, ecx, edx, 1);
+        return (ebx >> 24) & 0xff;
+    }
 }

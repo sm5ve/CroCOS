@@ -29,21 +29,26 @@ add_subdirectory(kernel)
 add_custom_target(run
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         DEPENDS Kernel
-        COMMAND time qemu-system-x86_64 -kernel kernel/Kernel -no-reboot -nographic -smp 128 -m 256M -d int,cpu_reset,guest_errors -D guestErrors.log -cpu qemu64,+fsgsbase
+        COMMAND time qemu-system-x86_64 -kernel kernel/Kernel -no-reboot -nographic -smp 8 -m 256M -d int,cpu_reset,guest_errors -D guestErrors.log -cpu qemu64,+fsgsbase
+        COMMENT "Running QEMU"
+        USES_TERMINAL
+)
+
+add_custom_target(qmon
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+        DEPENDS Kernel
+        COMMAND time qemu-system-x86_64 -kernel kernel/Kernel -no-reboot -nographic -s -S -smp 16 -m 256M -d int,cpu_reset,guest_errors -D guestErrors.log -cpu qemu64,+fsgsbase
         COMMENT "Running QEMU"
         USES_TERMINAL
 )
 
 add_custom_target(kdebug
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-        COMMAND qemu-system-x86_64 -kernel kernel/Kernel -s -S -no-reboot -nographic -smp 4 -m 256M -d guest_errors -cpu qemu64,+fsgsbase -serial file:qemu.log
+        DEPENDS Kernel
+        COMMAND qemu-system-x86_64 -kernel kernel/Kernel -s -S -no-reboot -nographic -smp 8 -m 256M -d guest_errors -cpu qemu64,+fsgsbase
         COMMENT "Running QEMU"
         USES_TERMINAL
 )
-
-add_dependencies(run Kernel)
-
-add_dependencies(kdebug Kernel)
 
 # Add unit test target that builds and runs all tests
 add_custom_target(unit_tests

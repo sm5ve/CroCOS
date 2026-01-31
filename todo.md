@@ -13,8 +13,8 @@ At this point, we have a minimal implementation of the interrupt manager, we can
 ---
 
 9. (✅) Create driver for PIT
-10. Implement timer manager, sleep()
-11. SMP bring up
+10. (✅) Implement timer manager, sleep()
+11. (✅) SMP bring up
 12. Unit test RingBuffer
 13. Rewrite PageTableManager to use RingBuffer abstraction, try to abstract out hardware details to minimize code in /arch
 14. Confirm functionality of new PageTableManager with one processor

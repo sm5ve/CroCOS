@@ -913,8 +913,8 @@ namespace kernel::mm::PageAllocator{
         }
 
         ContiguousRangeAllocator(page_allocator_range_info info, size_t processorCount){
-            phys_addr rangeBottom(divideAndRoundDown(info.range.start.value, bigPageSize) * bigPageSize);
-            phys_addr rangeTop(divideAndRoundUp(info.range.end.value, bigPageSize) * bigPageSize);
+            phys_addr rangeBottom(roundUpToNearestMultiple(info.range.start.value, bigPageSize));
+            phys_addr rangeTop(roundDownToNearestMultiple(info.range.end.value, bigPageSize));
             size_t totalSuperpages = (rangeTop.value - rangeBottom.value) / bigPageSize;
             void* buffPtr = info.buffer_start;
             assert((uint64_t)buffPtr % smallPageSize == 0, "Buffer not page-aligned");
@@ -988,8 +988,8 @@ namespace kernel::mm::PageAllocator{
 
     size_t requestedBufferSizeForRange(mm::phys_memory_range range, size_t processor_count){
         size_t out = 0;
-        phys_addr rangeBottom(divideAndRoundDown(range.start.value, bigPageSize) * bigPageSize);
-        phys_addr rangeTop(divideAndRoundUp(range.end.value, bigPageSize) * bigPageSize);
+        phys_addr rangeBottom(roundDownToNearestMultiple(range.start.value, bigPageSize));
+        phys_addr rangeTop(roundUpToNearestMultiple(range.end.value, bigPageSize));
         size_t totalSuperpages = (rangeTop.value - rangeBottom.value) / bigPageSize;
 
         incrementSizeWithAlignment(out, ContiguousRangeAllocator::rawSubpagePoolSize * totalSuperpages);

@@ -317,7 +317,14 @@ namespace kernel::interrupts::managed {
 
     void dispatchInterrupt(arch::InterruptFrame& frame) {
         if (frame.vector_index == 14) {
-            klog() << "Pagefault at " << reinterpret_cast<void*>(frame.rip) << "\n";
+            void* faultingAccess;
+            asm volatile("mov %%cr2, %0" : "=r"(faultingAccess));
+            klog() << "Pagefault at " << reinterpret_cast<void*>(frame.rip) << " accessing " << faultingAccess <<"\n";
+            print_stacktrace(&frame.rbp);
+            asm volatile("outw %0, %1" ::"a"((uint16_t)0x2000), "Nd"((uint16_t)0x604));
+        }
+        if (frame.vector_index < 32) {
+            klog() << "Unhandled exception " << frame.vector_index << " at IP " << (void*)frame.rip << " on processor " << arch::getCurrentProcessorID() << "\n";
             print_stacktrace(&frame.rbp);
             asm volatile("outw %0, %1" ::"a"((uint16_t)0x2000), "Nd"((uint16_t)0x604));
         }
@@ -331,7 +338,10 @@ namespace kernel::interrupts::managed {
             }
         }
         else {
-            assertUnimplemented("I don't yet have support for level-triggered interrupt EOIs");
+            klog() << "Interrupt " << frame.vector_index << " triggered on level\n";
+            klog() << "This is not supported yet!\n";
+            klog() << "IP is " << (void*)frame.rip << "\n";
+            //assertUnimplemented("I don't yet have support for level-triggered interrupt EOIs");
         }
         if (handlersByVector[frame.vector_index].get() != nullptr) {
             for (auto& handler : *handlersByVector[frame.vector_index]) {

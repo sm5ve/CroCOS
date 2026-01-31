@@ -1,17 +1,29 @@
 #!/bin/sh
 
-#hacky little script because I was having trouble getting clion's remote debugging
-#to automatically build and run the kernel
-
 set -euo pipefail
-
-killall qemu-system-x86_64 || true
 
 BUILD_DIR="cmake-build-debug"
 
+killall qemu-system-x86_64 2>/dev/null || true
+sleep 0.5
+
+echo "Building kernel..."
 cmake --build "$BUILD_DIR" --target Kernel
 
-qemu-system-x86_64 -kernel $BUILD_DIR/kernel/Kernel -no-reboot -nographic -s -S \
--smp 4 -m 256M -d guest_errors -cpu qemu64,+fsgsbase -serial file:$BUILD_DIR/qemu.log &
+echo "Starting QEMU wrapper..."
 
-sleep 1
+# Start the wrapper in the background using macOS-specific launchd-style detachment
+nohup ./qemu_wrapper.sh > /tmp/qemu_wrapper.log 2>&1 &
+
+# Wait for QEMU to be ready
+for i in $(seq 1 20); do
+    if lsof -i :1234 >/dev/null 2>&1; then
+        echo "QEMU ready on port 1234"
+        exit 0
+    fi
+    sleep 0.3
+done
+
+echo "ERROR: Timeout waiting for QEMU"
+cat /tmp/qemu_wrapper.log
+exit 1

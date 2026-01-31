@@ -21,6 +21,10 @@
 
 #include <arch/memmap.h>
 
+#ifdef ARCH_AMD64
+#define SUPPORTS_SPINLOCK_DEADLOCK_DETECTION
+#endif
+
 namespace arch{
     void serialOutputString(const char* str);
 
@@ -38,6 +42,9 @@ namespace arch{
         amd64::flushTLB();
     }
     using MemMapIterator = amd64::MultibootMMapIterator;
+    inline size_t debugEarlyBootCPUID() {
+        return amd64::debugEarlyBootCPUID();
+    }
 #endif
 
     template <size_t level>

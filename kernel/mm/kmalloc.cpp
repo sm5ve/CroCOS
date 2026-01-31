@@ -11,12 +11,18 @@ uint8_t heap_buffer[KERNEL_INIT_HEAP_BUFFER];
 
 namespace kernel{
     bool heapEarlyInit() {
+        klog() << "heap buffer starts at " << heap_buffer << "\n";
         la_init(heap_buffer, sizeof(heap_buffer));
         return true;
     }
 
     void* kmalloc(size_t size, std::align_val_t align){
-        return la_malloc(size, align);
+        auto out = la_malloc(size, align);
+        auto addr = reinterpret_cast<uint64_t>(out);
+        auto heapStart = reinterpret_cast<uint64_t>(heap_buffer);
+        //Temporary assert
+        assert(size == 0 || (addr >= heapStart && addr < heapStart + KERNEL_INIT_HEAP_BUFFER), "Returned pointer is out of bounds for the heap buffer");
+        return out;
     }
 
     void kfree(void* ptr){

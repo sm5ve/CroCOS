@@ -88,7 +88,7 @@ namespace arch::amd64::smp{
     }
 
     using SMPStack = uint8_t[KERNEL_STACK_SIZE];
-    SMPStack stacks[128]; //TODO replace temporary hack
+    SMPStack stacks[16]; //TODO replace temporary hack
 
     void initProcessors() {
         auto lapic = interrupts::getLAPICDomain();
@@ -132,6 +132,6 @@ using namespace kernel;
 
 
 extern "C" void smpEntry() {
-    upCount++;
+    ++upCount;
     kernel::init::kinit(false, KERNEL_INIT_LOG_LEVEL, false);
 }

@@ -38,21 +38,36 @@ namespace kernel{
         return true;
     }
 
-    [[noreturn]] bool naiveTest() {
-        mm::phys_addr pages[1024];
+    using PagePool = mm::phys_addr[2048];
+
+    PagePool page_pools[16];
+
+    // Original naiveTest - page allocator stress test
+    bool naiveTest() {
         klog() << "Running test on CPU " << arch::getCurrentProcessorID() << "\n";
         while (true) {
-            for (auto& page : pages) {
+            for (size_t i = 0; i < sizeof(PagePool) / sizeof(mm::phys_addr); i++) {
+                auto& page = page_pools[arch::getCurrentProcessorID()][i];
                 page = mm::PageAllocator::allocateSmallPage();
+                assert(page.value % arch::smallPageSize == 0, "The allocator has given me nonsense.");
             }
-            for (auto& page : pages) {
+            for (size_t i = 0; i < sizeof(PagePool) / sizeof(mm::phys_addr); i++) {
+                auto& page = page_pools[arch::getCurrentProcessorID()][i];
+                assert(page.value % arch::smallPageSize == 0, "There is a strange memory corruption error.");
                 mm::PageAllocator::freeSmallPage(page);
             }
         }
+        return true;
+    }
+
+    [[noreturn]] bool spin() {
+        for (;;)
+            asm volatile("hlt");
     }
 
     bool enqueueShutdown() {
         arch::amd64::sti();
+        klog() << "Enqueuing shutdown\n";
         timing::enqueueEvent([] {
             klog() << "\nGoodbye :)\n";
             asm volatile("outw %0, %1" ::"a"((uint16_t)0x2000), "Nd"((uint16_t)0x604));

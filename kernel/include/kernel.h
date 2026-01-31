@@ -32,6 +32,7 @@ namespace kernel{
             phys_addr& operator-=(const size_t offset) {value -= offset; return *this;}
             phys_addr operator&(const size_t mask) const {return phys_addr(value & mask);}
             phys_addr& operator&=(const size_t mask) {value &= mask; return *this;}
+            bool operator==(const phys_addr & other) const {return value == other.value;}
         };
 
         struct virt_addr {
@@ -45,6 +46,7 @@ namespace kernel{
             virt_addr operator-(const size_t offset) const {return virt_addr(value - offset);}
             virt_addr& operator+=(const size_t offset) {value += offset; return *this;}
             virt_addr& operator-=(const size_t offset) {value -= offset; return *this;}
+            bool operator==(const virt_addr & other) const {return value == other.value;}
         };
 
         struct phys_memory_range {

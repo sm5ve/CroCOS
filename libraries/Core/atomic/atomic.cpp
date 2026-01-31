@@ -3,13 +3,32 @@
 //
 #include <core/atomic.h>
 
+#ifdef KERNEL
+#include <arch.h>
+#if defined(SUPPORTS_SPINLOCK_DEADLOCK_DETECTION) && defined(DEBUG_BUILD)
+#define USE_SPINLOCK_DEADLOCK_DETECTION
+#endif
+#endif
+
 void Spinlock::acquire() {
+#ifdef USE_SPINLOCK_DEADLOCK_DETECTION
+    auto meta = metadata.load(ACQUIRE);
+    if (meta & activeMeta) {
+        assert ((meta & 0xff) != arch::debugEarlyBootCPUID(), "Deadlock detected!");
+    }
+#endif
     while (!locked.compare_exchange_v(false, true, ACQUIRE)) {
         tight_spin();
     }
+#ifdef USE_SPINLOCK_DEADLOCK_DETECTION
+    metadata.store(arch::debugEarlyBootCPUID() | activeMeta);
+#endif
 }
 
 void Spinlock::release() {
+#ifdef USE_SPINLOCK_DEADLOCK_DETECTION
+    metadata.store(0);
+#endif
     locked.store(false, RELEASE);
 }
 

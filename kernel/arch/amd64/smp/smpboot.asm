@@ -126,11 +126,15 @@ higher_half:
     mov %ax, %gs
     mov %ax, %ss
 
+    mov smp_bringup_stack, %rdx
+
     mov $1, %rax
     lock xadd %rax, proc_bringup_count
 
     imul $KERNEL_STACK_SIZE, %rax, %rax
-    lea smp_bringup_stack(%rax), %rsp
+    add $KERNEL_STACK_SIZE, %rax
+    mov smp_bringup_stack, %rsp
+    add %rax, %rsp
 
     call smpEntry
 2:

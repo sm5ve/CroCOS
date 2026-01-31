@@ -351,6 +351,7 @@ namespace arch::amd64 {
     };
 
     IteratorRange<MultibootMMapIterator> getMemoryMap();
+    size_t debugEarlyBootCPUID();
 }
 
 Core::PrintStream& operator<<(Core::PrintStream& ps, arch::amd64::interrupts::InterruptFrame& iframe);

@@ -7,19 +7,23 @@
 
 #include "kernel.h"
 
-#define PANIC(...) kernel::panic(__FILE__, __LINE__, __VA_ARGS__)
+#define PANIC(...) kernel::panic<true>(__FILE__, __LINE__, __VA_ARGS__)
+
+#define PANIC_NO_STACKTRACE(...) kernel::panic<false>(__FILE__, __LINE__, __VA_ARGS__)
 
 namespace kernel{
     void print_stacktrace();
     void print_stacktrace(uintptr_t* rbp);
     Core::PrintStream& emergencyLog();
-    template <typename... Args>
+    template <bool stacktrace, typename... Args>
     [[noreturn]]
     void panic(const char* filename, const uint32_t line, Args&&... args){
         emergencyLog() << "Panic: ";
         (emergencyLog() << ... << forward<Args>(args));
         emergencyLog() << "\nIn file " << filename << " line " << line << "\n";
-        print_stacktrace();
+        if constexpr (stacktrace) {
+            print_stacktrace();
+        }
 #ifdef __x86_64__
         //Give QEMU some time to actually print the panic message before quitting
         for(auto i = 0; i < 1000; i++){

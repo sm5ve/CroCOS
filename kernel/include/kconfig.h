@@ -5,7 +5,7 @@
 #ifndef CROCOS_KCONFIG_H
 #define CROCOS_KCONFIG_H
 
-#ifndef HOSTED
+#ifdef CR_BOOT
 #include <kbase.h>
 #endif
 

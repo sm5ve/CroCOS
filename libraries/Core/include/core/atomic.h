@@ -301,6 +301,8 @@ public:
 class Spinlock {
 private:
     Atomic<bool> locked{false};
+    static const size_t activeMeta = 1ul << 63;
+    Atomic<size_t> metadata{0};
 
 public:
     void acquire();

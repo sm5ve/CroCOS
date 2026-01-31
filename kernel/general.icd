@@ -61,3 +61,21 @@ phase = "core_devices"
 depends_on_capabilities = ["clock_source", "event_source"]
 depends_on = ["InterruptManager"]
 routine = "kernel::timing::initialize"
+
+[Shutdown]
+
+name = "Shutdown"
+required = true
+per_cpu = false
+phase = "smp_bringup"
+depends_on = ["SMP"]
+routine = "kernel::enqueueShutdown"
+
+[Test]
+
+name = "Naive Test"
+required = true
+per_cpu = true
+phase = "smp_bringup"
+depends_on = ["Shutdown"]
+routine = "kernel::naiveTest"
