@@ -281,20 +281,20 @@ public:
         return atomic_sub_fetch(value, val, mem_order);
     }
 
-    T operator++(int) {
-        return add_fetch(1);
-    }
-
-    T operator--(int) {
-        return sub_fetch(1);
-    }
-
-    T operator++() {
+    T operator++(int) {  // Post-increment: return old value
         return atomic_fetch_add<T>(value, 1);
     }
 
-    T operator--() {
+    T operator--(int) {  // Post-decrement: return old value
         return atomic_fetch_sub<T>(value, 1);
+    }
+
+    T operator++() {  // Pre-increment: return new value
+        return add_fetch(1);
+    }
+
+    T operator--() {  // Pre-decrement: return new value
+        return sub_fetch(1);
     }
 };
 

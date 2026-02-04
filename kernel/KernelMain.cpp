@@ -10,6 +10,7 @@
 #include <arch/amd64/smp.h>
 #include <init.h>
 #include <arch.h>
+#include <core/ds/permutation.h>
 
 extern "C" void (*__init_array_start[])(void) __attribute__((weak));
 extern "C" void (*__init_array_end[])(void) __attribute__((weak));
@@ -43,7 +44,7 @@ namespace kernel{
     PagePool page_pools[16];
 
     // Original naiveTest - page allocator stress test
-    bool naiveTest() {
+    [[noreturn]] bool naiveTest() {
         klog() << "Running test on CPU " << arch::getCurrentProcessorID() << "\n";
         while (true) {
             for (size_t i = 0; i < sizeof(PagePool) / sizeof(mm::phys_addr); i++) {
@@ -57,12 +58,6 @@ namespace kernel{
                 mm::PageAllocator::freeSmallPage(page);
             }
         }
-        return true;
-    }
-
-    [[noreturn]] bool spin() {
-        for (;;)
-            asm volatile("hlt");
     }
 
     bool enqueueShutdown() {

@@ -79,13 +79,17 @@ struct is_trivially_copyable {
     static constexpr bool value = __is_trivially_copyable(T);
 };
 
-#if !(defined(CORE_LIBRARY_TESTING) || defined(HOSTED))
-static constexpr size_t strlen(const char * str) {
+static constexpr size_t constexpr_strlen(const char * str) {
     size_t out = 0;
     while(str[out] != 0){
         out++;
     }
     return out;
+}
+
+#if !(defined(CORE_LIBRARY_TESTING) || defined(HOSTED))
+static constexpr size_t strlen(const char * str) {
+    return constexpr_strlen(str);
 }
 #else
 // When testing with standard library, use system strlen
@@ -101,7 +105,7 @@ static constexpr size_t find(const char * str, const char * substr) {
                 break;
             }
         }
-        if(subStrIndex == strlen(substr)){
+        if(subStrIndex == constexpr_strlen(substr)){
             break;
         }
         strIndex++;
@@ -110,7 +114,7 @@ static constexpr size_t find(const char * str, const char * substr) {
 }
 
 static constexpr size_t rfind(const char * str, const char * substr) {
-    size_t strIndex = strlen(str) - 1;
+    size_t strIndex = constexpr_strlen(str) - 1;
     while(strIndex < (size_t)-1){
         size_t subStrIndex = 0;
         for(; substr[subStrIndex] != 0; subStrIndex++){
@@ -118,7 +122,7 @@ static constexpr size_t rfind(const char * str, const char * substr) {
                 break;
             }
         }
-        if(subStrIndex == strlen(substr)){
+        if(subStrIndex == constexpr_strlen(substr)){
             break;
         }
         strIndex--;
@@ -155,7 +159,7 @@ public:
 #error("Unsupported compiler")
 #endif
 
-    constexpr static size_t startIndex = find(full_name(), prefix) + strlen(prefix);
+    constexpr static size_t startIndex = find(full_name(), prefix) + constexpr_strlen(prefix);
     constexpr static size_t endIndex = rfind(full_name(), suffix);
     constexpr static size_t typeNameSize = endIndex - startIndex + 1; //includes space for the null terminator
 

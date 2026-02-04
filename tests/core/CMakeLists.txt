@@ -14,6 +14,7 @@ target_sources(CoreTests PRIVATE
     HeapTest.cpp
     ObjectTest.cpp
     OptionalTest.cpp
+    PermutationTest.cpp
     SmartPointerTest.cpp
     TreeTest.cpp
     VariantTest.cpp
@@ -43,6 +44,7 @@ target_compile_options(CoreTests PRIVATE
     -Wall
     -Wextra
     -Wno-c++26-extensions          # Allow C++26 extensions
+    -Wno-vla
     -DCORE_KERNEL_TESTING          # Define to help resolve conflicts
     -DCORE_LINKED_WITH_KERNEL      # Match kernel compilation
     -DCORE_LIBRARY_TESTING
