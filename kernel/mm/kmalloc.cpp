@@ -11,7 +11,6 @@ uint8_t heap_buffer[KERNEL_INIT_HEAP_BUFFER];
 
 namespace kernel{
     bool heapEarlyInit() {
-        klog() << "heap buffer starts at " << heap_buffer << "\n";
         la_init(heap_buffer, sizeof(heap_buffer));
         return true;
     }

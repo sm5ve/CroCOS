@@ -349,8 +349,6 @@ namespace kernel::mm{
             phys_memory_range bufferRange(range.end - requiredBufferSize, range.end);
             range.end -= requiredBufferSize;
 
-            klog() << "Buffer starts at " << early_boot_phys_to_virt(bufferRange.start).as_ptr<void>() << "\n";
-
             // Initialize page tables to map the buffer into a page allocator zone
             // We map from the bottom up (!upper = false), so offset tells us where data starts
             auto data = initializePageTable<pageTableLevelForKMemRegion(), true>
