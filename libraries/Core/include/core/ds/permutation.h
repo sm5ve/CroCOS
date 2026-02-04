@@ -643,7 +643,7 @@ class PermutationWindow {
     }
 };
 
-template <size_t bits, PermutationSparsity sparsity = DENSE>
+template <size_t bits, PermutationSparsity sparsity = DENSE, bool owning = false>
 class BucketedSet {
 public:
     using IndexType = typename PermutationWindow<bits, sparsity>::IndexType;
@@ -656,14 +656,20 @@ private:
 
 public:
     // Construction
-    BucketedSet(const PermutationWindow<bits, sparsity>& perm, const size_t numBuckets) : permutation(perm){
+    BucketedSet(const PermutationWindow<bits, sparsity>& perm, const size_t numBuckets) requires (owning) : permutation(perm){
         bucketCount = numBuckets;
         bucketMarkers = new IndexType[bucketCount - 1];
     }
 
-    BucketedSet(const PermutationWindow<bits, sparsity>& perm, IndexType* markers, const size_t numBuckets) : permutation(perm){
+    BucketedSet(const PermutationWindow<bits, sparsity>& perm, IndexType* markers, const size_t numBuckets) requires (!owning) : permutation(perm){
         bucketCount = numBuckets;
         bucketMarkers = markers;
+    }
+
+    ~BucketedSet() {
+        if constexpr (owning) {
+            delete[] bucketMarkers;
+        }
     }
 
     // Query operations
