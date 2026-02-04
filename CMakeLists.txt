@@ -56,6 +56,7 @@ add_custom_target(unit_tests
         COMMAND cmake -B build -DCMAKE_BUILD_TYPE=Debug
         COMMAND cmake --build build --target run_all_tests
         COMMENT "Building and running all CroCOS unit tests"
+        USES_TERMINAL
         )
 #add_executable(CroCOS)
 #target_link_libraries(CroCOS PRIVATE Kernel)
