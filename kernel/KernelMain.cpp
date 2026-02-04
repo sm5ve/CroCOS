@@ -14,6 +14,8 @@
 
 extern "C" void (*__init_array_start[])(void) __attribute__((weak));
 extern "C" void (*__init_array_end[])(void) __attribute__((weak));
+extern "C" uint32_t __bss_virt_start;
+extern "C" uint32_t __bss_virt_end;
 
 namespace kernel{
     arch::SerialPrintStream EarlyBootStream;
@@ -28,6 +30,7 @@ namespace kernel{
     }
 
     bool runGlobalConstructors(){
+        memset(&__bss_virt_start, 0, reinterpret_cast<size_t>(&__bss_virt_end) - reinterpret_cast<size_t>(&__bss_virt_start));
         for (void (**ctor)() = __init_array_start; ctor != __init_array_end; ctor++) {
             (*ctor)();
         }

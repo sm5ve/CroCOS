@@ -79,6 +79,7 @@ set(GENERATED_BASE_HEADER "${CMAKE_BINARY_DIR}/generated_headers/kbase.h")
 add_custom_command(
         OUTPUT ${GENERATED_LINKER_SCRIPT} ${GENERATED_BASE_HEADER}
         DEPENDS "${CMAKE_SOURCE_DIR}/tools/DeriveKernelLayout.cpp"
+        DEPENDS "${LINKER_SCRIPT_TEMPLATE}"
         generate_linker_script
         COMMAND ${CMAKE_BINARY_DIR}/tools/generate_linker_script ${LINKER_SCRIPT_TEMPLATE} ${GENERATED_LINKER_SCRIPT} ${GENERATED_BASE_HEADER}
 )

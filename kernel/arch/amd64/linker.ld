@@ -40,18 +40,18 @@ SECTIONS
 	}
 
    .init_array ALIGN(4K) : AT(ADDR(.init_array) - @KERNEL_BASE@){
-           PROVIDE_HIDDEN(__init_array_start = .);
+           PROVIDE(__init_array_start = .);
            KEEP (*(.init_array))
            KEEP (*(SORT_BY_INIT_PRIORITY(.init_array.*)))
-           PROVIDE_HIDDEN (__init_array_end = .);
+           PROVIDE(__init_array_end = .);
        }
 
        .crocos_presort_array ALIGN(4K) : AT(ADDR(.crocos_presort_array) - @KERNEL_BASE@){
            . = ALIGN(8);
-           __crocos_presort_array_start = .;
+           PROVIDE(__crocos_presort_array_start = .);
            KEEP(*(.crocos_presort_array.*))
            KEEP(*(.crocos_presort_array))
-           __crocos_presort_array_end = .;
+           PROVIDE(__crocos_presort_array_end = .);
        }
 
     .trampoline : AT(ADDR(.trampoline) - @KERNEL_BASE@){
@@ -62,8 +62,10 @@ SECTIONS
 	.bss ALIGN(4K) : AT(ADDR(.bss) - @KERNEL_BASE@)
 	{
 	    PROVIDE(bss_start = . - @KERNEL_BASE@);
+	    PROVIDE(__bss_virt_start = .);
 		*(COMMON)
 		*(.bss)
+		PROVIDE(__bss_virt_end = .);
 	}
 
 	phys_end = (. - @KERNEL_BASE@);
