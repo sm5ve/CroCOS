@@ -223,7 +223,7 @@ namespace kernel::timing {
                             continue;
                         }
                         const auto deltaTicks = es.calibrationData().nanosToTicks(event->expirationTime - now);
-                        es.armOneshot(deltaTicks);
+                        es.armOneshot(min(deltaTicks, es.maxPeriod()));
                         return;
                     }
                     else {
