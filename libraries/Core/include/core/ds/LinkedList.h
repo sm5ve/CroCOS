@@ -151,6 +151,10 @@ public:
         using It = NodeIterator<false>;
         return IteratorRange<It>(It(tailNode), It(nullptr));
     }
+
+    [[nodiscard]] bool empty() const {
+        return headNode == nullptr;
+    }
 };
 
 template <typename NodeData>
