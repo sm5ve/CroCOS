@@ -84,6 +84,43 @@ namespace arch{
         void release();
     };
 
+    class InterruptDisablingSpinlock {
+    public:
+        enum class InterruptState : uint8_t {
+            ENABLED,
+            DISABLED,
+            STALE
+        };
+    private:
+        InterruptState state;
+        Atomic<bool> acquired;
+        Atomic<size_t> metadata;
+    public:
+        class InterruptResetter {
+            InterruptState state;
+
+            friend class InterruptDisablingSpinlock;
+
+            InterruptResetter(InterruptState s) : state(s) {}
+        public:
+            InterruptResetter(const InterruptResetter&) = delete;
+            InterruptResetter& operator=(const InterruptResetter&) = delete;
+            InterruptResetter(InterruptResetter&&) = default;
+            InterruptResetter& operator=(InterruptResetter&&) = default;
+
+            void operator()();
+        };
+
+        InterruptDisablingSpinlock();
+
+        void acquire(); //Acquire the lock, disable interrupts once acquired, store interrupt state
+        void acquirePlain(); //Acquire the lock, leave interrupts as-is
+        bool tryAcquire(); //Fallible version of acquire
+        bool tryAcquirePlain(); //Fallible version of acquirePlain
+        void release(); //Release the lock, revert interrupt flag to prior state
+        InterruptResetter releasePlain(); //Release the lock, maintain interrupt flag
+    };
+
     static_assert([] {
         for (const auto e : pageTableDescriptor.entryCount) {
             if (largestPowerOf2Dividing(e) != e) {

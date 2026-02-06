@@ -33,7 +33,13 @@ void Spinlock::release() {
 }
 
 bool Spinlock::try_acquire() {
-    return locked.compare_exchange_v(false, true, ACQUIRE);
+    if (locked.compare_exchange_v(false, true, ACQUIRE)) {
+#ifdef USE_SPINLOCK_DEADLOCK_DETECTION
+        metadata.store(arch::debugEarlyBootCPUID() | activeMeta);
+#endif
+        return true;
+    }
+    return false;
 }
 
 const uint64_t write_lock_queued_bit = 1 << 1;
