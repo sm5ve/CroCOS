@@ -63,6 +63,11 @@ constexpr uint32_t log2floor(uint32_t value){
 }
 
 template <typename T>
+constexpr T log2ceil(T value) {
+    return log2floor(value - 1) + 1;
+}
+
+template <typename T>
 constexpr T largestPowerOf2Dividing(T value) {
     T result = 1;
     if (value == 0) return 0;
