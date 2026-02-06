@@ -181,4 +181,27 @@ template <typename T>
 constexpr const char* type_name() {
     return TypeName<T>::name();
 }
+
+template <typename T>
+constexpr bool is_enum_v = __is_enum(T);
+
+template <typename T>
+using degrade_enum = __underlying_type(T);
+
+template <bool isEnum, typename T>
+struct _underlying_type;
+
+template <typename T>
+struct _underlying_type<true, T>
+{
+    using type = degrade_enum<T>;
+};
+
+template <typename T>
+struct _underlying_type<false, T> {
+    using type = T;
+};
+
+template <typename T>
+using underlying_type_t = _underlying_type<is_enum_v<T>, T>::type;
 #endif //CROCOS_TYPETRAITS_H
