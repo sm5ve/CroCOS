@@ -244,7 +244,7 @@ public:
             forwardBuffer[i] = i;
             backwardBuffer[i] = i;
         }
-        for (IndexType i = bwCap; i < fwCap(); i++) {
+        for (size_t i = bwCap; i < fwCap(); i++) {
             forwardBuffer[i] = INVALID;
         }
     }
