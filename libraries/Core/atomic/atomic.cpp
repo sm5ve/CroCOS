@@ -89,10 +89,14 @@ void RWSpinlock::release_writer(){
     lockstate &= ~write_lock_acquired_bit;
 }
 
-bool RWSpinlock::writer_lock_taken() {
+bool RWSpinlock::writer_lock_taken() const{
     return lockstate & write_lock_acquired_bit;
 }
 
-bool RWSpinlock::reader_lock_taken() {
+bool RWSpinlock::reader_lock_taken() const{
     return (lockstate & ~write_lock_mask) != 0;
+}
+
+bool Spinlock::lock_taken() const {
+    return locked.load(ACQUIRE);
 }

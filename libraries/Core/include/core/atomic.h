@@ -186,7 +186,8 @@ inline void thread_fence(MemoryOrder order = SEQ_CST){
 
 template<typename T>
 class Atomic {
-    alignas(alignof(T)) T value;
+    using S = underlying_type_t<T>;
+    alignas(alignof(S)) S value;
 public:
     Atomic(T t){
         store(t);
@@ -195,18 +196,18 @@ public:
     Atomic() = default;
 
     void store(T val, MemoryOrder order = SEQ_CST) {
-        atomic_store(value, val, order);
+        atomic_store(value, static_cast<S>(val), order);
     }
 
-    T load(MemoryOrder order = SEQ_CST) const {
-        return atomic_load(value, order);
+    [[nodiscard]] T load(MemoryOrder order = SEQ_CST) const {
+        return static_cast<T>(atomic_load(value, order));
     }
 
     bool compare_exchange(T& expected, T desired,
                           MemoryOrder success_order = SEQ_CST,
                           MemoryOrder failure_order = SEQ_CST) {
         if(failure_order > success_order) failure_order = success_order;
-        return atomic_cmpxchg(value, expected, desired,
+        return atomic_cmpxchg(value, static_cast<S&>(expected), static_cast<S>(desired),
                               false, success_order, failure_order);
     }
 
@@ -214,7 +215,7 @@ public:
                           MemoryOrder success_order = SEQ_CST,
                           MemoryOrder failure_order = SEQ_CST) {
         if(failure_order > success_order) failure_order = success_order;
-        return atomic_cmpxchg(value, expected, desired,
+        return atomic_cmpxchg(value, static_cast<S&>(expected), static_cast<S>(desired),
                               false, success_order, failure_order);
     }
 
@@ -223,14 +224,14 @@ public:
         return *this;
     }
 
-    operator T() const {
+    [[nodiscard]] operator T() const {
         return load();
     }
 
     struct ChangedVal{
         T oldVal;
         T newVal;
-    } ;
+    };
 
     template<typename F>
     __attribute__((always_inline)) ChangedVal update_and_get(F&& transform) {
@@ -273,27 +274,27 @@ public:
         return atomic_sub_fetch(value, val);
     }
 
-    T add_fetch(T val, MemoryOrder mem_order = SEQ_CST){
+    T add_fetch(T val, MemoryOrder mem_order = SEQ_CST) requires is_integral_v<T>{
         return atomic_add_fetch(value, val, mem_order);
     }
 
-    T sub_fetch(T val, MemoryOrder mem_order = SEQ_CST){
+    T sub_fetch(T val, MemoryOrder mem_order = SEQ_CST) requires is_integral_v<T>{
         return atomic_sub_fetch(value, val, mem_order);
     }
 
-    T operator++(int) {  // Post-increment: return old value
+    T operator++(int) requires is_integral_v<T>{  // Post-increment: return old value
         return atomic_fetch_add<T>(value, 1);
     }
 
-    T operator--(int) {  // Post-decrement: return old value
+    T operator--(int) requires is_integral_v<T>{  // Post-decrement: return old value
         return atomic_fetch_sub<T>(value, 1);
     }
 
-    T operator++() {  // Pre-increment: return new value
+    T operator++() requires is_integral_v<T>{  // Pre-increment: return new value
         return add_fetch(1);
     }
 
-    T operator--() {  // Pre-decrement: return new value
+    T operator--() requires is_integral_v<T>{  // Pre-decrement: return new value
         return sub_fetch(1);
     }
 };
@@ -308,6 +309,7 @@ public:
     void acquire();
     bool try_acquire();
     void release();
+    [[nodiscard]] bool lock_taken() const;
 };
 
 class RWSpinlock{
@@ -320,8 +322,8 @@ public:
     bool try_acquire_writer();
     void release_reader();
     void release_writer();
-    bool writer_lock_taken();
-    bool reader_lock_taken();
+    [[nodiscard]] bool writer_lock_taken() const;
+    [[nodiscard]] bool reader_lock_taken() const;
 };
 
 template<typename LockType>
