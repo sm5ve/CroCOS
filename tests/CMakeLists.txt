@@ -48,8 +48,19 @@ target_compile_options(TestHarness PRIVATE
     -g
 )
 
+# Link against C++ standard library for std::unordered_map, etc.
+if(HOMEBREW_CLANG AND HOMEBREW_CLANGXX)
+target_link_libraries(TestHarness PUBLIC
+    /opt/homebrew/opt/llvm/lib/c++/libc++.a
+    /opt/homebrew/opt/llvm/lib/c++/libc++abi.a
+)
+else()
+target_link_libraries(TestHarness PUBLIC
+    c++
+)
+endif()
 
-#add_subdirectory(kernel)
+add_subdirectory(kernel)
 add_subdirectory(liballoc)
 add_subdirectory(core)
 
@@ -57,9 +68,9 @@ add_subdirectory(core)
 add_custom_target(run_all_tests
     USES_TERMINAL
     COMMAND core/CoreTestRunner
-    #COMMAND kernel/KernelTestRunner
+    COMMAND kernel/KernelTestRunner
     COMMAND liballoc/LibAllocTestRunner
-    DEPENDS core/CoreTestRunner liballoc/LibAllocTestRunner
+    DEPENDS core/CoreTestRunner liballoc/LibAllocTestRunner kernel/KernelTestRunner
     #DEPENDS core/CoreTestRunner kernel/KernelTestRunner liballoc/LibAllocTestRunner
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     COMMENT "Running all CroCOS unit tests"

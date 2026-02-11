@@ -12,7 +12,6 @@
 #include <core/Hasher.h>
 
 #include <arch.h>
-#include <interrupts/interrupts.h>
 
 namespace kernel::interrupts {
    enum class InterruptLineActivationType : uint8_t{
@@ -192,8 +191,8 @@ namespace kernel::interrupts {
 }
 
 template<>
-struct DefaultHasher<interrupts::managed::RoutingNodeLabel> {
-   size_t operator()(const interrupts::managed::RoutingNodeLabel& label) const;
+struct DefaultHasher<kernel::interrupts::managed::RoutingNodeLabel> {
+   size_t operator()(const kernel::interrupts::managed::RoutingNodeLabel& label) const;
 };
 
 namespace kernel::interrupts {
@@ -229,12 +228,12 @@ namespace kernel::interrupts {
          size_t currentIndex;
          const SharedPtr<platform::InterruptDomain> fixedDomain;
          const size_t fixedIndex;
-         GraphBuilderBase<RoutingGraph>* graph;
+         const GraphBuilderBase<RoutingGraph>* graph;
          const bool checkTriggerType;
          friend struct RoutingConstraint;
          struct None{};
          PotentialEdgeIterator(const SharedPtr<platform::InterruptDomain>& domain, Iterator& itr,
-            Iterator& end, size_t index, size_t findex, GraphBuilderBase<RoutingGraph>* g, bool checkTriggerType);
+            Iterator& end, size_t index, size_t findex, const GraphBuilderBase<RoutingGraph>* g, bool checkTriggerType);
          void advanceIntermediateState();
          [[nodiscard]] bool isValidIntermediateState();
          void advanceToValidState();
@@ -250,12 +249,12 @@ namespace kernel::interrupts {
       struct RoutingConstraint {
          using Builder = GraphBuilderBase<RoutingGraph>;
          using VertexHandle = BuilderVertexHandle<RoutingGraph>;
-         static bool isEdgeAllowedImpl(Builder& graph, VertexHandle source, VertexHandle target, bool checkTriggerType);
-         static IteratorRange<PotentialEdgeIterator<true>> validEdgesFromImpl(Builder& graph, VertexHandle source, bool checkTriggerType);
-         static IteratorRange<PotentialEdgeIterator<false>> validEdgesToImpl(Builder& graph, VertexHandle target, bool checkTriggerType);
-         static bool isEdgeAllowed(Builder& graph, VertexHandle source, VertexHandle target);
-         static IteratorRange<PotentialEdgeIterator<true>> validEdgesFrom(Builder& graph, VertexHandle source);
-         static IteratorRange<PotentialEdgeIterator<false>> validEdgesTo(Builder& graph, VertexHandle target);
+         static bool isEdgeAllowedImpl(const Builder& graph, VertexHandle source, VertexHandle target, bool checkTriggerType);
+         static IteratorRange<PotentialEdgeIterator<true>> validEdgesFromImpl(const Builder& graph, VertexHandle source, bool checkTriggerType);
+         static IteratorRange<PotentialEdgeIterator<false>> validEdgesToImpl(const Builder& graph, VertexHandle target, bool checkTriggerType);
+         static bool isEdgeAllowed(const Builder& graph, VertexHandle source, VertexHandle target);
+         static IteratorRange<PotentialEdgeIterator<true>> validEdgesFrom(const Builder& graph, VertexHandle source);
+         static IteratorRange<PotentialEdgeIterator<false>> validEdgesTo(const Builder& graph, VertexHandle target);
       };
 
       class RoutingGraphBuilder : RestrictedGraphBuilder<RoutingGraph, RoutingConstraint> {
@@ -271,6 +270,7 @@ namespace kernel::interrupts {
          [[nodiscard]] FilteredPotentialEdgeIterator<false> validEdgesToIgnoringTriggerType(VertexHandle target);
       public:
          static RoutingGraphBuilder& fromGenericBuilder(RoutingConstraint::Builder&);
+         static const RoutingGraphBuilder& fromGenericBuilder(const RoutingConstraint::Builder&);
          template<typename VertexContainer>
          explicit RoutingGraphBuilder(const VertexContainer& vertices);
          Optional<RoutingGraph> build();
@@ -320,7 +320,5 @@ namespace kernel::interrupts {
       };
    }
 }
-
-#include <interrupts/_InterruptsExplicitTypes.h>
 
 #endif //CROCOS_INTERRUPTS_H

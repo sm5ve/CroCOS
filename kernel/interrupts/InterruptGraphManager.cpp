@@ -12,7 +12,10 @@ namespace kernel::interrupts {
         
 #ifdef CROCOS_TESTING
         bool isGraphDirty = false;
+        bool isTopologicalOrderDirty = false;
         Optional<TopologyGraph> cachedGraph;
+        Vector<SharedPtr<platform::InterruptDomain>> _topologicallySortedDomains;
+        TopologicalOrderMap _topologicalOrderMap;
         GraphBuilder<TopologyGraph>* builder_ptr = nullptr;
         GraphBuilder<TopologyGraph>& getBuilder() {
             if (!builder_ptr) {
@@ -260,8 +263,10 @@ namespace kernel::interrupts {
             return out;
         }
 
-        bool RoutingConstraint::isEdgeAllowedImpl(Builder &graph, const VertexHandle source, const VertexHandle target, bool checkTriggerType) {
-            auto& routingBuilder = RoutingGraphBuilder::fromGenericBuilder(graph);
+        bool RoutingConstraint::isEdgeAllowedImpl(const Builder &graph, const VertexHandle source, const VertexHandle target, bool checkTriggerType) {
+            const auto& routingBuilder = RoutingGraphBuilder::fromGenericBuilder(graph);
+            // Use const_cast for caching methods - logically const but implementation caches results
+            auto& mutableRoutingBuilder = const_cast<RoutingGraphBuilder&>(routingBuilder);
             if (graph.getOutgoingEdgeCount(source) > 0) {
                 return graph.hasEdge(source, target);
             }
@@ -272,8 +277,8 @@ namespace kernel::interrupts {
             const auto targetDomain = graph.getVertexLabel(target) -> domain();
             const auto targetIndex = graph.getVertexLabel(target) -> index();
 
-            const auto sourceActivationType = routingBuilder.getConnectedComponentTriggerType(source);
-            const auto targetActivationType = routingBuilder.getConnectedComponentTriggerType(target);
+            const auto sourceActivationType = mutableRoutingBuilder.getConnectedComponentTriggerType(source);
+            const auto targetActivationType = mutableRoutingBuilder.getConnectedComponentTriggerType(target);
             //Allowed connections are LEVEL -> LEVEL, LEVEL -> UNDETERMINED, and any mix of EDGE and UNDETERMINED
             if (checkTriggerType) {
                 if (targetActivationType == RoutingNodeTriggerType::TRIGGER_LEVEL) {
@@ -310,7 +315,7 @@ namespace kernel::interrupts {
                     }
                     //For routable domains of any sort, we need to check for compatibility with ownership restrictions.
                     if (emitter -> instanceof(TypeID_v<platform::RoutableDomain>)) {
-                        auto owner = routingBuilder.getEffectiveOwner(target);
+                        auto owner = mutableRoutingBuilder.getEffectiveOwner(target);
                         if (owner.occupied() && *owner != sourceDomain) {
                             return false;
                         }
@@ -335,7 +340,7 @@ namespace kernel::interrupts {
             return false;
         }
 
-        IteratorRange<PotentialEdgeIterator<true>> RoutingConstraint::validEdgesFromImpl(Builder &graph, const VertexHandle source, bool checkTriggerType) {
+        IteratorRange<PotentialEdgeIterator<true>> RoutingConstraint::validEdgesFromImpl(const Builder &graph, const VertexHandle source, bool checkTriggerType) {
             using It = PotentialEdgeIterator<true>;
             
             const auto sourceDomain = graph.getVertexLabel(source)->domain();
@@ -355,7 +360,7 @@ namespace kernel::interrupts {
             };
         }
 
-        IteratorRange<PotentialEdgeIterator<false>> RoutingConstraint::validEdgesToImpl(Builder &graph, const VertexHandle target, bool checkTriggerType) {
+        IteratorRange<PotentialEdgeIterator<false>> RoutingConstraint::validEdgesToImpl(const Builder &graph, const VertexHandle target, bool checkTriggerType) {
             using It = PotentialEdgeIterator<false>;
 
             const auto targetDomain = graph.getVertexLabel(target)->domain();
@@ -375,21 +380,21 @@ namespace kernel::interrupts {
             };
         }
 
-        bool RoutingConstraint::isEdgeAllowed(Builder &graph, VertexHandle source, VertexHandle target) {
+        bool RoutingConstraint::isEdgeAllowed(const Builder &graph, VertexHandle source, VertexHandle target) {
             return isEdgeAllowedImpl(graph, source, target, true);
         }
 
-        IteratorRange<PotentialEdgeIterator<true> > RoutingConstraint::validEdgesFrom(Builder &graph, VertexHandle source) {
+        IteratorRange<PotentialEdgeIterator<true> > RoutingConstraint::validEdgesFrom(const Builder &graph, VertexHandle source) {
             return validEdgesFromImpl(graph, source, true);
         }
 
-        IteratorRange<PotentialEdgeIterator<false> > RoutingConstraint::validEdgesTo(Builder &graph, VertexHandle target) {
+        IteratorRange<PotentialEdgeIterator<false> > RoutingConstraint::validEdgesTo(const Builder &graph, VertexHandle target) {
             return validEdgesToImpl(graph, target, true);
         }
 
         template<bool Forward>
         PotentialEdgeIterator<Forward>::PotentialEdgeIterator(const SharedPtr<platform::InterruptDomain>& domain, Iterator& itr,
-            Iterator& end, const size_t index, size_t findex, GraphBuilderBase<RoutingGraph>* g, bool c):
+            Iterator& end, const size_t index, size_t findex, const GraphBuilderBase<RoutingGraph>* g, bool c):
             currentConnector(itr), endConnector(end), currentIndex(index), fixedDomain(domain), fixedIndex(findex), graph(g),
             checkTriggerType(c) {
             assert(fixedDomain, "Fixed domain is null");
@@ -509,7 +514,7 @@ namespace kernel::interrupts {
         template<typename VertexContainer>
         RoutingGraphBuilder::RoutingGraphBuilder(const VertexContainer &vertices) : Base(vertices, RoutingConstraint{}){}
 
-        RoutingNodeTriggerType RoutingGraphBuilder::getConnectedComponentTriggerType(Base::VertexHandle v){
+        RoutingNodeTriggerType RoutingGraphBuilder::getConnectedComponentTriggerType(Base::VertexHandle v) {
             const auto original = v;
             auto triggerType = getVertexColor(v)->triggerType;
             Optional<EdgeHandle> e;
@@ -537,6 +542,10 @@ namespace kernel::interrupts {
 
         RoutingGraphBuilder &RoutingGraphBuilder::fromGenericBuilder(RoutingConstraint::Builder & b) {
             return static_cast<RoutingGraphBuilder&>(Base::fromGenericBuilder(b));
+        }
+
+        const RoutingGraphBuilder &RoutingGraphBuilder::fromGenericBuilder(const RoutingConstraint::Builder & b) {
+            return static_cast<const RoutingGraphBuilder&>(Base::fromGenericBuilder(const_cast<RoutingConstraint::Builder&>(b)));
         }
 
         Optional<RoutingGraph> RoutingGraphBuilder::build() {

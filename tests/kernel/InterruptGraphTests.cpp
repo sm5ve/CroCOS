@@ -4,7 +4,6 @@
 // Created by Spencer Martin on 8/26/25.
 //
 
-#define CROCOS_TESTING
 #include "../test.h"
 #include <TestHarness.h>
 #include <cstdlib>
@@ -165,10 +164,10 @@ public:
     
     void addMapping(size_t output, size_t input) {
         // Resize vectors if needed
-        while (outputToInput.getSize() <= output) {
+        while (outputToInput.size() <= output) {
             outputToInput.push(Optional<size_t>());
         }
-        while (inputToOutput.getSize() <= input) {
+        while (inputToOutput.size() <= input) {
             inputToOutput.push(Optional<size_t>());
         }
         
@@ -177,14 +176,14 @@ public:
     }
     
     Optional<platform::DomainInputIndex> fromOutput(platform::DomainOutputIndex output) const override {
-        if (output < outputToInput.getSize()) {
+        if (output < outputToInput.size()) {
             return outputToInput[output];
         }
         return Optional<platform::DomainInputIndex>();
     }
     
     Optional<platform::DomainOutputIndex> fromInput(platform::DomainInputIndex input) const override {
-        if (input < inputToOutput.getSize()) {
+        if (input < inputToOutput.size()) {
             return inputToOutput[input];
         }
         return Optional<platform::DomainOutputIndex>();

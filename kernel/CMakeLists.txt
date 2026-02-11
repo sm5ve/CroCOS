@@ -34,6 +34,7 @@ set(KERNEL_SRC
         timing/BlockingSleep.cpp
         arch/amd64/smp/smpboot.asm
         init.cpp
+        mm/NewPageAllocator.cpp
 )
 
 file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/generated_headers)

@@ -97,6 +97,7 @@ inline Core::PrintStream& operator<<(Core::PrintStream& ps, kernel::mm::virt_add
 //calls the constructor.
 //This is a seemingly necessary hack to prevent having to recompile crtstart/end with the kernel memory model
 //and linking it in with the kernel as suggested by https://forum.osdev.org/viewtopic.php?t=28066
+#ifndef CROCOS_TESTING
 #define WITH_GLOBAL_CONSTRUCTOR(Type, name, ...)                                  \
     __attribute__((used)) static Type name __VA_ARGS__;                           \
     static void name##_init() {                                                   \
@@ -116,4 +117,5 @@ inline Core::PrintStream& operator<<(Core::PrintStream& ps, kernel::mm::virt_add
         for (auto& x : (name)) new (& x) Type();                                  \
     }                                                                             \
     static void (*name##_ctor)(void) __attribute__((used, section(".init_array"))) = name##_init;
+#endif
 #endif //CROCOS_KERNEL_H

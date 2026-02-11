@@ -99,6 +99,54 @@ inline T atomic_nand_fetch(T& src, T mask, MemoryOrder mem_order = SEQ_CST){
 }
 
 template<typename T>
+inline T atomic_fetch_and( T& src, T mask, MemoryOrder mem_order = SEQ_CST){
+    if constexpr(_use_intrinsic_atomic_ops<T>){
+#ifdef __GNUC__
+        return __atomic_fetch_and(&src, mask, mem_order);
+#endif
+    }
+    else{
+        static_assert(_use_intrinsic_atomic_ops<T>, "Unimplemented");
+    }
+}
+
+template<typename T>
+inline T atomic_fetch_or( T& src, T mask, MemoryOrder mem_order = SEQ_CST){
+    if constexpr(_use_intrinsic_atomic_ops<T>){
+#ifdef __GNUC__
+        return __atomic_fetch_or(&src, mask, mem_order);
+#endif
+    }
+    else{
+        static_assert(_use_intrinsic_atomic_ops<T>, "Unimplemented");
+    }
+}
+
+template<typename T>
+inline T atomic_fetch_xor( T& src, T mask, MemoryOrder mem_order = SEQ_CST){
+    if constexpr(_use_intrinsic_atomic_ops<T>){
+#ifdef __GNUC__
+        return __atomic_fetch_xor(&src, mask, mem_order);
+#endif
+    }
+    else{
+        static_assert(_use_intrinsic_atomic_ops<T>, "Unimplemented");
+    }
+}
+
+template<typename T>
+inline T atomic_fetch_nand(T& src, T mask, MemoryOrder mem_order = SEQ_CST){
+    if constexpr(_use_intrinsic_atomic_ops<T>){
+#ifdef __GNUC__
+        return __atomic_fetch_nand(&src, mask, mem_order);
+#endif
+    }
+    else{
+        static_assert(_use_intrinsic_atomic_ops<T>, "Unimplemented");
+    }
+}
+
+template<typename T>
 inline T atomic_add_fetch(T& src, T val, MemoryOrder mem_order = SEQ_CST){
     if constexpr(_use_intrinsic_atomic_ops<T>){
 #ifdef __GNUC__
@@ -258,6 +306,18 @@ public:
     bool operator==(T other) const { return load() == other; }
     bool operator!=(T other) const { return load() != other; }
 
+    T fetch_and(T mask, MemoryOrder order = SEQ_CST) requires is_integral_v<T> {
+        return atomic_fetch_and(value, mask, order);
+    }
+
+    T fetch_or(T mask, MemoryOrder order = SEQ_CST) requires is_integral_v<T> {
+        return atomic_fetch_or(value, mask, order);
+    }
+
+    T fetch_xor(T mask, MemoryOrder order = SEQ_CST) requires is_integral_v<T> {
+        return atomic_fetch_xor(value, mask, order);
+    }
+
     T operator &=(T mask) requires is_integral_v<T> {
         return atomic_and_fetch(value, mask);
     }
@@ -315,6 +375,8 @@ public:
 class RWSpinlock{
 private:
     Atomic<uint64_t> lockstate{0};
+    static const size_t activeMeta = 1ul << 63;
+    Atomic<size_t> metadata{0};
 public:
     void acquire_reader();
     bool try_acquire_reader();
