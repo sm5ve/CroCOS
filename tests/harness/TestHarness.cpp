@@ -6,6 +6,7 @@
 #include "TestHarness.h"
 #include "MemoryTracker.h"
 #include <vector>
+#include <cstdio>
 #include "assert.h"
 
 // Cross-platform section boundary access
@@ -74,7 +75,8 @@ namespace CroCOSTest {
     }
     
     TestResult TestRunner::runSingleTest(const TestInfo* test) {
-        std::cout << "Running test: " << test->name << "..." << std::endl;
+        printf("Running test: %s...\n", test->name);
+        fflush(stdout);
         
         // Reset memory tracking before each test
         MemoryTracker::reset();
@@ -96,9 +98,11 @@ namespace CroCOSTest {
                 MemoryTracker::printLeakReport();
                 return TestResult(test->name, false, leakMsg);
             } else {
-                std::cout << "  ✓ PASSED (Memory: " << MemoryTracker::getTotalAllocated() 
-                          << " bytes allocated, " << MemoryTracker::getTotalFreed() 
-                          << " bytes freed)" << std::endl;
+                // Use printf to avoid std::cout locale issues
+                size_t allocated = MemoryTracker::getTotalAllocated();
+                size_t freed = MemoryTracker::getTotalFreed();
+                printf("  ✓ PASSED (Memory: %zu bytes allocated, %zu bytes freed)\n", allocated, freed);
+                fflush(stdout);
                 return TestResult(test->name, true);
             }
         } catch (const AssertionFailure& e) {
@@ -129,34 +133,44 @@ namespace CroCOSTest {
             std::cout << "No tests found!" << std::endl;
             return 0;
         }
-        
+
+        // Count actual non-null tests (AddressSanitizer creates padding entries)
+        size_t actualTestCount = 0;
+        for (size_t i = 0; i < testCount; ++i) {
+            if (tests[i] != nullptr) actualTestCount++;
+        }
+
+        printf("Found %zu tests\n\n", actualTestCount);
+        fflush(stdout);
+
         // Run all tests
         for (size_t i = 0; i < testCount; ++i) {
             const TestInfo* test = tests[i];
             if (test == nullptr) continue;  // Skip null entries
-            
+
             results.push_back(runSingleTest(test));
         }
         
         // Print summary
         int passed = 0, failed = 0;
-        std::cout << "\n=== Test Summary ===" << std::endl;
+        printf("\n=== Test Summary ===\n");
+        fflush(stdout);
         for (const auto& result : results) {
             if (result.passed) {
                 passed++;
             } else {
                 failed++;
-                std::cout << "FAILED: " << result.testName;
+                printf("FAILED: %s", result.testName);
                 if (result.errorMessage.length() > 0) {
-                    std::cout << " - " << result.errorMessage;
+                    printf(" - %s", result.errorMessage.c_str());
                 }
-                std::cout << std::endl;
+                printf("\n");
+                fflush(stdout);
             }
         }
-        
-        std::cout << "\nTotal: " << results.size() 
-                  << ", Passed: " << passed 
-                  << ", Failed: " << failed << std::endl;
+
+        printf("\nTotal: %zu, Passed: %d, Failed: %d\n", results.size(), passed, failed);
+        fflush(stdout);
         
         return failed > 0 ? 1 : 0;
     }

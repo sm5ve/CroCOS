@@ -39,8 +39,15 @@ target_compile_options(LibAllocTests PRIVATE
     #-fsanitize=address
     #-fsanitize=leak
     -g
-    # Force include test.h to inject strong allocation symbols for objcopy
-    -include ${CMAKE_CURRENT_SOURCE_DIR}/../test.h
+)
+
+# Force include test.h ONLY for the library source files being tested
+# NOT for the test files themselves, so test infrastructure uses real allocators
+set_source_files_properties(
+    ../../libraries/LibAlloc/InternalAllocator.cpp
+    ../../libraries/LibAlloc/backends/UnitTests.cpp
+    ../../libraries/LibAlloc/SlabAllocator.cpp
+    PROPERTIES COMPILE_FLAGS "-include ${CMAKE_CURRENT_SOURCE_DIR}/../test.h -DCROCOS_TEST_INSTRUMENT_ALLOCATORS"
 )
 
 # Custom PRE_LINK command to instrument object files before linking

@@ -14,9 +14,15 @@ volatile void* __garbage = nullptr;
 
 namespace CroCOSTest {
 
+    // Helper function to get the tracker mutex as a function-local static
+    // This ensures the mutex is never destroyed, avoiding issues during static destruction
+    static std::mutex& getTrackerMutex() {
+        static std::mutex* mutex = new std::mutex();
+        return *mutex;
+    }
+
     // Static member definitions
     std::unordered_map<void*, AllocationInfo> MemoryTracker::allocations;
-    std::mutex MemoryTracker::tracker_mutex;
     size_t MemoryTracker::total_allocated = 0;
     size_t MemoryTracker::total_freed = 0;
     size_t MemoryTracker::peak_usage = 0;
@@ -38,8 +44,8 @@ namespace CroCOSTest {
     void MemoryTracker::recordAllocation(void* ptr, size_t size) {
         if (!ptr) return;
         if (!track) return;
-        
-        std::lock_guard<std::mutex> lock(tracker_mutex);
+
+        std::lock_guard<std::mutex> lock(getTrackerMutex());
         allocations[ptr] = {size};
         total_allocated += size;
         current_usage += size;
@@ -51,8 +57,8 @@ namespace CroCOSTest {
     void MemoryTracker::recordDeallocation(void* ptr) {
         if (!ptr) return;
         if (!track) return;
-        
-        std::lock_guard<std::mutex> lock(tracker_mutex);
+
+        std::lock_guard<std::mutex> lock(getTrackerMutex());
         auto it = allocations.find(ptr);
         if (it != allocations.end()) {
             total_freed += it->second.size;
@@ -62,12 +68,12 @@ namespace CroCOSTest {
     }
 
     bool MemoryTracker::hasLeaks() {
-        std::lock_guard<std::mutex> lock(tracker_mutex);
+        std::lock_guard<std::mutex> lock(getTrackerMutex());
         return !allocations.empty();
     }
 
     void MemoryTracker::printLeakReport() {
-        std::lock_guard<std::mutex> lock(tracker_mutex);
+        std::lock_guard<std::mutex> lock(getTrackerMutex());
         
         std::cout << "\n=== Memory Leak Report ===" << std::endl;
         std::cout << "Total allocated: " << total_allocated << " bytes" << std::endl;
@@ -88,7 +94,7 @@ namespace CroCOSTest {
     }
 
     void MemoryTracker::reset() {
-        std::lock_guard<std::mutex> lock(tracker_mutex);
+        std::lock_guard<std::mutex> lock(getTrackerMutex());
         allocations.clear();
         total_allocated = 0;
         total_freed = 0;

@@ -17,10 +17,14 @@ namespace CroCOSTest {
         // Future: could add stack trace or debug info here
     };
 
+    // Forward declarations for tracking control
+    void pauseTracking();
+    void resumeTracking();
+    bool getTrackingStatus();
+
     class MemoryTracker {
     private:
         static std::unordered_map<void*, AllocationInfo> allocations;
-        static std::mutex tracker_mutex;
         static size_t total_allocated;
         static size_t total_freed;
         static size_t peak_usage;

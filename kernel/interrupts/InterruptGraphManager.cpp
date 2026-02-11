@@ -610,12 +610,14 @@ namespace kernel::interrupts {
 
         RoutingGraphBuilder::FilteredPotentialEdgeIterator<false> RoutingGraphBuilder::validEdgesToIgnoringTriggerType(VertexHandle target) {
             auto baseIterator = RoutingConstraint::validEdgesToImpl(asBase(), target, false);
-            return FilteredPotentialEdgeIterator(move(baseIterator), *this, target);
+            //Explicitly indicate the template parameter since clang++ crashes when trying to deduce this
+            return FilteredPotentialEdgeIterator<false>(move(baseIterator), *this, target);
         }
 
         RoutingGraphBuilder::FilteredPotentialEdgeIterator<true> RoutingGraphBuilder::validEdgesFromIgnoringTriggerType(VertexHandle target) {
             auto baseIterator = RoutingConstraint::validEdgesFromImpl(asBase(), target, false);
-            return FilteredPotentialEdgeIterator(move(baseIterator), *this, target);
+            //Explicitly indicate the template parameter since clang++ crashes when trying to deduce this
+            return FilteredPotentialEdgeIterator<true>(move(baseIterator), *this, target);
         }
 
         Optional<SharedPtr<platform::InterruptDomain> > RoutingGraphBuilder::getEffectiveOwner(const Base::VertexHandle& h) {
@@ -688,10 +690,10 @@ namespace kernel::interrupts {
     }
 }
 
-size_t DefaultHasher<interrupts::managed::RoutingNodeLabel>::operator()(const interrupts::managed::RoutingNodeLabel& label) const {
+size_t DefaultHasher<kernel::interrupts::managed::RoutingNodeLabel>::operator()(const kernel::interrupts::managed::RoutingNodeLabel& label) const {
     return label.hash();
 }
 
 // Explicit template instantiations to force code generation
-template class interrupts::managed::PotentialEdgeIterator<true>;
-template class interrupts::managed::PotentialEdgeIterator<false>;
+template class kernel::interrupts::managed::PotentialEdgeIterator<true>;
+template class kernel::interrupts::managed::PotentialEdgeIterator<false>;

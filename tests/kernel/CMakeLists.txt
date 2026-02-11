@@ -23,6 +23,7 @@ target_include_directories(KernelTests PUBLIC
 # Add kernel source files that we're testing
 target_sources(KernelTests PRIVATE
         ../../kernel/interrupts/InterruptGraphManager.cpp
+        ../../kernel/interrupts/ExplicitTypes.cpp
 )
 
 # Add Core library sources needed for kernel code
@@ -48,8 +49,18 @@ target_compile_options(KernelTests PRIVATE
     -fsanitize=address
     -fsanitize=leak
     -g
-    # Force include test.h to inject strong allocation symbols for objcopy
-    -include ${CMAKE_CURRENT_SOURCE_DIR}/../test.h
+)
+
+# Force include test.h ONLY for the library/kernel source files being tested
+# NOT for the test files themselves, so test infrastructure uses real allocators
+set_source_files_properties(
+    ../../kernel/interrupts/InterruptGraphManager.cpp
+    ../../kernel/interrupts/ExplicitTypes.cpp
+    ../../libraries/Core/PrintStream.cpp
+    ../../libraries/Core/str.cpp
+    ../../libraries/Core/Object.cpp
+    ../../libraries/Core/atomic/atomic.cpp
+    PROPERTIES COMPILE_FLAGS "-include ${CMAKE_CURRENT_SOURCE_DIR}/../test.h -DCROCOS_TEST_INSTRUMENT_ALLOCATORS"
 )
 
 # Custom PRE_LINK command to instrument object files before linking
