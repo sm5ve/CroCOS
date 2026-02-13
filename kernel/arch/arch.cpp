@@ -32,6 +32,7 @@ namespace arch{
     }
 #endif
 
+#ifndef CROCOS_TESTING
     void serialOutputString(const char *str) {
 #ifdef __x86_64__
         amd64::serialOutputString(str);
@@ -51,7 +52,7 @@ namespace arch{
     void SerialPrintStream::putString(const char * str){
         serialOutputString(str);
     }
-
+#endif
     InterruptDisabler::InterruptDisabler() {
         active = true;
         wasEnabled = areInterruptsEnabled();
@@ -82,12 +83,13 @@ namespace arch{
         }
         state = InterruptState::STALE;
     }
-
+#ifndef CROCOS_TESTING
     IteratorRange<MemMapIterator> getMemoryMap() {
 #ifdef ARCH_AMD64
         return amd64::getMemoryMap();
 #endif
     }
+#endif
 
     InterruptDisablingSpinlock::InterruptDisablingSpinlock(){
         state = InterruptState::STALE;

@@ -10,6 +10,7 @@ cmake_minimum_required(VERSION 3.20)
 add_library(KernelTests STATIC)
 
 target_sources(KernelTests PRIVATE
+    ArchMocks.cpp
     InterruptGraphTests.cpp
 )
 
@@ -24,6 +25,8 @@ target_include_directories(KernelTests PUBLIC
 target_sources(KernelTests PRIVATE
         ../../kernel/interrupts/InterruptGraphManager.cpp
         ../../kernel/interrupts/ExplicitTypes.cpp
+        ../../kernel/mm/NewPageAllocator.cpp
+        ../../kernel/arch/arch.cpp
 )
 
 # Add Core library sources needed for kernel code
@@ -60,6 +63,8 @@ set_source_files_properties(
     ../../libraries/Core/str.cpp
     ../../libraries/Core/Object.cpp
     ../../libraries/Core/atomic/atomic.cpp
+    ../../kernel/mm/NewPageAllocator.cpp
+    ../../kernel/arch/arch.cpp
     PROPERTIES COMPILE_FLAGS "-include ${CMAKE_CURRENT_SOURCE_DIR}/../test.h -DCROCOS_TEST_INSTRUMENT_ALLOCATORS"
 )
 

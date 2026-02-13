@@ -42,6 +42,8 @@
 
 // ================= Bootstrap Allocator ==================
 
+using namespace kernel;
+
 BootstrapAllocator::BootstrapAllocator() : current(nullptr), end(nullptr), measuring(true) {}
 
 BootstrapAllocator::BootstrapAllocator(void* buffer, size_t size)
@@ -215,7 +217,7 @@ BigPageMetadata*& BigPageColoredLinkedListExtractor::next(BigPageMetadata& m) {
 
 AllocatorContext::AllocatorContext(mm::phys_memory_range allocatorRange, BigPageMetadata *bigPageBuffer) {
     metadata = bigPageBuffer;
-    spanBase = mm::phys_addr{roundDownToNearestMultiple(allocatorRange.start.value, arch::bigPageSize)};
+    spanBase = mm::phys_addr{roundDownToNearestMultiple(allocatorRange.start.value, static_cast<uint64_t>(arch::bigPageSize))};
 }
 
 mm::phys_addr AllocatorContext::bigPageAddress(const BigPageMetadata& m) const {
@@ -577,8 +579,8 @@ PoolID PressureBitmap::BitmapIterator::operator*() const {
 // ==================== Range Allocator ===================
 
 constexpr size_t bigPagesInRange(const mm::phys_memory_range range) {
-    const auto alignedTop = roundUpToNearestMultiple(range.end.value, arch::bigPageSize);
-    const auto alignedBottom = roundDownToNearestMultiple(range.start.value, arch::bigPageSize);
+    const auto alignedTop = roundUpToNearestMultiple(range.end.value, static_cast<uint64_t>(arch::bigPageSize));
+    const auto alignedBottom = roundDownToNearestMultiple(range.start.value, static_cast<uint64_t>(arch::bigPageSize));
     return (alignedTop - alignedBottom)/arch::bigPageSize;
 }
 
@@ -589,8 +591,8 @@ globalPool(GLOBAL, context){
     assert(range.start.value % arch::smallPageSize == 0, "Range allocator start is not page aligned");
     assert(range.end.value % arch::smallPageSize == 0, "Range allocator end is not page aligned");
 
-    const auto alignedTop = roundUpToNearestMultiple(range.end.value, arch::bigPageSize);
-    const auto alignedBottom = roundDownToNearestMultiple(range.start.value, arch::bigPageSize);
+    const auto alignedTop = roundUpToNearestMultiple(range.end.value, static_cast<uint64_t>(arch::bigPageSize));
+    const auto alignedBottom = roundDownToNearestMultiple(range.start.value, static_cast<uint64_t>(arch::bigPageSize));
     const auto bottomReserveCount = (range.start.value - alignedBottom) / arch::smallPageSize;
     const auto topReserveCount = (range.end.value - alignedTop) / arch::smallPageSize;
 

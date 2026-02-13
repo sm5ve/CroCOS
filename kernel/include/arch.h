@@ -73,6 +73,10 @@ namespace arch{
     constexpr size_t smallPageSize = 1ull << pageTableDescriptor.getVirtualAddressBitCount(pageTableDescriptor.LEVEL_COUNT); //4KiB
     constexpr size_t bigPageSize = 1ull << pageTableDescriptor.getVirtualAddressBitCount(pageTableDescriptor.LEVEL_COUNT - 1); //2MiB
     constexpr size_t maxMemorySupported = 1ull << 1ull << pageTableDescriptor.getVirtualAddressBitCount(); //256 TiB
+#else
+    constexpr size_t smallPageSize = 1ull << 12;
+    constexpr size_t bigPageSize = 1ull << 21;
+    constexpr size_t maxMemorySupported = 1ull << 48;
 #endif
     //Guaranteed to be between 0 and (the total number of logical processors - 1)
     ProcessorID getCurrentProcessorID();

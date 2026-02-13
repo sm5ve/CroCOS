@@ -165,7 +165,7 @@ struct AllocatorContext {
     BigPageMetadata* metadata;
     kernel::mm::phys_addr spanBase;
 
-    AllocatorContext(mm::phys_memory_range allocatorRange, BigPageMetadata* bigPageBuffer);
+    AllocatorContext(kernel::mm::phys_memory_range allocatorRange, BigPageMetadata* bigPageBuffer);
 
     [[nodiscard]] kernel::mm::phys_addr bigPageAddress(const BigPageMetadata& m) const;
 };
@@ -219,7 +219,7 @@ class RangeAllocator {
     BigPagePool* localPools;
     BigPagePool globalPool;
 public:
-    RangeAllocator(mm::phys_memory_range range, BootstrapAllocator bootstrapAllocator);
+    RangeAllocator(kernel::mm::phys_memory_range range, BootstrapAllocator bootstrapAllocator);
 
     size_t allocatePages(size_t smallPageCount, PageAllocationCallback cb, Optional<BigPageColor> color = {});
 };
