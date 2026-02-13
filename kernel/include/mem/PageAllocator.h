@@ -165,8 +165,13 @@ public:
 struct AllocatorContext {
     BigPageMetadata* metadata;
     kernel::mm::phys_addr spanBase;
+    PressureBitmap pressureBitmap;
 
-    AllocatorContext(kernel::mm::phys_memory_range allocatorRange, BigPageMetadata* bigPageBuffer);
+    const size_t surplusThreshold;
+    const size_t comfortThreshold;
+    const size_t moderateThreshold;
+
+    AllocatorContext(kernel::mm::phys_memory_range allocatorRange, BootstrapAllocator& allocator);
 
     [[nodiscard]] kernel::mm::phys_addr bigPageAddress(const BigPageMetadata& m) const;
 };
@@ -200,8 +205,11 @@ struct BigPagePool {
     BigPageMetadata* getPageForColoredSmallAllocation(BigPageColor color, size_t requestedCount, AllocationDesperation);
     size_t allocatePages(size_t requestedCount, PageAllocationCallback cb, BigPageColor color, AllocationDesperation desperation, BigPagePool& requestingPool);
 
+    [[nodiscard]] PoolPressure computeUncoloredPressure() const;
+    void updatePressureBitmap() const;
+
     BigPagePool(PoolID poolID, AllocatorContext& context);
-    BigPagePool(AllocatorContext& context);
+    explicit BigPagePool(AllocatorContext& context);
     BigPagePool(const BigPagePool&) = delete;
     BigPagePool& operator=(const BigPagePool&) = delete;
     BigPagePool(BigPagePool&&) = delete;

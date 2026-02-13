@@ -11,4 +11,11 @@ constexpr size_t LOCK_RETRY_COUNT = 4;
 constexpr size_t LOCK_DELAY_ITERATIONS = 100;
 constexpr size_t MAX_COLOR_COUNT = 0x20;
 
+constexpr size_t SMALL_PAGE_WEIGHT_NUM = 1;
+constexpr size_t SMALL_PAGE_WEIGHT_DEN = 2;
+
+constexpr size_t MODERATE_THRESHOLD_MINIMUM = 4;
+
+
+
 #endif //CROCOS_PAGEALLOCATORTUNING_H

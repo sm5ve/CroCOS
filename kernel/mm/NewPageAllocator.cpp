@@ -4,6 +4,7 @@
 
 #include <mem/PageAllocator.h>
 #include <core/math.h>
+#include <core/ds/Trees.h>
 
 /*
  * This file implements the page allocator, which supports two allocation sizes:
@@ -215,9 +216,36 @@ BigPageMetadata*& BigPageColoredLinkedListExtractor::next(BigPageMetadata& m) {
 
 // ==================== AllocatorContext ====================
 
-AllocatorContext::AllocatorContext(mm::phys_memory_range allocatorRange, BigPageMetadata *bigPageBuffer) {
-    metadata = bigPageBuffer;
-    spanBase = mm::phys_addr{roundDownToNearestMultiple(allocatorRange.start.value, static_cast<uint64_t>(arch::bigPageSize))};
+constexpr size_t bigPagesInRange(const mm::phys_memory_range range) {
+    const auto alignedTop = roundUpToNearestMultiple(range.end.value, static_cast<uint64_t>(arch::bigPageSize));
+    const auto alignedBottom = roundDownToNearestMultiple(range.start.value, static_cast<uint64_t>(arch::bigPageSize));
+    return (alignedTop - alignedBottom)/arch::bigPageSize;
+}
+
+constexpr size_t computeModerateThreshold(mm::phys_memory_range r, size_t cpuCount) {
+    auto bigPagesPerCPU = bigPagesInRange(r)/cpuCount;
+    return max(bigPagesPerCPU/8, MODERATE_THRESHOLD_MINIMUM);
+}
+
+constexpr size_t computeComfortableThreshold(mm::phys_memory_range r, size_t cpuCount) {
+    auto bigPagesPerCPU = bigPagesInRange(r)/cpuCount;
+    return max(bigPagesPerCPU/4, MODERATE_THRESHOLD_MINIMUM * 2);
+}
+
+constexpr size_t computeSurplusThreshold(mm::phys_memory_range r, size_t cpuCount) {
+    auto bigPagesPerCPU = bigPagesInRange(r)/cpuCount;
+    return max(bigPagesPerCPU/2, MODERATE_THRESHOLD_MINIMUM * 4);
+}
+
+AllocatorContext::AllocatorContext(mm::phys_memory_range allocatorRange, BootstrapAllocator& allocator) :
+    pressureBitmap(allocator, arch::processorCount()),
+    surplusThreshold(computeSurplusThreshold(allocatorRange, arch::processorCount())),
+    comfortThreshold(computeComfortableThreshold(allocatorRange, arch::processorCount())),
+    moderateThreshold(computeModerateThreshold(allocatorRange, arch::processorCount())) {
+    metadata = allocator.allocate<BigPageMetadata>(bigPagesInRange(allocatorRange));
+    spanBase = mm::phys_addr{
+        roundDownToNearestMultiple(allocatorRange.start.value, static_cast<uint64_t>(arch::bigPageSize))
+    };
 }
 
 mm::phys_addr AllocatorContext::bigPageAddress(const BigPageMetadata& m) const {
@@ -258,6 +286,7 @@ void BigPagePool::addBigPage(BigPageMetadata& m) {
             break;
     }
     m.poolID = poolID;
+    updatePressureBitmap();
 }
 
 void BigPagePool::removeBigPage(BigPageMetadata& m) {
@@ -276,6 +305,7 @@ void BigPagePool::removeBigPage(BigPageMetadata& m) {
             freeSmallPageCount -= m.freePageCount();
             break;
     }
+    updatePressureBitmap();
 }
 
 BigPageMetadata* BigPagePool::getPageForColoredSmallAllocation(BigPageColor color, size_t requestedCount, AllocationDesperation desperation) {
@@ -325,6 +355,7 @@ BigPageMetadata* BigPagePool::getPageForColoredSmallAllocation(BigPageColor colo
 }
 
 size_t BigPagePool::allocatePages(size_t requestedCount, PageAllocationCallback cb, BigPageColor color, AllocationDesperation desperation, BigPagePool& requestingPool) {
+    //TODO respect MAX_BATCH_SIZE
     const bool localPool = (&requestingPool == this);
     if (localPool) {
         //If we're allocating from this pool's corresponding CPU, we always want to prioritize this pool above others.
@@ -357,13 +388,8 @@ size_t BigPagePool::allocatePages(size_t requestedCount, PageAllocationCallback 
     }
     //Unlock the pool while we actually allocate the pages.
 
-    arch::InterruptResetter resetter;
-    if (localPool) {
-        resetter = lock.releasePriorityPlain();
-    }
-    else {
-        resetter = lock.releasePlain();
-    }
+    arch::InterruptResetter resetter = localPool ? lock.releasePriorityPlain() : lock.releasePlain();
+    defer(resetter);
 
     size_t allocatedCount = 0;
     const auto allocateFromBigPage = [&](BigPageMetadata& bigPage) {
@@ -443,9 +469,28 @@ size_t BigPagePool::allocatePages(size_t requestedCount, PageAllocationCallback 
     }
     requestingPool.lock.releasePriority();
 
-    resetter();
-
     return allocatedCount;
+}
+
+PoolPressure BigPagePool::computeUncoloredPressure() const {
+    //We weight small pages less than big pages, because we want fragmentation to contribute to the recorded pressure
+    //of the pool. These parameters should be tuned at some point.
+    const auto effectiveBigPages = freeBigPageCount + (freeSmallPageCount * SMALL_PAGE_WEIGHT_NUM) / (mm::PageAllocator::smallPagesPerBigPage * SMALL_PAGE_WEIGHT_DEN);
+    if (effectiveBigPages >= context.surplusThreshold) {
+        return PoolPressure::SURPLUS;
+    }
+    if (effectiveBigPages >= context.comfortThreshold) {
+        return PoolPressure::COMFORTABLE;
+    }
+    if (effectiveBigPages >= context.moderateThreshold) {
+        return PoolPressure::MODERATE;
+    }
+    return PoolPressure::DESPERATE;
+}
+
+void BigPagePool::updatePressureBitmap() const {
+    const auto newPressure = computeUncoloredPressure();
+    context.pressureBitmap.markPressure(poolID, newPressure);
 }
 
 // ==================== PressureBitmap ====================
@@ -536,7 +581,7 @@ void PressureBitmap::BitmapIterator::advanceToSetBit() {
         size_t wordIndex = index / BITS_PER_WORD;
         size_t bitOffset = index % BITS_PER_WORD;
 
-        uint64_t word = bitmapStart[wordIndex].load(MemoryOrder::Relaxed);
+        uint64_t word = bitmapStart[wordIndex].load(RELAXED);
 
         // Mask off bits before our current position
         uint64_t maskedWord = word & ~((1ULL << bitOffset) - 1);
@@ -583,14 +628,8 @@ PoolID PressureBitmap::BitmapIterator::operator*() const {
 
 // ==================== Range Allocator ===================
 
-constexpr size_t bigPagesInRange(const mm::phys_memory_range range) {
-    const auto alignedTop = roundUpToNearestMultiple(range.end.value, static_cast<uint64_t>(arch::bigPageSize));
-    const auto alignedBottom = roundDownToNearestMultiple(range.start.value, static_cast<uint64_t>(arch::bigPageSize));
-    return (alignedTop - alignedBottom)/arch::bigPageSize;
-}
-
 RangeAllocator::RangeAllocator(const mm::phys_memory_range range, BootstrapAllocator bootstrapAllocator) :
-context(range, bootstrapAllocator.allocate<BigPageMetadata>(bigPagesInRange(range))),
+context(range, bootstrapAllocator),
 globalPool(GLOBAL, context){
     assert(!bootstrapAllocator.isFake(), "The bootstrap allocator cannot be in measurement mode");
     assert(range.start.value % arch::smallPageSize == 0, "Range allocator start is not page aligned");
@@ -599,7 +638,7 @@ globalPool(GLOBAL, context){
     const auto alignedTop = roundUpToNearestMultiple(range.end.value, static_cast<uint64_t>(arch::bigPageSize));
     const auto alignedBottom = roundDownToNearestMultiple(range.start.value, static_cast<uint64_t>(arch::bigPageSize));
     const auto bottomReserveCount = (range.start.value - alignedBottom) / arch::smallPageSize;
-    const auto topReserveCount = (range.end.value - alignedTop) / arch::smallPageSize;
+    const auto topReserveCount = (alignedTop - range.end.value) / arch::smallPageSize;
 
     const size_t bigPageCount = (alignedTop - alignedBottom) / arch::bigPageSize;
 

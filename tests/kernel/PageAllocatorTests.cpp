@@ -10,6 +10,7 @@
 #include <thread>
 #include <vector>
 #include <algorithm>
+#include <set>
 #include "ArchMocks.h"
 
 using namespace CroCOSTest;
@@ -402,16 +403,29 @@ TEST(PressureBitmapConcurrentMarking) {
     // Pause memory tracking during thread creation (std::thread allocates internal state)
     pauseTracking();
 
-    // Launch 8 threads, each marking its own pool
+    std::atomic<bool> stop{false};
+    std::atomic<size_t> totalOperations{0};
+
+    // Launch 8 threads, each continuously marking its own pool for a period
     std::vector<std::thread> threads;
     for (size_t i = 0; i < 8; i++) {
-        threads.emplace_back([&bitmap, i]() {
+        threads.emplace_back([&bitmap, &stop, &totalOperations, i]() {
             PoolID pool(static_cast<arch::ProcessorID>(i));
-            // Each thread marks its pool at different pressure levels in sequence
-            bitmap.markPressure(pool, PoolPressure::SURPLUS);
-            bitmap.markPressure(pool, PoolPressure::COMFORTABLE);
-            bitmap.markPressure(pool, PoolPressure::MODERATE);
-            bitmap.markPressure(pool, PoolPressure::DESPERATE);
+            size_t localOps = 0;
+
+            // Run for many iterations to stress test
+            for (size_t iter = 0; iter < 1000 && !stop.load(); iter++) {
+                // Cycle through pressure levels
+                bitmap.markPressure(pool, PoolPressure::SURPLUS);
+                localOps++;
+                bitmap.markPressure(pool, PoolPressure::COMFORTABLE);
+                localOps++;
+                bitmap.markPressure(pool, PoolPressure::MODERATE);
+                localOps++;
+                bitmap.markPressure(pool, PoolPressure::DESPERATE);
+                localOps++;
+            }
+            totalOperations.fetch_add(localOps);
         });
     }
 
@@ -421,7 +435,10 @@ TEST(PressureBitmapConcurrentMarking) {
 
     resumeTracking();
 
-    // All pools should end up in DESPERATE
+    // Verify that all threads did work
+    ASSERT_TRUE(totalOperations.load() > 0);
+
+    // All pools should end up in DESPERATE (last state set)
     size_t desperateCount = 0;
     for (auto _ : bitmap.poolsWithPressure(PoolPressure::DESPERATE)) {
         (void)_;
@@ -430,10 +447,12 @@ TEST(PressureBitmapConcurrentMarking) {
     ASSERT_EQ(8u, desperateCount);
 
     // Other pressure levels should be empty
+    size_t otherCount = 0;
     for (auto _ : bitmap.poolsWithPressure(PoolPressure::SURPLUS)) {
         (void)_;
-        ASSERT_TRUE(false);
+        otherCount++;
     }
+    ASSERT_EQ(0u, otherCount);
 
     free(buffer);
 }
@@ -458,10 +477,12 @@ TEST(PressureBitmapConcurrentReadWrite) {
     pauseTracking();
 
     std::atomic<bool> stop{false};
+    std::atomic<size_t> totalIterations{0};
+    std::atomic<size_t> totalPoolsSeen{0};
 
-    // Writer thread that changes pressure levels
+    // Writer thread that continuously changes pressure levels
     std::thread writer([&]() {
-        for (size_t iteration = 0; iteration < 100; iteration++) {
+        for (size_t iteration = 0; iteration < 500; iteration++) {
             for (size_t i = 0; i < 8; i++) {
                 PoolPressure pressure = static_cast<PoolPressure>(iteration % static_cast<size_t>(PoolPressure::COUNT));
                 bitmap.markPressure(PoolID(static_cast<arch::ProcessorID>(i)), pressure);
@@ -470,18 +491,33 @@ TEST(PressureBitmapConcurrentReadWrite) {
         stop.store(true);
     });
 
-    // Reader threads that iterate
+    // Reader threads that continuously iterate
     std::vector<std::thread> readers;
     for (size_t i = 0; i < 4; i++) {
         readers.emplace_back([&]() {
+            size_t localIterations = 0;
+            size_t localPoolsSeen = 0;
+
             while (!stop.load()) {
+                // Iterate through all pressure levels
                 for (size_t p = 0; p < static_cast<size_t>(PoolPressure::COUNT); p++) {
-                    for (auto _ : bitmap.poolsWithPressure(static_cast<PoolPressure>(p))) {
-                        (void)_;
-                        // Just ensure we can iterate without crashing
+                    size_t poolCount = 0;
+                    for (auto pool : bitmap.poolsWithPressure(static_cast<PoolPressure>(p))) {
+                        (void)pool;
+                        poolCount++;
+                        localPoolsSeen++;
+
+                        // Verify pool ID is in valid range
+                        ASSERT_TRUE(pool.global() || pool.id < 8);
                     }
+                    // Verify we don't see more pools than exist
+                    ASSERT_TRUE(poolCount <= 9); // 8 processors + 1 global
                 }
+                localIterations++;
             }
+
+            totalIterations.fetch_add(localIterations);
+            totalPoolsSeen.fetch_add(localPoolsSeen);
         });
     }
 
@@ -491,6 +527,23 @@ TEST(PressureBitmapConcurrentReadWrite) {
     }
 
     resumeTracking();
+
+    // Verify that readers did substantial work without stalling
+    ASSERT_TRUE(totalIterations.load() > 0);
+    ASSERT_TRUE(totalPoolsSeen.load() > 0);
+
+    // Verify final state is consistent (all pools at same pressure level)
+    size_t totalFound = 0;
+    for (size_t p = 0; p < static_cast<size_t>(PoolPressure::COUNT); p++) {
+        size_t count = 0;
+        for (auto _ : bitmap.poolsWithPressure(static_cast<PoolPressure>(p))) {
+            (void)_;
+            count++;
+        }
+        totalFound += count;
+    }
+    // Should find exactly 8 pools (global pool not marked in this test)
+    ASSERT_EQ(8u, totalFound);
 
     free(buffer);
 }
@@ -564,4 +617,322 @@ TEST(PressureBitmapMultipleWordSpan) {
     ASSERT_EQ(129u, foundPools[4]);
 
     free(buffer);
+}
+
+// ============================================================================
+// SmallPageAllocator Tests
+// ============================================================================
+
+// Helper to create buffers for SmallPageAllocator
+struct SmallPageAllocatorBuffers {
+    static constexpr size_t SMALL_PAGES_PER_BIG_PAGE = 512; // 2MB / 4KB
+    SmallPageIndex fwb[SMALL_PAGES_PER_BIG_PAGE];
+    SmallPageIndex bwb[SMALL_PAGES_PER_BIG_PAGE];
+};
+
+TEST(SmallPageAllocatorConstruction) {
+    PageAllocatorTestSetup setup;
+
+    SmallPageAllocatorBuffers buffers;
+    SmallPageAllocator allocator(buffers.fwb, buffers.bwb);
+
+    // Initially all pages should be free
+    ASSERT_TRUE(allocator.allFree());
+    ASSERT_FALSE(allocator.allFull());
+    ASSERT_EQ(512u, allocator.freePageCount());
+}
+
+TEST(SmallPageAllocatorAllocateSingle) {
+    PageAllocatorTestSetup setup;
+
+    SmallPageAllocatorBuffers buffers;
+    SmallPageAllocator allocator(buffers.fwb, buffers.bwb);
+
+    // Allocate one page
+    SmallPageIndex page = allocator.allocateSmallPage();
+
+    ASSERT_FALSE(allocator.allFree());
+    ASSERT_FALSE(allocator.allFull());
+    ASSERT_EQ(511u, allocator.freePageCount());
+}
+
+TEST(SmallPageAllocatorAllocateMultiple) {
+    PageAllocatorTestSetup setup;
+
+    SmallPageAllocatorBuffers buffers;
+    SmallPageAllocator allocator(buffers.fwb, buffers.bwb);
+
+    // Allocate 10 pages
+    std::vector<SmallPageIndex> pages;
+    for (size_t i = 0; i < 10; i++) {
+        pages.push_back(allocator.allocateSmallPage());
+    }
+
+    ASSERT_FALSE(allocator.allFree());
+    ASSERT_FALSE(allocator.allFull());
+    ASSERT_EQ(502u, allocator.freePageCount());
+}
+
+TEST(SmallPageAllocatorAllocateAll) {
+    PageAllocatorTestSetup setup;
+
+    SmallPageAllocatorBuffers buffers;
+    SmallPageAllocator allocator(buffers.fwb, buffers.bwb);
+
+    // Allocate all 512 pages
+    std::vector<SmallPageIndex> pages;
+    for (size_t i = 0; i < 512; i++) {
+        pages.push_back(allocator.allocateSmallPage());
+    }
+
+    ASSERT_FALSE(allocator.allFree());
+    ASSERT_TRUE(allocator.allFull());
+    ASSERT_EQ(0u, allocator.freePageCount());
+}
+
+TEST(SmallPageAllocatorFreeSingle) {
+    PageAllocatorTestSetup setup;
+
+    SmallPageAllocatorBuffers buffers;
+    SmallPageAllocator allocator(buffers.fwb, buffers.bwb);
+
+    // Allocate and then free
+    SmallPageIndex page = allocator.allocateSmallPage();
+    ASSERT_EQ(511u, allocator.freePageCount());
+
+    allocator.freeSmallPage(page);
+    ASSERT_TRUE(allocator.allFree());
+    ASSERT_EQ(512u, allocator.freePageCount());
+}
+
+TEST(SmallPageAllocatorFreeMultiple) {
+    PageAllocatorTestSetup setup;
+
+    SmallPageAllocatorBuffers buffers;
+    SmallPageAllocator allocator(buffers.fwb, buffers.bwb);
+
+    // Allocate 20 pages
+    std::vector<SmallPageIndex> pages;
+    for (size_t i = 0; i < 20; i++) {
+        pages.push_back(allocator.allocateSmallPage());
+    }
+    ASSERT_EQ(492u, allocator.freePageCount());
+
+    // Free 10 pages
+    for (size_t i = 0; i < 10; i++) {
+        allocator.freeSmallPage(pages[i]);
+    }
+    ASSERT_EQ(502u, allocator.freePageCount());
+}
+
+TEST(SmallPageAllocatorFreeAll) {
+    PageAllocatorTestSetup setup;
+
+    SmallPageAllocatorBuffers buffers;
+    SmallPageAllocator allocator(buffers.fwb, buffers.bwb);
+
+    // Allocate all pages
+    std::vector<SmallPageIndex> pages;
+    for (size_t i = 0; i < 512; i++) {
+        pages.push_back(allocator.allocateSmallPage());
+    }
+    ASSERT_TRUE(allocator.allFull());
+
+    // Free all pages
+    for (size_t i = 0; i < 512; i++) {
+        allocator.freeSmallPage(pages[i]);
+    }
+    ASSERT_TRUE(allocator.allFree());
+    ASSERT_EQ(512u, allocator.freePageCount());
+}
+
+TEST(SmallPageAllocatorAllocateFreePattern) {
+    PageAllocatorTestSetup setup;
+
+    SmallPageAllocatorBuffers buffers;
+    SmallPageAllocator allocator(buffers.fwb, buffers.bwb);
+
+    // Allocate-free-allocate-free pattern
+    SmallPageIndex page1 = allocator.allocateSmallPage();
+    ASSERT_EQ(511u, allocator.freePageCount());
+
+    SmallPageIndex page2 = allocator.allocateSmallPage();
+    ASSERT_EQ(510u, allocator.freePageCount());
+
+    allocator.freeSmallPage(page1);
+    ASSERT_EQ(511u, allocator.freePageCount());
+
+    SmallPageIndex page3 = allocator.allocateSmallPage();
+    ASSERT_EQ(510u, allocator.freePageCount());
+
+    allocator.freeSmallPage(page2);
+    ASSERT_EQ(511u, allocator.freePageCount());
+
+    allocator.freeSmallPage(page3);
+    ASSERT_EQ(512u, allocator.freePageCount());
+    ASSERT_TRUE(allocator.allFree());
+}
+
+TEST(SmallPageAllocatorReserveSinglePage) {
+    PageAllocatorTestSetup setup;
+
+    SmallPageAllocatorBuffers buffers;
+    SmallPageAllocator allocator(buffers.fwb, buffers.bwb);
+
+    // Reserve page at index 0
+    allocator.reserveSmallPage(0);
+
+    ASSERT_FALSE(allocator.allFree());
+    ASSERT_EQ(511u, allocator.freePageCount());
+}
+
+TEST(SmallPageAllocatorReserveMultiplePages) {
+    PageAllocatorTestSetup setup;
+
+    SmallPageAllocatorBuffers buffers;
+    SmallPageAllocator allocator(buffers.fwb, buffers.bwb);
+
+    // Reserve pages at specific indices
+    allocator.reserveSmallPage(0);
+    allocator.reserveSmallPage(100);
+    allocator.reserveSmallPage(511);
+
+    ASSERT_FALSE(allocator.allFree());
+    ASSERT_EQ(509u, allocator.freePageCount());
+}
+
+TEST(SmallPageAllocatorReserveAllPages) {
+    PageAllocatorTestSetup setup;
+
+    SmallPageAllocatorBuffers buffers;
+    SmallPageAllocator allocator(buffers.fwb, buffers.bwb);
+
+    // Reserve all pages at once
+    allocator.reserveAllPages();
+
+    ASSERT_FALSE(allocator.allFree());
+    ASSERT_TRUE(allocator.allFull());
+    ASSERT_EQ(0u, allocator.freePageCount());
+}
+
+TEST(SmallPageAllocatorMixedOperations) {
+    PageAllocatorTestSetup setup;
+
+    SmallPageAllocatorBuffers buffers;
+    SmallPageAllocator allocator(buffers.fwb, buffers.bwb);
+
+    // Mix of reserve, allocate, and free operations
+    allocator.reserveSmallPage(0);
+    ASSERT_EQ(511u, allocator.freePageCount());
+
+    SmallPageIndex page1 = allocator.allocateSmallPage();
+    ASSERT_EQ(510u, allocator.freePageCount());
+
+    allocator.reserveSmallPage(100);
+    ASSERT_EQ(509u, allocator.freePageCount());
+
+    SmallPageIndex page2 = allocator.allocateSmallPage();
+    ASSERT_EQ(508u, allocator.freePageCount());
+
+    allocator.freeSmallPage(page1);
+    ASSERT_EQ(509u, allocator.freePageCount());
+
+    SmallPageIndex page3 = allocator.allocateSmallPage();
+    ASSERT_EQ(508u, allocator.freePageCount());
+
+    allocator.freeSmallPage(page2);
+    allocator.freeSmallPage(page3);
+    ASSERT_EQ(510u, allocator.freePageCount());
+}
+
+TEST(SmallPageAllocatorAllocatedPagesAreUnique) {
+    PageAllocatorTestSetup setup;
+
+    SmallPageAllocatorBuffers buffers;
+    SmallPageAllocator allocator(buffers.fwb, buffers.bwb);
+
+    // Allocate 50 pages and verify they're all unique
+    std::set<SmallPageIndex> allocatedPages;
+    for (size_t i = 0; i < 50; i++) {
+        SmallPageIndex page = allocator.allocateSmallPage();
+        ASSERT_TRUE(allocatedPages.find(page) == allocatedPages.end());
+        allocatedPages.insert(page);
+    }
+
+    ASSERT_EQ(50u, allocatedPages.size());
+}
+
+TEST(SmallPageAllocatorFreeInReverseOrder) {
+    PageAllocatorTestSetup setup;
+
+    SmallPageAllocatorBuffers buffers;
+    SmallPageAllocator allocator(buffers.fwb, buffers.bwb);
+
+    // Allocate pages
+    std::vector<SmallPageIndex> pages;
+    for (size_t i = 0; i < 30; i++) {
+        pages.push_back(allocator.allocateSmallPage());
+    }
+    ASSERT_EQ(482u, allocator.freePageCount());
+
+    // Free in reverse order
+    for (int i = 29; i >= 0; i--) {
+        allocator.freeSmallPage(pages[i]);
+    }
+
+    ASSERT_TRUE(allocator.allFree());
+    ASSERT_EQ(512u, allocator.freePageCount());
+}
+
+TEST(SmallPageAllocatorFreeInRandomOrder) {
+    PageAllocatorTestSetup setup;
+
+    SmallPageAllocatorBuffers buffers;
+    SmallPageAllocator allocator(buffers.fwb, buffers.bwb);
+
+    // Allocate pages
+    std::vector<SmallPageIndex> pages;
+    for (size_t i = 0; i < 40; i++) {
+        pages.push_back(allocator.allocateSmallPage());
+    }
+    ASSERT_EQ(472u, allocator.freePageCount());
+
+    // Free in a mixed order: evens first, then odds
+    for (size_t i = 0; i < 40; i += 2) {
+        allocator.freeSmallPage(pages[i]);
+    }
+    ASSERT_EQ(492u, allocator.freePageCount());
+
+    for (size_t i = 1; i < 40; i += 2) {
+        allocator.freeSmallPage(pages[i]);
+    }
+    ASSERT_TRUE(allocator.allFree());
+    ASSERT_EQ(512u, allocator.freePageCount());
+}
+
+TEST(SmallPageAllocatorReserveAfterAllocations) {
+    PageAllocatorTestSetup setup;
+
+    SmallPageAllocatorBuffers buffers;
+    SmallPageAllocator allocator(buffers.fwb, buffers.bwb);
+
+    // Allocate some pages
+    SmallPageIndex page1 = allocator.allocateSmallPage();
+    SmallPageIndex page2 = allocator.allocateSmallPage();
+    ASSERT_EQ(510u, allocator.freePageCount());
+
+    // Reserve a page
+    allocator.reserveSmallPage(200);
+    ASSERT_EQ(509u, allocator.freePageCount());
+
+    // Allocate more
+    SmallPageIndex page3 = allocator.allocateSmallPage();
+    ASSERT_EQ(508u, allocator.freePageCount());
+
+    // Free allocated pages
+    allocator.freeSmallPage(page1);
+    allocator.freeSmallPage(page2);
+    allocator.freeSmallPage(page3);
+    ASSERT_EQ(511u, allocator.freePageCount());
+    ASSERT_FALSE(allocator.allFree()); // Still have reserved page
 }

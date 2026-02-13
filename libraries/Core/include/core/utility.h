@@ -783,7 +783,31 @@ constexpr bool isConstexprEqual(T a, T b) requires
     return !(a.operator!=(b));
 }
 
+template <typename T>
+requires Invocable<T, void>
+class Deferred {
+    T toInvoke;
+    bool canceled;
+public:
+    explicit Deferred(T&& t) : toInvoke(forward<T>(t)), canceled(false) {}
+    Deferred(const Deferred&) = delete;
+    Deferred& operator=(const Deferred&) = delete;
+    ~Deferred() {
+        if (!canceled)
+            toInvoke();
+    }
 
+    void cancel() {
+        canceled = true;
+    }
+};
+
+template <typename T>
+Deferred<T> makeDeferred(T&& t) {
+    return Deferred<T>(forward<T>(t));
+}
+
+#define defer(f) auto _ = makeDeferred(f)
 
 #ifdef __clang__
 #define condition_likely(x) __builtin_expect(!!(x), 1)
