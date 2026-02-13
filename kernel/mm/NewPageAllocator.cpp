@@ -457,7 +457,8 @@ void PressureBitmap::measureAllocation(BootstrapAllocator& allocator, size_t pro
     allocator.allocate<Atomic<uint64_t>>(bitmapWords * static_cast<size_t>(PoolPressure::COUNT));
 }
 
-PressureBitmap::PressureBitmap(BootstrapAllocator& allocator, size_t processorCount) {
+PressureBitmap::PressureBitmap(BootstrapAllocator& allocator, size_t procCount)
+    : processorCount(procCount) {
     constexpr size_t BITS_PER_WORD = 64;
     const size_t bitmapWords = divideAndRoundUp(processorCount + 1, BITS_PER_WORD);
     for (auto& bitmap : bitmaps) {
@@ -471,7 +472,7 @@ PressureBitmap::PressureBitmap(BootstrapAllocator& allocator, size_t processorCo
 
 void PressureBitmap::markPressure(PoolID pool, PoolPressure pressure) {
     constexpr size_t BITS_PER_WORD = 64;
-    const size_t totalBits = arch::processorCount() + 1;
+    const size_t totalBits = processorCount + 1;
     const size_t bitIndex = pool.global() ? totalBits - 1 : pool.id;
     const size_t wordIndex = bitIndex / BITS_PER_WORD;
     const uint64_t bitMask = 1ULL << (bitIndex % BITS_PER_WORD);
@@ -487,7 +488,7 @@ void PressureBitmap::markPressure(PoolID pool, PoolPressure pressure) {
 }
 
 IteratorRange<PressureBitmap::BitmapIterator> PressureBitmap::poolsWithPressure(PoolPressure pressure) const {
-    const size_t totalBits = arch::processorCount() + 1;
+    const size_t totalBits = processorCount + 1;
     Atomic<uint64_t>* bitmap = bitmaps[static_cast<size_t>(pressure)];
 
     return {BitmapIterator(bitmap, 0, totalBits), BitmapIterator(bitmap, totalBits, totalBits)};
@@ -551,6 +552,10 @@ void PressureBitmap::BitmapIterator::advanceToSetBit() {
         index = (wordIndex + 1) * BITS_PER_WORD;
     }
 #endif
+    // Clamp to totalBits to ensure iterator equals end() when exhausted
+    if (index > totalBits) {
+        index = totalBits;
+    }
 }
 
 bool PressureBitmap::BitmapIterator::atEnd() const {

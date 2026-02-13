@@ -134,6 +134,7 @@ enum class PoolPressure : uint8_t {
 
 class PressureBitmap {
     Atomic<uint64_t>* bitmaps[static_cast<size_t>(PoolPressure::COUNT)];
+    size_t processorCount;
 public:
     class BitmapIterator {
         Atomic<uint64_t>* bitmapStart;
