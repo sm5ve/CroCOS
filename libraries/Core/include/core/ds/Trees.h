@@ -1222,6 +1222,7 @@ template<typename NodeType, typename RedBlackTreeInfoExtractor, typename Compara
 	         BinaryTreeComparator<NodeType, RedBlackTreeInfoExtractor, Comparator> &&
 	         RedBlackTreeNodeType<NodeType, RedBlackTreeInfoExtractor>
 class IntrusiveRedBlackTree : protected IntrusiveBinarySearchTree<NodeType, RedBlackTreeInfoExtractor, Comparator> {
+public:
 	static constexpr bool HasParentPointer = ParentPointerBinaryTreeNodeType<NodeType, RedBlackTreeInfoExtractor>;
 	static constexpr bool AugmentedNode = AugmentedBinaryTreeNodeType<NodeType, RedBlackTreeInfoExtractor>;
 	

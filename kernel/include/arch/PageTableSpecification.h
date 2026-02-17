@@ -9,6 +9,7 @@
 #include <assert.h>
 #include <kernel.h>
 #include <core/math.h>
+#include <mem/MemTypes.h>
 
 #define PARANOID_PAGING_ASSERTIONS
 

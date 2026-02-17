@@ -7,6 +7,7 @@
 
 #include <kernel.h>
 #include <core/Iterator.h>
+#include <mem/MemTypes.h>
 
 namespace arch{
     enum MemoryMapEntryType : uint8_t {

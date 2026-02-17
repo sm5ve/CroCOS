@@ -27,6 +27,7 @@ target_sources(KernelTests PRIVATE
         ../../kernel/interrupts/InterruptGraphManager.cpp
         ../../kernel/interrupts/ExplicitTypes.cpp
         ../../kernel/mm/NewPageAllocator.cpp
+        ../../kernel/mm/MemTypes.cpp
         ../../kernel/arch/arch.cpp
 )
 

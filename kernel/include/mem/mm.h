@@ -9,7 +9,7 @@
 #include <core/TypeTraits.h>
 #include <arch.h>
 #include <core/ds/Vector.h>
-#include <kernel.h>
+#include <mem/MemTypes.h>
 
 namespace kernel::mm{
     struct MemoryStatistics{

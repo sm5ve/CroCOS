@@ -5,7 +5,7 @@
 
 #include "../test.h"
 #include <harness/TestHarness.h>
-#include <core/ds/permutation.h>
+#include <core/ds/Permutation.h>
 
 using namespace CroCOSTest;
 

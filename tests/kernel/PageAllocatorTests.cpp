@@ -39,7 +39,7 @@ TEST(PressureBitmapMeasureAllocation) {
     PageAllocatorTestSetup setup;
 
     BootstrapAllocator measureAllocator;
-    PressureBitmap::measureAllocation(measureAllocator, 8);
+    PressureBitmap<PoolID>::measureAllocation(measureAllocator, 8);
 
     size_t bytesNeeded = measureAllocator.bytesNeeded();
 
@@ -53,7 +53,7 @@ TEST(PressureBitmapMeasureAllocationLarge) {
     PageAllocatorTestSetup setup;
 
     BootstrapAllocator measureAllocator;
-    PressureBitmap::measureAllocation(measureAllocator, 100);
+    PressureBitmap<PoolID>::measureAllocation(measureAllocator, 100);
 
     size_t bytesNeeded = measureAllocator.bytesNeeded();
 
@@ -68,7 +68,7 @@ TEST(PressureBitmapConstruction) {
 
     // Measure first
     BootstrapAllocator measureAllocator;
-    PressureBitmap::measureAllocation(measureAllocator, 8);
+    PressureBitmap<PoolID>::measureAllocation(measureAllocator, 8);
     size_t bytesNeeded = measureAllocator.bytesNeeded();
 
     // Allocate buffer
@@ -77,7 +77,7 @@ TEST(PressureBitmapConstruction) {
 
     // Create actual allocator
     BootstrapAllocator allocator(buffer, bytesNeeded);
-    PressureBitmap bitmap(allocator, 8);
+    PressureBitmap<PoolID> bitmap(allocator, 8);
 
     // Should construct without error
     // All pools should start unmarked (no pressure set)
@@ -93,11 +93,11 @@ TEST(PressureBitmapMarkSinglePoolSurplus) {
     PageAllocatorTestSetup setup;
 
     BootstrapAllocator measureAllocator;
-    PressureBitmap::measureAllocation(measureAllocator, 8);
+    PressureBitmap<PoolID>::measureAllocation(measureAllocator, 8);
     void* buffer = malloc(measureAllocator.bytesNeeded());
 
     BootstrapAllocator allocator(buffer, measureAllocator.bytesNeeded());
-    PressureBitmap bitmap(allocator, 8);
+    PressureBitmap<PoolID> bitmap(allocator, 8);
 
     // Mark pool 0 as SURPLUS
     PoolID pool0(static_cast<arch::ProcessorID>(0));
@@ -123,11 +123,11 @@ TEST(PressureBitmapMarkMultiplePoolsSamePressure) {
     PageAllocatorTestSetup setup;
 
     BootstrapAllocator measureAllocator;
-    PressureBitmap::measureAllocation(measureAllocator, 8);
+    PressureBitmap<PoolID>::measureAllocation(measureAllocator, 8);
     void* buffer = malloc(measureAllocator.bytesNeeded());
 
     BootstrapAllocator allocator(buffer, measureAllocator.bytesNeeded());
-    PressureBitmap bitmap(allocator, 8);
+    PressureBitmap<PoolID> bitmap(allocator, 8);
 
     // Mark pools 0, 2, 4 as MODERATE
     PoolID pool0(static_cast<arch::ProcessorID>(0));
@@ -160,11 +160,11 @@ TEST(PressureBitmapChangePressureLevel) {
     PageAllocatorTestSetup setup;
 
     BootstrapAllocator measureAllocator;
-    PressureBitmap::measureAllocation(measureAllocator, 8);
+    PressureBitmap<PoolID>::measureAllocation(measureAllocator, 8);
     void* buffer = malloc(measureAllocator.bytesNeeded());
 
     BootstrapAllocator allocator(buffer, measureAllocator.bytesNeeded());
-    PressureBitmap bitmap(allocator, 8);
+    PressureBitmap<PoolID> bitmap(allocator, 8);
 
     PoolID pool1(static_cast<arch::ProcessorID>(1));
 
@@ -194,11 +194,11 @@ TEST(PressureBitmapMarkGlobalPool) {
     PageAllocatorTestSetup setup;
 
     BootstrapAllocator measureAllocator;
-    PressureBitmap::measureAllocation(measureAllocator, 8);
+    PressureBitmap<PoolID>::measureAllocation(measureAllocator, 8);
     void* buffer = malloc(measureAllocator.bytesNeeded());
 
     BootstrapAllocator allocator(buffer, measureAllocator.bytesNeeded());
-    PressureBitmap bitmap(allocator, 8);
+    PressureBitmap<PoolID> bitmap(allocator, 8);
 
     // Mark global pool as COMFORTABLE
     bitmap.markPressure(GLOBAL, PoolPressure::COMFORTABLE);
@@ -221,11 +221,11 @@ TEST(PressureBitmapMixedPressureLevels) {
     PageAllocatorTestSetup setup;
 
     BootstrapAllocator measureAllocator;
-    PressureBitmap::measureAllocation(measureAllocator, 8);
+    PressureBitmap<PoolID>::measureAllocation(measureAllocator, 8);
     void* buffer = malloc(measureAllocator.bytesNeeded());
 
     BootstrapAllocator allocator(buffer, measureAllocator.bytesNeeded());
-    PressureBitmap bitmap(allocator, 8);
+    PressureBitmap<PoolID> bitmap(allocator, 8);
 
     // Set up mixed pressure levels
     bitmap.markPressure(PoolID(static_cast<arch::ProcessorID>(0)), PoolPressure::SURPLUS);
@@ -276,11 +276,11 @@ TEST(PressureBitmapIteratorEmpty) {
     PageAllocatorTestSetup setup;
 
     BootstrapAllocator measureAllocator;
-    PressureBitmap::measureAllocation(measureAllocator, 8);
+    PressureBitmap<PoolID>::measureAllocation(measureAllocator, 8);
     void* buffer = malloc(measureAllocator.bytesNeeded());
 
     BootstrapAllocator allocator(buffer, measureAllocator.bytesNeeded());
-    PressureBitmap bitmap(allocator, 8);
+    PressureBitmap<PoolID> bitmap(allocator, 8);
 
     // Don't mark any pools
     // All iterators should be empty
@@ -297,11 +297,11 @@ TEST(PressureBitmapIteratorIncrement) {
     PageAllocatorTestSetup setup;
 
     BootstrapAllocator measureAllocator;
-    PressureBitmap::measureAllocation(measureAllocator, 8);
+    PressureBitmap<PoolID>::measureAllocation(measureAllocator, 8);
     void* buffer = malloc(measureAllocator.bytesNeeded());
 
     BootstrapAllocator allocator(buffer, measureAllocator.bytesNeeded());
-    PressureBitmap bitmap(allocator, 8);
+    PressureBitmap<PoolID> bitmap(allocator, 8);
 
     // Mark several non-consecutive pools
     bitmap.markPressure(PoolID(static_cast<arch::ProcessorID>(1)), PoolPressure::SURPLUS);
@@ -333,11 +333,11 @@ TEST(PressureBitmapIteratorAllPools) {
     PageAllocatorTestSetup setup;
 
     BootstrapAllocator measureAllocator;
-    PressureBitmap::measureAllocation(measureAllocator, 8);
+    PressureBitmap<PoolID>::measureAllocation(measureAllocator, 8);
     void* buffer = malloc(measureAllocator.bytesNeeded());
 
     BootstrapAllocator allocator(buffer, measureAllocator.bytesNeeded());
-    PressureBitmap bitmap(allocator, 8);
+    PressureBitmap<PoolID> bitmap(allocator, 8);
 
     // Mark all pools (8 CPUs + 1 global) as DESPERATE
     for (size_t i = 0; i < 8; i++) {
@@ -361,11 +361,11 @@ TEST(PressureBitmapIteratorRangeBasedLoop) {
     PageAllocatorTestSetup setup;
 
     BootstrapAllocator measureAllocator;
-    PressureBitmap::measureAllocation(measureAllocator, 8);
+    PressureBitmap<PoolID>::measureAllocation(measureAllocator, 8);
     void* buffer = malloc(measureAllocator.bytesNeeded());
 
     BootstrapAllocator allocator(buffer, measureAllocator.bytesNeeded());
-    PressureBitmap bitmap(allocator, 8);
+    PressureBitmap<PoolID> bitmap(allocator, 8);
 
     // Mark pools 0, 1, 2
     bitmap.markPressure(PoolID(static_cast<arch::ProcessorID>(0)), PoolPressure::MODERATE);
@@ -394,11 +394,11 @@ TEST(PressureBitmapConcurrentMarking) {
     arch::testing::setProcessorCount(8);
 
     BootstrapAllocator measureAllocator;
-    PressureBitmap::measureAllocation(measureAllocator, 8);
+    PressureBitmap<PoolID>::measureAllocation(measureAllocator, 8);
     void* buffer = malloc(measureAllocator.bytesNeeded());
 
     BootstrapAllocator allocator(buffer, measureAllocator.bytesNeeded());
-    PressureBitmap bitmap(allocator, 8);
+    PressureBitmap<PoolID> bitmap(allocator, 8);
 
     // Pause memory tracking during thread creation (std::thread allocates internal state)
     pauseTracking();
@@ -462,11 +462,11 @@ TEST(PressureBitmapConcurrentReadWrite) {
     arch::testing::setProcessorCount(8);
 
     BootstrapAllocator measureAllocator;
-    PressureBitmap::measureAllocation(measureAllocator, 8);
+    PressureBitmap<PoolID>::measureAllocation(measureAllocator, 8);
     void* buffer = malloc(measureAllocator.bytesNeeded());
 
     BootstrapAllocator allocator(buffer, measureAllocator.bytesNeeded());
-    PressureBitmap bitmap(allocator, 8);
+    PressureBitmap<PoolID> bitmap(allocator, 8);
 
     // Pre-mark some pools
     for (size_t i = 0; i < 4; i++) {
@@ -557,11 +557,11 @@ TEST(PressureBitmapLargeProcessorCount) {
     const size_t largeCount = 128;
 
     BootstrapAllocator measureAllocator;
-    PressureBitmap::measureAllocation(measureAllocator, largeCount);
+    PressureBitmap<PoolID>::measureAllocation(measureAllocator, largeCount);
     void* buffer = malloc(measureAllocator.bytesNeeded());
 
     BootstrapAllocator allocator(buffer, measureAllocator.bytesNeeded());
-    PressureBitmap bitmap(allocator, largeCount);
+    PressureBitmap<PoolID> bitmap(allocator, largeCount);
 
     // Mark every 8th pool as SURPLUS
     for (size_t i = 0; i < largeCount; i += 8) {
@@ -591,11 +591,11 @@ TEST(PressureBitmapMultipleWordSpan) {
     const size_t largeCount = 200;
 
     BootstrapAllocator measureAllocator;
-    PressureBitmap::measureAllocation(measureAllocator, largeCount);
+    PressureBitmap<PoolID>::measureAllocation(measureAllocator, largeCount);
     void* buffer = malloc(measureAllocator.bytesNeeded());
 
     BootstrapAllocator allocator(buffer, measureAllocator.bytesNeeded());
-    PressureBitmap bitmap(allocator, largeCount);
+    PressureBitmap<PoolID> bitmap(allocator, largeCount);
 
     // Mark pools across word boundaries (64, 65, 66 span two words)
     bitmap.markPressure(PoolID(static_cast<arch::ProcessorID>(63)), PoolPressure::COMFORTABLE);

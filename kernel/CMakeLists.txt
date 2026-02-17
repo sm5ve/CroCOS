@@ -35,6 +35,7 @@ set(KERNEL_SRC
         arch/amd64/smp/smpboot.asm
         init.cpp
         mm/NewPageAllocator.cpp
+        mm/MemTypes.cpp
 )
 
 file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/generated_headers)
