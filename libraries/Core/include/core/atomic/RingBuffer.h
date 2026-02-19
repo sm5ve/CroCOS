@@ -196,6 +196,8 @@ class SimpleMPMCRingBuffer {
     SimpleMPMCRingBuffer(const SimpleMPMCRingBuffer&) = delete;
     SimpleMPMCRingBuffer& operator=(const SimpleMPMCRingBuffer&) = delete;
 
+    template<typename U, bool O> friend class BroadcastRingBuffer;
+
 public:
     // Owning constructor: allocates internal storage
     explicit SimpleMPMCRingBuffer(size_t capacity) requires (Owning)
@@ -293,6 +295,21 @@ public:
 
     bool empty() const { return availableToRead() == 0; }
     bool full() const { return availableToWrite() == 0; }
+
+    // Discard all readable items. Must not be called concurrently with
+    // any other operation on this buffer.
+    void clear() {
+        if constexpr (Owning) {
+            size_t rh = readHead.load(RELAXED);
+            size_t wth = writtenHead.load(RELAXED);
+            if constexpr (!is_trivially_copyable_v<T>) {
+                for (size_t i = rh; i < wth; i++) {
+                    buffer[i % cap].~T();
+                }
+            }
+        }
+        readHead.store(writtenHead.load(RELAXED), RELAXED);
+    }
 };
 
 
@@ -562,6 +579,234 @@ public:
 
     bool empty() const { return availableToRead() == 0; }
     bool full() const { return availableToWrite() == 0; }
+
+    // Discard all readable items. Must not be called concurrently with
+    // any other operation on this buffer.
+    void clear() {
+        if constexpr (Owning) {
+            size_t rgh = readingHead.load(RELAXED);
+            size_t wth = writtenHead.load(RELAXED);
+            if constexpr (!is_trivially_copyable_v<T>) {
+                for (size_t i = rgh; i < wth; i++) {
+                    buffer[i % cap].~T();
+                }
+            }
+        }
+        size_t wth = writtenHead.load(RELAXED);
+        readingHead.store(wth, RELAXED);
+        readHead.store(wth, RELAXED);
+    }
+};
+
+// Broadcast MPMC ring buffer where all registered consumers must read each item
+// before its slot can be reused by producers.
+//
+// Wraps a SimpleMPMCRingBuffer for the write path and manages per-consumer read
+// heads externally. A slot is only freed (global readHead advances) when every
+// consumer has acknowledged it.
+//
+// Ack counters pack a 32-bit generation tag and 32-bit consumer count into a
+// single Atomic<uint64_t>. The generation disambiguates reuse of physical slots
+// across logical positions, eliminating the need for a separate reset step and
+// avoiding a race between counter reset and slot reuse. 32-bit generation
+// wraparound is handled correctly via unsigned modular equality — the maximum
+// generation lag for any slot is 1, so aliasing cannot occur.
+//
+// Template parameters:
+//   T      - element type
+//   Owning - if true, buffer owns its backing storage
+//
+// Design note: per-consumer readHeads are single-writer (each headNumber is
+// accessed by exactly one consumer thread). No CAS is needed for claiming
+// read slots — a simple load + store suffices. The headNumber is expected to
+// correspond to a logical consumer ID (e.g., CPU ID for TLB shootdowns).
+template<typename T, bool Owning = true>
+class BroadcastRingBuffer {
+    SimpleMPMCRingBuffer<T, Owning, false> buffer;
+    Atomic<size_t>* readHeads;      // one per consumer, single-writer
+    Atomic<uint64_t>* ackCounters;  // one per physical slot, packs {gen:32, count:32}
+    size_t consumerCount;
+    size_t cap;
+
+    static constexpr uint64_t packAck(uint32_t gen, uint32_t count) {
+        return (static_cast<uint64_t>(gen) << 32) | count;
+    }
+    static constexpr uint32_t ackGen(uint64_t packed) {
+        return static_cast<uint32_t>(packed >> 32);
+    }
+    static constexpr uint32_t ackCount(uint64_t packed) {
+        return static_cast<uint32_t>(packed);
+    }
+
+    // Acknowledge that a consumer has finished reading logical position logicalPos.
+    // If this consumer is the last to ack for this slot's current generation,
+    // attempts to advance the global readHead.
+    void ackSlot(size_t logicalPos) {
+        size_t slot = logicalPos % cap;
+        uint32_t expectedGen = static_cast<uint32_t>(logicalPos / cap);
+
+        while (true) {
+            uint64_t val = ackCounters[slot].load(ACQUIRE);
+            uint32_t gen = ackGen(val);
+            uint32_t count = ackCount(val);
+
+            uint64_t newVal;
+            if (gen == expectedGen) {
+                // Same generation, increment count
+                newVal = packAck(gen, count + 1);
+            } else {
+                // Old generation — we are the first consumer for this generation.
+                // The previous generation must have been fully acked (count ==
+                // consumerCount) for the slot to have been reused, so this CAS
+                // implicitly resets the counter.
+                newVal = packAck(expectedGen, 1);
+            }
+
+            if (ackCounters[slot].compare_exchange(val, newVal, RELEASE, ACQUIRE)) {
+                if (ackCount(newVal) == static_cast<uint32_t>(consumerCount)) {
+                    tryAdvanceReadHead();
+                }
+                break;
+            }
+        }
+    }
+
+    // Scan forward from the current global readHead, advancing past all
+    // consecutive slots whose ack counters show full consumption.
+    void tryAdvanceReadHead() {
+        while (true) {
+            size_t current = buffer.readHead.load(ACQUIRE);
+            size_t slot = current % cap;
+            uint64_t val = ackCounters[slot].load(ACQUIRE);
+            uint32_t gen = ackGen(val);
+            uint32_t count = ackCount(val);
+            uint32_t expectedGen = static_cast<uint32_t>(current / cap);
+
+            if (gen != expectedGen || count != static_cast<uint32_t>(consumerCount)) break;
+
+            // All consumers have acked this slot — try to advance
+            if (!buffer.readHead.compare_exchange(current, current + 1, RELEASE, RELAXED)) {
+                continue; // Someone else advanced, retry from new position
+            }
+        }
+    }
+
+    // Non-copyable, non-movable
+    BroadcastRingBuffer(const BroadcastRingBuffer&) = delete;
+    BroadcastRingBuffer& operator=(const BroadcastRingBuffer&) = delete;
+
+public:
+    // Owning constructor: allocates internal storage
+    BroadcastRingBuffer(size_t capacity, size_t consumerCount) requires (Owning)
+        : buffer(capacity), consumerCount(consumerCount), cap(capacity) {
+        readHeads = new Atomic<size_t>[consumerCount]();
+        ackCounters = new Atomic<uint64_t>[capacity]();
+    }
+
+    // Non-owning constructor: borrows all external arrays
+    BroadcastRingBuffer(T* buf, size_t capacity, size_t consumerCount,
+                        Atomic<size_t>* readHeads, Atomic<uint64_t>* ackCounters) requires (!Owning)
+        : buffer(buf, capacity), readHeads(readHeads), ackCounters(ackCounters),
+          consumerCount(consumerCount), cap(capacity) {}
+
+    ~BroadcastRingBuffer() {
+        if constexpr (Owning) {
+            delete[] readHeads;
+            delete[] ackCounters;
+        }
+    }
+
+    // --- Write interface: delegates directly to underlying buffer ---
+
+    template<typename WriteCallback>
+    bool bulkWrite(size_t count, WriteCallback callback) {
+        return buffer.bulkWrite(count, forward<WriteCallback>(callback));
+    }
+
+    template<typename WriteCallback>
+    bool tryBulkWrite(size_t count, WriteCallback callback) {
+        return buffer.tryBulkWrite(count, forward<WriteCallback>(callback));
+    }
+
+    template<typename WriteCallback>
+    size_t bulkWriteBestEffort(size_t count, WriteCallback callback) {
+        return buffer.bulkWriteBestEffort(count, forward<WriteCallback>(callback));
+    }
+
+    // --- Read interface: per-consumer with broadcast acknowledgement ---
+    //
+    // Each headNumber must be used by exactly one consumer thread (single-writer).
+    // The headNumber typically corresponds to a logical consumer ID (e.g., CPU ID).
+
+    // All-or-nothing read for specific consumer.
+    template<typename ReadCallback>
+    bool bulkRead(size_t headNumber, size_t count, ReadCallback callback) {
+        return tryBulkRead(headNumber, count, forward<ReadCallback>(callback));
+    }
+
+    // Non-blocking all-or-nothing read.
+    // Returns true if count items were available, false otherwise.
+    template<typename ReadCallback>
+    bool tryBulkRead(size_t headNumber, size_t count, ReadCallback callback) {
+        size_t myHead = readHeads[headNumber].load(RELAXED); // single-writer
+        size_t wth = buffer.writtenHead.load(ACQUIRE);
+        if (count > wth - myHead) return false;
+
+        for (size_t i = 0; i < count; i++) {
+            callback(i, static_cast<const T&>(buffer.buffer[(myHead + i) % cap]));
+        }
+
+        readHeads[headNumber].store(myHead + count, RELEASE);
+
+        for (size_t i = 0; i < count; i++) {
+            ackSlot(myHead + i);
+        }
+        return true;
+    }
+
+    // Best-effort: read up to count items, returns actual count read.
+    template<typename ReadCallback>
+    size_t bulkReadBestEffort(size_t headNumber, size_t count, ReadCallback callback) {
+        size_t myHead = readHeads[headNumber].load(RELAXED); // single-writer
+        size_t wth = buffer.writtenHead.load(ACQUIRE);
+        size_t available = wth - myHead;
+        size_t actualCount = min(count, available);
+        if (actualCount == 0) return 0;
+
+        for (size_t i = 0; i < actualCount; i++) {
+            callback(i, static_cast<const T&>(buffer.buffer[(myHead + i) % cap]));
+        }
+
+        readHeads[headNumber].store(myHead + actualCount, RELEASE);
+
+        for (size_t i = 0; i < actualCount; i++) {
+            ackSlot(myHead + i);
+        }
+        return actualCount;
+    }
+
+    // --- Utility methods ---
+
+    // Conservative estimate of items available for a specific consumer.
+    size_t availableToRead(size_t headNumber) const {
+        return buffer.writtenHead.load(ACQUIRE) - readHeads[headNumber].load(ACQUIRE);
+    }
+
+    size_t availableToWrite() const { return buffer.availableToWrite(); }
+    bool empty() const { return buffer.empty(); }
+    bool full() const { return buffer.full(); }
+
+    // Discard all readable items across all consumers. Must not be called
+    // concurrently with any other operation on this buffer. Ack counters
+    // do not need explicit reset — the generation-based mechanism will
+    // handle reinitialization when consumers next read.
+    void clear() {
+        size_t wth = buffer.writtenHead.load(RELAXED);
+        for (size_t c = 0; c < consumerCount; c++) {
+            readHeads[c].store(wth, RELAXED);
+        }
+        buffer.readHead.store(wth, RELAXED);
+    }
 };
 
 #endif //CROCOS_RINGBUFFER_H

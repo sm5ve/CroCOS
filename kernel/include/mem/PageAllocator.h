@@ -9,7 +9,7 @@
 #include <arch.h>
 #include <core/utility.h>
 #include <core/atomic.h>
-#include <core/ds/Permutation.h>
+#include <core/atomic/RingBuffer.h>
 #include <core/ds/LinkedList.h>
 #include <mem/PageAllocatorTuning.h>
 #include <core/Iterator.h>
@@ -80,59 +80,38 @@ enum class BigPageState : uint8_t {
     PARTIALLY_ALLOCATED
 };
 
-struct SmallPageAllocator {
-    using StackType = Permutation<log2ceil(kernel::mm::PageAllocator::smallPagesPerBigPage)>;
-    using SmallPageIndex = StackType::IndexType;
-    StackType stack;
-    SmallPageIndex occupiedStart;
+class SmallPageAllocator {
+    using SmallPageIndex = SmallestUInt_t<log2ceil(kernel::mm::PageAllocator::smallPagesPerBigPage)>;
+    using SmallPageCount = SmallestUInt_t<log2ceil(kernel::mm::PageAllocator::smallPagesPerBigPage + 1)>;
+    constexpr static size_t bitmapWordCount = kernel::mm::PageAllocator::smallPagesPerBigPage / (8 * sizeof(uint64_t));
+    SmallPageIndex buffer[kernel::mm::PageAllocator::smallPagesPerBigPage];
+    Atomic<uint64_t> occupiedBitmap[bitmapWordCount]{};
+    MPMCRingBuffer<SmallPageIndex, false> ringBuffer;
+    kernel::mm::phys_addr baseAddr;
 
-    SmallPageAllocator(SmallPageIndex* fwb, SmallPageIndex* bwb);
+    Atomic<SmallPageCount> lazilyInitialized = 0;
+    SmallPageCount reservedCount = 0;
 
-    SmallPageAllocator(const SmallPageAllocator&) = delete;
-    SmallPageAllocator& operator=(const SmallPageAllocator&) = delete;
-    SmallPageAllocator(SmallPageAllocator&&) = delete;
-    SmallPageAllocator& operator=(SmallPageAllocator&&) = delete;
+    [[nodiscard]] bool isPageFree(SmallPageIndex index) const;
+    bool markPageFreeState(SmallPageIndex index, bool isFree);
+    [[nodiscard]] kernel::mm::phys_addr fromPageIndex(SmallPageIndex index) const;
+public:
+    explicit SmallPageAllocator(kernel::mm::phys_addr base);
 
-    [[nodiscard]] constexpr bool allFree() const;
-    [[nodiscard]] constexpr bool allFull() const;
-    [[nodiscard]] constexpr size_t freePageCount() const;
-    [[nodiscard]] SmallPageIndex allocateSmallPage();
-    void freeSmallPage(SmallPageIndex index);
-    void reserveSmallPage(SmallPageIndex index);
-    void reserveAllPages();
-    void freeAllPages();
+    [[nodiscard]] bool isPageFree(PageRef page) const;
+    void free(PageRef* pages, size_t count);
+    size_t alloc(PageAllocationCallback cb, size_t count);
+    [[nodiscard]] bool isFull() const;
+    [[nodiscard]] bool isEmpty() const;
+    [[nodiscard]] size_t freePageCount() const;
+    void freeAll();
+    void allocAll();
+    void reservePage(kernel::mm::phys_addr addr);
 };
 
-using SmallPageIndex = SmallPageAllocator::SmallPageIndex;
 
 struct BigPageMetadata {
-    arch::InterruptDisablingPrioritySpinlock stealLock;
-    BigPageState state;
-    PoolID poolID;
-    BigPageColor pageColor;
 
-    BigPageMetadata* nextInPool;
-    BigPageMetadata* prevInPool;
-
-    BigPageMetadata* nextInColoredPool;
-    BigPageMetadata* prevInColoredPool;
-
-    SmallPageAllocator allocator;
-
-    BigPageMetadata(SmallPageIndex* smallPageFwb, SmallPageIndex* smallPageBwb);
-
-    BigPageMetadata(const BigPageMetadata&) = delete;
-    BigPageMetadata& operator=(const BigPageMetadata&) = delete;
-    BigPageMetadata(BigPageMetadata&&) = delete;
-    BigPageMetadata& operator=(BigPageMetadata&&) = delete;
-
-    [[nodiscard]] constexpr size_t freePageCount() const;
-    SmallPageIndex allocateSmallPage();
-    void freeSmallPage(SmallPageIndex index);
-    void freeSmallPage(kernel::mm::phys_addr addr);
-    void reserveSmallPage(SmallPageIndex index);
-    void reserveAllSmallPages();
-    void freeAllSmallPages();
 };
 
 struct BigPageLinkedListExtractor {
@@ -239,23 +218,6 @@ public:
     [[nodiscard]] IteratorRange<BitmapIterator> poolsWithPressure(PoolPressure pressure) const;
 };
 
-struct AllocatorContext {
-    BigPageMetadata* metadata;
-    kernel::mm::phys_addr spanBase;
-    PressureBitmap<PoolID> pressureBitmap;
-
-    const size_t surplusThreshold;
-    const size_t comfortThreshold;
-    const size_t moderateThreshold;
-
-    const size_t bigPageCount;
-
-    AllocatorContext(kernel::mm::phys_memory_range allocatorRange, BootstrapAllocator& allocator);
-
-    [[nodiscard]] kernel::mm::phys_addr bigPageAddress(const BigPageMetadata& m) const;
-    [[nodiscard]] BigPageMetadata& bigPageForAddress(kernel::mm::phys_addr p);
-};
-
 enum class AllocationDesperation : uint8_t{
     RELAXED,
     MODERATE,
@@ -263,125 +225,7 @@ enum class AllocationDesperation : uint8_t{
 };
 
 struct BigPagePool {
-    arch::InterruptDisablingPrioritySpinlock lock;
-    PoolID poolID;
 
-    using BigPageList = IntrusiveLinkedList<BigPageMetadata, BigPageLinkedListExtractor>;
-    using ColoredBigPageList = IntrusiveLinkedList<BigPageMetadata, BigPageColoredLinkedListExtractor>;
-
-    BigPageList freeList;
-    BigPageList fullList;
-    BigPageList partialList;
-
-    AllocatorContext& context;
-
-    ColoredBigPageList coloredList[MAX_COLOR_COUNT + 1];
-
-    size_t freeBigPageCount;
-    size_t freeSmallPageCount;
-
-    void addBigPage(BigPageMetadata& m);
-    void removeBigPage(BigPageMetadata& m);
-    BigPageMetadata* getPageForColoredSmallAllocation(BigPageColor color, size_t requestedCount, AllocationDesperation);
-    size_t allocatePages(size_t requestedCount, PageAllocationCallback cb, BigPageColor color, AllocationDesperation desperation, BigPagePool& requestingPool);
-
-    struct FreeResult {
-        size_t stopIndex;
-        size_t deferredFreeEnd;
-    };
-
-    //Attempts to free all pages starting from 'offset' in the 'pages' buffer. Stops as soon as it encounters a page
-    //belonging to another pool. If desperation < DESPERATE, then we only make a best effort to acquire page-level
-    //locks, but don't wait for them. If we fail to take a lock on that page, we move it deferredFreeEnd in page,
-    //then increment deferredFreeEnd so that the buffer starts with any pages whose lock we could not acquire.
-    [[nodiscard]] FreeResult freePages(PageRef* pages, size_t offset, size_t count, AllocationDesperation desperation);
-
-    [[nodiscard]] PoolPressure computeUncoloredPressure() const;
-    void updatePressureBitmap() const;
-
-    BigPagePool(PoolID poolID, AllocatorContext& context);
-    explicit BigPagePool(AllocatorContext& context);
-    BigPagePool(const BigPagePool&) = delete;
-    BigPagePool& operator=(const BigPagePool&) = delete;
-    BigPagePool(BigPagePool&&) = delete;
-    BigPagePool& operator=(BigPagePool&&) = delete;
-};
-
-using SmallPageBuff = SmallPageIndex[kernel::mm::PageAllocator::smallPagesPerBigPage];
-struct alignas(arch::CACHE_LINE_SIZE) SmallPageAllocatorData {
-    SmallPageBuff fwb;
-    SmallPageBuff bwb;
-} __attribute__((packed));
-
-class RangeAllocator {
-    AllocatorContext context;
-
-    BigPagePool* localPools;
-    BigPagePool globalPool;
-    kernel::mm::phys_memory_range range;
-
-    RangeAllocator* leftFreeChild;
-    RangeAllocator* rightFreeChild;
-    RangeAllocator* freeParent;
-    kernel::mm::phys_memory_range subtreeRange;
-    bool freeRed;
-
-    friend struct RangeAllocatorFreeTreeExtractor;
-    friend struct RangeAllocatorFreeTreeComparator;
-    friend class AggregateAllocator;
-
-public:
-    RangeAllocator(kernel::mm::phys_memory_range range, BootstrapAllocator bootstrapAllocator);
-
-    size_t allocatePages(size_t smallPageCount, PageAllocationCallback cb, Optional<BigPageColor> color = {});
-    void freePages(PageRef* pages, size_t count);
-};
-
-struct RangeAllocatorFreeTreeExtractor {
-    static RangeAllocator*& left(RangeAllocator& range){return range.leftFreeChild;}
-    static RangeAllocator*& right(RangeAllocator& range){return range.rightFreeChild;}
-    static RangeAllocator*& parent(RangeAllocator& range){return range.freeParent;}
-    static RangeAllocator& data(RangeAllocator& range) {return range;}
-    static RangeAllocator* const& left(const RangeAllocator& range){return range.leftFreeChild;}
-    static RangeAllocator* const& right(const RangeAllocator& range){return range.rightFreeChild;}
-    static RangeAllocator* const& parent(const RangeAllocator& range){return range.freeParent;}
-    static const RangeAllocator& data(const RangeAllocator& range) {return range;}
-    static bool isRed(RangeAllocator& range){return range.freeRed;}
-    static void setRed(RangeAllocator& range, bool red){range.freeRed = red;}
-    static kernel::mm::phys_memory_range& augmentedData(RangeAllocator& range){return range.subtreeRange;}
-    static kernel::mm::phys_memory_range recomputeAugmentedData(const RangeAllocator& range, const RangeAllocator* left, const RangeAllocator* right) {
-        auto laddr = range.range.start.value;
-        auto raddr = range.range.end.value;
-        if (left)
-            laddr = left->subtreeRange.start.value;
-        if (right)
-            raddr = right->subtreeRange.end.value;
-        return {kernel::mm::phys_addr(laddr), kernel::mm::phys_addr(raddr)};
-    }
-};
-
-struct RangeAllocatorFreeTreeComparator {
-    bool operator()(const RangeAllocator& r1, const RangeAllocator& r2) const{
-        return r1.range.start.value < r2.range.start.value;
-    }
-};
-
-//There is only one page allocator in the kernel. We're just wrapping this up in a class to make it easier
-//to unit test. No global state to keep track of!
-class AggregateAllocator {
-    using FreeTree = IntrusiveRedBlackTree<RangeAllocator, RangeAllocatorFreeTreeExtractor, RangeAllocatorFreeTreeComparator>;
-
-    FreeTree freeTree;
-    PressureBitmap<size_t> rangePressures;
-    Vector<RangeAllocator*> allocatorList;
-
-    RangeAllocator* findAllocatorForPaddr(kernel::mm::phys_addr addr);
-    bool markPageRuns(PageRef* pages, const size_t count);
-
-public:
-    AggregateAllocator(PressureBitmap<size_t>&& pressureBitmaps, Vector<RangeAllocator*>&& allocators);
-
-    void freePages(PageRef* pages, const size_t count);
 };
 
 #endif //CROCOS_PAGEALLOCATOR_H

@@ -1144,6 +1144,345 @@ TEST(MPMCRingBufferScanSPMC) {
 // MPMCRingBuffer - Bulk write with batch sizes
 // ============================================================
 
+// ============================================================
+// BroadcastRingBuffer - Single Producer, Multiple Consumers
+// ============================================================
+
+TEST(BroadcastSPSCBasicWriteRead) {
+    BroadcastRingBuffer<int> rb(8, 1);
+
+    ASSERT_TRUE(rb.empty());
+    ASSERT_FALSE(rb.full());
+    ASSERT_EQ(8u, rb.availableToWrite());
+    ASSERT_EQ(0u, rb.availableToRead(0));
+
+    // Write 3 items
+    bool ok = rb.tryBulkWrite(3, [](size_t i, int& slot) {
+        slot = static_cast<int>(i * 10);
+    });
+    ASSERT_TRUE(ok);
+    ASSERT_EQ(3u, rb.availableToRead(0));
+
+    // Read them back
+    int values[3] = {};
+    ok = rb.tryBulkRead(0, 3, [&values](size_t i, const int& slot) {
+        values[i] = slot;
+    });
+    ASSERT_TRUE(ok);
+    ASSERT_EQ(0, values[0]);
+    ASSERT_EQ(10, values[1]);
+    ASSERT_EQ(20, values[2]);
+
+    ASSERT_TRUE(rb.empty());
+    ASSERT_EQ(8u, rb.availableToWrite());
+}
+
+TEST(BroadcastAllConsumersMustRead) {
+    constexpr size_t numConsumers = 4;
+    BroadcastRingBuffer<int> rb(4, numConsumers);
+
+    // Fill the buffer
+    ASSERT_TRUE(rb.tryBulkWrite(4, [](size_t i, int& slot) {
+        slot = static_cast<int>(i);
+    }));
+    ASSERT_TRUE(rb.full());
+
+    // Have 3 of 4 consumers read — should NOT free slots
+    for (size_t c = 0; c < numConsumers - 1; c++) {
+        ASSERT_TRUE(rb.tryBulkRead(c, 4, [](size_t, const int&) {}));
+    }
+    ASSERT_TRUE(rb.full()); // Last consumer hasn't read yet
+
+    // Cannot write more
+    ASSERT_FALSE(rb.tryBulkWrite(1, [](size_t, int& slot) { slot = 99; }));
+
+    // Last consumer reads — slots should now be freed
+    ASSERT_TRUE(rb.tryBulkRead(numConsumers - 1, 4, [](size_t, const int&) {}));
+    ASSERT_EQ(4u, rb.availableToWrite());
+
+    // Now we can write again
+    ASSERT_TRUE(rb.tryBulkWrite(4, [](size_t i, int& slot) {
+        slot = static_cast<int>(i + 100);
+    }));
+}
+
+TEST(BroadcastAllConsumersSeeAllItems) {
+    constexpr size_t numConsumers = 3;
+    BroadcastRingBuffer<int> rb(8, numConsumers);
+
+    // Write 5 items
+    rb.tryBulkWrite(5, [](size_t i, int& slot) {
+        slot = static_cast<int>(i * 10);
+    });
+
+    // Each consumer reads independently and sees the same data
+    for (size_t c = 0; c < numConsumers; c++) {
+        int values[5] = {};
+        ASSERT_TRUE(rb.tryBulkRead(c, 5, [&values](size_t i, const int& slot) {
+            values[i] = slot;
+        }));
+        for (int i = 0; i < 5; i++) {
+            ASSERT_EQ(i * 10, values[i]);
+        }
+    }
+}
+
+TEST(BroadcastWraparound) {
+    constexpr size_t numConsumers = 2;
+    BroadcastRingBuffer<int> rb(4, numConsumers);
+
+    for (int round = 0; round < 5; round++) {
+        ASSERT_TRUE(rb.tryBulkWrite(4, [round](size_t i, int& slot) {
+            slot = round * 100 + static_cast<int>(i);
+        }));
+
+        for (size_t c = 0; c < numConsumers; c++) {
+            int values[4] = {};
+            ASSERT_TRUE(rb.tryBulkRead(c, 4, [&values](size_t i, const int& slot) {
+                values[i] = slot;
+            }));
+            for (int i = 0; i < 4; i++) {
+                ASSERT_EQ(round * 100 + i, values[i]);
+            }
+        }
+    }
+}
+
+TEST(BroadcastTryReadFailsWhenEmpty) {
+    BroadcastRingBuffer<int> rb(4, 2);
+    ASSERT_FALSE(rb.tryBulkRead(0, 1, [](size_t, const int&) {}));
+    ASSERT_FALSE(rb.tryBulkRead(1, 1, [](size_t, const int&) {}));
+}
+
+TEST(BroadcastTryReadFailsWhenInsufficient) {
+    BroadcastRingBuffer<int> rb(8, 2);
+    rb.tryBulkWrite(2, [](size_t i, int& slot) { slot = static_cast<int>(i); });
+    ASSERT_FALSE(rb.tryBulkRead(0, 3, [](size_t, const int&) {}));
+    ASSERT_TRUE(rb.tryBulkRead(0, 2, [](size_t, const int&) {}));
+}
+
+TEST(BroadcastBestEffortReadPartial) {
+    BroadcastRingBuffer<int> rb(8, 2);
+    rb.tryBulkWrite(3, [](size_t i, int& slot) { slot = static_cast<int>(i * 10); });
+
+    int values[8] = {};
+    size_t read = rb.bulkReadBestEffort(0, 5, [&values](size_t i, const int& slot) {
+        values[i] = slot;
+    });
+    ASSERT_EQ(3u, read);
+    ASSERT_EQ(0, values[0]);
+    ASSERT_EQ(10, values[1]);
+    ASSERT_EQ(20, values[2]);
+}
+
+TEST(BroadcastBestEffortReadZero) {
+    BroadcastRingBuffer<int> rb(4, 2);
+    size_t read = rb.bulkReadBestEffort(0, 2, [](size_t, const int&) {});
+    ASSERT_EQ(0u, read);
+}
+
+TEST(BroadcastBestEffortWritePartial) {
+    BroadcastRingBuffer<int> rb(4, 1);
+
+    rb.tryBulkWrite(3, [](size_t i, int& slot) { slot = static_cast<int>(i); });
+    size_t written = rb.bulkWriteBestEffort(4, [](size_t i, int& slot) {
+        slot = static_cast<int>(i + 100);
+    });
+    ASSERT_EQ(1u, written);
+    ASSERT_TRUE(rb.full());
+}
+
+TEST(BroadcastSlowConsumerPreventsReuse) {
+    constexpr size_t numConsumers = 3;
+    BroadcastRingBuffer<int> rb(4, numConsumers);
+
+    // Fill buffer
+    rb.tryBulkWrite(4, [](size_t i, int& slot) { slot = static_cast<int>(i); });
+
+    // Fast consumers read everything
+    rb.tryBulkRead(0, 4, [](size_t, const int&) {});
+    rb.tryBulkRead(1, 4, [](size_t, const int&) {});
+
+    // Slow consumer (2) hasn't read yet — buffer should still be full
+    ASSERT_TRUE(rb.full());
+    ASSERT_FALSE(rb.tryBulkWrite(1, [](size_t, int& slot) { slot = 99; }));
+
+    // Slow consumer catches up
+    rb.tryBulkRead(2, 4, [](size_t, const int&) {});
+
+    // Now writes should succeed
+    ASSERT_TRUE(rb.tryBulkWrite(4, [](size_t i, int& slot) {
+        slot = static_cast<int>(i + 100);
+    }));
+}
+
+TEST(BroadcastNonOwning) {
+    int externalBuffer[8];
+    Atomic<size_t> readHeads[2] = {};
+    Atomic<uint64_t> ackCounters[8] = {};
+
+    BroadcastRingBuffer<int, false> rb(externalBuffer, 8, 2, readHeads, ackCounters);
+
+    ASSERT_TRUE(rb.tryBulkWrite(4, [](size_t i, int& slot) {
+        slot = static_cast<int>(i + 1);
+    }));
+
+    // Verify data in external buffer
+    ASSERT_EQ(1, externalBuffer[0]);
+    ASSERT_EQ(2, externalBuffer[1]);
+
+    // Both consumers read
+    for (size_t c = 0; c < 2; c++) {
+        int values[4] = {};
+        ASSERT_TRUE(rb.tryBulkRead(c, 4, [&values](size_t i, const int& slot) {
+            values[i] = slot;
+        }));
+        for (int i = 0; i < 4; i++) ASSERT_EQ(i + 1, values[i]);
+    }
+}
+
+// ============================================================
+// BroadcastRingBuffer - Multi-threaded
+// ============================================================
+
+TEST(BroadcastMPBroadcast) {
+    // Multiple producers, multiple consumers, all consumers see all items
+    constexpr size_t numProducers = 4;
+    constexpr size_t numConsumers = 4;
+    constexpr size_t itemsPerProducer = 50;
+    constexpr size_t totalItems = numProducers * itemsPerProducer;
+    constexpr size_t bufSize = 64;
+
+    BroadcastRingBuffer<size_t> rb(bufSize, numConsumers);
+    std::atomic<bool> start{false};
+
+    auto producer = [&](size_t producerId) {
+        while (!start.load(std::memory_order_acquire)) {}
+        for (size_t i = 0; i < itemsPerProducer; i++) {
+            size_t value = producerId * 10000 + i;
+            while (!rb.tryBulkWrite(1, [value](size_t, size_t& slot) { slot = value; })) {}
+        }
+    };
+
+    std::vector<std::vector<size_t>> perConsumer(numConsumers);
+
+    auto consumer = [&](size_t consumerId) {
+        while (!start.load(std::memory_order_acquire)) {}
+        size_t consumed = 0;
+        while (consumed < totalItems) {
+            size_t read = rb.bulkReadBestEffort(consumerId, 4, [&](size_t, const size_t& slot) {
+                perConsumer[consumerId].push_back(slot);
+            });
+            consumed += read;
+        }
+    };
+
+    pauseTracking();
+    std::vector<std::thread> threads;
+    for (size_t p = 0; p < numProducers; p++) threads.emplace_back(producer, p);
+    for (size_t c = 0; c < numConsumers; c++) threads.emplace_back(consumer, c);
+    resumeTracking();
+
+    start.store(true, std::memory_order_release);
+
+    pauseTracking();
+    for (auto& t : threads) t.join();
+    resumeTracking();
+
+    // Every consumer should have seen all items
+    for (size_t c = 0; c < numConsumers; c++) {
+        ASSERT_EQ(totalItems, perConsumer[c].size());
+        std::sort(perConsumer[c].begin(), perConsumer[c].end());
+        for (size_t p = 0; p < numProducers; p++) {
+            for (size_t i = 0; i < itemsPerProducer; i++) {
+                ASSERT_TRUE(std::binary_search(
+                    perConsumer[c].begin(), perConsumer[c].end(), p * 10000 + i));
+            }
+        }
+    }
+}
+
+TEST(BroadcastSPBroadcastSlowConsumer) {
+    // One producer, multiple consumers at different speeds.
+    // Verifies the slow consumer gets all data and the fast consumer isn't blocked.
+    constexpr size_t numConsumers = 3;
+    constexpr size_t totalItems = 200;
+    constexpr size_t bufSize = 32;
+
+    BroadcastRingBuffer<size_t> rb(bufSize, numConsumers);
+    std::atomic<bool> start{false};
+    std::atomic<bool> producerDone{false};
+
+    auto producer = [&]() {
+        while (!start.load(std::memory_order_acquire)) {}
+        for (size_t i = 0; i < totalItems; i++) {
+            while (!rb.tryBulkWrite(1, [i](size_t, size_t& slot) { slot = i; })) {}
+        }
+        producerDone.store(true, std::memory_order_release);
+    };
+
+    std::vector<std::vector<size_t>> perConsumer(numConsumers);
+
+    auto consumer = [&](size_t consumerId) {
+        while (!start.load(std::memory_order_acquire)) {}
+        size_t consumed = 0;
+        while (consumed < totalItems) {
+            // Consumer 0 reads 1 at a time (slow), others read up to 8
+            size_t batch = (consumerId == 0) ? 1 : 8;
+            size_t read = rb.bulkReadBestEffort(consumerId, batch, [&](size_t, const size_t& slot) {
+                perConsumer[consumerId].push_back(slot);
+            });
+            consumed += read;
+        }
+    };
+
+    pauseTracking();
+    std::vector<std::thread> threads;
+    threads.emplace_back(producer);
+    for (size_t c = 0; c < numConsumers; c++) threads.emplace_back(consumer, c);
+    resumeTracking();
+
+    start.store(true, std::memory_order_release);
+
+    pauseTracking();
+    for (auto& t : threads) t.join();
+    resumeTracking();
+
+    // Every consumer sees all items in order (single producer guarantees ordering)
+    for (size_t c = 0; c < numConsumers; c++) {
+        ASSERT_EQ(totalItems, perConsumer[c].size());
+        for (size_t i = 0; i < totalItems; i++) {
+            ASSERT_EQ(i, perConsumer[c][i]);
+        }
+    }
+}
+
+TEST(BroadcastAckCounterResetOnReuse) {
+    // Specifically tests that ack counters reset correctly across many
+    // generations of slot reuse with a tiny buffer.
+    constexpr size_t numConsumers = 2;
+    BroadcastRingBuffer<int> rb(2, numConsumers);
+
+    for (int round = 0; round < 20; round++) {
+        ASSERT_TRUE(rb.tryBulkWrite(2, [round](size_t i, int& slot) {
+            slot = round * 10 + static_cast<int>(i);
+        }));
+
+        for (size_t c = 0; c < numConsumers; c++) {
+            int values[2] = {};
+            ASSERT_TRUE(rb.tryBulkRead(c, 2, [&values](size_t i, const int& slot) {
+                values[i] = slot;
+            }));
+            ASSERT_EQ(round * 10, values[0]);
+            ASSERT_EQ(round * 10 + 1, values[1]);
+        }
+    }
+}
+
+// ============================================================
+// MPMCRingBuffer - Bulk write with batch sizes
+// ============================================================
+
 TEST(MPMCRingBufferBulkBatchWriteRead) {
     MPMCRingBuffer<int> rb(16);
 

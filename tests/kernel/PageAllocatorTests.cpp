@@ -1,938 +1,756 @@
 //
-// Unit tests for Page Allocator components
-// Created by Spencer Martin on 2/12/26.
+// Unit tests for SmallPageAllocator and PageRef
+// Created by Spencer Martin on 2/18/26.
 //
 
 #include "../test.h"
 #include <TestHarness.h>
+#include <cstdlib>
+#include <vector>
+#include <set>
+#include <thread>
+#include <atomic>
+#include <algorithm>
+#include <mutex>
 
 #include <mem/PageAllocator.h>
-#include <thread>
-#include <vector>
-#include <algorithm>
-#include <set>
-#include "ArchMocks.h"
 
+using namespace kernel::mm;
 using namespace CroCOSTest;
 
+constexpr phys_addr testBaseAddr(0x200000); // 2MiB aligned base
+
+// Helper macro: set up an allocator where pages are in the ring buffer.
+// allocAll exhausts lazy init, then freeing pages puts them in the ring buffer.
+#define MAKE_SPA_WITH_FREE_PAGES(name, freeCount) \
+    SmallPageAllocator name(testBaseAddr); \
+    do { \
+        name.allocAll(); \
+        std::vector<PageRef> _toFree; \
+        _toFree.reserve(freeCount); \
+        for (size_t _i = 0; _i < (freeCount); _i++) { \
+            _toFree.push_back(PageRef::small(testBaseAddr + _i * arch::smallPageSize)); \
+        } \
+        name.free(_toFree.data(), _toFree.size()); \
+    } while(0)
+
 // ============================================================================
-// Test Setup/Teardown for Processor State
+// PageRef Basics
 // ============================================================================
 
-class PageAllocatorTestSetup {
-public:
-    PageAllocatorTestSetup() {
-        arch::testing::resetProcessorState();
-        arch::testing::setProcessorCount(8);
-    }
-
-    ~PageAllocatorTestSetup() {
-        arch::testing::resetProcessorState();
-    }
-};
-
-// ============================================================================
-// PressureBitmap Basic Tests
-// ============================================================================
-
-TEST(PressureBitmapMeasureAllocation) {
-    PageAllocatorTestSetup setup;
-
-    BootstrapAllocator measureAllocator;
-    PressureBitmap<PoolID>::measureAllocation(measureAllocator, 8);
-
-    size_t bytesNeeded = measureAllocator.bytesNeeded();
-
-    // Should allocate 4 bitmaps (one per pressure level)
-    // Each bitmap needs ceil((8+1)/64) = 1 word of 8 bytes
-    // Total: 4 * 1 * 8 = 32 bytes
-    ASSERT_EQ(32u, bytesNeeded);
+TEST(PageRef_SmallPageCreation) {
+    auto ref = PageRef::small(phys_addr(0x1000));
+    ASSERT_EQ(PageSize::SMALL, ref.size());
+    ASSERT_EQ(0x1000ul, ref.addr().value);
 }
 
-TEST(PressureBitmapMeasureAllocationLarge) {
-    PageAllocatorTestSetup setup;
-
-    BootstrapAllocator measureAllocator;
-    PressureBitmap<PoolID>::measureAllocation(measureAllocator, 100);
-
-    size_t bytesNeeded = measureAllocator.bytesNeeded();
-
-    // Should allocate 4 bitmaps
-    // Each bitmap needs ceil((100+1)/64) = 2 words of 8 bytes
-    // Total: 4 * 2 * 8 = 64 bytes
-    ASSERT_EQ(64u, bytesNeeded);
+TEST(PageRef_BigPageCreation) {
+    auto ref = PageRef::big(phys_addr(0x200000));
+    ASSERT_EQ(PageSize::BIG, ref.size());
+    ASSERT_EQ(0x200000ul, ref.addr().value);
 }
 
-TEST(PressureBitmapConstruction) {
-    PageAllocatorTestSetup setup;
+TEST(PageRef_RunLength) {
+    auto ref = PageRef::small(phys_addr(0x1000));
+    ASSERT_EQ(1ul, ref.runLength());
 
-    // Measure first
-    BootstrapAllocator measureAllocator;
-    PressureBitmap<PoolID>::measureAllocation(measureAllocator, 8);
-    size_t bytesNeeded = measureAllocator.bytesNeeded();
+    ref.setRunLength(42);
+    ASSERT_EQ(42ul, ref.runLength());
+    ASSERT_EQ(0x1000ul, ref.addr().value);
+    ASSERT_EQ(PageSize::SMALL, ref.size());
+}
 
-    // Allocate buffer
-    void* buffer = malloc(bytesNeeded);
-    ASSERT_TRUE(buffer != nullptr);
+TEST(PageRef_RunLengthMaxValue) {
+    auto ref = PageRef::small(phys_addr(0x1000));
+    ref.setRunLength(PageAllocator::smallPagesPerBigPage);
+    ASSERT_EQ(PageAllocator::smallPagesPerBigPage, ref.runLength());
+}
 
-    // Create actual allocator
-    BootstrapAllocator allocator(buffer, bytesNeeded);
-    PressureBitmap<PoolID> bitmap(allocator, 8);
+TEST(PageRef_Equality) {
+    auto a = PageRef::small(phys_addr(0x1000));
+    auto b = PageRef::small(phys_addr(0x1000));
+    auto c = PageRef::small(phys_addr(0x2000));
 
-    // Should construct without error
-    // All pools should start unmarked (no pressure set)
+    ASSERT_EQ(a, b);
+    ASSERT_NE(a, c);
+}
 
-    free(buffer);
+TEST(PageRef_RunLengthPreservesSize) {
+    auto small = PageRef::small(phys_addr(0x1000));
+    small.setRunLength(10);
+    ASSERT_EQ(PageSize::SMALL, small.size());
+
+    auto big = PageRef::big(phys_addr(0x200000));
+    big.setRunLength(10);
+    ASSERT_EQ(PageSize::BIG, big.size());
 }
 
 // ============================================================================
-// PressureBitmap Marking Tests
+// Construction and Initial State
 // ============================================================================
 
-TEST(PressureBitmapMarkSinglePoolSurplus) {
-    PageAllocatorTestSetup setup;
-
-    BootstrapAllocator measureAllocator;
-    PressureBitmap<PoolID>::measureAllocation(measureAllocator, 8);
-    void* buffer = malloc(measureAllocator.bytesNeeded());
-
-    BootstrapAllocator allocator(buffer, measureAllocator.bytesNeeded());
-    PressureBitmap<PoolID> bitmap(allocator, 8);
-
-    // Mark pool 0 as SURPLUS
-    PoolID pool0(static_cast<arch::ProcessorID>(0));
-    bitmap.markPressure(pool0, PoolPressure::SURPLUS);
-
-    // Check that pool 0 appears in SURPLUS pressure
-    auto surplusPools = bitmap.poolsWithPressure(PoolPressure::SURPLUS);
-    auto it = surplusPools.begin();
-    ASSERT_FALSE(it.atEnd());
-    ASSERT_EQ(pool0.id, (*it).id);
-
-    ++it;
-    ASSERT_TRUE(it.atEnd());
-
-    // Pool 0 should not appear in other pressure levels
-    auto comfortablePools = bitmap.poolsWithPressure(PoolPressure::COMFORTABLE);
-    ASSERT_TRUE(comfortablePools.begin().atEnd());
-
-    free(buffer);
-}
-
-TEST(PressureBitmapMarkMultiplePoolsSamePressure) {
-    PageAllocatorTestSetup setup;
-
-    BootstrapAllocator measureAllocator;
-    PressureBitmap<PoolID>::measureAllocation(measureAllocator, 8);
-    void* buffer = malloc(measureAllocator.bytesNeeded());
-
-    BootstrapAllocator allocator(buffer, measureAllocator.bytesNeeded());
-    PressureBitmap<PoolID> bitmap(allocator, 8);
-
-    // Mark pools 0, 2, 4 as MODERATE
-    PoolID pool0(static_cast<arch::ProcessorID>(0));
-    PoolID pool2(static_cast<arch::ProcessorID>(2));
-    PoolID pool4(static_cast<arch::ProcessorID>(4));
-
-    bitmap.markPressure(pool0, PoolPressure::MODERATE);
-    bitmap.markPressure(pool2, PoolPressure::MODERATE);
-    bitmap.markPressure(pool4, PoolPressure::MODERATE);
-
-    // Collect all pools with MODERATE pressure
-    std::vector<PoolID::IDType> moderatePools;
-    for (auto pool : bitmap.poolsWithPressure(PoolPressure::MODERATE)) {
-        moderatePools.push_back(pool.id);
-    }
-
-    // Should have exactly 3 pools
-    ASSERT_EQ(3u, moderatePools.size());
-
-    // Verify they're the right ones (in sorted order)
-    std::sort(moderatePools.begin(), moderatePools.end());
-    ASSERT_EQ(0u, moderatePools[0]);
-    ASSERT_EQ(2u, moderatePools[1]);
-    ASSERT_EQ(4u, moderatePools[2]);
-
-    free(buffer);
-}
-
-TEST(PressureBitmapChangePressureLevel) {
-    PageAllocatorTestSetup setup;
-
-    BootstrapAllocator measureAllocator;
-    PressureBitmap<PoolID>::measureAllocation(measureAllocator, 8);
-    void* buffer = malloc(measureAllocator.bytesNeeded());
-
-    BootstrapAllocator allocator(buffer, measureAllocator.bytesNeeded());
-    PressureBitmap<PoolID> bitmap(allocator, 8);
-
-    PoolID pool1(static_cast<arch::ProcessorID>(1));
-
-    // Initially mark as SURPLUS
-    bitmap.markPressure(pool1, PoolPressure::SURPLUS);
-
-    auto surplusPools = bitmap.poolsWithPressure(PoolPressure::SURPLUS);
-    ASSERT_FALSE(surplusPools.begin().atEnd());
-
-    // Change to DESPERATE
-    bitmap.markPressure(pool1, PoolPressure::DESPERATE);
-
-    // Should no longer appear in SURPLUS
-    auto surplusPools2 = bitmap.poolsWithPressure(PoolPressure::SURPLUS);
-    ASSERT_TRUE(surplusPools2.begin().atEnd());
-
-    // Should appear in DESPERATE
-    auto desperatePools = bitmap.poolsWithPressure(PoolPressure::DESPERATE);
-    auto it = desperatePools.begin();
-    ASSERT_FALSE(it.atEnd());
-    ASSERT_EQ(pool1.id, (*it).id);
-
-    free(buffer);
-}
-
-TEST(PressureBitmapMarkGlobalPool) {
-    PageAllocatorTestSetup setup;
-
-    BootstrapAllocator measureAllocator;
-    PressureBitmap<PoolID>::measureAllocation(measureAllocator, 8);
-    void* buffer = malloc(measureAllocator.bytesNeeded());
-
-    BootstrapAllocator allocator(buffer, measureAllocator.bytesNeeded());
-    PressureBitmap<PoolID> bitmap(allocator, 8);
-
-    // Mark global pool as COMFORTABLE
-    bitmap.markPressure(GLOBAL, PoolPressure::COMFORTABLE);
-
-    // Check that global pool appears in COMFORTABLE pressure
-    auto comfortablePools = bitmap.poolsWithPressure(PoolPressure::COMFORTABLE);
-    auto it = comfortablePools.begin();
-    ASSERT_FALSE(it.atEnd());
-
-    PoolID found = *it;
-    ASSERT_TRUE(found.global());
-
-    ++it;
-    ASSERT_TRUE(it.atEnd());
-
-    free(buffer);
-}
-
-TEST(PressureBitmapMixedPressureLevels) {
-    PageAllocatorTestSetup setup;
-
-    BootstrapAllocator measureAllocator;
-    PressureBitmap<PoolID>::measureAllocation(measureAllocator, 8);
-    void* buffer = malloc(measureAllocator.bytesNeeded());
-
-    BootstrapAllocator allocator(buffer, measureAllocator.bytesNeeded());
-    PressureBitmap<PoolID> bitmap(allocator, 8);
-
-    // Set up mixed pressure levels
-    bitmap.markPressure(PoolID(static_cast<arch::ProcessorID>(0)), PoolPressure::SURPLUS);
-    bitmap.markPressure(PoolID(static_cast<arch::ProcessorID>(1)), PoolPressure::SURPLUS);
-    bitmap.markPressure(PoolID(static_cast<arch::ProcessorID>(2)), PoolPressure::COMFORTABLE);
-    bitmap.markPressure(PoolID(static_cast<arch::ProcessorID>(3)), PoolPressure::COMFORTABLE);
-    bitmap.markPressure(PoolID(static_cast<arch::ProcessorID>(4)), PoolPressure::MODERATE);
-    bitmap.markPressure(PoolID(static_cast<arch::ProcessorID>(5)), PoolPressure::DESPERATE);
-    bitmap.markPressure(GLOBAL, PoolPressure::COMFORTABLE);
-
-    // Count pools at each pressure level
-    size_t surplusCount = 0;
-    for (auto _ : bitmap.poolsWithPressure(PoolPressure::SURPLUS)) {
-        (void)_;
-        surplusCount++;
-    }
-    ASSERT_EQ(2u, surplusCount);
-
-    size_t comfortableCount = 0;
-    for (auto _ : bitmap.poolsWithPressure(PoolPressure::COMFORTABLE)) {
-        (void)_;
-        comfortableCount++;
-    }
-    ASSERT_EQ(3u, comfortableCount);
-
-    size_t moderateCount = 0;
-    for (auto _ : bitmap.poolsWithPressure(PoolPressure::MODERATE)) {
-        (void)_;
-        moderateCount++;
-    }
-    ASSERT_EQ(1u, moderateCount);
-
-    size_t desperateCount = 0;
-    for (auto _ : bitmap.poolsWithPressure(PoolPressure::DESPERATE)) {
-        (void)_;
-        desperateCount++;
-    }
-    ASSERT_EQ(1u, desperateCount);
-
-    free(buffer);
+TEST(SmallPageAllocator_InitiallyEmpty) {
+    SmallPageAllocator spa(testBaseAddr);
+    ASSERT_TRUE(spa.isEmpty());
+    ASSERT_FALSE(spa.isFull());
+    ASSERT_EQ(PageAllocator::smallPagesPerBigPage, spa.freePageCount());
 }
 
 // ============================================================================
-// PressureBitmap Iterator Tests
+// allocAll / freeAll
 // ============================================================================
 
-TEST(PressureBitmapIteratorEmpty) {
-    PageAllocatorTestSetup setup;
-
-    BootstrapAllocator measureAllocator;
-    PressureBitmap<PoolID>::measureAllocation(measureAllocator, 8);
-    void* buffer = malloc(measureAllocator.bytesNeeded());
-
-    BootstrapAllocator allocator(buffer, measureAllocator.bytesNeeded());
-    PressureBitmap<PoolID> bitmap(allocator, 8);
-
-    // Don't mark any pools
-    // All iterators should be empty
-    for (size_t i = 0; i < static_cast<size_t>(PoolPressure::COUNT); i++) {
-        auto pools = bitmap.poolsWithPressure(static_cast<PoolPressure>(i));
-        ASSERT_TRUE(pools.begin().atEnd());
-        ASSERT_EQ(pools.begin(), pools.end());
-    }
-
-    free(buffer);
+TEST(SmallPageAllocator_AllocAllMakesFull) {
+    SmallPageAllocator spa(testBaseAddr);
+    spa.allocAll();
+    ASSERT_TRUE(spa.isFull());
+    ASSERT_FALSE(spa.isEmpty());
+    ASSERT_EQ(0ul, spa.freePageCount());
 }
 
-TEST(PressureBitmapIteratorIncrement) {
-    PageAllocatorTestSetup setup;
-
-    BootstrapAllocator measureAllocator;
-    PressureBitmap<PoolID>::measureAllocation(measureAllocator, 8);
-    void* buffer = malloc(measureAllocator.bytesNeeded());
-
-    BootstrapAllocator allocator(buffer, measureAllocator.bytesNeeded());
-    PressureBitmap<PoolID> bitmap(allocator, 8);
-
-    // Mark several non-consecutive pools
-    bitmap.markPressure(PoolID(static_cast<arch::ProcessorID>(1)), PoolPressure::SURPLUS);
-    bitmap.markPressure(PoolID(static_cast<arch::ProcessorID>(3)), PoolPressure::SURPLUS);
-    bitmap.markPressure(PoolID(static_cast<arch::ProcessorID>(7)), PoolPressure::SURPLUS);
-
-    auto pools = bitmap.poolsWithPressure(PoolPressure::SURPLUS);
-    auto it = pools.begin();
-
-    // Should iterate through in order
-    ASSERT_FALSE(it.atEnd());
-    ASSERT_EQ(1u, (*it).id);
-
-    ++it;
-    ASSERT_FALSE(it.atEnd());
-    ASSERT_EQ(3u, (*it).id);
-
-    ++it;
-    ASSERT_FALSE(it.atEnd());
-    ASSERT_EQ(7u, (*it).id);
-
-    ++it;
-    ASSERT_TRUE(it.atEnd());
-
-    free(buffer);
+TEST(SmallPageAllocator_FreeAllMakesEmpty) {
+    SmallPageAllocator spa(testBaseAddr);
+    spa.allocAll();
+    spa.freeAll();
+    ASSERT_TRUE(spa.isEmpty());
+    ASSERT_EQ(PageAllocator::smallPagesPerBigPage, spa.freePageCount());
 }
 
-TEST(PressureBitmapIteratorAllPools) {
-    PageAllocatorTestSetup setup;
-
-    BootstrapAllocator measureAllocator;
-    PressureBitmap<PoolID>::measureAllocation(measureAllocator, 8);
-    void* buffer = malloc(measureAllocator.bytesNeeded());
-
-    BootstrapAllocator allocator(buffer, measureAllocator.bytesNeeded());
-    PressureBitmap<PoolID> bitmap(allocator, 8);
-
-    // Mark all pools (8 CPUs + 1 global) as DESPERATE
-    for (size_t i = 0; i < 8; i++) {
-        bitmap.markPressure(PoolID(static_cast<arch::ProcessorID>(i)), PoolPressure::DESPERATE);
+TEST(SmallPageAllocator_AllocAllThenFreeAllRoundtrip) {
+    SmallPageAllocator spa(testBaseAddr);
+    for (int i = 0; i < 3; i++) {
+        spa.allocAll();
+        ASSERT_TRUE(spa.isFull());
+        spa.freeAll();
+        ASSERT_TRUE(spa.isEmpty());
     }
-    bitmap.markPressure(GLOBAL, PoolPressure::DESPERATE);
-
-    // Count them
-    size_t count = 0;
-    for (auto pool : bitmap.poolsWithPressure(PoolPressure::DESPERATE)) {
-        (void)pool;
-        count++;
-    }
-
-    ASSERT_EQ(9u, count);
-
-    free(buffer);
-}
-
-TEST(PressureBitmapIteratorRangeBasedLoop) {
-    PageAllocatorTestSetup setup;
-
-    BootstrapAllocator measureAllocator;
-    PressureBitmap<PoolID>::measureAllocation(measureAllocator, 8);
-    void* buffer = malloc(measureAllocator.bytesNeeded());
-
-    BootstrapAllocator allocator(buffer, measureAllocator.bytesNeeded());
-    PressureBitmap<PoolID> bitmap(allocator, 8);
-
-    // Mark pools 0, 1, 2
-    bitmap.markPressure(PoolID(static_cast<arch::ProcessorID>(0)), PoolPressure::MODERATE);
-    bitmap.markPressure(PoolID(static_cast<arch::ProcessorID>(1)), PoolPressure::MODERATE);
-    bitmap.markPressure(PoolID(static_cast<arch::ProcessorID>(2)), PoolPressure::MODERATE);
-
-    std::vector<PoolID::IDType> foundPools;
-    for (auto pool : bitmap.poolsWithPressure(PoolPressure::MODERATE)) {
-        foundPools.push_back(pool.id);
-    }
-
-    ASSERT_EQ(3u, foundPools.size());
-    ASSERT_EQ(0u, foundPools[0]);
-    ASSERT_EQ(1u, foundPools[1]);
-    ASSERT_EQ(2u, foundPools[2]);
-
-    free(buffer);
 }
 
 // ============================================================================
-// PressureBitmap Concurrent Tests
+// Allocation via Lazy Init Path
 // ============================================================================
 
-TEST(PressureBitmapConcurrentMarking) {
-    PageAllocatorTestSetup setup;
-    arch::testing::setProcessorCount(8);
+TEST(SmallPageAllocator_AllocSinglePage) {
+    SmallPageAllocator spa(testBaseAddr);
 
-    BootstrapAllocator measureAllocator;
-    PressureBitmap<PoolID>::measureAllocation(measureAllocator, 8);
-    void* buffer = malloc(measureAllocator.bytesNeeded());
+    PageRef allocated = INVALID_PAGE_REF;
+    size_t count = spa.alloc([&](PageRef ref) { allocated = ref; }, 1);
 
-    BootstrapAllocator allocator(buffer, measureAllocator.bytesNeeded());
-    PressureBitmap<PoolID> bitmap(allocator, 8);
+    ASSERT_EQ(1ul, count);
+    ASSERT_NE(INVALID_PAGE_REF, allocated);
+    ASSERT_EQ(PageSize::SMALL, allocated.size());
+    ASSERT_GE(allocated.addr().value, testBaseAddr.value);
+    ASSERT_LT(allocated.addr().value, testBaseAddr.value + arch::bigPageSize);
+}
 
-    // Pause memory tracking during thread creation (std::thread allocates internal state)
+TEST(SmallPageAllocator_AllocAllPagesViaLazyInit) {
+    SmallPageAllocator spa(testBaseAddr);
+
+    std::set<uint64_t> addresses;
+    size_t count = spa.alloc([&](PageRef ref) {
+        addresses.insert(ref.addr().value);
+    }, PageAllocator::smallPagesPerBigPage);
+
+    ASSERT_EQ(PageAllocator::smallPagesPerBigPage, count);
+    ASSERT_EQ(PageAllocator::smallPagesPerBigPage, addresses.size());
+    ASSERT_TRUE(spa.isFull());
+}
+
+// ============================================================================
+// Allocation from Ring Buffer (via allocAll + free setup)
+// ============================================================================
+
+TEST(SmallPageAllocator_AllocSinglePageFromRingBuffer) {
+    MAKE_SPA_WITH_FREE_PAGES(spa, 10);
+
+    PageRef allocated = INVALID_PAGE_REF;
+    size_t count = spa.alloc([&](PageRef ref) { allocated = ref; }, 1);
+
+    ASSERT_EQ(1ul, count);
+    ASSERT_NE(INVALID_PAGE_REF, allocated);
+    ASSERT_EQ(PageSize::SMALL, allocated.size());
+    ASSERT_GE(allocated.addr().value, testBaseAddr.value);
+    ASSERT_LT(allocated.addr().value, testBaseAddr.value + arch::bigPageSize);
+}
+
+TEST(SmallPageAllocator_BulkAllocFromRingBuffer) {
+    MAKE_SPA_WITH_FREE_PAGES(spa, 64);
+
+    std::vector<PageRef> pages;
+    size_t count = spa.alloc([&](PageRef ref) { pages.push_back(ref); }, 64);
+
+    ASSERT_EQ(64ul, count);
+    ASSERT_EQ(64ul, pages.size());
+
+    std::set<uint64_t> addresses;
+    for (auto& p : pages) {
+        addresses.insert(p.addr().value);
+    }
+    ASSERT_EQ(64ul, addresses.size());
+}
+
+TEST(SmallPageAllocator_AllocAllPagesFromRingBuffer) {
+    MAKE_SPA_WITH_FREE_PAGES(spa, PageAllocator::smallPagesPerBigPage);
+
+    std::vector<PageRef> pages;
+    size_t count = spa.alloc([&](PageRef ref) { pages.push_back(ref); },
+                             PageAllocator::smallPagesPerBigPage);
+
+    ASSERT_EQ(PageAllocator::smallPagesPerBigPage, count);
+    ASSERT_TRUE(spa.isFull());
+}
+
+TEST(SmallPageAllocator_AllocWhenFullReturnsZero) {
+    SmallPageAllocator spa(testBaseAddr);
+    spa.allocAll();
+
+    size_t count = spa.alloc([](PageRef) {}, 1);
+    ASSERT_EQ(0ul, count);
+}
+
+TEST(SmallPageAllocator_AllocZeroPages) {
+    MAKE_SPA_WITH_FREE_PAGES(spa, 10);
+    size_t count = spa.alloc([](PageRef) { ASSERT_UNREACHABLE("should not be called"); }, 0);
+    ASSERT_EQ(0ul, count);
+}
+
+TEST(SmallPageAllocator_PartialAllocFromRingBuffer) {
+    MAKE_SPA_WITH_FREE_PAGES(spa, 10);
+
+    std::vector<PageRef> pages;
+    size_t count = spa.alloc([&](PageRef ref) { pages.push_back(ref); }, 20);
+
+    ASSERT_EQ(10ul, count);
+    ASSERT_TRUE(spa.isFull());
+}
+
+// ============================================================================
+// Free and Reallocate
+// ============================================================================
+
+TEST(SmallPageAllocator_FreeAndReallocate) {
+    MAKE_SPA_WITH_FREE_PAGES(spa, 10);
+
+    // Allocate all 10
+    std::vector<PageRef> pages;
+    spa.alloc([&](PageRef ref) { pages.push_back(ref); }, 10);
+    ASSERT_EQ(10ul, pages.size());
+    ASSERT_TRUE(spa.isFull());
+
+    // Free them back
+    spa.free(pages.data(), pages.size());
+    ASSERT_EQ(10ul, spa.freePageCount());
+
+    // Reallocate
+    std::vector<PageRef> pages2;
+    size_t count = spa.alloc([&](PageRef ref) { pages2.push_back(ref); }, 10);
+    ASSERT_EQ(10ul, count);
+    ASSERT_TRUE(spa.isFull());
+}
+
+TEST(SmallPageAllocator_AllocFreeCycle) {
+    MAKE_SPA_WITH_FREE_PAGES(spa, PageAllocator::smallPagesPerBigPage);
+
+    // Exhaust all pages
+    std::vector<PageRef> pages;
+    spa.alloc([&](PageRef ref) { pages.push_back(ref); },
+              PageAllocator::smallPagesPerBigPage);
+    ASSERT_TRUE(spa.isFull());
+
+    // Free all
+    spa.free(pages.data(), pages.size());
+    ASSERT_EQ(PageAllocator::smallPagesPerBigPage, spa.freePageCount());
+
+    // Allocate again
+    std::vector<PageRef> pages2;
+    size_t count = spa.alloc([&](PageRef ref) { pages2.push_back(ref); },
+                             PageAllocator::smallPagesPerBigPage);
+    ASSERT_EQ(PageAllocator::smallPagesPerBigPage, count);
+    ASSERT_TRUE(spa.isFull());
+}
+
+TEST(SmallPageAllocator_MultipleAllocFreeCycles) {
+    MAKE_SPA_WITH_FREE_PAGES(spa, 32);
+
+    for (int cycle = 0; cycle < 5; cycle++) {
+        std::vector<PageRef> pages;
+        size_t count = spa.alloc([&](PageRef ref) { pages.push_back(ref); }, 32);
+        ASSERT_EQ(32ul, count);
+        ASSERT_TRUE(spa.isFull());
+
+        spa.free(pages.data(), pages.size());
+        ASSERT_EQ(32ul, spa.freePageCount());
+    }
+}
+
+// ============================================================================
+// Address Properties
+// ============================================================================
+
+TEST(SmallPageAllocator_AddressesArePageAligned) {
+    MAKE_SPA_WITH_FREE_PAGES(spa, 32);
+
+    std::vector<PageRef> pages;
+    spa.alloc([&](PageRef ref) { pages.push_back(ref); }, 32);
+
+    for (auto& p : pages) {
+        ASSERT_EQ(0ul, p.addr().value % arch::smallPageSize);
+    }
+}
+
+TEST(SmallPageAllocator_AddressesWithinBigPage) {
+    MAKE_SPA_WITH_FREE_PAGES(spa, PageAllocator::smallPagesPerBigPage);
+
+    std::vector<PageRef> pages;
+    spa.alloc([&](PageRef ref) { pages.push_back(ref); },
+              PageAllocator::smallPagesPerBigPage);
+
+    for (auto& p : pages) {
+        ASSERT_GE(p.addr().value, testBaseAddr.value);
+        ASSERT_LT(p.addr().value, testBaseAddr.value + arch::bigPageSize);
+    }
+}
+
+TEST(SmallPageAllocator_AllAllocatedPagesAreUnique) {
+    MAKE_SPA_WITH_FREE_PAGES(spa, PageAllocator::smallPagesPerBigPage);
+
+    std::set<uint64_t> addresses;
+    spa.alloc([&](PageRef ref) { addresses.insert(ref.addr().value); },
+              PageAllocator::smallPagesPerBigPage);
+
+    ASSERT_EQ(PageAllocator::smallPagesPerBigPage, addresses.size());
+}
+
+// ============================================================================
+// freePageCount Consistency
+// ============================================================================
+
+TEST(SmallPageAllocator_FreePageCountDecreasesOnAlloc) {
+    MAKE_SPA_WITH_FREE_PAGES(spa, 20);
+    size_t initial = spa.freePageCount();
+    ASSERT_EQ(20ul, initial);
+
+    spa.alloc([](PageRef) {}, 10);
+    ASSERT_EQ(10ul, spa.freePageCount());
+}
+
+TEST(SmallPageAllocator_FreePageCountIncreasesOnFree) {
+    MAKE_SPA_WITH_FREE_PAGES(spa, 10);
+
+    std::vector<PageRef> pages;
+    spa.alloc([&](PageRef ref) { pages.push_back(ref); }, 10);
+    ASSERT_EQ(10ul, pages.size());
+    ASSERT_EQ(0ul, spa.freePageCount());
+
+    spa.free(pages.data(), 5);
+    ASSERT_EQ(5ul, spa.freePageCount());
+
+    spa.free(pages.data() + 5, 5);
+    ASSERT_EQ(10ul, spa.freePageCount());
+}
+
+TEST(SmallPageAllocator_FreePageCountZeroWhenFull) {
+    SmallPageAllocator spa(testBaseAddr);
+    spa.allocAll();
+    ASSERT_EQ(0ul, spa.freePageCount());
+}
+
+// ============================================================================
+// isPageFree (public API)
+// ============================================================================
+
+TEST(SmallPageAllocator_IsPageFreeAfterAllocAll) {
+    SmallPageAllocator spa(testBaseAddr);
+    spa.allocAll();
+
+    // After allocAll, pages are occupied
+    PageRef testPage = PageRef::small(testBaseAddr);
+    ASSERT_FALSE(spa.isPageFree(testPage));
+}
+
+TEST(SmallPageAllocator_IsPageFreeAfterFreeAll) {
+    SmallPageAllocator spa(testBaseAddr);
+    spa.allocAll();
+    spa.freeAll();
+
+    // After freeAll, pages are free
+    PageRef testPage = PageRef::small(testBaseAddr);
+    ASSERT_TRUE(spa.isPageFree(testPage));
+}
+
+TEST(SmallPageAllocator_IsPageFreeAfterRingBufferAlloc) {
+    MAKE_SPA_WITH_FREE_PAGES(spa, 10);
+
+    std::vector<PageRef> pages;
+    spa.alloc([&](PageRef ref) { pages.push_back(ref); }, 10);
+
+    // After alloc from ring buffer, pages are occupied
+    for (auto& p : pages) {
+        ASSERT_FALSE(spa.isPageFree(p));
+    }
+}
+
+TEST(SmallPageAllocator_IsPageFreeAfterLazyInitAlloc) {
+    SmallPageAllocator spa(testBaseAddr);
+
+    std::vector<PageRef> pages;
+    spa.alloc([&](PageRef ref) { pages.push_back(ref); }, 5);
+
+    for (auto& p : pages) {
+        ASSERT_FALSE(spa.isPageFree(p));
+    }
+}
+
+// ============================================================================
+// reservePage
+// ============================================================================
+
+TEST(SmallPageAllocator_ReservePageMarksOccupied) {
+    SmallPageAllocator spa(testBaseAddr);
+
+    // Before reserve, page is free
+    PageRef page = PageRef::small(testBaseAddr);
+    ASSERT_TRUE(spa.isPageFree(page));
+
+    spa.reservePage(testBaseAddr);
+
+    // After reserve, page is occupied
+    ASSERT_FALSE(spa.isPageFree(page));
+}
+
+TEST(SmallPageAllocator_ReservedPageSkippedDuringAlloc) {
+    SmallPageAllocator spa(testBaseAddr);
+    spa.reservePage(testBaseAddr);
+
+    // Allocate all pages via lazy init
+    std::set<uint64_t> allocatedAddrs;
+    spa.alloc([&](PageRef ref) { allocatedAddrs.insert(ref.addr().value); },
+              PageAllocator::smallPagesPerBigPage);
+
+    // Reserved page should not have been allocated
+    ASSERT_EQ(0ul, allocatedAddrs.count(testBaseAddr.value));
+}
+
+TEST(SmallPageAllocator_ReserveMultiplePages) {
+    SmallPageAllocator spa(testBaseAddr);
+
+    for (size_t i = 0; i < 4; i++) {
+        spa.reservePage(testBaseAddr + i * arch::smallPageSize);
+    }
+
+    // All reserved pages should be marked occupied
+    for (size_t i = 0; i < 4; i++) {
+        PageRef page = PageRef::small(testBaseAddr + i * arch::smallPageSize);
+        ASSERT_FALSE(spa.isPageFree(page));
+    }
+
+    // Non-reserved page should still be free
+    PageRef unreserved = PageRef::small(testBaseAddr + 4 * arch::smallPageSize);
+    ASSERT_TRUE(spa.isPageFree(unreserved));
+
+    // Allocate and verify none of the reserved addresses appear
+    std::set<uint64_t> allocatedAddrs;
+    spa.alloc([&](PageRef ref) { allocatedAddrs.insert(ref.addr().value); },
+              PageAllocator::smallPagesPerBigPage);
+
+    for (size_t i = 0; i < 4; i++) {
+        phys_addr reserved = testBaseAddr + i * arch::smallPageSize;
+        ASSERT_EQ(0ul, allocatedAddrs.count(reserved.value));
+    }
+}
+
+// ============================================================================
+// Zero-Count Edge Cases
+// ============================================================================
+
+TEST(SmallPageAllocator_FreeZeroPages) {
+    MAKE_SPA_WITH_FREE_PAGES(spa, 10);
+    size_t before = spa.freePageCount();
+    spa.free(nullptr, 0);
+    ASSERT_EQ(before, spa.freePageCount());
+}
+
+// ============================================================================
+// Double-Free Detection
+// ============================================================================
+
+TEST(SmallPageAllocator_DoubleFreeDetected) {
+    MAKE_SPA_WITH_FREE_PAGES(spa, 10);
+
+    // Allocate a page
+    PageRef page = INVALID_PAGE_REF;
+    spa.alloc([&](PageRef ref) { page = ref; }, 1);
+    ASSERT_NE(INVALID_PAGE_REF, page);
+
+    // First free should succeed
+    spa.free(&page, 1);
+
+    // Second free of the same page should trigger an assertion
+    bool exceptionCaught = false;
+    try {
+        spa.free(&page, 1);
+    } catch (const AssertionFailure& e) {
+        exceptionCaught = true;
+        std::string message = e.what();
+        ASSERT_TRUE(message.find("already free") != std::string::npos);
+    }
+    ASSERT_TRUE(exceptionCaught);
+}
+
+TEST(SmallPageAllocator_FreeUnallocatedPageDetected) {
+    SmallPageAllocator spa(testBaseAddr);
+
+    // Try to free a page that was never allocated (still in lazy-init range)
+    PageRef page = PageRef::small(testBaseAddr);
+
+    bool exceptionCaught = false;
+    try {
+        spa.free(&page, 1);
+    } catch (const AssertionFailure& e) {
+        exceptionCaught = true;
+        std::string message = e.what();
+        ASSERT_TRUE(message.find("already free") != std::string::npos);
+    }
+    ASSERT_TRUE(exceptionCaught);
+}
+
+// ============================================================================
+// Concurrent Tests
+// ============================================================================
+
+TEST(SmallPageAllocator_ConcurrentLazyInitAlloc) {
+    // Multiple threads race to allocate pages through the lazy init CAS path.
+    // All allocated pages must be unique and the total must equal the big page.
+    constexpr size_t numThreads = 4;
+    constexpr size_t pagesPerThread = PageAllocator::smallPagesPerBigPage / numThreads;
+
+    SmallPageAllocator spa(testBaseAddr);
+    std::atomic<bool> start{false};
+
+    std::mutex perThreadMutex[numThreads];
+    std::vector<uint64_t> perThread[numThreads];
+
+    auto worker = [&](size_t id) {
+        while (!start.load(std::memory_order_acquire)) {}
+        std::vector<uint64_t> local;
+        spa.alloc([&](PageRef ref) {
+            local.push_back(ref.addr().value);
+        }, pagesPerThread);
+        std::lock_guard<std::mutex> lock(perThreadMutex[id]);
+        perThread[id] = std::move(local);
+    };
+
     pauseTracking();
-
-    std::atomic<bool> stop{false};
-    std::atomic<size_t> totalOperations{0};
-
-    // Launch 8 threads, each continuously marking its own pool for a period
     std::vector<std::thread> threads;
-    for (size_t i = 0; i < 8; i++) {
-        threads.emplace_back([&bitmap, &stop, &totalOperations, i]() {
-            PoolID pool(static_cast<arch::ProcessorID>(i));
-            size_t localOps = 0;
-
-            // Run for many iterations to stress test
-            for (size_t iter = 0; iter < 1000 && !stop.load(); iter++) {
-                // Cycle through pressure levels
-                bitmap.markPressure(pool, PoolPressure::SURPLUS);
-                localOps++;
-                bitmap.markPressure(pool, PoolPressure::COMFORTABLE);
-                localOps++;
-                bitmap.markPressure(pool, PoolPressure::MODERATE);
-                localOps++;
-                bitmap.markPressure(pool, PoolPressure::DESPERATE);
-                localOps++;
-            }
-            totalOperations.fetch_add(localOps);
-        });
+    for (size_t i = 0; i < numThreads; i++) {
+        threads.emplace_back(worker, i);
     }
-
-    for (auto& thread : threads) {
-        thread.join();
-    }
-
     resumeTracking();
 
-    // Verify that all threads did work
-    ASSERT_TRUE(totalOperations.load() > 0);
+    start.store(true, std::memory_order_release);
 
-    // All pools should end up in DESPERATE (last state set)
-    size_t desperateCount = 0;
-    for (auto _ : bitmap.poolsWithPressure(PoolPressure::DESPERATE)) {
-        (void)_;
-        desperateCount++;
-    }
-    ASSERT_EQ(8u, desperateCount);
-
-    // Other pressure levels should be empty
-    size_t otherCount = 0;
-    for (auto _ : bitmap.poolsWithPressure(PoolPressure::SURPLUS)) {
-        (void)_;
-        otherCount++;
-    }
-    ASSERT_EQ(0u, otherCount);
-
-    free(buffer);
-}
-
-TEST(PressureBitmapConcurrentReadWrite) {
-    PageAllocatorTestSetup setup;
-    arch::testing::setProcessorCount(8);
-
-    BootstrapAllocator measureAllocator;
-    PressureBitmap<PoolID>::measureAllocation(measureAllocator, 8);
-    void* buffer = malloc(measureAllocator.bytesNeeded());
-
-    BootstrapAllocator allocator(buffer, measureAllocator.bytesNeeded());
-    PressureBitmap<PoolID> bitmap(allocator, 8);
-
-    // Pre-mark some pools
-    for (size_t i = 0; i < 4; i++) {
-        bitmap.markPressure(PoolID(static_cast<arch::ProcessorID>(i)), PoolPressure::MODERATE);
-    }
-
-    // Pause memory tracking during thread creation
     pauseTracking();
-
-    std::atomic<bool> stop{false};
-    std::atomic<size_t> totalIterations{0};
-    std::atomic<size_t> totalPoolsSeen{0};
-
-    // Writer thread that continuously changes pressure levels
-    std::thread writer([&]() {
-        for (size_t iteration = 0; iteration < 500; iteration++) {
-            for (size_t i = 0; i < 8; i++) {
-                PoolPressure pressure = static_cast<PoolPressure>(iteration % static_cast<size_t>(PoolPressure::COUNT));
-                bitmap.markPressure(PoolID(static_cast<arch::ProcessorID>(i)), pressure);
-            }
-        }
-        stop.store(true);
-    });
-
-    // Reader threads that continuously iterate
-    std::vector<std::thread> readers;
-    for (size_t i = 0; i < 4; i++) {
-        readers.emplace_back([&]() {
-            size_t localIterations = 0;
-            size_t localPoolsSeen = 0;
-
-            while (!stop.load()) {
-                // Iterate through all pressure levels
-                for (size_t p = 0; p < static_cast<size_t>(PoolPressure::COUNT); p++) {
-                    size_t poolCount = 0;
-                    for (auto pool : bitmap.poolsWithPressure(static_cast<PoolPressure>(p))) {
-                        (void)pool;
-                        poolCount++;
-                        localPoolsSeen++;
-
-                        // Verify pool ID is in valid range
-                        ASSERT_TRUE(pool.global() || pool.id < 8);
-                    }
-                    // Verify we don't see more pools than exist
-                    ASSERT_TRUE(poolCount <= 9); // 8 processors + 1 global
-                }
-                localIterations++;
-            }
-
-            totalIterations.fetch_add(localIterations);
-            totalPoolsSeen.fetch_add(localPoolsSeen);
-        });
-    }
-
-    writer.join();
-    for (auto& reader : readers) {
-        reader.join();
-    }
-
+    for (auto& t : threads) t.join();
     resumeTracking();
 
-    // Verify that readers did substantial work without stalling
-    ASSERT_TRUE(totalIterations.load() > 0);
-    ASSERT_TRUE(totalPoolsSeen.load() > 0);
-
-    // Verify final state is consistent (all pools at same pressure level)
-    size_t totalFound = 0;
-    for (size_t p = 0; p < static_cast<size_t>(PoolPressure::COUNT); p++) {
-        size_t count = 0;
-        for (auto _ : bitmap.poolsWithPressure(static_cast<PoolPressure>(p))) {
-            (void)_;
-            count++;
+    // Collect all allocated addresses
+    std::set<uint64_t> allAddresses;
+    size_t totalAllocated = 0;
+    for (size_t i = 0; i < numThreads; i++) {
+        totalAllocated += perThread[i].size();
+        for (auto addr : perThread[i]) {
+            allAddresses.insert(addr);
         }
-        totalFound += count;
-    }
-    // Should find exactly 8 pools (global pool not marked in this test)
-    ASSERT_EQ(8u, totalFound);
-
-    free(buffer);
-}
-
-// ============================================================================
-// PressureBitmap Large Processor Count Tests
-// ============================================================================
-
-TEST(PressureBitmapLargeProcessorCount) {
-    PageAllocatorTestSetup setup;
-    const size_t largeCount = 128;
-
-    BootstrapAllocator measureAllocator;
-    PressureBitmap<PoolID>::measureAllocation(measureAllocator, largeCount);
-    void* buffer = malloc(measureAllocator.bytesNeeded());
-
-    BootstrapAllocator allocator(buffer, measureAllocator.bytesNeeded());
-    PressureBitmap<PoolID> bitmap(allocator, largeCount);
-
-    // Mark every 8th pool as SURPLUS
-    for (size_t i = 0; i < largeCount; i += 8) {
-        bitmap.markPressure(PoolID(static_cast<arch::ProcessorID>(i)), PoolPressure::SURPLUS);
     }
 
-    // Count them
-    size_t count = 0;
-    std::vector<PoolID::IDType> foundPools;
-    for (auto pool : bitmap.poolsWithPressure(PoolPressure::SURPLUS)) {
-        foundPools.push_back(pool.id);
-        count++;
+    // Every page should be unique (no double-allocation)
+    ASSERT_EQ(totalAllocated, allAddresses.size());
+    // Total should cover the entire big page
+    ASSERT_EQ(PageAllocator::smallPagesPerBigPage, totalAllocated);
+
+    // All addresses should be within range and aligned
+    for (auto addr : allAddresses) {
+        ASSERT_GE(addr, testBaseAddr.value);
+        ASSERT_LT(addr, testBaseAddr.value + arch::bigPageSize);
+        ASSERT_EQ(0ul, addr % arch::smallPageSize);
+    }
+}
+
+TEST(SmallPageAllocator_ConcurrentRingBufferAlloc) {
+    // Multiple threads race to allocate from the ring buffer path.
+    constexpr size_t numThreads = 4;
+    constexpr size_t totalPages = PageAllocator::smallPagesPerBigPage;
+    constexpr size_t pagesPerThread = totalPages / numThreads;
+
+    MAKE_SPA_WITH_FREE_PAGES(spa, totalPages);
+    std::atomic<bool> start{false};
+
+    std::mutex perThreadMutex[numThreads];
+    std::vector<uint64_t> perThread[numThreads];
+
+    auto worker = [&](size_t id) {
+        while (!start.load(std::memory_order_acquire)) {}
+        std::vector<uint64_t> local;
+        spa.alloc([&](PageRef ref) {
+            local.push_back(ref.addr().value);
+        }, pagesPerThread);
+        std::lock_guard<std::mutex> lock(perThreadMutex[id]);
+        perThread[id] = std::move(local);
+    };
+
+    pauseTracking();
+    std::vector<std::thread> threads;
+    for (size_t i = 0; i < numThreads; i++) {
+        threads.emplace_back(worker, i);
+    }
+    resumeTracking();
+
+    start.store(true, std::memory_order_release);
+
+    pauseTracking();
+    for (auto& t : threads) t.join();
+    resumeTracking();
+
+    std::set<uint64_t> allAddresses;
+    size_t totalAllocated = 0;
+    for (size_t i = 0; i < numThreads; i++) {
+        totalAllocated += perThread[i].size();
+        for (auto addr : perThread[i]) {
+            allAddresses.insert(addr);
+        }
     }
 
-    ASSERT_EQ(16u, count);
+    ASSERT_EQ(totalAllocated, allAddresses.size());
+    ASSERT_EQ(totalPages, totalAllocated);
+    ASSERT_TRUE(spa.isFull());
+}
 
-    // Verify they're correct
-    for (size_t i = 0; i < count; i++) {
-        ASSERT_EQ(i * 8, foundPools[i]);
+TEST(SmallPageAllocator_ConcurrentAllocAndFree) {
+    // Producer threads free pages back into the allocator while consumer
+    // threads allocate them. Tests the ring buffer under concurrent read/write.
+    constexpr size_t numAllocators = 2;
+    constexpr size_t numFreers = 2;
+    constexpr size_t pagesPerFreer = 64;
+    constexpr size_t totalPages = numFreers * pagesPerFreer;
+
+    // Start fully allocated so lazy init is exhausted, then free pages
+    // from the freer threads into the ring buffer.
+    SmallPageAllocator spa(testBaseAddr);
+    spa.allocAll();
+
+    std::atomic<bool> start{false};
+    std::atomic<size_t> totalFreed{0};
+    std::atomic<size_t> totalAllocated{0};
+
+    // Each freer owns a disjoint set of page indices to free
+    auto freer = [&](size_t id) {
+        while (!start.load(std::memory_order_acquire)) {}
+        size_t base = id * pagesPerFreer;
+        // Free in small batches to interleave with allocators
+        for (size_t i = 0; i < pagesPerFreer; i += 4) {
+            size_t batch = std::min(size_t(4), pagesPerFreer - i);
+            PageRef refs[4];
+            for (size_t j = 0; j < batch; j++) {
+                refs[j] = PageRef::small(testBaseAddr + (base + i + j) * arch::smallPageSize);
+            }
+            spa.free(refs, batch);
+            totalFreed.fetch_add(batch, std::memory_order_relaxed);
+        }
+    };
+
+    std::mutex allocMutex[numAllocators];
+    std::vector<uint64_t> perAllocator[numAllocators];
+
+    auto allocator = [&](size_t id) {
+        while (!start.load(std::memory_order_acquire)) {}
+        std::vector<uint64_t> local;
+        size_t myTotal = 0;
+        size_t target = totalPages / numAllocators;
+        while (myTotal < target) {
+            size_t got = spa.alloc([&](PageRef ref) {
+                local.push_back(ref.addr().value);
+            }, std::min(size_t(4), target - myTotal));
+            myTotal += got;
+        }
+        std::lock_guard<std::mutex> lock(allocMutex[id]);
+        perAllocator[id] = std::move(local);
+    };
+
+    pauseTracking();
+    std::vector<std::thread> threads;
+    for (size_t i = 0; i < numFreers; i++) {
+        threads.emplace_back(freer, i);
+    }
+    for (size_t i = 0; i < numAllocators; i++) {
+        threads.emplace_back(allocator, i);
+    }
+    resumeTracking();
+
+    start.store(true, std::memory_order_release);
+
+    pauseTracking();
+    for (auto& t : threads) t.join();
+    resumeTracking();
+
+    // Collect all allocated addresses
+    std::set<uint64_t> allAddresses;
+    size_t allocated = 0;
+    for (size_t i = 0; i < numAllocators; i++) {
+        allocated += perAllocator[i].size();
+        for (auto addr : perAllocator[i]) {
+            allAddresses.insert(addr);
+        }
     }
 
-    free(buffer);
+    // Every allocated page should be unique
+    ASSERT_EQ(allocated, allAddresses.size());
+    // Should have allocated all freed pages
+    ASSERT_EQ(totalPages, allocated);
 }
 
-TEST(PressureBitmapMultipleWordSpan) {
-    PageAllocatorTestSetup setup;
-    const size_t largeCount = 200;
+TEST(SmallPageAllocator_ConcurrentAllocFreeCycles) {
+    // Multiple threads independently do alloc-then-free cycles on the same
+    // allocator, stress-testing the ring buffer and lazy init atomics.
+    constexpr size_t numThreads = 4;
+    constexpr size_t cyclesPerThread = 2000;
+    constexpr size_t pagesPerCycle = 32;
 
-    BootstrapAllocator measureAllocator;
-    PressureBitmap<PoolID>::measureAllocation(measureAllocator, largeCount);
-    void* buffer = malloc(measureAllocator.bytesNeeded());
+    // Set up with enough pages in the ring buffer for all threads
+    MAKE_SPA_WITH_FREE_PAGES(spa, numThreads * pagesPerCycle);
+    std::atomic<bool> start{false};
+    std::atomic<size_t> successfulCycles{0};
 
-    BootstrapAllocator allocator(buffer, measureAllocator.bytesNeeded());
-    PressureBitmap<PoolID> bitmap(allocator, largeCount);
+    auto worker = [&](size_t) {
+        while (!start.load(std::memory_order_acquire)) {}
+        for (size_t cycle = 0; cycle < cyclesPerThread; cycle++) {
+            PageRef pages[pagesPerCycle];
+            size_t got = 0;
+            spa.alloc([&](PageRef ref) {
+                pages[got++] = ref;
+            }, pagesPerCycle);
 
-    // Mark pools across word boundaries (64, 65, 66 span two words)
-    bitmap.markPressure(PoolID(static_cast<arch::ProcessorID>(63)), PoolPressure::COMFORTABLE);
-    bitmap.markPressure(PoolID(static_cast<arch::ProcessorID>(64)), PoolPressure::COMFORTABLE);
-    bitmap.markPressure(PoolID(static_cast<arch::ProcessorID>(65)), PoolPressure::COMFORTABLE);
-    bitmap.markPressure(PoolID(static_cast<arch::ProcessorID>(128)), PoolPressure::COMFORTABLE);
-    bitmap.markPressure(PoolID(static_cast<arch::ProcessorID>(129)), PoolPressure::COMFORTABLE);
+            if (got > 0) {
+                spa.free(pages, got);
+                successfulCycles.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+    };
 
-    std::vector<PoolID::IDType> foundPools;
-    for (auto pool : bitmap.poolsWithPressure(PoolPressure::COMFORTABLE)) {
-        foundPools.push_back(pool.id);
+    pauseTracking();
+    std::vector<std::thread> threads;
+    for (size_t i = 0; i < numThreads; i++) {
+        threads.emplace_back(worker, i);
     }
+    resumeTracking();
 
-    ASSERT_EQ(5u, foundPools.size());
-    ASSERT_EQ(63u, foundPools[0]);
-    ASSERT_EQ(64u, foundPools[1]);
-    ASSERT_EQ(65u, foundPools[2]);
-    ASSERT_EQ(128u, foundPools[3]);
-    ASSERT_EQ(129u, foundPools[4]);
+    start.store(true, std::memory_order_release);
 
-    free(buffer);
-}
+    pauseTracking();
+    for (auto& t : threads) t.join();
+    resumeTracking();
 
-// ============================================================================
-// SmallPageAllocator Tests
-// ============================================================================
-
-// Helper to create buffers for SmallPageAllocator
-struct SmallPageAllocatorBuffers {
-    static constexpr size_t SMALL_PAGES_PER_BIG_PAGE = 512; // 2MB / 4KB
-    SmallPageIndex fwb[SMALL_PAGES_PER_BIG_PAGE];
-    SmallPageIndex bwb[SMALL_PAGES_PER_BIG_PAGE];
-};
-
-TEST(SmallPageAllocatorConstruction) {
-    PageAllocatorTestSetup setup;
-
-    SmallPageAllocatorBuffers buffers;
-    SmallPageAllocator allocator(buffers.fwb, buffers.bwb);
-
-    // Initially all pages should be free
-    ASSERT_TRUE(allocator.allFree());
-    ASSERT_FALSE(allocator.allFull());
-    ASSERT_EQ(512u, allocator.freePageCount());
-}
-
-TEST(SmallPageAllocatorAllocateSingle) {
-    PageAllocatorTestSetup setup;
-
-    SmallPageAllocatorBuffers buffers;
-    SmallPageAllocator allocator(buffers.fwb, buffers.bwb);
-
-    // Allocate one page
-    SmallPageIndex page = allocator.allocateSmallPage();
-
-    ASSERT_FALSE(allocator.allFree());
-    ASSERT_FALSE(allocator.allFull());
-    ASSERT_EQ(511u, allocator.freePageCount());
-}
-
-TEST(SmallPageAllocatorAllocateMultiple) {
-    PageAllocatorTestSetup setup;
-
-    SmallPageAllocatorBuffers buffers;
-    SmallPageAllocator allocator(buffers.fwb, buffers.bwb);
-
-    // Allocate 10 pages
-    std::vector<SmallPageIndex> pages;
-    for (size_t i = 0; i < 10; i++) {
-        pages.push_back(allocator.allocateSmallPage());
-    }
-
-    ASSERT_FALSE(allocator.allFree());
-    ASSERT_FALSE(allocator.allFull());
-    ASSERT_EQ(502u, allocator.freePageCount());
-}
-
-TEST(SmallPageAllocatorAllocateAll) {
-    PageAllocatorTestSetup setup;
-
-    SmallPageAllocatorBuffers buffers;
-    SmallPageAllocator allocator(buffers.fwb, buffers.bwb);
-
-    // Allocate all 512 pages
-    std::vector<SmallPageIndex> pages;
-    for (size_t i = 0; i < 512; i++) {
-        pages.push_back(allocator.allocateSmallPage());
-    }
-
-    ASSERT_FALSE(allocator.allFree());
-    ASSERT_TRUE(allocator.allFull());
-    ASSERT_EQ(0u, allocator.freePageCount());
-}
-
-TEST(SmallPageAllocatorFreeSingle) {
-    PageAllocatorTestSetup setup;
-
-    SmallPageAllocatorBuffers buffers;
-    SmallPageAllocator allocator(buffers.fwb, buffers.bwb);
-
-    // Allocate and then free
-    SmallPageIndex page = allocator.allocateSmallPage();
-    ASSERT_EQ(511u, allocator.freePageCount());
-
-    allocator.freeSmallPage(page);
-    ASSERT_TRUE(allocator.allFree());
-    ASSERT_EQ(512u, allocator.freePageCount());
-}
-
-TEST(SmallPageAllocatorFreeMultiple) {
-    PageAllocatorTestSetup setup;
-
-    SmallPageAllocatorBuffers buffers;
-    SmallPageAllocator allocator(buffers.fwb, buffers.bwb);
-
-    // Allocate 20 pages
-    std::vector<SmallPageIndex> pages;
-    for (size_t i = 0; i < 20; i++) {
-        pages.push_back(allocator.allocateSmallPage());
-    }
-    ASSERT_EQ(492u, allocator.freePageCount());
-
-    // Free 10 pages
-    for (size_t i = 0; i < 10; i++) {
-        allocator.freeSmallPage(pages[i]);
-    }
-    ASSERT_EQ(502u, allocator.freePageCount());
-}
-
-TEST(SmallPageAllocatorFreeAll) {
-    PageAllocatorTestSetup setup;
-
-    SmallPageAllocatorBuffers buffers;
-    SmallPageAllocator allocator(buffers.fwb, buffers.bwb);
-
-    // Allocate all pages
-    std::vector<SmallPageIndex> pages;
-    for (size_t i = 0; i < 512; i++) {
-        pages.push_back(allocator.allocateSmallPage());
-    }
-    ASSERT_TRUE(allocator.allFull());
-
-    // Free all pages
-    for (size_t i = 0; i < 512; i++) {
-        allocator.freeSmallPage(pages[i]);
-    }
-    ASSERT_TRUE(allocator.allFree());
-    ASSERT_EQ(512u, allocator.freePageCount());
-}
-
-TEST(SmallPageAllocatorAllocateFreePattern) {
-    PageAllocatorTestSetup setup;
-
-    SmallPageAllocatorBuffers buffers;
-    SmallPageAllocator allocator(buffers.fwb, buffers.bwb);
-
-    // Allocate-free-allocate-free pattern
-    SmallPageIndex page1 = allocator.allocateSmallPage();
-    ASSERT_EQ(511u, allocator.freePageCount());
-
-    SmallPageIndex page2 = allocator.allocateSmallPage();
-    ASSERT_EQ(510u, allocator.freePageCount());
-
-    allocator.freeSmallPage(page1);
-    ASSERT_EQ(511u, allocator.freePageCount());
-
-    SmallPageIndex page3 = allocator.allocateSmallPage();
-    ASSERT_EQ(510u, allocator.freePageCount());
-
-    allocator.freeSmallPage(page2);
-    ASSERT_EQ(511u, allocator.freePageCount());
-
-    allocator.freeSmallPage(page3);
-    ASSERT_EQ(512u, allocator.freePageCount());
-    ASSERT_TRUE(allocator.allFree());
-}
-
-TEST(SmallPageAllocatorReserveSinglePage) {
-    PageAllocatorTestSetup setup;
-
-    SmallPageAllocatorBuffers buffers;
-    SmallPageAllocator allocator(buffers.fwb, buffers.bwb);
-
-    // Reserve page at index 0
-    allocator.reserveSmallPage(0);
-
-    ASSERT_FALSE(allocator.allFree());
-    ASSERT_EQ(511u, allocator.freePageCount());
-}
-
-TEST(SmallPageAllocatorReserveMultiplePages) {
-    PageAllocatorTestSetup setup;
-
-    SmallPageAllocatorBuffers buffers;
-    SmallPageAllocator allocator(buffers.fwb, buffers.bwb);
-
-    // Reserve pages at specific indices
-    allocator.reserveSmallPage(0);
-    allocator.reserveSmallPage(100);
-    allocator.reserveSmallPage(511);
-
-    ASSERT_FALSE(allocator.allFree());
-    ASSERT_EQ(509u, allocator.freePageCount());
-}
-
-TEST(SmallPageAllocatorReserveAllPages) {
-    PageAllocatorTestSetup setup;
-
-    SmallPageAllocatorBuffers buffers;
-    SmallPageAllocator allocator(buffers.fwb, buffers.bwb);
-
-    // Reserve all pages at once
-    allocator.reserveAllPages();
-
-    ASSERT_FALSE(allocator.allFree());
-    ASSERT_TRUE(allocator.allFull());
-    ASSERT_EQ(0u, allocator.freePageCount());
-}
-
-TEST(SmallPageAllocatorMixedOperations) {
-    PageAllocatorTestSetup setup;
-
-    SmallPageAllocatorBuffers buffers;
-    SmallPageAllocator allocator(buffers.fwb, buffers.bwb);
-
-    // Mix of reserve, allocate, and free operations
-    allocator.reserveSmallPage(0);
-    ASSERT_EQ(511u, allocator.freePageCount());
-
-    SmallPageIndex page1 = allocator.allocateSmallPage();
-    ASSERT_EQ(510u, allocator.freePageCount());
-
-    allocator.reserveSmallPage(100);
-    ASSERT_EQ(509u, allocator.freePageCount());
-
-    SmallPageIndex page2 = allocator.allocateSmallPage();
-    ASSERT_EQ(508u, allocator.freePageCount());
-
-    allocator.freeSmallPage(page1);
-    ASSERT_EQ(509u, allocator.freePageCount());
-
-    SmallPageIndex page3 = allocator.allocateSmallPage();
-    ASSERT_EQ(508u, allocator.freePageCount());
-
-    allocator.freeSmallPage(page2);
-    allocator.freeSmallPage(page3);
-    ASSERT_EQ(510u, allocator.freePageCount());
-}
-
-TEST(SmallPageAllocatorAllocatedPagesAreUnique) {
-    PageAllocatorTestSetup setup;
-
-    SmallPageAllocatorBuffers buffers;
-    SmallPageAllocator allocator(buffers.fwb, buffers.bwb);
-
-    // Allocate 50 pages and verify they're all unique
-    std::set<SmallPageIndex> allocatedPages;
-    for (size_t i = 0; i < 50; i++) {
-        SmallPageIndex page = allocator.allocateSmallPage();
-        ASSERT_TRUE(allocatedPages.find(page) == allocatedPages.end());
-        allocatedPages.insert(page);
-    }
-
-    ASSERT_EQ(50u, allocatedPages.size());
-}
-
-TEST(SmallPageAllocatorFreeInReverseOrder) {
-    PageAllocatorTestSetup setup;
-
-    SmallPageAllocatorBuffers buffers;
-    SmallPageAllocator allocator(buffers.fwb, buffers.bwb);
-
-    // Allocate pages
-    std::vector<SmallPageIndex> pages;
-    for (size_t i = 0; i < 30; i++) {
-        pages.push_back(allocator.allocateSmallPage());
-    }
-    ASSERT_EQ(482u, allocator.freePageCount());
-
-    // Free in reverse order
-    for (int i = 29; i >= 0; i--) {
-        allocator.freeSmallPage(pages[i]);
-    }
-
-    ASSERT_TRUE(allocator.allFree());
-    ASSERT_EQ(512u, allocator.freePageCount());
-}
-
-TEST(SmallPageAllocatorFreeInRandomOrder) {
-    PageAllocatorTestSetup setup;
-
-    SmallPageAllocatorBuffers buffers;
-    SmallPageAllocator allocator(buffers.fwb, buffers.bwb);
-
-    // Allocate pages
-    std::vector<SmallPageIndex> pages;
-    for (size_t i = 0; i < 40; i++) {
-        pages.push_back(allocator.allocateSmallPage());
-    }
-    ASSERT_EQ(472u, allocator.freePageCount());
-
-    // Free in a mixed order: evens first, then odds
-    for (size_t i = 0; i < 40; i += 2) {
-        allocator.freeSmallPage(pages[i]);
-    }
-    ASSERT_EQ(492u, allocator.freePageCount());
-
-    for (size_t i = 1; i < 40; i += 2) {
-        allocator.freeSmallPage(pages[i]);
-    }
-    ASSERT_TRUE(allocator.allFree());
-    ASSERT_EQ(512u, allocator.freePageCount());
-}
-
-TEST(SmallPageAllocatorReserveAfterAllocations) {
-    PageAllocatorTestSetup setup;
-
-    SmallPageAllocatorBuffers buffers;
-    SmallPageAllocator allocator(buffers.fwb, buffers.bwb);
-
-    // Allocate some pages
-    SmallPageIndex page1 = allocator.allocateSmallPage();
-    SmallPageIndex page2 = allocator.allocateSmallPage();
-    ASSERT_EQ(510u, allocator.freePageCount());
-
-    // Reserve a page
-    allocator.reserveSmallPage(200);
-    ASSERT_EQ(509u, allocator.freePageCount());
-
-    // Allocate more
-    SmallPageIndex page3 = allocator.allocateSmallPage();
-    ASSERT_EQ(508u, allocator.freePageCount());
-
-    // Free allocated pages
-    allocator.freeSmallPage(page1);
-    allocator.freeSmallPage(page2);
-    allocator.freeSmallPage(page3);
-    ASSERT_EQ(511u, allocator.freePageCount());
-    ASSERT_FALSE(allocator.allFree()); // Still have reserved page
+    // At least some cycles should have succeeded
+    ASSERT_GT(successfulCycles.load(), 0ul);
+    // All pages should be back (each thread frees what it allocates)
+    ASSERT_EQ(numThreads * pagesPerCycle, spa.freePageCount());
 }
