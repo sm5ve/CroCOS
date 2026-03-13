@@ -7,6 +7,7 @@
 #include <iostream>
 #include <cstdlib>
 #include <new>
+#include <unordered_set>
 #include "MemoryTrackingGuard.h"  // For globally constructed objects invoking the memory allocator
 
 // Define the garbage pointer used by placeholder implementations in test.h
@@ -19,6 +20,13 @@ namespace CroCOSTest {
     static std::mutex& getTrackerMutex() {
         static std::mutex* mutex = new std::mutex();
         return *mutex;
+    }
+
+    // Set of threads that have timed out and should be silently ignored (and terminated
+    // on next allocation). Protected by getTrackerMutex().
+    static std::unordered_set<std::thread::id>& getIgnoredThreads() {
+        static auto* ignored = new std::unordered_set<std::thread::id>();
+        return *ignored;
     }
 
     // Static member definitions
@@ -45,13 +53,24 @@ namespace CroCOSTest {
         if (!ptr) return;
         if (!track) return;
 
-        std::lock_guard<std::mutex> lock(getTrackerMutex());
-        allocations[ptr] = {size};
-        total_allocated += size;
-        current_usage += size;
-        if (current_usage > peak_usage) {
-            peak_usage = current_usage;
+        bool shouldTerminate = false;
+        {
+            std::lock_guard<std::mutex> lock(getTrackerMutex());
+            if (getIgnoredThreads().count(std::this_thread::get_id())) {
+                // Only throw if we are not already unwinding — throwing a second time
+                // during stack unwinding would call std::terminate.
+                shouldTerminate = (std::uncaught_exceptions() == 0);
+                // Either way, do not record the allocation.
+            } else {
+                allocations[ptr] = {size};
+                total_allocated += size;
+                current_usage += size;
+                if (current_usage > peak_usage) {
+                    peak_usage = current_usage;
+                }
+            }
         }
+        if (shouldTerminate) throw ThreadTerminationRequest{};
     }
 
     void MemoryTracker::recordDeallocation(void* ptr) {
@@ -59,12 +78,22 @@ namespace CroCOSTest {
         if (!track) return;
 
         std::lock_guard<std::mutex> lock(getTrackerMutex());
+        // Silently ignore deallocations from timed-out threads — throwing from a
+        // destructor (which is how most deallocations arrive during unwinding) would
+        // call std::terminate.
+        if (getIgnoredThreads().count(std::this_thread::get_id())) return;
+
         auto it = allocations.find(ptr);
         if (it != allocations.end()) {
             total_freed += it->second.size;
             current_usage -= it->second.size;
             allocations.erase(it);
         }
+    }
+
+    void MemoryTracker::ignoreThread(std::thread::id threadId) {
+        std::lock_guard<std::mutex> lock(getTrackerMutex());
+        getIgnoredThreads().insert(threadId);
     }
 
     bool MemoryTracker::hasLeaks() {

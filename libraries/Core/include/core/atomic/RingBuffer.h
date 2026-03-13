@@ -697,17 +697,17 @@ class BroadcastRingBuffer {
 
 public:
     // Owning constructor: allocates internal storage
-    BroadcastRingBuffer(size_t capacity, size_t consumerCount) requires (Owning)
-        : buffer(capacity), consumerCount(consumerCount), cap(capacity) {
+    BroadcastRingBuffer(size_t capacity, size_t ccount) requires (Owning)
+        : buffer(capacity), consumerCount(ccount), cap(capacity) {
         readHeads = new Atomic<size_t>[consumerCount]();
         ackCounters = new Atomic<uint64_t>[capacity]();
     }
 
     // Non-owning constructor: borrows all external arrays
-    BroadcastRingBuffer(T* buf, size_t capacity, size_t consumerCount,
-                        Atomic<size_t>* readHeads, Atomic<uint64_t>* ackCounters) requires (!Owning)
-        : buffer(buf, capacity), readHeads(readHeads), ackCounters(ackCounters),
-          consumerCount(consumerCount), cap(capacity) {}
+    BroadcastRingBuffer(T* buf, size_t capacity, size_t consumers,
+                        Atomic<size_t>* readHeadsBuff, Atomic<uint64_t>* ackCountersBuff) requires (!Owning)
+        : buffer(buf, capacity), readHeads(readHeadsBuff), ackCounters(ackCountersBuff),
+          consumerCount(consumers), cap(capacity) {}
 
     ~BroadcastRingBuffer() {
         if constexpr (Owning) {

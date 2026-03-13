@@ -109,6 +109,7 @@ namespace CroCOSTest {
         void (*testFunc)();
         const char* fileName;
         int lineNumber;
+        int timeoutMs = 0;  // 0 means no timeout
     };
 
         // Cross-platform section attribute
@@ -126,7 +127,24 @@ namespace CroCOSTest {
     #testName, \
     testName, \
     __FILE__, \
-    __LINE__ \
+    __LINE__, \
+    0 \
+    }; \
+    CROCOS_TEST_SECTION \
+    const CroCOSTest::TestInfo* testName##_registration = &testName##_info; \
+    } \
+    void testName()
+
+        // Test registration macro with a timeout (in milliseconds)
+    #define TEST_WITH_TIMEOUT(testName, timeoutMilliseconds) \
+    void testName(); \
+    namespace { \
+    const CroCOSTest::TestInfo testName##_info { \
+    #testName, \
+    testName, \
+    __FILE__, \
+    __LINE__, \
+    timeoutMilliseconds \
     }; \
     CROCOS_TEST_SECTION \
     const CroCOSTest::TestInfo* testName##_registration = &testName##_info; \

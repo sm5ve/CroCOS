@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <unordered_map>
 #include <mutex>
+#include <thread>
 
 namespace CroCOSTest {
 
@@ -16,6 +17,11 @@ namespace CroCOSTest {
         size_t size;
         // Future: could add stack trace or debug info here
     };
+
+    // Thrown from within a tracked allocation when the allocating thread has been
+    // placed on the ignore list (i.e. it timed out). The thread lambda catches this
+    // to exit cleanly without touching the already-expired promise.
+    struct ThreadTerminationRequest {};
 
     // Forward declarations for tracking control
     void pauseTracking();
@@ -36,6 +42,7 @@ namespace CroCOSTest {
         static bool hasLeaks();
         static void printLeakReport();
         static void reset();
+        static void ignoreThread(std::thread::id threadId);
         static size_t getCurrentUsage() { return current_usage; }
         static size_t getPeakUsage() { return peak_usage; }
         static size_t getTotalAllocated() { return total_allocated; }

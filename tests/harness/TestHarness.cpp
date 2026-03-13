@@ -7,6 +7,10 @@
 #include "MemoryTracker.h"
 #include <vector>
 #include <cstdio>
+#include <thread>
+#include <future>
+#include <chrono>
+#include <memory>
 #include "assert.h"
 
 // Cross-platform section boundary access
@@ -77,44 +81,94 @@ namespace CroCOSTest {
     TestResult TestRunner::runSingleTest(const TestInfo* test) {
         printf("Running test: %s...\n", test->name);
         fflush(stdout);
-        
+
         // Reset memory tracking before each test
         MemoryTracker::reset();
-        
-        try {
-            test->testFunc();
-            
-            // Check for memory leaks after test completion
-            if (MemoryTracker::hasLeaks()) {
-                std::string leakMsg = "Memory leak detected: " + 
-                                    std::to_string(MemoryTracker::getCurrentUsage()) + 
-                                    " bytes leaked in " + 
-                                    std::to_string(MemoryTracker::getActiveAllocationCount()) + 
-                                    " allocations";
-                std::cout << "  ✗ FAILED: " << leakMsg << std::endl;
-                
-                // Print detailed leak report for this test
-                std::cout << "  Memory leak details for " << test->name << ":" << std::endl;
-                MemoryTracker::printLeakReport();
-                return TestResult(test->name, false, leakMsg);
-            } else {
-                // Use printf to avoid std::cout locale issues
-                size_t allocated = MemoryTracker::getTotalAllocated();
-                size_t freed = MemoryTracker::getTotalFreed();
-                printf("  ✓ PASSED (Memory: %zu bytes allocated, %zu bytes freed)\n", allocated, freed);
+
+        auto handleException = [test](const std::string& message) -> TestResult {
+            std::cout << "  ✗ FAILED: " << message << std::endl;
+            return TestResult(test->name, false, message);
+        };
+
+        if (test->timeoutMs > 0) {
+            // Run with timeout: execute the test on a background thread and wait
+            // up to timeoutMs milliseconds for it to complete.
+            //
+            // The promise is heap-allocated via shared_ptr so that it stays alive
+            // even after runSingleTest returns in the timeout path (the detached
+            // thread holds the other reference and will eventually destroy it).
+            auto promisePtr = std::make_shared<std::promise<void>>();
+            auto future = promisePtr->get_future();
+
+            std::thread testThread([promisePtr, test]() {
+                try {
+                    test->testFunc();
+                    try { promisePtr->set_value(); } catch (...) {}
+                } catch (const ThreadTerminationRequest&) {
+                    // The MemoryTracker threw this to unwind our stack after a timeout.
+                    // Exit cleanly without touching the promise — the main thread has
+                    // already recorded a timeout failure and moved on.
+                } catch (...) {
+                    try { promisePtr->set_exception(std::current_exception()); } catch (...) {}
+                }
+            });
+
+            if (future.wait_for(std::chrono::milliseconds(test->timeoutMs)) == std::future_status::timeout) {
+                // Register the thread so the next allocation it makes throws
+                // ThreadTerminationRequest, unwinding its stack gracefully.
+                MemoryTracker::ignoreThread(testThread.get_id());
+                // Clear any tracking state the timed-out thread may have dirtied.
+                MemoryTracker::reset();
+                testThread.detach();
+                std::string msg = "Test timed out after " + std::to_string(test->timeoutMs) + "ms";
+                printf("  ✗ FAILED: %s\n", msg.c_str());
                 fflush(stdout);
-                return TestResult(test->name, true);
+                return TestResult(test->name, false, msg);
             }
-        } catch (const AssertionFailure& e) {
-            std::cout << "  ✗ FAILED: " << e.what() << std::endl;
-            return TestResult(test->name, false, e.what());
-        } catch (const std::exception& e) {
-            std::cout << "  ✗ FAILED: " << e.what() << std::endl;
-            return TestResult(test->name, false, e.what());
-        } catch (...) {
-            std::cout << "  ✗ FAILED: Unknown exception" << std::endl;
-            return TestResult(test->name, false, "Unknown exception");
+
+            testThread.join();
+
+            try {
+                future.get();
+            } catch (const AssertionFailure& e) {
+                return handleException(e.what());
+            } catch (const std::exception& e) {
+                return handleException(e.what());
+            } catch (...) {
+                return handleException("Unknown exception");
+            }
+        } else {
+            try {
+                test->testFunc();
+            } catch (const AssertionFailure& e) {
+                return handleException(e.what());
+            } catch (const std::exception& e) {
+                return handleException(e.what());
+            } catch (...) {
+                return handleException("Unknown exception");
+            }
         }
+
+        // Check for memory leaks after test completion
+        if (MemoryTracker::hasLeaks()) {
+            std::string leakMsg = "Memory leak detected: " +
+                                std::to_string(MemoryTracker::getCurrentUsage()) +
+                                " bytes leaked in " +
+                                std::to_string(MemoryTracker::getActiveAllocationCount()) +
+                                " allocations";
+            std::cout << "  ✗ FAILED: " << leakMsg << std::endl;
+
+            // Print detailed leak report for this test
+            std::cout << "  Memory leak details for " << test->name << ":" << std::endl;
+            MemoryTracker::printLeakReport();
+            return TestResult(test->name, false, leakMsg);
+        }
+
+        size_t allocated = MemoryTracker::getTotalAllocated();
+        size_t freed = MemoryTracker::getTotalFreed();
+        printf("  ✓ PASSED (Memory: %zu bytes allocated, %zu bytes freed)\n", allocated, freed);
+        fflush(stdout);
+        return TestResult(test->name, true);
     }
     
     int TestRunner::runAllTests() {

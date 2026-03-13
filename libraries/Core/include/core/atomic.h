@@ -24,6 +24,19 @@ enum MemoryOrder : int{
 template <typename T>
 constexpr bool _use_intrinsic_atomic_ops = (is_trivially_copyable_v<T>) && ((sizeof(T) == 1) || (sizeof(T) == 2) || (sizeof(T) == 4) || (sizeof(T) == 8));
 
+// Storage type for Atomic<T>:
+//   enum     → underlying integer type  (existing behaviour)
+//   pointer  → uintptr_t               (avoids volatile-pointer-to-T vs volatile-pointer issues)
+//   other    → T itself                (existing behaviour)
+template<typename T>
+using _atomic_storage_t = conditional_t<
+    is_enum_v<T>,    underlying_type_t<T>,
+    conditional_t<
+        is_pointer_v<T>, uintptr_t,
+        T
+    >
+>;
+
 template<typename T>
 inline void atomic_store(T& dest, T val, MemoryOrder mem_order = SEQ_CST){
     //use __atomic_store_n if trivially copiable and right size (can I force alignment on arguments?)
@@ -404,7 +417,7 @@ inline void thread_fence(MemoryOrder order = SEQ_CST){
 
 template<typename T>
 class Atomic {
-    using S = underlying_type_t<T>;
+    using S = _atomic_storage_t<T>;
     alignas(alignof(S)) volatile S value;
 public:
     Atomic(T t){
@@ -414,27 +427,47 @@ public:
     Atomic() = default;
 
     void store(T val, MemoryOrder order = SEQ_CST) {
-        atomic_store(value, static_cast<S>(val), order);
+        if constexpr (is_pointer_v<T>)
+            atomic_store(value, reinterpret_cast<S>(val), order);
+        else
+            atomic_store(value, static_cast<S>(val), order);
     }
 
     [[nodiscard]] T load(MemoryOrder order = SEQ_CST) const {
-        return static_cast<T>(atomic_load(value, order));
+        if constexpr (is_pointer_v<T>)
+            return reinterpret_cast<T>(atomic_load(value, order));
+        else
+            return static_cast<T>(atomic_load(value, order));
     }
 
     bool compare_exchange(T& expected, T desired,
                           MemoryOrder success_order = SEQ_CST,
                           MemoryOrder failure_order = SEQ_CST) {
         if(failure_order > success_order) failure_order = success_order;
-        return atomic_cmpxchg(value, static_cast<S&>(expected), static_cast<S>(desired),
-                              false, success_order, failure_order);
+        if constexpr (is_pointer_v<T>) {
+            S exp_storage = reinterpret_cast<S>(expected);
+            bool result = atomic_cmpxchg(value, exp_storage, reinterpret_cast<S>(desired),
+                                         false, success_order, failure_order);
+            if (!result) expected = reinterpret_cast<T>(exp_storage);
+            return result;
+        } else {
+            return atomic_cmpxchg(value, static_cast<S&>(expected), static_cast<S>(desired),
+                                  false, success_order, failure_order);
+        }
     }
 
     bool compare_exchange_v(T expected, T desired,
                           MemoryOrder success_order = SEQ_CST,
                           MemoryOrder failure_order = SEQ_CST) {
         if(failure_order > success_order) failure_order = success_order;
-        return atomic_cmpxchg(value, static_cast<S&>(expected), static_cast<S>(desired),
-                              false, success_order, failure_order);
+        if constexpr (is_pointer_v<T>) {
+            S exp_storage = reinterpret_cast<S>(expected);
+            return atomic_cmpxchg(value, exp_storage, reinterpret_cast<S>(desired),
+                                  false, success_order, failure_order);
+        } else {
+            return atomic_cmpxchg(value, static_cast<S&>(expected), static_cast<S>(desired),
+                                  false, success_order, failure_order);
+        }
     }
 
     Atomic& operator=(T val) {

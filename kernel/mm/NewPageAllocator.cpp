@@ -5,6 +5,7 @@
 #include <mem/PageAllocator.h>
 #include <core/math.h>
 #include <core/ds/Trees.h>
+#include <core/atomic/AtomicLinkedList.h>
 
 constexpr size_t bigPagesInRange(const kernel::mm::phys_memory_range range) {
     const auto alignedTop = roundUpToNearestMultiple(range.end.value, static_cast<uint64_t>(arch::bigPageSize));
@@ -172,10 +173,11 @@ size_t SmallPageAllocator::alloc(PageAllocationCallback cb, size_t count) {
     }
 
     // Fall back to ring buffer
-    allocated += ringBuffer.bulkReadBestEffort(count - allocated, [&](auto _, SmallPageIndex index) {
+    allocated += static_cast<SmallPageCount>(ringBuffer.bulkReadBestEffort(count - allocated, [&](auto _, SmallPageIndex index) {
+        (void)_;
         markPageFreeState(index, false);
         cb(PageRef::small(fromPageIndex(index)));
-    });
+    }));
 
     return allocated;
 }
@@ -245,9 +247,7 @@ void SmallPageAllocator::reservePage(kernel::mm::phys_addr addr) {
     markPageFreeState(index, false);
 }
 
-
 // ==================== BigPageMetadata ====================
-
 
 // ==================== BigPageLinkedListExtractor ====================
 
