@@ -10,6 +10,7 @@ cmake_minimum_required(VERSION 3.20)
 add_library(CoreTests STATIC)
 
 target_sources(CoreTests PRIVATE
+    ArrayTest.cpp
     GraphTest.cpp
     HeapTest.cpp
     ObjectTest.cpp

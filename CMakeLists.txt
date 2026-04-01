@@ -15,8 +15,8 @@ find_package(Python3 3.11 REQUIRED)
 set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -DDEBUG_BUILD -O0 -fno-omit-frame-pointer -Wno-error=inline")
-set(CMAKE_C_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -DDEBUG_BUILD -O0 -fno-omit-frame-pointer -Wno-error=inline")
+set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -DDEBUG_BUILD -O0 -fno-omit-frame-pointer -Wno-error=inline -Wno-comma-subscript")
+set(CMAKE_C_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -DDEBUG_BUILD -O0 -fno-omit-frame-pointer -Wno-error=inline -Wno-comma-subscript")
 
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Debug CACHE STRING "Choose the type of build." FORCE)
@@ -39,6 +39,71 @@ add_custom_target(qmon
         DEPENDS Kernel
         COMMAND time qemu-system-x86_64 -kernel kernel/Kernel -no-reboot -nographic -s -S -smp 16 -m 256M -d int,cpu_reset,guest_errors -D guestErrors.log -cpu qemu64,+fsgsbase
         COMMENT "Running QEMU"
+        USES_TERMINAL
+)
+
+add_custom_target(run_numa
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+        DEPENDS Kernel
+        # 3-node NUMA topology:
+        #   node 0 — CPUs 0-3, 128M (primary socket)
+        #   node 1 — CPUs 4-7,  64M (secondary socket)
+        #   node 2 — no CPUs,   64M (memory-only / CXL-style domain)
+        # SLIT distances: local=10, 0<->1=21, 0<->2=30, 1<->2=25
+        COMMAND time qemu-system-x86_64 -kernel kernel/Kernel -no-reboot -nographic
+            -smp 8,sockets=2,cores=4
+            -m 256M
+            -object memory-backend-ram,id=m0,size=128M
+            -object memory-backend-ram,id=m1,size=64M
+            -object memory-backend-ram,id=m2,size=64M
+            -numa node,nodeid=0,cpus=0-3,memdev=m0
+            -numa node,nodeid=1,cpus=4-7,memdev=m1
+            -numa node,nodeid=2,memdev=m2
+            -numa dist,src=0,dst=1,val=21
+            -numa dist,src=1,dst=0,val=21
+            -numa dist,src=0,dst=2,val=30
+            -numa dist,src=2,dst=0,val=30
+            -numa dist,src=1,dst=2,val=25
+            -numa dist,src=2,dst=1,val=25
+            -d int,cpu_reset,guest_errors -D guestErrors.log -cpu qemu64,+fsgsbase
+        COMMENT "Running QEMU with 3-node NUMA topology"
+        USES_TERMINAL
+)
+
+add_custom_target(run_numa_hmat
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+        DEPENDS Kernel
+        # Same 3-node topology as run_numa but with HMAT latency+bandwidth tables.
+        # Latency in picoseconds, bandwidth in KB/s (must be multiples of 1048576 = 1 GiB/s).
+        #   node 0 (initiator+target): local 5ns / ~40 GiB/s
+        #   node 1 (initiator+target): local 5ns / ~40 GiB/s
+        #   node 2 (target only):      CXL-style memory-only domain
+        #   0->1 / 1->0: 40ns / ~10 GiB/s
+        #   0->2: 80ns / ~8 GiB/s    1->2: 60ns / ~12 GiB/s
+        COMMAND time qemu-system-x86_64 -kernel kernel/Kernel -no-reboot -nographic
+            -machine q35,hmat=on
+            -smp 8,sockets=2,cores=4
+            -m 256M
+            -object memory-backend-ram,id=m0,size=128M
+            -object memory-backend-ram,id=m1,size=64M
+            -object memory-backend-ram,id=m2,size=64M
+            -numa node,nodeid=0,cpus=0-3,memdev=m0
+            -numa node,nodeid=1,cpus=4-7,memdev=m1
+            -numa node,nodeid=2,memdev=m2
+            -numa hmat-lb,initiator=0,target=0,hierarchy=memory,data-type=access-latency,latency=5000
+            -numa hmat-lb,initiator=0,target=0,hierarchy=memory,data-type=access-bandwidth,bandwidth=41943040
+            -numa hmat-lb,initiator=0,target=1,hierarchy=memory,data-type=access-latency,latency=40000
+            -numa hmat-lb,initiator=0,target=1,hierarchy=memory,data-type=access-bandwidth,bandwidth=10485760
+            -numa hmat-lb,initiator=0,target=2,hierarchy=memory,data-type=access-latency,latency=80000
+            -numa hmat-lb,initiator=0,target=2,hierarchy=memory,data-type=access-bandwidth,bandwidth=8388608
+            -numa hmat-lb,initiator=1,target=0,hierarchy=memory,data-type=access-latency,latency=40000
+            -numa hmat-lb,initiator=1,target=0,hierarchy=memory,data-type=access-bandwidth,bandwidth=10485760
+            -numa hmat-lb,initiator=1,target=1,hierarchy=memory,data-type=access-latency,latency=5000
+            -numa hmat-lb,initiator=1,target=1,hierarchy=memory,data-type=access-bandwidth,bandwidth=41943040
+            -numa hmat-lb,initiator=1,target=2,hierarchy=memory,data-type=access-latency,latency=60000
+            -numa hmat-lb,initiator=1,target=2,hierarchy=memory,data-type=access-bandwidth,bandwidth=12582912
+            -d int,cpu_reset,guest_errors -D guestErrors.log -cpu qemu64,+fsgsbase
+        COMMENT "Running QEMU with 3-node NUMA topology and HMAT"
         USES_TERMINAL
 )
 

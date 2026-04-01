@@ -1,0 +1,22 @@
+CompileFlags:
+  Add:
+    - --target=x86_64-elf
+    - -std=gnu++2b
+    - -isystem/opt/homebrew/Cellar/x86_64-elf-gcc/15.1.0/lib/gcc/x86_64-elf/15.1.0/include
+    - -isystem/opt/homebrew/Cellar/x86_64-elf-gcc/15.1.0/lib/gcc/x86_64-elf/15.1.0/include-fixed
+  Remove:
+    # Flags that clang doesn't understand or that cause issues
+    - -mcmodel=kernel
+    - -mno-red-zone
+    - -fconcepts
+    - -fdiagnostics-color=always
+    - -masm=att
+    - -fimplicit-constexpr
+    - -fconcepts-diagnostics-depth=3
+    - -fno-sized-deallocation
+
+Diagnostics:
+  Suppress:
+    # GCC builtins that clang doesn't know about
+    - builtin_definition_not_found
+    - comma-subscript

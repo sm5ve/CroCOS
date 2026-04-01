@@ -17,6 +17,8 @@
 #include <arch/amd64/interrupts/AuxiliaryDomains.h>
 #include <arch/amd64/timers/HPET.h>
 #include <kmemlayout.h>
+#include <mem/NUMA.h>
+#include <acpi/NUMAIterators.h>
 
 extern uint32_t mboot_magic;
 extern uint32_t mboot_table;
@@ -186,5 +188,14 @@ namespace arch::amd64{
         uint32_t eax, ebx, ecx, edx;
         cpuid(eax, ebx, ecx, edx, 1);
         return (ebx >> 24) & 0xff;
+    }
+
+    alignas(alignof(kernel::numa::NUMATopology)) char numaTopologyStorage[sizeof(kernel::numa::NUMATopology)];
+
+    bool initNUMAInfo() {
+        auto* topo = new(numaTopologyStorage) kernel::numa::NUMATopology(
+            kernel::acpi::numa::buildNUMATopology());
+        kernel::numa::initNUMAPolicy(*topo);
+        return true;
     }
 }

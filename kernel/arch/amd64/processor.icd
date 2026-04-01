@@ -103,3 +103,12 @@ required = true
 per_cpu = false
 phase = "smp_bringup"
 routine = "arch::amd64::smp::smpInit"
+
+[NUMATopology]
+
+name = "NUMA Topology Discovery"
+required = true
+per_cpu = false
+phase = "core_devices"
+depends_on = ["SMPTableInit"]
+routine = "arch::amd64::initNUMAInfo"

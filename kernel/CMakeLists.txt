@@ -36,6 +36,8 @@ set(KERNEL_SRC
         init.cpp
         mm/NewPageAllocator.cpp
         mm/MemTypes.cpp
+        mm/NUMA.cpp
+        acpi/NUMAIterators.cpp
 )
 
 file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/generated_headers)

@@ -13,6 +13,7 @@ target_sources(KernelTests PRIVATE
     ArchMocks.cpp
     InterruptGraphTests.cpp
     PageAllocatorTests.cpp
+    NUMATests.cpp
 )
 
 # Add the TestHarness from parent directory
@@ -28,6 +29,7 @@ target_sources(KernelTests PRIVATE
         ../../kernel/interrupts/ExplicitTypes.cpp
         ../../kernel/mm/NewPageAllocator.cpp
         ../../kernel/mm/MemTypes.cpp
+        ../../kernel/mm/NUMA.cpp
         ../../kernel/arch/arch.cpp
 )
 
@@ -66,6 +68,7 @@ set_source_files_properties(
     ../../libraries/Core/Object.cpp
     ../../libraries/Core/atomic/atomic.cpp
     ../../kernel/mm/NewPageAllocator.cpp
+    ../../kernel/mm/NUMA.cpp
     ../../kernel/arch/arch.cpp
     PROPERTIES COMPILE_FLAGS "-include ${CMAKE_CURRENT_SOURCE_DIR}/../test.h -DCROCOS_TEST_INSTRUMENT_ALLOCATORS"
 )

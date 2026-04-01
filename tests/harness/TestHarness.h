@@ -8,6 +8,8 @@
 
 #include "../assert_support.h"
 #include "MemoryTracker.h"
+#include <source_location>
+#include <string>
 
 namespace CroCOSTest {
     
@@ -54,47 +56,56 @@ namespace CroCOSTest {
 	#define ASSERT_UNREACHABLE(message) \
         throw CroCOSTest::AssertionFailure("Assertion failed: unreachable: " #message);
     
-    #define ASSERT_EQ(expected, actual) \
-        do { \
-            if (!((expected) == (actual))) { \
-                throw CroCOSTest::AssertionFailure("Assertion failed: expected == actual (" #expected " == " #actual ")"); \
-            } \
-        } while(0)
-    
-    #define ASSERT_NE(expected, actual) \
-        do { \
-            if ((expected) == (actual)) { \
-                throw CroCOSTest::AssertionFailure("Assertion failed: expected != actual (" #expected " != " #actual ")"); \
-            } \
-        } while(0)
-    
-    #define ASSERT_LT(a, b) \
-        do { \
-            if (!((a) < (b))) { \
-                throw CroCOSTest::AssertionFailure("Assertion failed: " #a " < " #b); \
-            } \
-        } while(0)
-    
-    #define ASSERT_LE(a, b) \
-        do { \
-            if (!((a) <= (b))) { \
-                throw CroCOSTest::AssertionFailure("Assertion failed: " #a " <= " #b); \
-            } \
-        } while(0)
-    
-    #define ASSERT_GT(a, b) \
-        do { \
-            if (!((a) > (b))) { \
-                throw CroCOSTest::AssertionFailure("Assertion failed: " #a " > " #b); \
-            } \
-        } while(0)
-    
-    #define ASSERT_GE(a, b) \
-        do { \
-            if (!((a) >= (b))) { \
-                throw CroCOSTest::AssertionFailure("Assertion failed: " #a " >= " #b); \
-            } \
-        } while(0)
+    // Binary comparison assertions are template functions rather than macros so that
+    // arguments containing commas (e.g. multi-dimensional subscripts like arr[i, j, k])
+    // are parsed correctly by the C++ parser instead of being split by the preprocessor.
+    template <typename A, typename B>
+    inline void ASSERT_EQ(const A& expected, const B& actual,
+                          std::source_location loc = std::source_location::current()) {
+        if (!(expected == actual))
+            throw AssertionFailure("Assertion failed: expected == actual at " +
+                                   std::string(loc.file_name()) + ":" + std::to_string(loc.line()));
+    }
+
+    template <typename A, typename B>
+    inline void ASSERT_NE(const A& expected, const B& actual,
+                          std::source_location loc = std::source_location::current()) {
+        if (expected == actual)
+            throw AssertionFailure("Assertion failed: expected != actual at " +
+                                   std::string(loc.file_name()) + ":" + std::to_string(loc.line()));
+    }
+
+    template <typename A, typename B>
+    inline void ASSERT_LT(const A& a, const B& b,
+                          std::source_location loc = std::source_location::current()) {
+        if (!(a < b))
+            throw AssertionFailure("Assertion failed: a < b at " +
+                                   std::string(loc.file_name()) + ":" + std::to_string(loc.line()));
+    }
+
+    template <typename A, typename B>
+    inline void ASSERT_LE(const A& a, const B& b,
+                          std::source_location loc = std::source_location::current()) {
+        if (!(a <= b))
+            throw AssertionFailure("Assertion failed: a <= b at " +
+                                   std::string(loc.file_name()) + ":" + std::to_string(loc.line()));
+    }
+
+    template <typename A, typename B>
+    inline void ASSERT_GT(const A& a, const B& b,
+                          std::source_location loc = std::source_location::current()) {
+        if (!(a > b))
+            throw AssertionFailure("Assertion failed: a > b at " +
+                                   std::string(loc.file_name()) + ":" + std::to_string(loc.line()));
+    }
+
+    template <typename A, typename B>
+    inline void ASSERT_GE(const A& a, const B& b,
+                          std::source_location loc = std::source_location::current()) {
+        if (!(a >= b))
+            throw AssertionFailure("Assertion failed: a >= b at " +
+                                   std::string(loc.file_name()) + ":" + std::to_string(loc.line()));
+    }
 
     #define ASSERT_NO_ALLOCS() \
         do { \
@@ -151,5 +162,7 @@ namespace CroCOSTest {
     } \
     void testName()
 }
+
+using namespace CroCOSTest;
 
 #endif //CROCOS_TESTHARNESS_H

@@ -41,10 +41,11 @@ private:
 };
 
 template<typename Filter, typename It>
-concept IteratorFilter = requires(Filter f, It it)
+concept IteratorFilter = requires(Filter f, It it, It other)
 {
-    requires Iterable<It>;
     {f(*it)} -> convertible_to<bool>;
+    {++it};
+    {it != other} -> convertible_to<bool>;
 };
 
 template<typename Filter, typename It>

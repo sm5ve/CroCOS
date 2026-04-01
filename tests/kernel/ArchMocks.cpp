@@ -4,10 +4,21 @@
 
 #include "../test.h"
 #include <arch.h>
+#include <kernel.h>
 #include <thread>
 #include <mutex>
 #include <unordered_map>
 #include <atomic>
+
+// ============================================================================
+// kernel::klog() stub — routes to Core::cout() for test visibility
+// ============================================================================
+
+namespace kernel {
+    Core::AtomicPrintStream klog() {
+        return Core::AtomicPrintStream(Core::cout());
+    }
+}
 
 namespace arch {
     namespace {
