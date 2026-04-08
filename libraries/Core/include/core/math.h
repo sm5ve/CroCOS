@@ -104,31 +104,19 @@ constexpr uint64_t multShift64(uint64_t a, uint64_t mult, uint64_t shift) {
 }
 
 constexpr size_t countTrailingZeros(uint64_t value) {
-#ifdef __x86_64__
     return value == 0 ? 64 : static_cast<size_t>(__builtin_ctzll(value));
-#else
-    if (value == 0) return 64;
-    size_t count = 0;
-    while ((value & 1) == 0) {
-        value >>= 1;
-        count++;
-    }
-    return count;
-#endif
 }
 
 constexpr size_t countTrailingZeros(uint32_t value) {
-#ifdef __x86_64__
     return value == 0 ? 32 : static_cast<size_t>(__builtin_ctz(value));
-#else
-    if (value == 0) return 32;
-    size_t count = 0;
-    while ((value & 1) == 0) {
-        value >>= 1;
-        count++;
-    }
-    return count;
-#endif
+}
+
+constexpr size_t countLeadingZeros(uint64_t value) {
+    return value == 0 ? 64 : static_cast<size_t>(__builtin_clzll(value));
+}
+
+constexpr size_t countLeadingZeros(uint32_t value) {
+    return value == 0 ? 32 : static_cast<size_t>(__builtin_clz(value));
 }
 
 #endif //CROCOS_MATH_H

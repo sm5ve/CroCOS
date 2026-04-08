@@ -10,14 +10,9 @@
 #include <core/utility.h>
 #include <core/atomic.h>
 #include <core/atomic/RingBuffer.h>
-#include <core/ds/LinkedList.h>
-#include <mem/PageAllocatorTuning.h>
-#include <core/Iterator.h>
-#include <core/ds/Trees.h>
+#include <mem/NUMA.h>
 
 #include <mem/mm.h>
-
-#define PA_BITMAP_ITERATOR_CACHE_WORD
 
 // ==================== Struct Definitions ====================
 
@@ -43,7 +38,6 @@ struct PageRef {
     uint64_t value;
 
     static PageRef small(kernel::mm::phys_addr addr);
-
     static PageRef big(kernel::mm::phys_addr addr);
 
     [[nodiscard]] kernel::mm::PageSize size() const;
@@ -59,31 +53,13 @@ constexpr auto INVALID_PAGE_REF = PageRef{static_cast<uint64_t>(-1)};
 
 using PageAllocationCallback = FunctionRef<void(PageRef)>;
 
-struct PoolID {
-    using IDType = SmallestUInt_t<sizeof(arch::ProcessorID) * 8 + 1>;
-    IDType id;
-
-    constexpr PoolID(const arch::ProcessorID pid) : id(pid) {}
-    constexpr PoolID() : id(static_cast<IDType>(-1)) {}
-
-    bool operator==(const PoolID &) const = default;
-    [[nodiscard]] bool global() const;
-};
-
-constexpr PoolID GLOBAL = {};
-using BigPageColor = SmallestUInt_t<log2ceil(MAX_COLOR_COUNT)>;
-constexpr BigPageColor uncolored = MAX_COLOR_COUNT;
-
-enum class BigPageState : uint8_t {
-    FREE,
-    FULL,
-    PARTIALLY_ALLOCATED
-};
+// ==================== Small Page Allocator ====================
 
 class SmallPageAllocator {
     using SmallPageIndex = SmallestUInt_t<log2ceil(kernel::mm::PageAllocator::smallPagesPerBigPage)>;
     using SmallPageCount = SmallestUInt_t<log2ceil(kernel::mm::PageAllocator::smallPagesPerBigPage + 1)>;
     constexpr static size_t bitmapWordCount = kernel::mm::PageAllocator::smallPagesPerBigPage / (8 * sizeof(uint64_t));
+
     SmallPageIndex buffer[kernel::mm::PageAllocator::smallPagesPerBigPage];
     Atomic<uint64_t> occupiedBitmap[bitmapWordCount]{};
     MPMCRingBuffer<SmallPageIndex, false> ringBuffer;
@@ -95,6 +71,7 @@ class SmallPageAllocator {
     [[nodiscard]] bool isPageFree(SmallPageIndex index) const;
     bool markPageFreeState(SmallPageIndex index, bool isFree);
     [[nodiscard]] kernel::mm::phys_addr fromPageIndex(SmallPageIndex index) const;
+
 public:
     explicit SmallPageAllocator(kernel::mm::phys_addr base);
 
@@ -109,123 +86,84 @@ public:
     void reservePage(kernel::mm::phys_addr addr);
 };
 
+// ==================== Big Page Metadata ====================
 
-struct BigPageMetadata {
+class NUMAPool;
 
-};
+class BigPageMetadata {
+    SmallPageAllocator& subpageAllocator;
+    NUMAPool& ownerPool;
 
-struct BigPageLinkedListExtractor {
-    static BigPageMetadata*& previous(BigPageMetadata& m);
-    static BigPageMetadata*& next(BigPageMetadata& m);
-};
-
-struct BigPageColoredLinkedListExtractor {
-    static BigPageMetadata*& previous(BigPageMetadata& m);
-    static BigPageMetadata*& next(BigPageMetadata& m);
-};
-
-enum class PoolPressure : uint8_t {
-    SURPLUS = 0,
-    COMFORTABLE = 1,
-    MODERATE = 2,
-    DESPERATE = 3,
-
-    COUNT
-};
-
-// Traits for converting between index types and bit indices
-template<typename IndexType>
-struct BitmapIndexTraits {
-    // Returns the number of bits required for the given entry count
-    static size_t requiredBits(size_t entryCount);
-    // Converts an index to a bit index
-    static size_t toBitIndex(IndexType index, size_t entryCount);
-    // Converts a bit index back to an index
-    static IndexType fromBitIndex(size_t bitIndex, size_t entryCount);
-};
-
-// Specialization for PoolID: handles global pool as last bit
-// For N processors, we need N+1 bits (0..N-1 for processors, N for global)
-template<>
-struct BitmapIndexTraits<PoolID> {
-    static size_t requiredBits(size_t processorCount) {
-        return processorCount + 1;
-    }
-    static size_t toBitIndex(PoolID pool, size_t processorCount) {
-        return pool.global() ? processorCount : pool.id;
-    }
-    static PoolID fromBitIndex(size_t bitIndex, size_t processorCount) {
-        if (bitIndex == processorCount) {
-            return GLOBAL;
-        }
-        return PoolID(static_cast<arch::ProcessorID>(bitIndex));
-    }
-};
-
-// Specialization for size_t: direct mapping, no special handling
-template<>
-struct BitmapIndexTraits<size_t> {
-    static size_t requiredBits(size_t rangeCount) {
-        return rangeCount;
-    }
-    static size_t toBitIndex(size_t index, size_t) {
-        return index;
-    }
-    static size_t fromBitIndex(size_t bitIndex, size_t) {
-        return bitIndex;
-    }
-};
-
-template<typename IndexType>
-class PressureBitmap {
-    using Traits = BitmapIndexTraits<IndexType>;
-
-    Atomic<uint64_t>* bitmaps[static_cast<size_t>(PoolPressure::COUNT)];
-    size_t entryCount;
 public:
-    class BitmapIterator {
-        Atomic<uint64_t>* bitmapStart;
-        const size_t totalBits;      // Actual number of bits in bitmap
-        const size_t entryCount;     // Semantic count for traits conversion
-#ifdef PA_BITMAP_ITERATOR_CACHE_WORD
-        uint64_t currentWord;
-#endif
-        size_t index;
+    BigPageMetadata(SmallPageAllocator& allocator, NUMAPool& pool);
 
-        void advanceToSetBit();
+    [[nodiscard]] size_t allocatePages(size_t smallPageCount, PageAllocationCallback cb);
+    void freePages(PageRef* pages, size_t count);
 
-    public:
-        BitmapIterator(Atomic<uint64_t>* bitmap, size_t index, size_t totalBits, size_t entryCount);
-        [[nodiscard]] bool atEnd() const;
-        BitmapIterator& operator++();
-        bool operator==(const BitmapIterator& other) const;
-        IndexType operator*() const;
+    [[nodiscard]] bool isFull() const;
+    [[nodiscard]] bool isEmpty() const;
+
+    [[nodiscard]] NUMAPool& getOwnerPool() const { return ownerPool; }
+};
+
+// ==================== Multi-Level Bit Pool ====================
+
+class BitPool {
+    struct alignas(64) CacheLineEntry {
+        Atomic<uint64_t> hintBitmap;
+        Atomic<int64_t> count;
+        uint8_t padding[48];  // 64 - 8 - 8 = 48 bytes padding
     };
 
-    static void measureAllocation(BootstrapAllocator& allocator, size_t entryCount);
-    PressureBitmap(BootstrapAllocator& allocator, size_t entryCount);
+    struct Level {
+        CacheLineEntry* entries;
+        size_t numWords;
+    };
 
-    // Move constructor and assignment for lazy initialization
-    PressureBitmap(PressureBitmap&& other) noexcept;
-    PressureBitmap& operator=(PressureBitmap&& other) noexcept;
+    struct L0Location {
+        size_t l1EntryIndex;  // Which L1 entry (which L0 word)
+        size_t bitIndex;      // Which bit in that word
+    };
 
-    // Delete copy operations
-    PressureBitmap(const PressureBitmap&) = delete;
-    PressureBitmap& operator=(const PressureBitmap&) = delete;
+    Level* levels;
+    size_t numLevels;
+    Atomic<uint64_t>* l0Bitmap;  // L0 is just bitmap
 
-    void markPressure(IndexType index, PoolPressure pressure);
+    [[nodiscard]] L0Location pageToL0Location(size_t pageIndex) const {
+        // In inverted tree:
+        // - Bottom (numLevels - 1) levels use 6 bits each
+        // - Top bits index within L0 word (up to 64 bits)
 
-    [[nodiscard]] IteratorRange<BitmapIterator> poolsWithPressure(PoolPressure pressure) const;
-};
+        size_t bitsForTree = (numLevels - 1) * 6;
+        size_t l1EntryIndex = pageIndex & ((1ULL << bitsForTree) - 1);
+        size_t l0BitIndex = pageIndex >> bitsForTree;
 
-enum class AllocationDesperation : uint8_t{
-    RELAXED,
-    MODERATE,
-    DESPERATE
-};
+        return {l1EntryIndex, l0BitIndex};
+    }
 
-struct BigPagePool {
+    bool tryClaimBit(size_t pageIndex);
+    bool tryClearBit(size_t pageIndex);
+    void incrementCounts(size_t pageIndex);
+    void decrementCounts(size_t pageIndex);
 
+    // Recursive get with rotation-based selection
+    bool tryGetFromSubtree(size_t level, size_t wordIndex, size_t cpuId,
+                          size_t retryCount, size_t& outPageIndex);
+
+public:
+    BitPool(size_t numPages, void* storage);
+
+    // Add a PA page to the pool (returns false if already in pool)
+    bool add(size_t bitIndex);
+
+    // Remove a specific PA page from the pool (returns false if not in pool)
+    bool remove(size_t bitIndex);
+
+    // Get any PA page from the pool (returns false if pool is empty or contended)
+    bool getAny(size_t cpuId, size_t& outPageIndex, size_t maxRetries = 8);
+
+    static size_t levelsRequired(size_t numPages);
+    static size_t storageRequired(size_t numPages);
 };
 
 #endif //CROCOS_PAGEALLOCATOR_H

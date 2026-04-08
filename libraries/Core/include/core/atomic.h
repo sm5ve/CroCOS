@@ -541,8 +541,16 @@ public:
         return atomic_add_fetch(value, val, mem_order);
     }
 
+    T fetch_add(T val, MemoryOrder mem_order = SEQ_CST) requires is_integral_v<T>{
+        return atomic_fetch_add(value, val, mem_order);
+    }
+
     T sub_fetch(T val, MemoryOrder mem_order = SEQ_CST) requires is_integral_v<T>{
         return atomic_sub_fetch(value, val, mem_order);
+    }
+
+    T fetch_sub(T val, MemoryOrder mem_order = SEQ_CST) requires is_integral_v<T>{
+        return atomic_fetch_sub(value, val, mem_order);
     }
 
     T operator++(int) requires is_integral_v<T>{  // Post-increment: return old value

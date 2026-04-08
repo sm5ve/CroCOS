@@ -13,21 +13,6 @@ constexpr size_t bigPagesInRange(const kernel::mm::phys_memory_range range) {
     return (alignedTop - alignedBottom)/arch::bigPageSize;
 }
 
-constexpr size_t computeModerateThreshold(kernel::mm::phys_memory_range r, size_t cpuCount) {
-    auto bigPagesPerCPU = bigPagesInRange(r)/cpuCount;
-    return max(bigPagesPerCPU/8, MODERATE_THRESHOLD_MINIMUM);
-}
-
-constexpr size_t computeComfortableThreshold(kernel::mm::phys_memory_range r, size_t cpuCount) {
-    auto bigPagesPerCPU = bigPagesInRange(r)/cpuCount;
-    return max(bigPagesPerCPU/4, MODERATE_THRESHOLD_MINIMUM * 2);
-}
-
-constexpr size_t computeSurplusThreshold(kernel::mm::phys_memory_range r, size_t cpuCount) {
-    auto bigPagesPerCPU = bigPagesInRange(r)/cpuCount;
-    return max(bigPagesPerCPU/2, MODERATE_THRESHOLD_MINIMUM * 4);
-}
-
 // ================= Bootstrap Allocator ==================
 
 using namespace kernel;
@@ -44,7 +29,8 @@ T* BootstrapAllocator::allocate(const size_t count) {
     const size_t alignment = alignof(T);
     const auto addr = reinterpret_cast<size_t>(current);
     const size_t aligned = roundUpToNearestMultiple(addr, alignment);
-    const size_t size = sizeof(T) * count;
+    const size_t paddedObjSize = roundUpToNearestMultiple(sizeof(T), alignof(T));
+    const size_t size = paddedObjSize * (count - 1) + sizeof(T);
 
     if (measuring) {
         current = reinterpret_cast<uint8_t *>(aligned + size);
@@ -67,18 +53,6 @@ size_t BootstrapAllocator::bytesRemaining() const {
     return measuring ? 0ul : static_cast<size_t>(end - current);
 }
 
-//For eventual use in higher-level allocation policies
-bool tryAcquireLock(arch::InterruptDisablingPrioritySpinlock& spinlock, size_t retryIterations = LOCK_RETRY_COUNT, size_t delayCount = LOCK_DELAY_ITERATIONS) {
-    for (size_t i = 0; i < retryIterations; i++) {
-        if (spinlock.tryAcquire()) {
-            return true;
-        }
-        for (size_t j = 0; j < delayCount; j++) {
-            tight_spin();
-        }
-    }
-    return false;
-}
 // ======================= PageRef ========================
 mm::phys_addr PageRef::addr() const {
     return mm::phys_addr{value & ~(arch::smallPageSize - 1)};
@@ -112,12 +86,6 @@ void PageRef::setRunLength(const size_t length) {
 size_t PageRef::runLength() const {
     //Add 1 since the smallest run is of length 1.
     return ((value & pageRefRunMask) >> 1) + 1;
-}
-
-// ==================== PoolID ====================
-
-bool PoolID::global() const {
-    return id == static_cast<IDType>(-1);
 }
 
 // ==================== SmallPageAllocator ====================
@@ -213,6 +181,7 @@ bool SmallPageAllocator::isPageFree(PageRef page) const {
 void SmallPageAllocator::free(PageRef *pages, size_t count) {
     ringBuffer.bulkWrite(count, [&](auto index, auto& entry) {
         const auto addrRaw = pages[index].addr().value;
+        assert((addrRaw & ~(arch::bigPageSize - 1)) == baseAddr.value, "Tried to free small page in wrong small page allocator");
         const SmallPageIndex pageIndex = (addrRaw / arch::smallPageSize) % mm::PageAllocator::smallPagesPerBigPage;
         const bool wasFree = markPageFreeState(pageIndex, true);
         assert(!wasFree, "Double free: page is already free");
@@ -249,176 +218,18 @@ void SmallPageAllocator::reservePage(kernel::mm::phys_addr addr) {
 
 // ==================== BigPageMetadata ====================
 
-// ==================== BigPageLinkedListExtractor ====================
-
-// ==================== BigPageColoredLinkedListExtractor ====================
-
-// ==================== BigPagePool ====================
-
-// ==================== PressureBitmap ====================
-
-template<typename IndexType>
-void PressureBitmap<IndexType>::measureAllocation(BootstrapAllocator& allocator, size_t entryCount) {
-    constexpr size_t BITS_PER_WORD = 64;
-    const size_t requiredBits = Traits::requiredBits(entryCount);
-    const size_t bitmapWords = divideAndRoundUp(requiredBits, BITS_PER_WORD);
-    // Measure 4 bitmaps (one per pressure level), each with bitmapWords words
-    allocator.allocate<Atomic<uint64_t>>(bitmapWords * static_cast<size_t>(PoolPressure::COUNT));
+size_t BigPageMetadata::allocatePages(size_t smallPageCount, PageAllocationCallback cb) {
+    return subpageAllocator.alloc(cb, smallPageCount);
 }
 
-template<typename IndexType>
-PressureBitmap<IndexType>::PressureBitmap(BootstrapAllocator& allocator, size_t count)
-    : entryCount(count) {
-    constexpr size_t BITS_PER_WORD = 64;
-    const size_t requiredBits = Traits::requiredBits(entryCount);
-    const size_t bitmapWords = divideAndRoundUp(requiredBits, BITS_PER_WORD);
-    for (auto& bitmap : bitmaps) {
-        bitmap = allocator.allocate<Atomic<uint64_t>>(bitmapWords);
-        // Initialize all words to 0
-        for (size_t j = 0; j < bitmapWords; j++) {
-            bitmap[j].store(0, RELAXED);
-        }
-    }
+void BigPageMetadata::freePages(PageRef *pages, size_t count) {
+    subpageAllocator.free(pages, count);
 }
 
-template<typename IndexType>
-PressureBitmap<IndexType>::PressureBitmap(PressureBitmap&& other) noexcept
-    : entryCount(other.entryCount) {
-    for (size_t i = 0; i < static_cast<size_t>(PoolPressure::COUNT); i++) {
-        bitmaps[i] = other.bitmaps[i];
-        other.bitmaps[i] = nullptr;
-    }
-    other.entryCount = 0;
+bool BigPageMetadata::isEmpty() const {
+    return subpageAllocator.isEmpty();
 }
 
-template<typename IndexType>
-PressureBitmap<IndexType>& PressureBitmap<IndexType>::operator=(PressureBitmap&& other) noexcept {
-    if (this != &other) {
-        entryCount = other.entryCount;
-        for (size_t i = 0; i < static_cast<size_t>(PoolPressure::COUNT); i++) {
-            bitmaps[i] = other.bitmaps[i];
-            other.bitmaps[i] = nullptr;
-        }
-        other.entryCount = 0;
-    }
-    return *this;
+bool BigPageMetadata::isFull() const {
+    return subpageAllocator.isFull();
 }
-
-template<typename IndexType>
-void PressureBitmap<IndexType>::markPressure(IndexType index, PoolPressure pressure) {
-    constexpr size_t BITS_PER_WORD = 64;
-    const size_t bitIndex = Traits::toBitIndex(index, entryCount);
-    const size_t wordIndex = bitIndex / BITS_PER_WORD;
-    const uint64_t bitMask = 1ULL << (bitIndex % BITS_PER_WORD);
-
-    // First set bit in target pressure level
-    bitmaps[static_cast<size_t>(pressure)][wordIndex].fetch_or(bitMask, RELAXED);
-
-    // Then clear bit from all other pressure levels
-    for (size_t i = 0; i < static_cast<size_t>(PoolPressure::COUNT); i++) {
-        if (i != static_cast<size_t>(pressure))
-            bitmaps[i][wordIndex].fetch_and(~bitMask, RELAXED);
-    }
-}
-
-template<typename IndexType>
-IteratorRange<typename PressureBitmap<IndexType>::BitmapIterator> PressureBitmap<IndexType>::poolsWithPressure(PoolPressure pressure) const {
-    const size_t requiredBits = Traits::requiredBits(entryCount);
-    Atomic<uint64_t>* bitmap = bitmaps[static_cast<size_t>(pressure)];
-    return {BitmapIterator(bitmap, 0, requiredBits, entryCount), BitmapIterator(bitmap, requiredBits, requiredBits, entryCount)};
-}
-
-template<typename IndexType>
-PressureBitmap<IndexType>::BitmapIterator::BitmapIterator(Atomic<uint64_t>* bitmap, size_t idx, size_t total, size_t count)
-    : bitmapStart(bitmap), totalBits(total), entryCount(count), index(idx) {
-#ifdef PA_BITMAP_ITERATOR_CACHE_WORD
-    currentWord = 0;
-#endif
-    // Only advance if not at the end
-    if (index < totalBits) {
-        advanceToSetBit();
-    }
-}
-
-template<typename IndexType>
-void PressureBitmap<IndexType>::BitmapIterator::advanceToSetBit() {
-    constexpr size_t BITS_PER_WORD = 64;
-
-#ifdef PA_BITMAP_ITERATOR_CACHE_WORD
-    while (index < totalBits) {
-        size_t wordIndex = index / BITS_PER_WORD;
-        size_t bitOffset = index % BITS_PER_WORD;
-
-        // If we're at the start of a new word, load it
-        if (bitOffset == 0) {
-            currentWord = bitmapStart[wordIndex].load(RELAXED);
-        }
-
-        // Mask off bits before our current position
-        uint64_t maskedWord = currentWord & ~((1ULL << bitOffset) - 1);
-
-        if (maskedWord != 0) {
-            // Found a set bit
-            size_t bitPosition = countTrailingZeros(maskedWord);
-            index = wordIndex * BITS_PER_WORD + bitPosition;
-            return;
-        }
-
-        // No set bits in remainder of this word, move to next word
-        index = (wordIndex + 1) * BITS_PER_WORD;
-    }
-#else
-    while (index < totalBits) {
-        size_t wordIndex = index / BITS_PER_WORD;
-        size_t bitOffset = index % BITS_PER_WORD;
-
-        uint64_t word = bitmapStart[wordIndex].load(RELAXED);
-
-        // Mask off bits before our current position
-        uint64_t maskedWord = word & ~((1ULL << bitOffset) - 1);
-
-        if (maskedWord != 0) {
-            // Found a set bit
-            size_t bitPosition = countTrailingZeros(maskedWord);
-            index = wordIndex * BITS_PER_WORD + bitPosition;
-            return;
-        }
-
-        // No set bits in remainder of this word, move to next word
-        index = (wordIndex + 1) * BITS_PER_WORD;
-    }
-#endif
-    // Clamp to totalBits to ensure iterator equals end() when exhausted
-    if (index > totalBits) {
-        index = totalBits;
-    }
-}
-
-template<typename IndexType>
-bool PressureBitmap<IndexType>::BitmapIterator::atEnd() const {
-    return index >= totalBits;
-}
-
-template<typename IndexType>
-typename PressureBitmap<IndexType>::BitmapIterator& PressureBitmap<IndexType>::BitmapIterator::operator++() {
-    if (index < totalBits) {
-        index++;
-        advanceToSetBit();
-    }
-    return *this;
-}
-
-template<typename IndexType>
-bool PressureBitmap<IndexType>::BitmapIterator::operator==(const BitmapIterator& other) const {
-    return index == other.index && bitmapStart == other.bitmapStart;
-}
-
-template<typename IndexType>
-IndexType PressureBitmap<IndexType>::BitmapIterator::operator*() const {
-    return Traits::fromBitIndex(index, entryCount);
-}
-
-// Explicit template instantiations
-template class PressureBitmap<PoolID>;
-template class PressureBitmap<size_t>;
-

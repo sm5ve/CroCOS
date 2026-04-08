@@ -23,6 +23,7 @@ target_sources(CoreTests PRIVATE
     VectorTest.cpp
     LinkedListTests.cpp
     AtomicLinkedListTest.cpp
+    AtomicBitPoolTest.cpp
 )
 
 # Add the TestHarness from parent directory
@@ -37,6 +38,7 @@ target_sources(CoreTests PRIVATE
     ../../libraries/Core/PrintStream.cpp
     ../../libraries/Core/str.cpp
     ../../libraries/Core/atomic/atomic.cpp
+    ../../libraries/Core/atomic/AtomicBitPool.cpp
     ../../libraries/Core/Object.cpp
 )
 
@@ -66,6 +68,13 @@ set_source_files_properties(
     ../../libraries/Core/atomic/atomic.cpp
     ../../libraries/Core/Object.cpp
     PROPERTIES COMPILE_FLAGS "-include ${CMAKE_CURRENT_SOURCE_DIR}/../test.h -DCROCOS_TEST_INSTRUMENT_ALLOCATORS"
+)
+
+# AtomicBitPool.cpp uses memset; include string.h to ensure it is declared in
+# the freestanding-style test build (no -ffreestanding, but no implicit includes).
+set_source_files_properties(
+    ../../libraries/Core/atomic/AtomicBitPool.cpp
+    PROPERTIES COMPILE_FLAGS "-include ${CMAKE_CURRENT_SOURCE_DIR}/../test.h -DCROCOS_TEST_INSTRUMENT_ALLOCATORS -include string.h"
 )
 
 # Custom PRE_LINK command to instrument object files before linking

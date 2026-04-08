@@ -10,6 +10,7 @@ set(CORE_SOURCES
         include/core/ds/IndexedHashtable.h
         mem.cpp
         FrequencyData.cpp
+        atomic/AtomicBitPool.cpp
 )
 
 #Special version of Core meant to be linked with the kernel
