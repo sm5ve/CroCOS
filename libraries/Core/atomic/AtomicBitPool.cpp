@@ -104,20 +104,34 @@ size_t AtomicBitPool::bitIndexInParent(size_t entryIndex, size_t level) const {
     return entryIndex & ((1ull << parentShift) - 1);
 }
 
-int64_t AtomicBitPool::incrementCount(size_t entryIndex, size_t level) {
+AtomicBitPool::CountResult AtomicBitPool::incrementCount(size_t entryIndex, size_t level) {
     int64_t oldCount = entryAt(entryIndex, level).count.fetch_add(1, bpAcqRel);
-    if (oldCount == 0 && level < levelCount - 1)
-        entryAt(parentEntryIndex(entryIndex, level), level + 1)
-            .bitmap.fetch_xor(1ull << bitIndexInParent(entryIndex, level), bpRelease);
-    return oldCount + 1;
+    CountResult result{oldCount + 1, false, false};
+    if (oldCount == 0 && level < levelCount - 1) {
+        size_t parentIdx = parentEntryIndex(entryIndex, level);
+        uint64_t bit = 1ull << bitIndexInParent(entryIndex, level);
+        uint64_t oldBitmap = entryAt(parentIdx, level + 1).bitmap.fetch_xor(bit, bpRelease);
+        if (level == levelCount - 2) {
+            result.toggledTopLevel = true;
+            result.poolTransitioned = (oldBitmap == 0); // was empty → AddedToEmpty
+        }
+    }
+    return result;
 }
 
-int64_t AtomicBitPool::decrementCount(size_t entryIndex, size_t level) {
+AtomicBitPool::CountResult AtomicBitPool::decrementCount(size_t entryIndex, size_t level) {
     int64_t oldCount = entryAt(entryIndex, level).count.fetch_sub(1, bpAcqRel);
-    if (oldCount == 1 && level < levelCount - 1)
-        entryAt(parentEntryIndex(entryIndex, level), level + 1)
-            .bitmap.fetch_xor(1ull << bitIndexInParent(entryIndex, level), bpRelease);
-    return oldCount - 1;
+    CountResult result{oldCount - 1, false, false};
+    if (oldCount == 1 && level < levelCount - 1) {
+        size_t parentIdx = parentEntryIndex(entryIndex, level);
+        uint64_t bit = 1ull << bitIndexInParent(entryIndex, level);
+        uint64_t oldBitmap = entryAt(parentIdx, level + 1).bitmap.fetch_xor(bit, bpRelease);
+        if (level == levelCount - 2) {
+            result.toggledTopLevel = true;
+            result.poolTransitioned = ((oldBitmap ^ bit) == 0); // became empty → RemovedAndMadeEmpty
+        }
+    }
+    return result;
 }
 
 AtomicBitPool::AddResult AtomicBitPool::add(size_t absoluteIndex) {
@@ -127,11 +141,22 @@ AtomicBitPool::AddResult AtomicBitPool::add(size_t absoluteIndex) {
     uint64_t old = entryAt(l0Entry, 0).bitmap.fetch_or(mask, bpAcqRel);
     if (old & mask) return AddResult::AlreadyPresent;
 
-    for (size_t k = 0; k < levelCount; k++) {
+    // levelCount == 1: the single L0 entry is also LN; no XOR ever fires.
+    // Detect emptiness directly from the fetch_or old value (old==0 → was empty).
+    if (levelCount == 1)
+        return (old == 0) ? AddResult::AddedToEmpty : AddResult::AddedToNonempty;
+
+    // Update counts from L0 up through levelCount-2. The count at LN (levelCount-1)
+    // is no longer maintained; AddedToEmpty is derived from the LN bitmap XOR at
+    // levelCount-2.
+    for (size_t k = 0; k < levelCount - 1; k++) {
         size_t entry = entryIndexForLevel(absoluteIndex, k);
-        bool wasEmpty = (incrementCount(entry, k) == 1);
-        if (k == levelCount - 1)
-            return wasEmpty ? AddResult::AddedToEmpty : AddResult::AddedToNonempty;
+        CountResult cr = incrementCount(entry, k);
+        if (k == levelCount - 2) {
+            if (cr.toggledTopLevel && cr.poolTransitioned)
+                return AddResult::AddedToEmpty;
+            return AddResult::AddedToNonempty;
+        }
     }
 
     // unreachable
@@ -139,20 +164,35 @@ AtomicBitPool::AddResult AtomicBitPool::add(size_t absoluteIndex) {
 }
 
 AtomicBitPool::RemoveResult AtomicBitPool::remove(size_t absoluteIndex) {
-    // Phase 1: walk downward decrementing counts, capturing top level transition
-    bool topWasOne = false;
-    for (size_t k = levelCount; k-- > 0;) {
+    // levelCount == 1: the single L0 entry is also LN; no XOR ever fires and
+    // no counts are maintained.  Clear the bit directly and derive emptiness
+    // from whether any bits remain in the L0 bitmap after the clear.
+    if (levelCount == 1) {
+        size_t l0Entry = entryIndexForLevel(absoluteIndex, 0);
+        size_t l0Bit   = bitIndexForLevel(absoluteIndex, 0);
+        uint64_t mask  = uint64_t(1) << l0Bit;
+        uint64_t old   = entryAt(l0Entry, 0).bitmap.fetch_and(~mask, bpAcqRel);
+        if (!(old & mask)) return RemoveResult::NotPresent;
+        return ((old & ~mask) == 0) ? RemoveResult::RemovedAndMadeEmpty
+                                    : RemoveResult::RemovedAndStayedNonempty;
+    }
+
+    // Phase 1: walk downward (levelCount-2 → 0) decrementing counts.
+    // The LN (levelCount-1) count is not maintained; RemovedAndMadeEmpty is
+    // derived from the LN bitmap XOR that fires from level levelCount-2.
+    bool madeEmpty = false;
+    for (size_t k = levelCount - 1; k-- > 0;) {
         size_t entry = entryIndexForLevel(absoluteIndex, k);
-        int64_t newCount = decrementCount(entry, k);
-        if (newCount < 0) {
+        CountResult cr = decrementCount(entry, k);
+        if (cr.newCount < 0) {
             // back out: undo the decrement at level k, then restore all higher
             // levels that were already decremented in earlier loop iterations
-            for (size_t j = k; j < levelCount; j++)
+            for (size_t j = k; j < levelCount - 1; j++)
                 incrementCount(entryIndexForLevel(absoluteIndex, j), j);
             return RemoveResult::NotPresent;
         }
-        if (k == levelCount - 1)
-            topWasOne = (newCount == 0);
+        if (k == levelCount - 2 && cr.toggledTopLevel)
+            madeEmpty = cr.poolTransitioned;
     }
 
     // Phase 2: attempt to clear the L0 bit
@@ -162,12 +202,12 @@ AtomicBitPool::RemoveResult AtomicBitPool::remove(size_t absoluteIndex) {
     uint64_t old = entryAt(l0Entry, 0).bitmap.fetch_and(~mask, bpAcqRel);
     if (!(old & mask)) {
         // bit was already clear, back out all count decrements
-        for (size_t j = 0; j < levelCount; j++)
+        for (size_t j = 0; j < levelCount - 1; j++)
             incrementCount(entryIndexForLevel(absoluteIndex, j), j);
         return RemoveResult::NotPresent;
     }
 
-    return topWasOne ? RemoveResult::RemovedAndMadeEmpty : RemoveResult::RemovedAndStayedNonempty;
+    return madeEmpty ? RemoveResult::RemovedAndMadeEmpty : RemoveResult::RemovedAndStayedNonempty;
 }
 
 AtomicBitPool::GetResult AtomicBitPool::getAny(size_t threadId, size_t& outIndex, size_t maxRetries) {
@@ -210,11 +250,8 @@ AtomicBitPool::GetResult AtomicBitPool::getAny(size_t threadId, size_t& outIndex
             uint64_t mask = uint64_t(1) << actualBit;
             uint64_t old = entryAt(entryIndex, 0).bitmap.fetch_and(~mask, bpAcqRel);
             if (old & mask) {
-                // Successfully claimed the bit.  The downward traversal decremented
-                // counts for levels 0..levelCount-2 (via the higher-level loop), but
-                // the root count at level levelCount-1 (always entry 0) was never
-                // touched.  Decrement it now to keep all counts consistent.
-                decrementCount(0, levelCount - 1);
+                // Successfully claimed the bit.  The LN count is no longer maintained,
+                // so no additional decrement is needed here.
                 outIndex = (entryIndex << 6) | actualBit;
                 return GetResult::Success;
             }
@@ -246,8 +283,8 @@ AtomicBitPool::GetResult AtomicBitPool::getAny(size_t threadId, size_t& outIndex
         size_t actualBit = doRotation(bitmap);
         size_t childEntry = childEntryIndex(entryIndex, actualBit, level);
 
-        int64_t newCount = decrementCount(childEntry, level - 1);
-        if (newCount < 0) {
+        CountResult cr = decrementCount(childEntry, level - 1);
+        if (cr.newCount < 0) {
             incrementCount(childEntry, level - 1);
             retryCount++;
             continue;
@@ -278,16 +315,21 @@ bool AtomicBitPool::checkInvariants() const {
                     expectedBitmap |= uint64_t(1) << c;
             }
             const Entry& entry = entryAt(e, k + 1);
-            if (entry.count.load() != expectedCount) return false;
+            // The LN count is intentionally unused; only check it for non-LN levels.
+            bool isLnLevel = (k + 1 == levelCount - 1);
+            if (!isLnLevel && entry.count.load() != expectedCount) return false;
             if (entry.bitmap.load() != expectedBitmap) return false;
         }
         numEntries = numChildEntries;
     }
-    // Check L0: count should equal popcount of bitmap
-    for (size_t e = 0; e < numEntries; e++) {
-        const Entry& entry = entryAt(e, 0);
-        uint64_t bitmap = entry.bitmap.load();
-        if (entry.count.load() != __builtin_popcountll(bitmap)) return false;
+    // Check L0: count should equal popcount of bitmap.
+    // For levelCount == 1, L0 is also LN; its count is not maintained, so skip.
+    if (levelCount > 1) {
+        for (size_t e = 0; e < numEntries; e++) {
+            const Entry& entry = entryAt(e, 0);
+            uint64_t bitmap = entry.bitmap.load();
+            if (entry.count.load() != __builtin_popcountll(bitmap)) return false;
+        }
     }
     return true;
 }

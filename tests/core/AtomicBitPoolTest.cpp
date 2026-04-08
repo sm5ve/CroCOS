@@ -592,3 +592,32 @@ static void runGetAnyConcurrentStress(size_t capacity) {
 TEST_WITH_TIMEOUT(AtomicBitPool_GetAnyConcurrentStress_Capacity64,   5000) { runGetAnyConcurrentStress(64); }
 TEST_WITH_TIMEOUT(AtomicBitPool_GetAnyConcurrentStress_Capacity256,  5000) { runGetAnyConcurrentStress(256); }
 TEST_WITH_TIMEOUT(AtomicBitPool_GetAnyConcurrentStress_Capacity8192, 5000) { runGetAnyConcurrentStress(8192); }
+
+// ============================================================
+// Emptiness transitions: AddedToEmpty / RemovedAndMadeEmpty
+//
+// Explicitly exercises the LN bitmap-derived emptiness signal for
+// each pool depth: levelCount==1 (cap 64), levelCount==2 (cap 128),
+// and levelCount==3 (cap 8192).
+// ============================================================
+
+static void testEmptinessTransitions(size_t capacity) {
+    PoolFixture f(capacity);
+
+    // Empty pool: first add must return AddedToEmpty
+    checkedAdd(f, 0, AR::AddedToEmpty);
+    // Second add to a non-empty pool: AddedToNonempty
+    checkedAdd(f, 1, AR::AddedToNonempty);
+    // Remove one, pool stays nonempty
+    checkedRemove(f, 0, RR::RemovedAndStayedNonempty);
+    // Remove last element: pool becomes empty
+    checkedRemove(f, 1, RR::RemovedAndMadeEmpty);
+
+    // Pool is empty again; next add must return AddedToEmpty
+    checkedAdd(f, capacity - 1, AR::AddedToEmpty);
+    checkedRemove(f, capacity - 1, RR::RemovedAndMadeEmpty);
+}
+
+TEST(AtomicBitPool_EmptinessTransitions_LevelCount1) { testEmptinessTransitions(64); }
+TEST(AtomicBitPool_EmptinessTransitions_LevelCount2) { testEmptinessTransitions(128); }
+TEST(AtomicBitPool_EmptinessTransitions_LevelCount3) { testEmptinessTransitions(8192); }

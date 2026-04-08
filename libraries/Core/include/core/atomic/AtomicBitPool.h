@@ -15,6 +15,18 @@ class AtomicBitPool {
         Atomic<int64_t> count;
     };
 
+    // Result returned by incrementCount / decrementCount.
+    // toggledTopLevel is true when a bitmap XOR was fired on the LN (top-level)
+    // bitmap from the level below it (levelCount - 2).
+    // poolTransitioned meaning:
+    //   - for incrementCount: the LN bitmap was zero before the XOR (AddedToEmpty signal)
+    //   - for decrementCount: the LN bitmap became zero after the XOR (RemovedAndMadeEmpty signal)
+    struct CountResult {
+        int64_t  newCount;
+        bool     toggledTopLevel;
+        bool     poolTransitioned;
+    };
+
     void* storage;
     size_t entryStride;
     size_t levelCount;
@@ -33,8 +45,8 @@ class AtomicBitPool {
     [[nodiscard]] size_t parentEntryIndex(size_t entryIndex, size_t level) const;
     [[nodiscard]] size_t bitIndexInParent(size_t entryIndex, size_t level) const;
 
-    int64_t incrementCount(size_t entryIndex, size_t level);
-    int64_t decrementCount(size_t entryIndex, size_t level);
+    CountResult incrementCount(size_t entryIndex, size_t level);
+    CountResult decrementCount(size_t entryIndex, size_t level);
 
 public:
     enum class AddResult {
