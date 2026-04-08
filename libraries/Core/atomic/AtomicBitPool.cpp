@@ -5,6 +5,18 @@
 #include <assert.h>
 #include <core/math.h>
 
+#define STRONG_ORDER
+
+#ifdef STRONG_ORDER
+static constexpr MemoryOrder bpAcqRel  = SEQ_CST;
+static constexpr MemoryOrder bpAcquire = SEQ_CST;
+static constexpr MemoryOrder bpRelease = SEQ_CST;
+#else
+static constexpr MemoryOrder bpAcqRel  = ACQ_REL;
+static constexpr MemoryOrder bpAcquire = ACQUIRE;
+static constexpr MemoryOrder bpRelease = RELEASE;
+#endif
+
 static size_t computeLevelCount(const size_t capacity) {
     if (capacity <= 64) return 1;
     // smallest n s.t. 64^n >= capacity
@@ -93,18 +105,18 @@ size_t AtomicBitPool::bitIndexInParent(size_t entryIndex, size_t level) const {
 }
 
 int64_t AtomicBitPool::incrementCount(size_t entryIndex, size_t level) {
-    int64_t oldCount = entryAt(entryIndex, level).count.fetch_add(1);
+    int64_t oldCount = entryAt(entryIndex, level).count.fetch_add(1, bpAcqRel);
     if (oldCount == 0 && level < levelCount - 1)
         entryAt(parentEntryIndex(entryIndex, level), level + 1)
-            .bitmap.fetch_xor(1ull << bitIndexInParent(entryIndex, level));
+            .bitmap.fetch_xor(1ull << bitIndexInParent(entryIndex, level), bpRelease);
     return oldCount + 1;
 }
 
 int64_t AtomicBitPool::decrementCount(size_t entryIndex, size_t level) {
-    int64_t oldCount = entryAt(entryIndex, level).count.fetch_sub(1);
+    int64_t oldCount = entryAt(entryIndex, level).count.fetch_sub(1, bpAcqRel);
     if (oldCount == 1 && level < levelCount - 1)
         entryAt(parentEntryIndex(entryIndex, level), level + 1)
-            .bitmap.fetch_xor(1ull << bitIndexInParent(entryIndex, level));
+            .bitmap.fetch_xor(1ull << bitIndexInParent(entryIndex, level), bpRelease);
     return oldCount - 1;
 }
 
@@ -112,7 +124,7 @@ AtomicBitPool::AddResult AtomicBitPool::add(size_t absoluteIndex) {
     size_t l0Entry = entryIndexForLevel(absoluteIndex, 0);
     size_t l0Bit = bitIndexForLevel(absoluteIndex, 0);
     uint64_t mask = uint64_t(1) << l0Bit;
-    uint64_t old = entryAt(l0Entry, 0).bitmap.fetch_or(mask);
+    uint64_t old = entryAt(l0Entry, 0).bitmap.fetch_or(mask, bpAcqRel);
     if (old & mask) return AddResult::AlreadyPresent;
 
     for (size_t k = 0; k < levelCount; k++) {
@@ -147,7 +159,7 @@ AtomicBitPool::RemoveResult AtomicBitPool::remove(size_t absoluteIndex) {
     size_t l0Entry = entryIndexForLevel(absoluteIndex, 0);
     size_t l0Bit = bitIndexForLevel(absoluteIndex, 0);
     uint64_t mask = uint64_t(1) << l0Bit;
-    uint64_t old = entryAt(l0Entry, 0).bitmap.fetch_and(~mask);
+    uint64_t old = entryAt(l0Entry, 0).bitmap.fetch_and(~mask, bpAcqRel);
     if (!(old & mask)) {
         // bit was already clear, back out all count decrements
         for (size_t j = 0; j < levelCount; j++)
@@ -187,7 +199,7 @@ AtomicBitPool::GetResult AtomicBitPool::getAny(size_t threadId, size_t& outIndex
 
     while (retryCount <= maxRetries) {
         if (level == 0) {
-            uint64_t bitmap = entryAt(entryIndex, 0).bitmap.load();
+            uint64_t bitmap = entryAt(entryIndex, 0).bitmap.load(bpAcquire);
             // For levelCount == 1 the root is the L0 entry itself; the higher-level
             // empty check is never reached, so we must detect an empty bitmap here.
             if (bitmap == 0 && levelCount == 1) {
@@ -196,7 +208,7 @@ AtomicBitPool::GetResult AtomicBitPool::getAny(size_t threadId, size_t& outIndex
             }
             size_t actualBit = doRotation(bitmap);
             uint64_t mask = uint64_t(1) << actualBit;
-            uint64_t old = entryAt(entryIndex, 0).bitmap.fetch_and(~mask);
+            uint64_t old = entryAt(entryIndex, 0).bitmap.fetch_and(~mask, bpAcqRel);
             if (old & mask) {
                 // Successfully claimed the bit.  The downward traversal decremented
                 // counts for levels 0..levelCount-2 (via the higher-level loop), but
@@ -212,7 +224,7 @@ AtomicBitPool::GetResult AtomicBitPool::getAny(size_t threadId, size_t& outIndex
         }
 
         // Higher level: use hint bitmap to select a child
-        uint64_t bitmap = entryAt(entryIndex, level).bitmap.load();
+        uint64_t bitmap = entryAt(entryIndex, level).bitmap.load(bpAcquire);
         if (bitmap == 0) {
             if (level == levelCount - 1) {
                 backout();

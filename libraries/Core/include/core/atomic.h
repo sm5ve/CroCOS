@@ -13,6 +13,7 @@ const size_t _atomic_global_lock_count = (1 << 4);
 #ifdef __GNUC__
 enum MemoryOrder : int{
     SEQ_CST = __ATOMIC_SEQ_CST,
+    ACQ_REL = __ATOMIC_ACQ_REL,
     ACQUIRE = __ATOMIC_ACQUIRE,
     RELEASE = __ATOMIC_RELEASE,
     RELAXED = __ATOMIC_RELAXED
