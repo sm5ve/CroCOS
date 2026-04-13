@@ -25,8 +25,12 @@ BootstrapAllocator::BootstrapAllocator(void* buffer, size_t size)
           measuring(false) {}
 
 template<typename T>
-T* BootstrapAllocator::allocate(const size_t count) {
-    const size_t alignment = alignof(T);
+T* BootstrapAllocator::allocate() {
+    return allocate<T>(1);
+}
+
+template<typename T>
+T* BootstrapAllocator::allocate(const size_t count, size_t alignment) {
     const auto addr = reinterpret_cast<size_t>(current);
     const size_t aligned = roundUpToNearestMultiple(addr, alignment);
     const size_t paddedObjSize = roundUpToNearestMultiple(sizeof(T), alignof(T));
@@ -42,6 +46,17 @@ T* BootstrapAllocator::allocate(const size_t count) {
     current += size;
 
     assert(current <= end, "Bootstrap allocator overflow");
+    return result;
+}
+
+template<typename T>
+T* BootstrapAllocator::allocate(FunctionRef<void(T&)> init, const size_t count, size_t alignment) {
+    T* result = allocate<T>(count, alignment);
+    if (!measuring) {
+        for (size_t i = 0; i < count; i++) {
+            init(result[i]);
+        }
+    }
     return result;
 }
 
@@ -232,4 +247,22 @@ bool BigPageMetadata::isEmpty() const {
 
 bool BigPageMetadata::isFull() const {
     return subpageAllocator.isFull();
+}
+
+// ==================== New Page Allocator Factory ====================
+
+NUMAPool* createNumaPool(BootstrapAllocator& alloc, const Vector<kernel::mm::phys_memory_range>& ranges) {
+    // TODO: allocate and initialize NUMAPool substructures from alloc
+    (void)ranges;
+    return alloc.allocate<NUMAPool>();
+}
+
+LocalPool* createLocalPool(BootstrapAllocator& alloc) {
+    // TODO: allocate and initialize LocalPool from alloc
+    return alloc.allocate<LocalPool>();
+}
+
+PageAllocatorImpl createPageAllocator(Vector<NUMAPool*>&&, LocalPool**) {
+    // TODO: wire up NUMA pools and local pools into a functional allocator
+    return {};
 }

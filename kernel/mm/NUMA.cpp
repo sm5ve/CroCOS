@@ -5,6 +5,7 @@
 #include <mem/NUMA.h>
 #include <core/ds/HashMap.h>
 #include <core/ds/HashSet.h>
+#include <core/math.h>
 #include <kernel.h>
 #include <assert.h>
 
@@ -667,6 +668,162 @@ DataQualityLevel NUMAPolicy::orderingQuality() const { return quality; }
 
 // ============================================================================
 // Global policy singleton
+// ============================================================================
+
+// ============================================================================
+// partitionMemoryByDomain
+// ============================================================================
+
+static constexpr size_t kMinPartitionRangeSize = arch::smallPageSize;
+
+NUMAMemoryPartition partitionMemoryByDomain(
+    const Vector<mm::phys_memory_range>& usableRanges,
+    size_t processorCount,
+    const NUMATopology& topology,
+    DistanceMetric metric)
+{
+    NUMAMemoryPartition result;
+    const size_t domainCount = topology.domainCount();
+
+    for (size_t d = 0; d < domainCount; d++)
+        result.rangesPerDomain.push(Vector<mm::phys_memory_range>{});
+
+    // ---------------------------------------------------------------
+    // Step 1: walk usable memory ranges, split along small-page-aligned
+    // NUMA domain boundaries.
+    // ---------------------------------------------------------------
+    for (const auto& entry : usableRanges) {
+        const uint64_t alignedStart = roundUpToNearestMultiple(
+            entry.start.value, static_cast<uint64_t>(arch::smallPageSize));
+        const uint64_t alignedEnd   = roundDownToNearestMultiple(
+            entry.end.value,   static_cast<uint64_t>(arch::smallPageSize));
+
+        if (alignedEnd <= alignedStart) continue;
+
+        // Build a sorted list of small-page-aligned split points by projecting
+        // each NUMA region boundary into this usable range.  The count is
+        // O(domains × regions_per_domain) — far smaller than smallPages.
+        Vector<uint64_t> splits;
+        splits.push(alignedStart);
+        splits.push(alignedEnd);
+
+        for (const auto& mr : topology.allMemoryRegions()) {
+            const uint64_t rStart = roundUpToNearestMultiple(
+                mr.region.range.start.value, static_cast<uint64_t>(arch::smallPageSize));
+            const uint64_t rEnd   = roundDownToNearestMultiple(
+                mr.region.range.end.value,   static_cast<uint64_t>(arch::smallPageSize));
+
+            if (rStart > alignedStart && rStart < alignedEnd)
+                splits.push(rStart);
+            if (rEnd > alignedStart && rEnd < alignedEnd)
+                splits.push(rEnd);
+        }
+
+        // Insertion sort — count is tiny (2 + 2 × NUMA region count).
+        for (size_t s = 1; s < splits.size(); s++) {
+            const uint64_t key = splits[s];
+            size_t j = s;
+            while (j > 0 && splits[j - 1] > key) {
+                splits[j] = splits[j - 1];
+                j--;
+            }
+            splits[j] = key;
+        }
+
+        // Walk intervals between consecutive split points, calling
+        // domainForAddress once per interval instead of once per big page.
+        const ProximityDomain* runDomain = nullptr;
+        mm::phys_addr runStart{alignedStart};
+
+        auto flushRun = [&](mm::phys_addr flushEnd) {
+            mm::phys_memory_range r{runStart, flushEnd};
+            if (r.getSize() < kMinPartitionRangeSize) return;
+            if (runDomain) {
+                result.rangesPerDomain[runDomain->id.value].push(r);
+            } else {
+                klog() << "[NUMA] Warning: usable range [0x" << (void*)runStart.value
+                       << ", 0x" << (void*)flushEnd.value
+                       << ") has no NUMA domain affinity\n";
+                result.unownedRanges.push(r);
+            }
+        };
+
+        for (size_t s = 0; s + 1 < splits.size(); s++) {
+            if (splits[s] == splits[s + 1]) continue; // skip duplicates
+
+            const mm::phys_addr intervalStart{splits[s]};
+            const mm::phys_addr intervalEnd{splits[s + 1]};
+
+            const ProximityDomain* intervalDomain =
+                topology.domainForAddress(intervalStart);
+
+            // Straddle check: our split points snap NUMA boundaries to big-page
+            // alignment, so an interval can still contain a domain boundary if the
+            // original boundary was not big-page aligned.
+            const ProximityDomain* tailDomain =
+                topology.domainForAddress(mm::phys_addr{intervalEnd.value - 1});
+            if (intervalDomain != tailDomain) {
+                klog() << "[NUMA] Warning: interval [0x" << (void*)intervalStart.value
+                       << ", 0x" << (void*)intervalEnd.value
+                       << ") straddles a NUMA domain boundary; "
+                       << "assigning to start-address domain\n";
+                // intervalDomain (start) wins
+            }
+
+            if (intervalDomain != runDomain) {
+                if (intervalStart.value > alignedStart)
+                    flushRun(intervalStart);
+                runDomain = intervalDomain;
+                runStart  = intervalStart;
+            }
+        }
+        flushRun(mm::phys_addr{alignedEnd});
+    }
+
+    // ---------------------------------------------------------------
+    // Step 2: for each ProcessorID, walk the distance-ordered domain
+    // list and pick the first domain that has at least one range.
+    // ---------------------------------------------------------------
+
+    // Identify a last-resort fallback (first domain with any ranges).
+    DomainID fallback = DomainID::null();
+    for (size_t d = 0; d < domainCount; d++) {
+        if (!result.rangesPerDomain[d].empty()) {
+            fallback = DomainID{static_cast<uint16_t>(d)};
+            break;
+        }
+    }
+
+    for (size_t i = 0; i < processorCount; i++) {
+        const arch::ProcessorID cpu = static_cast<arch::ProcessorID>(i);
+        const DomainID homeDomain = topology.domainForCpu(cpu).id;
+
+        DomainID chosen = DomainID::null();
+        for (const auto& dd : topology.domainsOrdered(homeDomain, metric)) {
+            if (!result.rangesPerDomain[dd.domainId.value].empty()) {
+                chosen = dd.domainId;
+                break;
+            }
+        }
+
+        if (chosen == DomainID::null()) {
+            klog() << "[NUMA] Warning: CPU " << static_cast<uint32_t>(cpu)
+                   << " has no reachable domain with memory; "
+                   << "assigning to domain " << fallback.value << "\n";
+            chosen = fallback;
+        } else if (chosen != homeDomain) {
+            klog() << "[NUMA] Warning: CPU " << static_cast<uint32_t>(cpu)
+                   << " home domain " << homeDomain.value
+                   << " has no memory; nearest domain with memory is "
+                   << chosen.value << "\n";
+        }
+
+        result.processorDomain.push(chosen);
+    }
+
+    return result;
+}
+
 // ============================================================================
 
 static NUMAPolicy* gNUMAPolicy = nullptr;

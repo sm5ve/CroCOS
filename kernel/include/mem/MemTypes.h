@@ -42,7 +42,9 @@ namespace kernel::mm{
         phys_addr start;
         phys_addr end;
         [[nodiscard]] size_t getSize() const;
+        [[nodiscard]] bool isEmpty() const;
         [[nodiscard]] bool contains(phys_addr) const;
+        [[nodiscard]] phys_memory_range intersect(phys_memory_range) const;
 
         bool operator==(const phys_memory_range & other) const {return start == other.start && end == other.end;};
     };
@@ -51,6 +53,9 @@ namespace kernel::mm{
         virt_addr start;
         virt_addr end;
         [[nodiscard]] size_t getSize() const;
+        [[nodiscard]] bool isEmpty() const;
+        [[nodiscard]] bool contains(virt_addr) const;
+        [[nodiscard]] virt_memory_range intersect(virt_memory_range) const;
     };
 
     enum class PageMappingPermissions : uint8_t {

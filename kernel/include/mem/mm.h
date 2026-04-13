@@ -10,8 +10,10 @@
 #include <arch.h>
 #include <core/ds/Vector.h>
 #include <mem/MemTypes.h>
+#include <mem/NUMA.h>
 
 namespace kernel::mm{
+
     struct MemoryStatistics{
         Vector<size_t> freeBigPageCount;
         Vector<size_t> freeSmallPageCount; //includes sub-pages of big pages

@@ -10,7 +10,6 @@
 #include <arch/amd64/smp.h>
 #include <init.h>
 #include <arch.h>
-#include <core/ds/permutation.h>
 
 extern "C" void (*__init_array_start[])(void) __attribute__((weak));
 extern "C" void (*__init_array_end[])(void) __attribute__((weak));

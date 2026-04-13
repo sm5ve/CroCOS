@@ -89,4 +89,8 @@ namespace arch {
         // No lock needed - reading size_t is atomic on modern architectures
         return mockProcessorCount;
     }
+
+    size_t getCacheLineSize() {
+        return 64;
+    }
 }

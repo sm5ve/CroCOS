@@ -39,6 +39,7 @@ target_sources(KernelTests PRIVATE
     ../../libraries/Core/str.cpp
     ../../libraries/Core/Object.cpp
     ../../libraries/Core/atomic/atomic.cpp
+    ../../libraries/Core/atomic/AtomicBitPool.cpp
 )
 
 # Kernel tests use host-compatible compilation but with freestanding mode for tested code

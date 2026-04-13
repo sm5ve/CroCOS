@@ -708,6 +708,219 @@ TEST(SmallPageAllocator_ConcurrentAllocAndFree) {
     ASSERT_EQ(totalPages, allocated);
 }
 
+// ============================================================================
+// Test Scaffolding for NUMAPool and PageAllocatorImpl
+// ============================================================================
+//
+// The two-pass construction pattern (measure → allocate buffer → construct)
+// is handled automatically. Physical address layout for tests:
+//
+//   testDomainBase(d) — 1GiB-aligned base for domain slot d, never overlapping.
+//   makeBigPageRange(base, n) — n big pages starting at base.
+//
+// Typical usage:
+//
+//   auto pool = TestNUMAPool::withBigPages(testDomainBase(0), 8);
+//   pool.pool->allocatePages(...);
+//
+//   TestPageAllocatorImpl impl({
+//       DomainSpec::simple(0, 8, {0, 1}),
+//       DomainSpec::simple(1, 4, {2, 3}),
+//   });
+//   // impl.impl       — the live PageAllocatorImpl
+//   // impl.localPools — per-CPU LocalPool pointers (indexed by ProcessorID)
+
+static constexpr uint64_t testDomainBase(size_t domain) {
+    // Start at 1GiB to avoid colliding with the low-memory/BIOS region.
+    return (domain + 1) * (1ull << 30);
+}
+
+static phys_memory_range makeBigPageRange(uint64_t base, size_t bigPageCount) {
+    return { phys_addr(base), phys_addr(base + bigPageCount * arch::bigPageSize) };
+}
+
+// BootstrapBuffer — RAII backing storage for a BootstrapAllocator.
+// Zeroed on construction so uninitialised atomic members start from a
+// well-defined state even when placement-new isn't run on them.
+struct BootstrapBuffer {
+    std::vector<uint8_t> storage;
+
+    explicit BootstrapBuffer(size_t bytes) : storage(bytes, 0) {}
+
+    BootstrapAllocator makeAllocator() {
+        return BootstrapAllocator(storage.data(), storage.size());
+    }
+};
+
+// TestNUMAPool — RAII owner of a NUMAPool and its backing memory.
+//
+// Runs both passes automatically:
+//   1. Measuring pass  → determines how much backing memory is needed.
+//   2. Real pass       → constructs the pool inside the allocated buffer.
+//
+// The buffer outlives the pool pointer; both are destroyed together.
+// Non-copyable (buffer contents are address-sensitive).  All factory
+// methods below are eligible for C++17 mandatory copy elision.
+struct TestNUMAPool {
+    Vector<phys_memory_range> ranges;
+    BootstrapBuffer           buffer;
+    NUMAPool*                 pool = nullptr;
+
+    explicit TestNUMAPool(Vector<phys_memory_range> r)
+        : ranges(move(r))
+        , buffer(measure(ranges))
+    {
+        BootstrapAllocator real = buffer.makeAllocator();
+        pool = createNumaPool(real, ranges);
+    }
+
+    // Single contiguous range of bigPageCount big pages.
+    static TestNUMAPool withBigPages(uint64_t base, size_t bigPageCount) {
+        Vector<phys_memory_range> r;
+        r.push(makeBigPageRange(base, bigPageCount));
+        return TestNUMAPool(move(r));
+    }
+
+    // rangeCount discontiguous ranges, each bigPagesPerRange big pages wide,
+    // laid out consecutively from base.  Models a pool whose memory comes
+    // from several separate physical spans.
+    static TestNUMAPool withRanges(uint64_t base, size_t rangeCount,
+                                   size_t bigPagesPerRange) {
+        Vector<phys_memory_range> r;
+        for (size_t i = 0; i < rangeCount; i++) {
+            r.push(makeBigPageRange(
+                base + i * bigPagesPerRange * arch::bigPageSize, bigPagesPerRange));
+        }
+        return TestNUMAPool(move(r));
+    }
+
+private:
+    static size_t measure(const Vector<phys_memory_range>& r) {
+        BootstrapAllocator measuring;
+        createNumaPool(measuring, r);
+        return measuring.bytesNeeded();
+    }
+};
+
+// DomainSpec — configuration for one NUMA domain in TestPageAllocatorImpl.
+struct DomainSpec {
+    Vector<phys_memory_range> ranges;
+    std::vector<size_t>       cpuIds; // logical CPU IDs owned by this domain
+
+    // Convenience: a single range at testDomainBase(domainSlot) covering
+    // bigPageCount big pages, assigned to cpuIds.
+    static DomainSpec simple(size_t domainSlot, size_t bigPageCount,
+                             std::vector<size_t> cpuIds) {
+        Vector<phys_memory_range> r;
+        r.push(makeBigPageRange(testDomainBase(domainSlot), bigPageCount));
+        return { move(r), move(cpuIds) };
+    }
+};
+
+// TestPageAllocatorImpl — RAII owner of a PageAllocatorImpl and all its
+// backing memory (one BootstrapBuffer per NUMA domain).
+//
+// Mirrors the structure of initNewPageAllocator() exactly so that any
+// bugs caught here would also manifest in the real initialisation path.
+//
+// IMPORTANT: domainBuffers is reserved before the construction loop so that
+// push_back() never reallocates.  If it did, the raw pointers held inside
+// the BootstrapAllocators in perDomainAllocs would be invalidated.
+struct TestPageAllocatorImpl {
+    std::vector<BootstrapBuffer> domainBuffers;
+    LocalPool*                   localPools[arch::MAX_PROCESSOR_COUNT] = {};
+    PageAllocatorImpl            impl;
+
+    explicit TestPageAllocatorImpl(std::vector<DomainSpec> domains) {
+        domainBuffers.reserve(domains.size()); // prevent reallocation; see note above
+        Vector<BootstrapAllocator> perDomainAllocs;
+
+        for (auto& spec : domains) {
+            // ---- Measuring pass: determine memory requirements for this domain ----
+            BootstrapAllocator measuring;
+            createNumaPool(measuring, spec.ranges);
+            for (size_t i = 0; i < spec.cpuIds.size(); i++) {
+                createLocalPool(measuring);
+            }
+
+            // ---- Allocate buffer (reserve guarantees no reallocation here) ----
+            domainBuffers.emplace_back(measuring.bytesNeeded());
+
+            // ---- Real pass: construct NUMAPool and LocalPools in the buffer ----
+            BootstrapAllocator real = domainBuffers.back().makeAllocator();
+            createNumaPool(real, spec.ranges); // NUMAPool lives inside the buffer
+            for (size_t cpu : spec.cpuIds) {
+                localPools[cpu] = createLocalPool(real);
+            }
+
+            perDomainAllocs.push(move(real));
+        }
+
+        impl = createPageAllocator(move(perDomainAllocs), localPools);
+    }
+};
+
+// ============================================================================
+// Scaffold Validation
+// ============================================================================
+// These tests verify that the two-pass construction scaffolding above works
+// correctly.  Detailed behavioural tests for NUMAPool and PageAllocatorImpl
+// will be added here as createNumaPool and createPageAllocator are implemented.
+
+TEST(NUMAPool_Scaffold_SingleRange) {
+    auto pool = TestNUMAPool::withBigPages(testDomainBase(0), 4);
+    ASSERT_NE(nullptr, pool.pool);
+}
+
+TEST(NUMAPool_Scaffold_MultipleRanges) {
+    // Pool whose physical memory comes from 3 separate spans of 4 big pages each
+    auto pool = TestNUMAPool::withRanges(testDomainBase(0), 3, 4);
+    ASSERT_NE(nullptr, pool.pool);
+}
+
+TEST(NUMAPool_Scaffold_LargePool) {
+    auto pool = TestNUMAPool::withBigPages(testDomainBase(0), 64);
+    ASSERT_NE(nullptr, pool.pool);
+}
+
+TEST(PageAllocatorImpl_Scaffold_SingleDomain) {
+    TestPageAllocatorImpl impl({
+        DomainSpec::simple(0, 8, {0, 1, 2, 3}),
+    });
+    ASSERT_NE(nullptr, impl.localPools[0]);
+    ASSERT_NE(nullptr, impl.localPools[1]);
+    ASSERT_NE(nullptr, impl.localPools[2]);
+    ASSERT_NE(nullptr, impl.localPools[3]);
+}
+
+TEST(PageAllocatorImpl_Scaffold_TwoDomains) {
+    TestPageAllocatorImpl impl({
+        DomainSpec::simple(0, 8, {0, 1}),
+        DomainSpec::simple(1, 8, {2, 3}),
+    });
+    ASSERT_NE(nullptr, impl.localPools[0]);
+    ASSERT_NE(nullptr, impl.localPools[2]);
+    // Each domain allocates its LocalPools from a separate buffer, so pointers
+    // belonging to different domains must be distinct.
+    ASSERT_NE(impl.localPools[0], impl.localPools[2]);
+}
+
+TEST(PageAllocatorImpl_Scaffold_AsymmetricDomains) {
+    // Validates that per-domain buffer sizing is computed independently —
+    // a large domain shouldn't force a small domain to over-allocate (or
+    // vice versa cause an underflow).
+    TestPageAllocatorImpl impl({
+        DomainSpec::simple(0, 1,  {0}),
+        DomainSpec::simple(1, 64, {1, 2, 3, 4, 5, 6, 7}),
+    });
+    ASSERT_NE(nullptr, impl.localPools[0]);
+    ASSERT_NE(nullptr, impl.localPools[1]);
+}
+
+// ============================================================================
+// Concurrent Tests (SmallPageAllocator)
+// ============================================================================
+
 TEST(SmallPageAllocator_ConcurrentAllocFreeCycles) {
     // Multiple threads independently do alloc-then-free cycles on the same
     // allocator, stress-testing the ring buffer and lazy init atomics.

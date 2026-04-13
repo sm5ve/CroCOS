@@ -31,7 +31,7 @@ namespace arch{
             bool executeOnOne;
             bool globalOnOne;
 
-            bool canBeGlobal() const {
+            [[nodiscard]] constexpr bool canBeGlobal() const {
                 return global != BIT_NOT_PRESENT;
             }
         };

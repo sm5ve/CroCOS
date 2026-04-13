@@ -24,6 +24,8 @@ target_sources(CoreTests PRIVATE
     LinkedListTests.cpp
     AtomicLinkedListTest.cpp
     AtomicBitPoolTest.cpp
+    #AtomicBitPoolGlobalLockMock.cpp
+    #AtomicBitPoolConcurrentLinkedList.cpp
 )
 
 # Add the TestHarness from parent directory

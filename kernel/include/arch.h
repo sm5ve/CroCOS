@@ -253,5 +253,7 @@ namespace arch{
        return true;
     }(), "Page tables must have a power-of-two number of entries");
 #endif
+
+    size_t getCacheLineSize();
 }
 #endif //CROCOS_ARCH_H

@@ -199,3 +199,12 @@ namespace arch::amd64{
         return true;
     }
 }
+
+namespace arch {
+    size_t getCacheLineSize() {
+        uint32_t eax, ebx, ecx, edx;
+        arch::amd64::cpuid(eax, ebx, ecx, edx, 0x01);
+        // EBX[15:8] is the CLFLUSH line size in 8-byte units
+        return ((ebx >> 8) & 0xFF) * 8;
+    }
+}

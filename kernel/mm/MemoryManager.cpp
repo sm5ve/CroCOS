@@ -3,9 +3,11 @@
 //
 
 #include <mem/mm.h>
+#include <mem/PageAllocator.h>
 
 #include <kernel.h>
 #include <kmemlayout.h>
+#include <mem/NUMA.h>
 
 extern uint32_t phys_end;
 
@@ -296,19 +298,21 @@ namespace kernel::mm{
         return {pageTablePaddr, offset};
     }
 
+    // Shared zone counter across all reservePageAllocatorBufferForRange overloads.
+    static size_t gMappedPageAllocatorBuffers = 0;
+
     // Reserve and map a page allocator buffer for a physical memory range.
     //
     // This function carves out space at the top of the physical range for:
     // 1. Page table structures needed to map the buffer
-    // 2. The buffer itself (for per-range page allocator metadata)
+    // 2. The buffer itself (requiredBufferSize bytes, rounded up to page granularity)
     //
     // The function modifies the input range to mark the reserved space as used,
     // sets up the page tables to map the buffer into the next available page
     // allocator zone, and returns a virtual pointer to the mapped buffer.
     //
     // Returns: Virtual address of the mapped buffer
-    void* reservePageAllocatorBufferForRange(phys_memory_range& range) {
-        static size_t mappedBuffers = 0;
+    void* reservePageAllocatorBufferForRange(phys_memory_range& range, size_t requiredBufferSize) {
         if constexpr (supportsSimpleBootstrapPageAllocatorMapping) {
             //Align range to page boundaries
             range.end &= ~(arch::smallPageSize - 1);
@@ -326,19 +330,15 @@ namespace kernel::mm{
             //Clear out the page tables
             memset(pageTableBase.as_ptr<void>(), 0, requiredTableSizeForPageAllocator);
 
-            // Calculate how much buffer space we need for this range's allocator
-            const auto processor_count = arch::processorCount();
-            auto requiredBufferSize = PageAllocator::requestedBufferSizeForRange(range, processor_count);
-            requiredBufferSize = roundUpToNearestMultiple(requiredBufferSize, arch::smallPageSize);
-            // Sanity check: buffer must fit in a single kernel zone
-            assert(2 * requiredBufferSize <= getKernelMemRegionSize(), "Memory range is too big"); //Conservative check
+            // Round buffer size up to page granularity, then sanity check
+            const size_t alignedBufferSize = roundUpToNearestMultiple(requiredBufferSize, arch::smallPageSize);
+            assert(2 * alignedBufferSize <= getKernelMemRegionSize(), "Memory range is too big"); //Conservative check
 
             // Reserve space for the buffer itself (also at top of range, before page tables)
-            phys_memory_range bufferRange(range.end - requiredBufferSize, range.end);
-            range.end -= requiredBufferSize;
+            phys_memory_range bufferRange(range.end - alignedBufferSize, range.end);
+            range.end -= alignedBufferSize;
 
             // Initialize page tables to map the buffer into a page allocator zone
-            // We map from the bottom up (!upper = false), so offset tells us where data starts
             auto data = initializePageTable<pageTableLevelForKMemRegion(), true>
                 (pageTableBase, bufferRange, ptPhysicalBase);
 
@@ -347,15 +347,25 @@ namespace kernel::mm{
             auto ptentry = KMemRegionEntryType::subtableEntry(data.pageTableAddress);
             ptentry.markPresent();
             ptentry.enableWrite();
-            getPageTableEntryForZone(PAGE_ALLOCATOR_ZONE_START + mappedBuffers) = ptentry;
+            getPageTableEntryForZone(PAGE_ALLOCATOR_ZONE_START + gMappedPageAllocatorBuffers) = ptentry;
 
             // Calculate the virtual address where the buffer is now mapped
-            auto mappedAddress = getKernelMemRegionStart(PAGE_ALLOCATOR_ZONE_START + mappedBuffers) + data.mappedAddressStartOffset;
-            mappedBuffers++; // Advance to next zone for the next buffer
+            auto mappedAddress = getKernelMemRegionStart(PAGE_ALLOCATOR_ZONE_START + gMappedPageAllocatorBuffers) + data.mappedAddressStartOffset;
+            gMappedPageAllocatorBuffers++; // Advance to next zone for the next buffer
             arch::flushTLB();
             return mappedAddress.as_ptr<void>();
         }
         static_assert(supportsSimpleBootstrapPageAllocatorMapping, "Page allocator buffer mapping not supported on this architecture with the simple mapping construction");
+    }
+
+    // Overload that computes the required buffer size from the old PageAllocator formula.
+    void* reservePageAllocatorBufferForRange(phys_memory_range& range) {
+        // Peek at the aligned range to compute the old allocator's buffer requirement.
+        phys_memory_range aligned = range;
+        aligned.end &= ~(arch::smallPageSize - 1);
+        aligned.start.value = roundUpToNearestMultiple(aligned.start.value, arch::smallPageSize);
+        const size_t requiredBufferSize = PageAllocator::requestedBufferSizeForRange(aligned, arch::processorCount());
+        return reservePageAllocatorBufferForRange(range, requiredBufferSize);
     }
 
     bool initPageAllocator() {
@@ -377,6 +387,76 @@ namespace kernel::mm{
         //Find the memory range where the kernel resides and reserve it so we don't overwrite anything!
         phys_memory_range range{.start=mm::phys_addr(nullptr), .end=mm::phys_addr(&phys_end)};
         PageAllocator::reservePhysicalRange(range);
+        return true;
+    }
+
+    // New NUMA-aware page allocator initialisation.
+    // Measures how much metadata memory each NUMA domain needs, carves that space
+    // out of the domain's largest physical range (mapping it into the kernel address
+    // space via the page-allocator zones), then constructs the pools for real.
+    // The "New" prefix is intentional: this replaces initPageAllocator() once the
+    // implementation is complete.
+    bool initNewPageAllocator(const numa::NUMATopology& topology) {
+        // Collect usable physical ranges from the firmware memory map.
+        Vector<phys_memory_range> usableRanges;
+        for (auto entry : arch::getMemoryMap()) {
+            if (entry.type == arch::USABLE && entry.range.getSize() > arch::bigPageSize * 2) {
+                usableRanges.push(entry.range);
+            }
+        }
+
+        numa::NUMAMemoryPartition partition =
+            numa::partitionMemoryByDomain(usableRanges, arch::processorCount(), topology);
+
+        // Per-processor LocalPool pointer table (indexed by ProcessorID).
+        static LocalPool* localPools[arch::MAX_PROCESSOR_COUNT] = {};
+
+        Vector<NUMAPool*>         numaPools;
+        Vector<BootstrapAllocator> perDomainAllocs;
+
+        for (size_t domainIdx = 0; domainIdx < partition.rangesPerDomain.size(); domainIdx++) {
+            auto& ranges = partition.rangesPerDomain[domainIdx];
+            if (ranges.empty()) continue;
+
+            const numa::DomainID domainId{static_cast<uint16_t>(domainIdx)};
+            const size_t processorCount = partition.processorDomain.size();
+
+            // ---- Stage 1 & 2: measure required memory ----
+            BootstrapAllocator measuringAlloc;
+            createNumaPool(measuringAlloc, ranges);
+            for (size_t cpu = 0; cpu < processorCount; cpu++) {
+                if (partition.processorDomain[cpu] == domainId) {
+                    createLocalPool(measuringAlloc);
+                }
+            }
+
+            // ---- Stage 3: find largest range and carve out the buffer ----
+            phys_memory_range* largestRange = &ranges[0];
+            for (size_t i = 1; i < ranges.size(); i++) {
+                if (ranges[i].getSize() > largestRange->getSize()) {
+                    largestRange = &ranges[i];
+                }
+            }
+            void* buffer = reservePageAllocatorBufferForRange(*largestRange, measuringAlloc.bytesNeeded());
+
+            // ---- Stage 4: create the NUMAPool using real memory ----
+            BootstrapAllocator realAlloc(buffer, measuringAlloc.bytesNeeded());
+            numaPools.push(createNumaPool(realAlloc, ranges));
+
+            // ---- Stage 5: create LocalPools for processors in this domain ----
+            for (size_t cpu = 0; cpu < processorCount; cpu++) {
+                if (partition.processorDomain[cpu] == domainId) {
+                    localPools[cpu] = createLocalPool(realAlloc);
+                }
+            }
+
+            perDomainAllocs.push(move(realAlloc));
+        }
+
+        unmapTemporaryWindow();
+
+        auto impl = createPageAllocator(move(numaPools), localPools);
+        (void)impl; // TODO: store in a global once PageAllocatorImpl is fully implemented
         return true;
     }
 }

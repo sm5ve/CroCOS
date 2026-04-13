@@ -11,6 +11,7 @@
 #include <core/atomic.h>
 #include <core/atomic/RingBuffer.h>
 #include <mem/NUMA.h>
+#include <core/atomic/AtomicBitPool.h>
 
 #include <mem/mm.h>
 
@@ -28,7 +29,11 @@ public:
     BootstrapAllocator(void* buffer, size_t size);
 
     template<typename T>
-    T* allocate(size_t count = 1);
+    T* allocate(size_t count, size_t alignment = alignof(T));
+    template<typename T>
+    T* allocate();
+    template<typename T>
+    T* allocate(FunctionRef<void(T&)> init, size_t count, size_t alignment = alignof(T));
     [[nodiscard]] size_t bytesNeeded() const;
     [[nodiscard]] size_t bytesRemaining() const;
     [[nodiscard]] bool isFake() const {return measuring;}
@@ -56,6 +61,7 @@ using PageAllocationCallback = FunctionRef<void(PageRef)>;
 // ==================== Small Page Allocator ====================
 
 class SmallPageAllocator {
+    friend class BigPageMetadata;
     using SmallPageIndex = SmallestUInt_t<log2ceil(kernel::mm::PageAllocator::smallPagesPerBigPage)>;
     using SmallPageCount = SmallestUInt_t<log2ceil(kernel::mm::PageAllocator::smallPagesPerBigPage + 1)>;
     constexpr static size_t bitmapWordCount = kernel::mm::PageAllocator::smallPagesPerBigPage / (8 * sizeof(uint64_t));
@@ -91,11 +97,11 @@ public:
 class NUMAPool;
 
 class BigPageMetadata {
-    SmallPageAllocator& subpageAllocator;
+    SmallPageAllocator subpageAllocator;
     NUMAPool& ownerPool;
 
 public:
-    BigPageMetadata(SmallPageAllocator& allocator, NUMAPool& pool);
+    BigPageMetadata(NUMAPool& pool, kernel::mm::phys_addr baseAddr);
 
     [[nodiscard]] size_t allocatePages(size_t smallPageCount, PageAllocationCallback cb);
     void freePages(PageRef* pages, size_t count);
@@ -106,64 +112,34 @@ public:
     [[nodiscard]] NUMAPool& getOwnerPool() const { return ownerPool; }
 };
 
-// ==================== Multi-Level Bit Pool ====================
-
-class BitPool {
-    struct alignas(64) CacheLineEntry {
-        Atomic<uint64_t> hintBitmap;
-        Atomic<int64_t> count;
-        uint8_t padding[48];  // 64 - 8 - 8 = 48 bytes padding
-    };
-
-    struct Level {
-        CacheLineEntry* entries;
-        size_t numWords;
-    };
-
-    struct L0Location {
-        size_t l1EntryIndex;  // Which L1 entry (which L0 word)
-        size_t bitIndex;      // Which bit in that word
-    };
-
-    Level* levels;
-    size_t numLevels;
-    Atomic<uint64_t>* l0Bitmap;  // L0 is just bitmap
-
-    [[nodiscard]] L0Location pageToL0Location(size_t pageIndex) const {
-        // In inverted tree:
-        // - Bottom (numLevels - 1) levels use 6 bits each
-        // - Top bits index within L0 word (up to 64 bits)
-
-        size_t bitsForTree = (numLevels - 1) * 6;
-        size_t l1EntryIndex = pageIndex & ((1ULL << bitsForTree) - 1);
-        size_t l0BitIndex = pageIndex >> bitsForTree;
-
-        return {l1EntryIndex, l0BitIndex};
-    }
-
-    bool tryClaimBit(size_t pageIndex);
-    bool tryClearBit(size_t pageIndex);
-    void incrementCounts(size_t pageIndex);
-    void decrementCounts(size_t pageIndex);
-
-    // Recursive get with rotation-based selection
-    bool tryGetFromSubtree(size_t level, size_t wordIndex, size_t cpuId,
-                          size_t retryCount, size_t& outPageIndex);
-
-public:
-    BitPool(size_t numPages, void* storage);
-
-    // Add a PA page to the pool (returns false if already in pool)
-    bool add(size_t bitIndex);
-
-    // Remove a specific PA page from the pool (returns false if not in pool)
-    bool remove(size_t bitIndex);
-
-    // Get any PA page from the pool (returns false if pool is empty or contended)
-    bool getAny(size_t cpuId, size_t& outPageIndex, size_t maxRetries = 8);
-
-    static size_t levelsRequired(size_t numPages);
-    static size_t storageRequired(size_t numPages);
+struct SubrangeInfo {
+    kernel::mm::phys_memory_range base;
+    size_t bitPoolOffset;
 };
+
+class NUMAPool {
+    BigPageMetadata* bigPageMetadataBuffer;
+    MPMCRingBuffer<BigPageMetadata*, false, true> freeBigPages;
+    AtomicBitPool paPages;
+    kernel::numa::DomainID associatedDomain;
+    SubrangeInfo* subrangeInfo;
+    size_t subrangeCount;
+public:
+    NUMAPool(const Vector<kernel::mm::phys_memory_range>& memoryRanges, void* bufferStart, size_t bufferSize);
+};
+
+class LocalPool {
+
+};
+
+// ==================== New Page Allocator ====================
+
+struct PageAllocatorImpl {
+    // TODO: full implementation TBD
+};
+
+NUMAPool*         createNumaPool(BootstrapAllocator& alloc, const Vector<kernel::mm::phys_memory_range>& ranges);
+LocalPool*        createLocalPool(BootstrapAllocator& alloc);
+PageAllocatorImpl createPageAllocator(Vector<NUMAPool*>&& perDomainAllocs, LocalPool** localPools);
 
 #endif //CROCOS_PAGEALLOCATOR_H

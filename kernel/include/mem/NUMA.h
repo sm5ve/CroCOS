@@ -553,6 +553,36 @@ void initNUMAPolicy(const NUMATopology& topology);
 // Returns the global NUMAPolicy.  Asserts if not yet initialised.
 const NUMAPolicy& numaPolicy();
 
+// ============================================================================
+// Memory partitioning
+// ============================================================================
+
+// Result of partitionMemoryByDomain().
+//   rangesPerDomain[d.value] — usable big-page-aligned ranges belonging to domain d
+//   unownedRanges            — usable ranges with no NUMA affinity
+//   processorDomain[cpu]     — closest domain with memory for each logical CPU
+struct NUMAMemoryPartition {
+    Vector<Vector<mm::phys_memory_range>> rangesPerDomain; // indexed by DomainID.value
+    Vector<mm::phys_memory_range>         unownedRanges;
+    Vector<DomainID>                      processorDomain; // indexed by ProcessorID
+};
+
+// Splits usableRanges by NUMA proximity domain, aligning every sub-range to
+// arch::smallPageSize boundaries and discarding sub-ranges smaller than
+// arch::smallPageSize.
+//
+// processorCount determines the size of processorDomain in the result.
+// All processor IDs [0, processorCount) receive a valid domain assignment;
+// processors absent from the topology are assigned domain 0 (with a warning).
+//
+// Also produces a per-processor mapping to the closest domain (by `metric`)
+// that actually contains memory map entries.
+NUMAMemoryPartition partitionMemoryByDomain(
+    const Vector<mm::phys_memory_range>& usableRanges,
+    size_t processorCount,
+    const NUMATopology& topology,
+    DistanceMetric metric = DistanceMetric::Latency);
+
 } // namespace kernel::numa
 
 #endif // CROCOS_NUMA_H

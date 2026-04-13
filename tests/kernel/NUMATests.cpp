@@ -719,3 +719,295 @@ TEST(NUMAPolicy_DomainOrder_ByLatency) {
     ASSERT_EQ(DomainID(0), order1[1]);
     ASSERT_EQ(DomainID(2), order1[2]);
 }
+
+// ============================================================================
+// partitionMemoryByDomain
+// ============================================================================
+
+// Convenience: build a single-range usable list.
+static Vector<phys_memory_range> usable(uint64_t start, uint64_t end) {
+    Vector<phys_memory_range> v;
+    v.push(makeRange(start, end));
+    return v;
+}
+
+static constexpr uint64_t BP = arch::bigPageSize;  // 2 MiB on amd64
+static constexpr uint64_t SP = arch::smallPageSize; // 4 KiB on amd64
+
+// Single NUMA domain covers the usable range — all pages assigned to domain 0.
+TEST(Partition_SingleDomain) {
+    NUMATestSetup setup(2);
+    Vector<ProcessorAffinityEntry>   procs;
+    Vector<MemoryRangeAffinityEntry> mems;
+    procs.push({0, 0, 0});
+    procs.push({1, 0, 0});
+    // Domain 0 memory exactly covering usable range [1*BP, 5*BP)
+    mems.push({makeRange(1*BP, 5*BP), 0, MemoryType::Volatile});
+
+    auto topo = NUMATopology::build(procs, mems, emptyGen);
+    auto ranges = usable(1*BP, 5*BP);
+    auto result = partitionMemoryByDomain(ranges, 2, topo);
+
+    ASSERT_EQ(1u, result.rangesPerDomain.size());
+    ASSERT_EQ(1u, result.rangesPerDomain[0].size());
+    ASSERT_EQ(makeRange(1*BP, 5*BP), result.rangesPerDomain[0][0]);
+    ASSERT_TRUE(result.unownedRanges.empty());
+    ASSERT_EQ(DomainID(0), result.processorDomain[0]);
+    ASSERT_EQ(DomainID(0), result.processorDomain[1]);
+}
+
+// Two NUMA domains split the usable range at a big-page-aligned boundary.
+TEST(Partition_TwoDomains_AlignedSplit) {
+    NUMATestSetup setup(2);
+    Vector<ProcessorAffinityEntry>   procs;
+    Vector<MemoryRangeAffinityEntry> mems;
+    procs.push({0, 0, 0}); // CPU 0 → domain 0
+    procs.push({1, 1, 0}); // CPU 1 → domain 1
+    // Domain 0: [1*BP, 3*BP), Domain 1: [3*BP, 5*BP)
+    mems.push({makeRange(1*BP, 3*BP), 0, MemoryType::Volatile});
+    mems.push({makeRange(3*BP, 5*BP), 1, MemoryType::Volatile});
+
+    auto topo = NUMATopology::build(procs, mems, emptyGen);
+    auto ranges = usable(1*BP, 5*BP);
+    auto result = partitionMemoryByDomain(ranges, 2, topo);
+
+    ASSERT_EQ(2u, result.rangesPerDomain.size());
+    ASSERT_EQ(1u, result.rangesPerDomain[0].size());
+    ASSERT_EQ(makeRange(1*BP, 3*BP), result.rangesPerDomain[0][0]);
+    ASSERT_EQ(1u, result.rangesPerDomain[1].size());
+    ASSERT_EQ(makeRange(3*BP, 5*BP), result.rangesPerDomain[1][0]);
+    ASSERT_TRUE(result.unownedRanges.empty());
+    ASSERT_EQ(DomainID(0), result.processorDomain[0]);
+    ASSERT_EQ(DomainID(1), result.processorDomain[1]);
+}
+
+// Usable range partially outside any NUMA domain — the gap goes to unownedRanges.
+TEST(Partition_UnownedGap) {
+    NUMATestSetup setup(1);
+    Vector<ProcessorAffinityEntry>   procs;
+    Vector<MemoryRangeAffinityEntry> mems;
+    procs.push({0, 0, 0});
+    // Domain 0 covers only the first half; second half has no NUMA affinity.
+    mems.push({makeRange(1*BP, 3*BP), 0, MemoryType::Volatile});
+
+    auto topo = NUMATopology::build(procs, mems, emptyGen);
+
+    // Usable range spans [1*BP, 5*BP); only [1*BP, 3*BP) is in any domain.
+    auto ranges = usable(1*BP, 5*BP);
+    auto result = partitionMemoryByDomain(ranges, 1, topo);
+
+    ASSERT_EQ(1u, result.rangesPerDomain[0].size());
+    ASSERT_EQ(makeRange(1*BP, 3*BP), result.rangesPerDomain[0][0]);
+    ASSERT_EQ(1u, result.unownedRanges.size());
+    ASSERT_EQ(makeRange(3*BP, 5*BP), result.unownedRanges[0]);
+}
+
+// Usable range that rounds to empty after small-page alignment is silently dropped.
+TEST(Partition_UnalignedRangeDropped) {
+    NUMATestSetup setup(1);
+    Vector<ProcessorAffinityEntry>   procs;
+    Vector<MemoryRangeAffinityEntry> mems;
+    procs.push({0, 0, 0});
+    mems.push({makeRange(0, 4*BP), 0, MemoryType::Volatile});
+
+    auto topo = NUMATopology::build(procs, mems, emptyGen);
+
+    // [0x100, 0xF00) is entirely within one small page — alignedEnd <= alignedStart.
+    Vector<phys_memory_range> ranges;
+    ranges.push(makeRange(0x100, 0xF00));
+    auto result = partitionMemoryByDomain(ranges, 1, topo);
+
+    ASSERT_TRUE(result.rangesPerDomain[0].empty());
+    ASSERT_TRUE(result.unownedRanges.empty());
+}
+
+// Usable range with unaligned start/end: trimmed to small-page boundaries.
+TEST(Partition_UnalignedEndsTrimmed) {
+    NUMATestSetup setup(1);
+    Vector<ProcessorAffinityEntry>   procs;
+    Vector<MemoryRangeAffinityEntry> mems;
+    procs.push({0, 0, 0});
+    mems.push({makeRange(0, 8*BP), 0, MemoryType::Volatile});
+
+    auto topo = NUMATopology::build(procs, mems, emptyGen);
+
+    // Usable range [SP/2, 3*BP + SP/2) — should trim to [SP, 3*BP).
+    auto ranges = usable(SP/2, 3*BP + SP/2);
+    auto result = partitionMemoryByDomain(ranges, 1, topo);
+
+    ASSERT_EQ(1u, result.rangesPerDomain[0].size());
+    ASSERT_EQ(makeRange(SP, 3*BP), result.rangesPerDomain[0][0]);
+}
+
+// CPU whose home domain has no memory is redirected to the nearest domain with memory.
+TEST(Partition_CpuRedirectedToNearestDomainWithMemory) {
+    NUMATestSetup setup(2);
+    Vector<ProcessorAffinityEntry>   procs;
+    Vector<MemoryRangeAffinityEntry> mems;
+    Vector<LatencyEntry>             lats;
+    // CPU 0 → domain 0 (no memory).  CPU 1 → domain 1 (has memory).
+    procs.push({0, 0, 0});
+    procs.push({1, 1, 0});
+    mems.push({makeRange(2*BP, 4*BP), 1, MemoryType::Volatile});
+
+    // Domain 0 → domain 1 latency is finite; domain 0 is local.
+    lats.push({0, 0, 10, DISTANCE_NO_DATA, false});
+    lats.push({0, 1, 20, DISTANCE_NO_DATA, false});
+    lats.push({1, 0, 20, DISTANCE_NO_DATA, false});
+    lats.push({1, 1, 10, DISTANCE_NO_DATA, false});
+
+    auto topo = NUMATopology::build(procs, mems, emptyGen, lats);
+    auto ranges = usable(2*BP, 4*BP);
+    auto result = partitionMemoryByDomain(ranges, 2, topo, DistanceMetric::Latency);
+
+    // CPU 0's home domain (0) has no memory — it should be assigned to domain 1.
+    ASSERT_EQ(DomainID(1), result.processorDomain[0]);
+    // CPU 1 stays on its home domain.
+    ASSERT_EQ(DomainID(1), result.processorDomain[1]);
+}
+
+// Multiple separate usable ranges, each assigned to their respective domain.
+TEST(Partition_MultipleUsableRanges) {
+    NUMATestSetup setup(2);
+    Vector<ProcessorAffinityEntry>   procs;
+    Vector<MemoryRangeAffinityEntry> mems;
+    procs.push({0, 0, 0});
+    procs.push({1, 1, 0});
+    mems.push({makeRange(1*BP, 3*BP), 0, MemoryType::Volatile});
+    mems.push({makeRange(5*BP, 7*BP), 1, MemoryType::Volatile});
+
+    auto topo = NUMATopology::build(procs, mems, emptyGen);
+
+    Vector<phys_memory_range> ranges;
+    ranges.push(makeRange(1*BP, 3*BP));
+    ranges.push(makeRange(5*BP, 7*BP));
+    auto result = partitionMemoryByDomain(ranges, 2, topo);
+
+    ASSERT_EQ(1u, result.rangesPerDomain[0].size());
+    ASSERT_EQ(makeRange(1*BP, 3*BP), result.rangesPerDomain[0][0]);
+    ASSERT_EQ(1u, result.rangesPerDomain[1].size());
+    ASSERT_EQ(makeRange(5*BP, 7*BP), result.rangesPerDomain[1][0]);
+    ASSERT_TRUE(result.unownedRanges.empty());
+}
+
+// ============================================================================
+// Stress test: many domains, multiple gaps, multi-range input, CPU redirect
+// ============================================================================
+//
+// Memory layout within usable range [1*BP, 22*BP):
+//
+//   [1*BP,  3*BP)   domain 0   (2 pages)
+//   [3*BP,  5*BP)   domain 1   (2 pages)
+//   [5*BP,  7*BP)   UNOWNED    gap 1
+//   [7*BP,  11*BP)  domain 2   (4 pages)
+//   [11*BP, 12*BP)  domain 3   (1 page)
+//   [12*BP, 14*BP)  UNOWNED    gap 2
+//   [14*BP, 17*BP)  domain 4   (3 pages)
+//   [17*BP, 19*BP)  UNOWNED    gap 3
+//   [19*BP, 22*BP)  domain 5   (3 pages)
+//
+// Plus a second separate usable range [25*BP, 27*BP) entirely in domain 2,
+// giving domain 2 a second non-contiguous range.
+//
+// Domain 6 is CPU-only (no memory).  Its 2 CPUs must be redirected to the
+// nearest domain with memory.  Latency is set so domain 5 wins for domain 6.
+//
+TEST(Partition_StressTest_ManyDomainsGapsCpuRedirect) {
+    NUMATestSetup setup(14); // 14 CPUs: 2 per domain for domains 0-6
+
+    Vector<ProcessorAffinityEntry>   procs;
+    Vector<MemoryRangeAffinityEntry> mems;
+    Vector<LatencyEntry>             lats;
+
+    // 2 CPUs per domain (domains 0-6)
+    for (uint32_t d = 0; d <= 6; d++) {
+        procs.push({static_cast<arch::ProcessorID>(d * 2),     d, 0});
+        procs.push({static_cast<arch::ProcessorID>(d * 2 + 1), d, 0});
+    }
+
+    // Memory regions (domain 6 intentionally has none)
+    mems.push({makeRange( 1*BP,  3*BP), 0, MemoryType::Volatile});
+    mems.push({makeRange( 3*BP,  5*BP), 1, MemoryType::Volatile});
+    mems.push({makeRange( 7*BP, 11*BP), 2, MemoryType::Volatile});
+    mems.push({makeRange(25*BP, 27*BP), 2, MemoryType::Volatile}); // second range for d2
+    mems.push({makeRange(11*BP, 12*BP), 3, MemoryType::Volatile});
+    mems.push({makeRange(14*BP, 17*BP), 4, MemoryType::Volatile});
+    mems.push({makeRange(19*BP, 22*BP), 5, MemoryType::Volatile});
+
+    // Latency matrix: self=10, all cross-domain=20, except domain 6 which
+    // has graduated distances so that domain 5 (lat=12) wins over domain 4
+    // (lat=18) and all others.
+    //   d6->d0=35, d6->d1=30, d6->d2=28, d6->d3=22, d6->d4=18, d6->d5=12
+    constexpr uint64_t d6CrossLat[] = {35, 30, 28, 22, 18, 12};
+    for (uint32_t i = 0; i <= 6; i++) {
+        for (uint32_t j = 0; j <= 6; j++) {
+            uint64_t lat;
+            if (i == j) {
+                lat = 10;
+            } else if (i == 6) {
+                lat = d6CrossLat[j]; // j is always 0-5 when i==6 and i!=j
+            } else {
+                lat = 20;
+            }
+            lats.push({i, j, lat, DISTANCE_NO_DATA, false});
+        }
+    }
+
+    auto topo = NUMATopology::build(procs, mems, emptyGen, lats, emptyBw);
+
+    Vector<phys_memory_range> usableRanges;
+    usableRanges.push(makeRange( 1*BP, 22*BP)); // large range with gaps
+    usableRanges.push(makeRange(25*BP, 27*BP)); // separate range for domain 2
+
+    auto result = partitionMemoryByDomain(usableRanges, 14, topo);
+
+    // 7 domains in result
+    ASSERT_EQ(7u, result.rangesPerDomain.size());
+
+    // Domain 0: one range
+    ASSERT_EQ(1u, result.rangesPerDomain[0].size());
+    ASSERT_EQ(makeRange(1*BP, 3*BP), result.rangesPerDomain[0][0]);
+
+    // Domain 1: one range
+    ASSERT_EQ(1u, result.rangesPerDomain[1].size());
+    ASSERT_EQ(makeRange(3*BP, 5*BP), result.rangesPerDomain[1][0]);
+
+    // Domain 2: two non-contiguous ranges (one from each usable range)
+    ASSERT_EQ(2u, result.rangesPerDomain[2].size());
+    ASSERT_EQ(makeRange( 7*BP, 11*BP), result.rangesPerDomain[2][0]);
+    ASSERT_EQ(makeRange(25*BP, 27*BP), result.rangesPerDomain[2][1]);
+
+    // Domain 3: one range
+    ASSERT_EQ(1u, result.rangesPerDomain[3].size());
+    ASSERT_EQ(makeRange(11*BP, 12*BP), result.rangesPerDomain[3][0]);
+
+    // Domain 4: one range
+    ASSERT_EQ(1u, result.rangesPerDomain[4].size());
+    ASSERT_EQ(makeRange(14*BP, 17*BP), result.rangesPerDomain[4][0]);
+
+    // Domain 5: one range
+    ASSERT_EQ(1u, result.rangesPerDomain[5].size());
+    ASSERT_EQ(makeRange(19*BP, 22*BP), result.rangesPerDomain[5][0]);
+
+    // Domain 6: no memory
+    ASSERT_TRUE(result.rangesPerDomain[6].empty());
+
+    // Three unowned gaps from the large usable range
+    ASSERT_EQ(3u, result.unownedRanges.size());
+    ASSERT_EQ(makeRange( 5*BP,  7*BP), result.unownedRanges[0]);
+    ASSERT_EQ(makeRange(12*BP, 14*BP), result.unownedRanges[1]);
+    ASSERT_EQ(makeRange(17*BP, 19*BP), result.unownedRanges[2]);
+
+    // 14 processor entries
+    ASSERT_EQ(14u, result.processorDomain.size());
+
+    // CPUs on domains 0-5 stay on their home domain (which has memory)
+    for (size_t d = 0; d <= 5; d++) {
+        ASSERT_EQ(DomainID(d), result.processorDomain[d * 2]);
+        ASSERT_EQ(DomainID(d), result.processorDomain[d * 2 + 1]);
+    }
+
+    // Domain 6 CPUs (12 and 13) redirect to domain 5 (nearest with memory: lat=12)
+    ASSERT_EQ(DomainID(5), result.processorDomain[12]);
+    ASSERT_EQ(DomainID(5), result.processorDomain[13]);
+}
