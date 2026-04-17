@@ -2092,3 +2092,354 @@ TEST_WITH_TIMEOUT_NO_TRACKING(NUMAPool_ConcurrentStress_MultiRange, 8000) {
         ASSERT_LE(p.pool->getFreeBigPageCount() + p.pool->getPAPagesCount(), numBigPages);
     }
 }
+
+// ============================================================================
+// PageAllocatorImpl — Basic Allocation (Single Domain)
+// ============================================================================
+
+TEST(PAI_SingleDomain_SmallAlloc_Basic) {
+    TestPageAllocatorImpl impl({ DomainSpec::simple(0, 4, {0, 1, 2, 3}) });
+
+    std::vector<PageRef> pages;
+    size_t got = impl.impl.allocatePages(10, [&](PageRef r){ pages.push_back(r); });
+
+    ASSERT_EQ(10u, got);
+    ASSERT_EQ(10u, pages.size());
+}
+
+TEST(PAI_SingleDomain_SmallAlloc_PageRefProperties) {
+    // Allocated small pages must be small, page-aligned, within the domain's address range,
+    // and unique (no double-allocation).
+    TestPageAllocatorImpl impl({ DomainSpec::simple(0, 4, {0, 1, 2, 3}) });
+
+    const uint64_t rangeStart = testDomainBase(0);
+    const uint64_t rangeEnd   = testDomainBase(0) + 4 * arch::bigPageSize;
+    std::set<uint64_t> seen;
+    bool allSmall   = true;
+    bool allAligned = true;
+    bool allInRange = true;
+
+    impl.impl.allocatePages(200, [&](PageRef r){
+        seen.insert(r.addr().value);
+        if (r.size() != PageSize::SMALL)                               allSmall   = false;
+        if (r.addr().value % arch::smallPageSize != 0)                 allAligned = false;
+        if (r.addr().value < rangeStart || r.addr().value >= rangeEnd) allInRange = false;
+    });
+
+    ASSERT_EQ(200u, seen.size());
+    ASSERT_TRUE(allSmall);
+    ASSERT_TRUE(allAligned);
+    ASSERT_TRUE(allInRange);
+}
+
+TEST(PAI_SingleDomain_BigPageOnly_Basic) {
+    TestPageAllocatorImpl impl({ DomainSpec::simple(0, 4, {0, 1, 2, 3}) });
+
+    std::vector<PageRef> pages;
+    size_t got = impl.impl.allocatePages(2 * PageAllocator::smallPagesPerBigPage,
+                                          [&](PageRef r){ pages.push_back(r); },
+                                          AllocBehavior::BIG_PAGE_ONLY);
+
+    ASSERT_EQ(2 * PageAllocator::smallPagesPerBigPage, got);
+    ASSERT_EQ(2u, pages.size());
+    for (const auto& pg : pages) {
+        ASSERT_EQ(PageSize::BIG, pg.size());
+    }
+    ASSERT_EQ(2u, impl.impl.numaPools[0]->getFreeBigPageCount());
+}
+
+TEST(PAI_SingleDomain_BigPageOnly_NonDivisibleCount) {
+    // BIG_PAGE_ONLY rounds the requested count up to a whole big page.
+    TestPageAllocatorImpl impl({ DomainSpec::simple(0, 2, {0, 1, 2, 3}) });
+
+    std::vector<PageRef> pages;
+    size_t got = impl.impl.allocatePages(1,
+                                          [&](PageRef r){ pages.push_back(r); },
+                                          AllocBehavior::BIG_PAGE_ONLY);
+
+    ASSERT_EQ(PageAllocator::smallPagesPerBigPage, got);
+    ASSERT_EQ(1u, pages.size());
+    ASSERT_EQ(PageSize::BIG, pages[0].size());
+}
+
+// ============================================================================
+// PageAllocatorImpl — Free (Single Domain)
+// ============================================================================
+
+TEST(PAI_SingleDomain_FreeBig_RestoredToPool) {
+    TestPageAllocatorImpl impl({ DomainSpec::simple(0, 4, {0, 1, 2, 3}) });
+
+    std::vector<PageRef> pages;
+    impl.impl.allocatePages(2 * PageAllocator::smallPagesPerBigPage,
+                            [&](PageRef r){ pages.push_back(r); },
+                            AllocBehavior::BIG_PAGE_ONLY);
+    ASSERT_EQ(2u, impl.impl.numaPools[0]->getFreeBigPageCount());
+
+    impl.impl.freePages(pages.data(), pages.size());
+
+    ASSERT_EQ(4u, impl.impl.numaPools[0]->getFreeBigPageCount());
+    ASSERT_TRUE(impl.impl.numaPools[0]->checkInvariants());
+}
+
+TEST(PAI_SingleDomain_FreeSmall_InvariantsHold) {
+    TestPageAllocatorImpl impl({ DomainSpec::simple(0, 4, {0, 1, 2, 3}) });
+
+    std::vector<PageRef> pages;
+    impl.impl.allocatePages(50, [&](PageRef r){ pages.push_back(r); });
+    ASSERT_EQ(50u, pages.size());
+
+    impl.impl.freePages(pages.data(), pages.size());
+
+    ASSERT_TRUE(impl.impl.numaPools[0]->checkInvariants());
+}
+
+TEST(PAI_SingleDomain_RoundTrip_AllocFreeAlloc) {
+    TestPageAllocatorImpl impl({ DomainSpec::simple(0, 2, {0, 1, 2, 3}) });
+
+    std::vector<PageRef> pages;
+    impl.impl.allocatePages(2 * PageAllocator::smallPagesPerBigPage,
+                            [&](PageRef r){ pages.push_back(r); },
+                            AllocBehavior::BIG_PAGE_ONLY);
+    ASSERT_EQ(2u, pages.size());
+    ASSERT_EQ(0u, impl.impl.numaPools[0]->getFreeBigPageCount());
+
+    impl.impl.freePages(pages.data(), pages.size());
+    ASSERT_EQ(2u, impl.impl.numaPools[0]->getFreeBigPageCount());
+
+    std::vector<PageRef> pages2;
+    size_t got = impl.impl.allocatePages(2 * PageAllocator::smallPagesPerBigPage,
+                                          [&](PageRef r){ pages2.push_back(r); },
+                                          AllocBehavior::BIG_PAGE_ONLY);
+    ASSERT_EQ(2 * PageAllocator::smallPagesPerBigPage, got);
+    ASSERT_EQ(2u, pages2.size());
+}
+
+// ============================================================================
+// PageAllocatorImpl — OOM handling
+// ============================================================================
+
+TEST(PAI_GracefulOOM_ReturnsPartialCount) {
+    // GRACEFUL_OOM must not panic; it returns however many pages were available.
+    TestPageAllocatorImpl impl({ DomainSpec::simple(0, 1, {0, 1, 2, 3}) });
+
+    std::vector<PageRef> pages;
+    size_t got = impl.impl.allocatePages(2 * PageAllocator::smallPagesPerBigPage,
+                                          [&](PageRef r){ pages.push_back(r); },
+                                          AllocBehavior::GRACEFUL_OOM);
+
+    ASSERT_EQ(PageAllocator::smallPagesPerBigPage, got);
+    ASSERT_TRUE(impl.impl.numaPools[0]->checkInvariants());
+}
+
+TEST(PAI_NonGracefulOOM_Panics) {
+    // Without GRACEFUL_OOM, an unsatisfiable request must trigger an assertion failure.
+    TestPageAllocatorImpl impl({ DomainSpec::simple(0, 1, {0, 1, 2, 3}) });
+
+    // Exhaust the pool so the next alloc cannot be satisfied.
+    impl.impl.allocatePages(PageAllocator::smallPagesPerBigPage,
+                            [](PageRef){}, AllocBehavior::BIG_PAGE_ONLY);
+    ASSERT_EQ(0u, impl.impl.numaPools[0]->getFreeBigPageCount());
+
+    bool panicked = false;
+    try {
+        impl.impl.allocatePages(1, [](PageRef){});
+    } catch (const AssertionFailure&) {
+        panicked = true;
+    }
+    ASSERT_TRUE(panicked);
+}
+
+// ============================================================================
+// PageAllocatorImpl — LocalPool integration
+// ============================================================================
+
+TEST(PAI_LocalPool_SecondAllocUsesCache) {
+    // After a small-page alloc, the leftover portion of the consumed big page is
+    // cached in the calling CPU's LocalPool.  A second alloc on the same CPU must
+    // draw from that cache without touching the NUMA pool's free-big-page count.
+    TestPageAllocatorImpl impl({ DomainSpec::simple(0, 2, {0, 1, 2, 3}) });
+
+    // First alloc: NUMAPool fallback consumes 1 big page; the ~502 remaining
+    // subpages are handed to the CPU's LocalPool.
+    impl.impl.allocatePages(10, [](PageRef){});
+    ASSERT_EQ(1u, impl.impl.numaPools[0]->getFreeBigPageCount());
+
+    // Second alloc: must be served entirely from LocalPool — NUMAPool count unchanged.
+    impl.impl.allocatePages(10, [](PageRef){});
+    ASSERT_EQ(1u, impl.impl.numaPools[0]->getFreeBigPageCount());
+}
+
+// ============================================================================
+// PageAllocatorImpl — Multi-domain
+// ============================================================================
+
+TEST(PAI_MultiDomain_FallbackToRemote) {
+    // When the home domain is exhausted, allocatePages must spill into the remote domain.
+    //
+    // Domain 0: 2 big pages, CPU 0 (main thread home domain).
+    // Domain 1: 2 big pages, CPU 1.
+    // Request 3 big pages worth — the last one must come from domain 1.
+    TestPageAllocatorImpl impl({
+        DomainSpec::simple(0, 2, {0}),
+        DomainSpec::simple(1, 2, {1}),
+    });
+
+    constexpr size_t request = 3 * PageAllocator::smallPagesPerBigPage;
+    std::vector<PageRef> pages;
+    size_t got = impl.impl.allocatePages(request,
+                                          [&](PageRef r){ pages.push_back(r); },
+                                          AllocBehavior::GRACEFUL_OOM);
+
+    ASSERT_EQ(request, got);
+    ASSERT_EQ(0u, impl.impl.numaPools[0]->getFreeBigPageCount());
+    ASSERT_EQ(1u, impl.impl.numaPools[1]->getFreeBigPageCount());
+}
+
+TEST(PAI_MultiDomain_LocalDomainOnly_NoSpill) {
+    // LOCAL_DOMAIN_ONLY must never draw from remote domains, even when the local
+    // domain cannot satisfy the full request.
+    //
+    // Domain 0: 1 big page, CPU 0.  Domain 1: 2 big pages, CPU 1.
+    // Requesting 2 big pages worth with LOCAL_DOMAIN_ONLY should yield at most
+    // 1 big page's worth, leaving domain 1 untouched.
+    TestPageAllocatorImpl impl({
+        DomainSpec::simple(0, 1, {0}),
+        DomainSpec::simple(1, 2, {1}),
+    });
+
+    constexpr size_t request = 2 * PageAllocator::smallPagesPerBigPage;
+    size_t got = impl.impl.allocatePages(request, [](PageRef){},
+                                          AllocBehavior::LOCAL_DOMAIN_ONLY |
+                                          AllocBehavior::GRACEFUL_OOM);
+
+    ASSERT_LT(got, request);
+    ASSERT_EQ(2u, impl.impl.numaPools[1]->getFreeBigPageCount());
+}
+
+TEST(PAI_MultiDomain_FreeRoutesToCorrectPool) {
+    // freePages() must dispatch each page back to the NUMAPool whose address range owns it.
+    TestPageAllocatorImpl impl({
+        DomainSpec::simple(0, 2, {0}),
+        DomainSpec::simple(1, 2, {1}),
+    });
+
+    // Allocate 2 big pages from domain 0 (main thread is CPU 0, nearest pool = domain 0).
+    std::vector<PageRef> pages;
+    impl.impl.allocatePages(2 * PageAllocator::smallPagesPerBigPage,
+                            [&](PageRef r){ pages.push_back(r); },
+                            AllocBehavior::BIG_PAGE_ONLY);
+    ASSERT_EQ(2u, pages.size());
+    ASSERT_EQ(0u, impl.impl.numaPools[0]->getFreeBigPageCount());
+    ASSERT_EQ(2u, impl.impl.numaPools[1]->getFreeBigPageCount());
+
+    // Free them — must return to domain 0, leaving domain 1 untouched.
+    impl.impl.freePages(pages.data(), pages.size());
+    ASSERT_EQ(2u, impl.impl.numaPools[0]->getFreeBigPageCount());
+    ASSERT_EQ(2u, impl.impl.numaPools[1]->getFreeBigPageCount());
+    ASSERT_TRUE(impl.impl.numaPools[0]->checkInvariants());
+    ASSERT_TRUE(impl.impl.numaPools[1]->checkInvariants());
+}
+
+// ============================================================================
+// PageAllocatorImpl — Concurrent stress (single domain)
+// ============================================================================
+
+TEST_WITH_TIMEOUT_NO_TRACKING(PAI_ConcurrentStress_SingleDomain, 8000) {
+    constexpr size_t numBigPages = 16;
+    constexpr size_t totalPages  = numBigPages * PageAllocator::smallPagesPerBigPage;
+    constexpr int    numThreads  = 4;
+    constexpr int    numEpochs   = 20;
+    constexpr int    epochMs     = 10;
+    constexpr size_t maxPages    = 64;
+
+    TestPageAllocatorImpl impl({ DomainSpec::simple(0, numBigPages, {0, 1, 2, 3}) });
+
+    for (int epoch = 0; epoch < numEpochs; epoch++) {
+        std::atomic<bool> stop{false};
+        std::vector<std::thread> threads;
+        threads.reserve(numThreads);
+
+        // Pages held by each thread at epoch end (final alloc, not freed).
+        // Written by thread t after its loop exits; read by main after join().
+        std::vector<std::vector<PageRef>> heldPages(numThreads);
+
+        for (int t = 0; t < numThreads; t++) {
+            threads.emplace_back([&, t]() {
+                std::mt19937_64 rng(std::random_device{}());
+                std::uniform_int_distribution<size_t> pick(1, maxPages);
+
+                while (!stop.load(std::memory_order_relaxed)) {
+                    PageRef pages[maxPages];
+                    size_t pageCount = 0;
+                    impl.impl.allocatePages(pick(rng),
+                        [&](PageRef r){ pages[pageCount++] = r; },
+                        AllocBehavior::GRACEFUL_OOM);
+
+                    if (pageCount > 0) {
+                        impl.impl.freePages(pages, pageCount);
+                    }
+                }
+
+                // Final alloc: record but do NOT free — held for epoch-end inspection.
+                impl.impl.allocatePages(maxPages,
+                    [&](PageRef r){ heldPages[t].push_back(r); },
+                    AllocBehavior::GRACEFUL_OOM);
+            });
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(epochMs));
+        stop.store(true, std::memory_order_relaxed);
+        for (auto& th : threads) th.join();
+
+        // ---- Epoch-end correctness checks ----
+
+        // (1) Collect all held pages, expanding big PageRefs to small-page granularity.
+        //     Every address must be unique — duplicates indicate double-allocation.
+        std::set<uint64_t> allHeldSmallAddrs;
+        size_t totalHeld = 0;
+        for (int t = 0; t < numThreads; t++) {
+            for (const auto& pg : heldPages[t]) {
+                if (pg.size() == PageSize::BIG) {
+                    for (size_t i = 0; i < PageAllocator::smallPagesPerBigPage; i++) {
+                        bool inserted = allHeldSmallAddrs.insert(
+                            pg.addr().value + i * arch::smallPageSize).second;
+                        ASSERT_TRUE(inserted); // duplicate = double-allocation across threads
+                    }
+                    totalHeld += PageAllocator::smallPagesPerBigPage;
+                } else {
+                    bool inserted = allHeldSmallAddrs.insert(pg.addr().value).second;
+                    ASSERT_TRUE(inserted);
+                    totalHeld += 1;
+                }
+            }
+        }
+
+        // (2) Each held page must be marked as allocated inside the impl.
+        for (int t = 0; t < numThreads; t++) {
+            for (const auto& pg : heldPages[t]) {
+                ASSERT_TRUE(impl.impl.isPageAllocated(pg));
+            }
+        }
+
+        // (3) Free pages + held pages must equal the total pages we initialized with.
+        //     countFreePages() sums freeSubpageCount() across every BigPageMetadata,
+        //     covering pages in freeBigPages, paPages, and LocalPool caches.
+        const size_t freeCount = impl.impl.countFreePages();
+        ASSERT_EQ(totalPages, freeCount + totalHeld);
+
+        // (4) NUMAPool structural invariant.
+        ASSERT_TRUE(impl.impl.numaPools[0]->checkInvariants());
+        ASSERT_LE(impl.impl.numaPools[0]->getFreeBigPageCount() +
+                  impl.impl.numaPools[0]->getPAPagesCount(), numBigPages);
+
+        // Release all held pages before the next epoch.
+        for (int t = 0; t < numThreads; t++) {
+            if (!heldPages[t].empty()) {
+                impl.impl.freePages(heldPages[t].data(), heldPages[t].size());
+            }
+        }
+
+        // After freeing everything, every page must be free.
+        ASSERT_EQ(totalPages, impl.impl.countFreePages());
+    }
+}

@@ -157,6 +157,13 @@ public:
     [[nodiscard]] NUMAPool& getOwnerPool() const { return *ownerPool; }
     void returnPage();
     [[nodiscard]] kernel::mm::phys_addr baseAddr() const {return subpageAllocator.baseAddr;}
+
+#ifdef CROCOS_TESTING
+    // Number of subpages that are currently free (not allocated or reserved).
+    [[nodiscard]] size_t freeSubpageCount() const { return subpageAllocator.freePageCount(); }
+    // True when the given small-page ref is currently allocated in this big page.
+    [[nodiscard]] bool isSubpageAllocated(PageRef page) const { return !subpageAllocator.isPageFree(page); }
+#endif
 };
 
 struct SubrangeInfo {
@@ -212,6 +219,9 @@ public:
     [[nodiscard]] bool   isInPAPages(size_t i) const { return paPages.isSet(i); }
     // Quiescent-state invariant check: all paPages entries must be partial pages.
     [[nodiscard]] bool   checkInvariants()     const;
+    // Sum of freeSubpageCount() across every BigPageMetadata in this pool.
+    // Correctly accounts for pages in freeBigPages, paPages, or cached in a LocalPool.
+    [[nodiscard]] size_t countTotalFreePages() const;
 #endif
 };
 
@@ -273,6 +283,17 @@ struct PageAllocatorImpl {
 
     [[nodiscard]] size_t allocatePages(size_t smallPageCount, PageAllocationCallback cb, AllocFlags flags = {});
     void freePages(PageRef* pages, size_t count);
+
+#ifdef CROCOS_TESTING
+    // Sum of free subpages across all NUMAPools (and the unowned pool, if present).
+    // Includes pages cached in LocalPools, since their SmallPageAllocators track occupancy
+    // independently of which pool-level structure currently holds the BigPageMetadata.
+    [[nodiscard]] size_t countFreePages() const;
+    // True when the given PageRef is currently allocated (not available for new allocations).
+    // For BIG refs: checks isFull() on the owning BigPageMetadata.
+    // For SMALL refs: checks the occupancy bitmap in the owning SmallPageAllocator.
+    [[nodiscard]] bool isPageAllocated(PageRef page);
+#endif
 };
 
 NUMAPool*         createNumaPool(BootstrapAllocator& alloc,

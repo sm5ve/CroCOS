@@ -357,6 +357,14 @@ bool NUMAPool::checkInvariants() const {
     if (getFreeBigPageCount() + getPAPagesCount() > bigPageCount) return false;
     return true;
 }
+
+size_t NUMAPool::countTotalFreePages() const {
+    size_t total = 0;
+    for (size_t i = 0; i < bigPageCount; i++) {
+        total += bigPageMetadataBuffer[i].freeSubpageCount();
+    }
+    return total;
+}
 #endif
 
 
@@ -1034,3 +1042,23 @@ void PageAllocatorImpl::freePages(PageRef *pages, size_t count) {
         runPool->freePages(&pages[runStart], count - runStart);
     }
 }
+
+#ifdef CROCOS_TESTING
+size_t PageAllocatorImpl::countFreePages() const {
+    size_t total = 0;
+    for (size_t i = 0; i < numDomains; i++) {
+        if (numaPools[i]) total += numaPools[i]->countTotalFreePages();
+    }
+    if (unownedPool) total += unownedPool->countTotalFreePages();
+    return total;
+}
+
+bool PageAllocatorImpl::isPageAllocated(PageRef page) {
+    BigPageMetadata* meta = findMetadata(page.addr());
+    if (meta == nullptr) return false;
+    if (page.size() == kernel::mm::PageSize::BIG) {
+        return meta->isFull();
+    }
+    return meta->isSubpageAllocated(page);
+}
+#endif
