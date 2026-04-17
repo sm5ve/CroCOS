@@ -48,7 +48,7 @@ struct Config {
     size_t numDomains        = 2;
     size_t bigPagesPerDomain = 128;
     size_t threadsPerDomain  = 4;
-    size_t maxBatch          = 64;
+    size_t maxBatch          = 1024;
     size_t reportIntervalMs  = 5000;
 };
 
@@ -195,7 +195,7 @@ static std::string fmtRate(double r) {
 // Worker thread
 // ============================================================================
 
-static constexpr size_t HARD_MAX_BATCH = 1024;
+static constexpr size_t HARD_MAX_BATCH = 4096;
 
 static void workerThread(PageAllocatorImpl& impl,
                          ThreadStats& stats,

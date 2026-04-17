@@ -16,11 +16,11 @@
 // decremented when a reader claims an item. If the buffer read then stalls (write
 // not yet visible via writtenHead), the reader spins until the write completes.
 //
-// Same structural overflow contract as SimpleMPMCRingBuffer: callers must guarantee
+// Same structural overflow contract as MPMCRingBuffer: callers must guarantee
 // that the total number of items in flight never exceeds capacity.
 template<typename T, bool Owning = true, bool ScanOnComplete = false>
 class HighReliabilityRingBuffer {
-    SimpleMPMCRingBuffer<T, Owning, ScanOnComplete> buffer;
+    MPMCRingBuffer<T, Owning, ScanOnComplete> buffer;
     Atomic<size_t> logicalCount{size_t(0)};
 
     // Drain `toClaim` already-claimed items from the underlying buffer, invoking
@@ -64,9 +64,9 @@ public:
         : buffer(buf, capacity) {}
 
     // Non-owning, with write gen counters (ScanOnComplete=true)
-    HighReliabilityRingBuffer(T* buf, size_t capacity, Atomic<size_t>* wgc)
+    HighReliabilityRingBuffer(T* buf, size_t capacity, Atomic<size_t>* wgc, Atomic<size_t>* rgc)
         requires (!Owning && ScanOnComplete)
-        : buffer(buf, capacity, wgc) {}
+        : buffer(buf, capacity, wgc, rgc) {}
 
     HighReliabilityRingBuffer(const HighReliabilityRingBuffer&) = delete;
     HighReliabilityRingBuffer& operator=(const HighReliabilityRingBuffer&) = delete;

@@ -10,7 +10,7 @@
 #include <core/utility.h>
 #include <core/atomic.h>
 #include <core/atomic/RingBuffer.h>
-#include <core/ds/HighReliabilityRingBuffer.h>
+#include <core/atomic/HighReliabilityRingBuffer.h>
 #include <mem/NUMA.h>
 #include <core/atomic/AtomicBitPool.h>
 
@@ -187,6 +187,7 @@ public:
     NUMAPool(BigPageMetadata* metadataBuffer,
              BigPageMetadata** freeBuffer,
              Atomic<size_t>* wgc,
+            Atomic<size_t>* rgc,
              AtomicBitPool&& paPagesBitPool,
              SubrangeInfo* subrangeBuffer,
              size_t numSubranges,
