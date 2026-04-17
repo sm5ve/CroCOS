@@ -412,21 +412,25 @@ namespace kernel::mm{
         static LocalPool* localPools[arch::MAX_PROCESSOR_COUNT] = {};
 
         Vector<NUMAPool*>         numaPools;
-        Vector<BootstrapAllocator> perDomainAllocs;
+        const size_t processorCount = partition.processorDomain.size();
 
         for (size_t domainIdx = 0; domainIdx < partition.rangesPerDomain.size(); domainIdx++) {
             auto& ranges = partition.rangesPerDomain[domainIdx];
-            if (ranges.empty()) continue;
+            if (ranges.empty()) {
+                // Preserve the contract: numaPools[domainID] must be valid for
+                // all domain IDs up to maxDomainID, with nullptr for empty domains.
+                numaPools.push(nullptr);
+                continue;
+            }
 
             const numa::DomainID domainId{static_cast<uint16_t>(domainIdx)};
-            const size_t processorCount = partition.processorDomain.size();
 
             // ---- Stage 1 & 2: measure required memory ----
             BootstrapAllocator measuringAlloc;
-            createNumaPool(measuringAlloc, ranges);
+            createNumaPool(measuringAlloc, ranges, domainId);
             for (size_t cpu = 0; cpu < processorCount; cpu++) {
                 if (partition.processorDomain[cpu] == domainId) {
-                    createLocalPool(measuringAlloc);
+                    createLocalPool(measuringAlloc, topology);
                 }
             }
 
@@ -441,21 +445,38 @@ namespace kernel::mm{
 
             // ---- Stage 4: create the NUMAPool using real memory ----
             BootstrapAllocator realAlloc(buffer, measuringAlloc.bytesNeeded());
-            numaPools.push(createNumaPool(realAlloc, ranges));
+            numaPools.push(createNumaPool(realAlloc, ranges, domainId));
 
             // ---- Stage 5: create LocalPools for processors in this domain ----
             for (size_t cpu = 0; cpu < processorCount; cpu++) {
                 if (partition.processorDomain[cpu] == domainId) {
-                    localPools[cpu] = createLocalPool(realAlloc);
+                    localPools[cpu] = createLocalPool(realAlloc, topology);
                 }
             }
+        }
 
-            perDomainAllocs.push(move(realAlloc));
+        // ---- Unowned ranges: physical memory with no NUMA domain affinity ----
+        // Constructed after the domain loop so it doesn't compete for zone slots.
+        // Queried last during allocation as a final fallback.
+        NUMAPool* unownedPool = nullptr;
+        if (!partition.unownedRanges.empty()) {
+            BootstrapAllocator measuringAlloc;
+            createNumaPool(measuringAlloc, partition.unownedRanges);
+
+            phys_memory_range* largestRange = &partition.unownedRanges[0];
+            for (size_t i = 1; i < partition.unownedRanges.size(); i++) {
+                if (partition.unownedRanges[i].getSize() > largestRange->getSize())
+                    largestRange = &partition.unownedRanges[i];
+            }
+            void* buffer = reservePageAllocatorBufferForRange(*largestRange, measuringAlloc.bytesNeeded());
+
+            BootstrapAllocator realAlloc(buffer, measuringAlloc.bytesNeeded());
+            unownedPool = createNumaPool(realAlloc, partition.unownedRanges);
         }
 
         unmapTemporaryWindow();
 
-        auto impl = createPageAllocator(move(numaPools), localPools);
+        auto impl = createPageAllocator(move(numaPools), localPools, processorCount, unownedPool);
         (void)impl; // TODO: store in a global once PageAllocatorImpl is fully implemented
         return true;
     }

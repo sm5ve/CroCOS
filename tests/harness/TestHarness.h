@@ -15,6 +15,7 @@ namespace CroCOSTest {
     
     // Forward declarations
     struct TestInfo;
+    struct TestCleanupHook;
     
     // Test result tracking
     struct TestResult {
@@ -31,8 +32,9 @@ namespace CroCOSTest {
     private:
         // Helper methods for test discovery and execution
         static const TestInfo* const* getTests(size_t& testCount);
+        static const TestCleanupHook* const* getCleanupHooks(size_t& hookCount);
         static TestResult runSingleTest(const TestInfo* test);
-        
+
     public:
         static int runAllTests();
         static int runTest(const char* testName);
@@ -120,14 +122,25 @@ namespace CroCOSTest {
         void (*testFunc)();
         const char* fileName;
         int lineNumber;
-        int timeoutMs = 0;  // 0 means no timeout
+        int timeoutMs = 0;   // 0 means no timeout
+        bool noTracking = false;  // true disables memory leak detection for this test
     };
 
-        // Cross-platform section attribute
+    // Between-test cleanup hook: a zero-argument function registered to run
+    // after every test completes (pass or fail).  Use REGISTER_TEST_CLEANUP
+    // to register a function; the harness calls all registered hooks in
+    // declaration order before moving to the next test.
+    struct TestCleanupHook {
+        void (*cleanupFunc)();
+    };
+
+        // Cross-platform section attributes
     #ifdef __APPLE__
-    #define CROCOS_TEST_SECTION __attribute__((used, section("__DATA,crocos_tests")))
+    #define CROCOS_TEST_SECTION         __attribute__((used, section("__DATA,crocos_tests")))
+    #define CROCOS_CLEANUP_SECTION      __attribute__((used, section("__DATA,crocos_cleanup")))
     #else
-    #define CROCOS_TEST_SECTION __attribute__((used, section(".crocos_unit_tests")))
+    #define CROCOS_TEST_SECTION         __attribute__((used, section(".crocos_unit_tests")))
+    #define CROCOS_CLEANUP_SECTION      __attribute__((used, section(".crocos_test_cleanup")))
     #endif
 
         // Test registration macro using custom section (cross-platform)
@@ -161,6 +174,34 @@ namespace CroCOSTest {
     const CroCOSTest::TestInfo* testName##_registration = &testName##_info; \
     } \
     void testName()
+
+        // Test registration macro with a timeout and memory tracking disabled.
+        // Use when the test is inherently multi-threaded and the code under test
+        // makes no dynamic heap allocations (so leak detection adds no value).
+    #define TEST_WITH_TIMEOUT_NO_TRACKING(testName, timeoutMilliseconds) \
+    void testName(); \
+    namespace { \
+    const CroCOSTest::TestInfo testName##_info { \
+    #testName, \
+    testName, \
+    __FILE__, \
+    __LINE__, \
+    timeoutMilliseconds, \
+    true \
+    }; \
+    CROCOS_TEST_SECTION \
+    const CroCOSTest::TestInfo* testName##_registration = &testName##_info; \
+    } \
+    void testName()
+
+    // Register a cleanup function to be called after every test.
+    // Usage: REGISTER_TEST_CLEANUP(myCleanupFn)  (no semicolon on the function itself)
+    #define REGISTER_TEST_CLEANUP(cleanupFn) \
+    namespace { \
+    const CroCOSTest::TestCleanupHook cleanupFn##_hook { cleanupFn }; \
+    CROCOS_CLEANUP_SECTION \
+    const CroCOSTest::TestCleanupHook* cleanupFn##_hook_registration = &cleanupFn##_hook; \
+    }
 }
 
 using namespace CroCOSTest;

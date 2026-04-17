@@ -12,6 +12,8 @@
 #include <atomic>
 #include <algorithm>
 #include <mutex>
+#include <random>
+#include <chrono>
 
 #include <mem/PageAllocator.h>
 
@@ -50,22 +52,6 @@ TEST(PageRef_BigPageCreation) {
     ASSERT_EQ(0x200000ul, ref.addr().value);
 }
 
-TEST(PageRef_RunLength) {
-    auto ref = PageRef::small(phys_addr(0x1000));
-    ASSERT_EQ(1ul, ref.runLength());
-
-    ref.setRunLength(42);
-    ASSERT_EQ(42ul, ref.runLength());
-    ASSERT_EQ(0x1000ul, ref.addr().value);
-    ASSERT_EQ(PageSize::SMALL, ref.size());
-}
-
-TEST(PageRef_RunLengthMaxValue) {
-    auto ref = PageRef::small(phys_addr(0x1000));
-    ref.setRunLength(PageAllocator::smallPagesPerBigPage);
-    ASSERT_EQ(PageAllocator::smallPagesPerBigPage, ref.runLength());
-}
-
 TEST(PageRef_Equality) {
     auto a = PageRef::small(phys_addr(0x1000));
     auto b = PageRef::small(phys_addr(0x1000));
@@ -73,16 +59,6 @@ TEST(PageRef_Equality) {
 
     ASSERT_EQ(a, b);
     ASSERT_NE(a, c);
-}
-
-TEST(PageRef_RunLengthPreservesSize) {
-    auto small = PageRef::small(phys_addr(0x1000));
-    small.setRunLength(10);
-    ASSERT_EQ(PageSize::SMALL, small.size());
-
-    auto big = PageRef::big(phys_addr(0x200000));
-    big.setRunLength(10);
-    ASSERT_EQ(PageSize::BIG, big.size());
 }
 
 // ============================================================================
@@ -826,21 +802,70 @@ struct DomainSpec {
 // IMPORTANT: domainBuffers is reserved before the construction loop so that
 // push_back() never reallocates.  If it did, the raw pointers held inside
 // the BootstrapAllocators in perDomainAllocs would be invalidated.
+//
+// NOTE: The domains vector must be provided in contiguous domain-ID order
+// (domains[0] = domain 0, domains[1] = domain 1, ...) to satisfy the
+// createPageAllocator contract that numaPools[domainID] is valid.
+// The test helpers below always use contiguous IDs starting at 0.
 struct TestPageAllocatorImpl {
-    std::vector<BootstrapBuffer> domainBuffers;
-    LocalPool*                   localPools[arch::MAX_PROCESSOR_COUNT] = {};
-    PageAllocatorImpl            impl;
+    std::vector<BootstrapBuffer>              domainBuffers;
+    LocalPool*                                localPools[arch::MAX_PROCESSOR_COUNT] = {};
+    kernel::numa::NUMATopology                topology = kernel::numa::NUMATopology::build(
+        kernel::numa::EmptyIterable<kernel::numa::ProcessorAffinityEntry>{},
+        kernel::numa::EmptyIterable<kernel::numa::MemoryRangeAffinityEntry>{},
+        kernel::numa::EmptyIterable<kernel::numa::GenericInitiatorEntry>{}
+    ); // replaced in constructor when domains are provided
+    std::optional<kernel::numa::NUMAPolicy>   policy;
+    PageAllocatorImpl                         impl;
 
     explicit TestPageAllocatorImpl(std::vector<DomainSpec> domains) {
         domainBuffers.reserve(domains.size()); // prevent reallocation; see note above
-        Vector<BootstrapAllocator> perDomainAllocs;
+        Vector<NUMAPool*> numaPools;
 
+        // Determine total processor count (highest CPU ID + 1) across all domains.
+        size_t processorCount = 0;
         for (auto& spec : domains) {
+            for (size_t cpu : spec.cpuIds) {
+                if (cpu + 1 > processorCount) processorCount = cpu + 1;
+            }
+        }
+
+        // Build a NUMATopology with the CPU-to-domain assignments from the specs.
+        std::vector<kernel::numa::ProcessorAffinityEntry> procEntries;
+        for (size_t di = 0; di < domains.size(); di++) {
+            for (size_t cpu : domains[di].cpuIds) {
+                procEntries.push_back({
+                    static_cast<arch::ProcessorID>(cpu),
+                    static_cast<uint32_t>(di),
+                    static_cast<uint32_t>(di)  // clock domain same as proximity domain
+                });
+            }
+        }
+        if (!procEntries.empty()) {
+            topology = kernel::numa::NUMATopology::build(
+                procEntries,
+                kernel::numa::EmptyIterable<kernel::numa::MemoryRangeAffinityEntry>{},
+                kernel::numa::EmptyIterable<kernel::numa::GenericInitiatorEntry>{}
+            );
+        }
+
+        // For multi-domain topologies, build a NUMAPolicy so createPageAllocator
+        // can populate cpuNearestPool correctly.
+        const kernel::numa::NUMAPolicy* policyPtr = nullptr;
+        if (domains.size() > 1) {
+            policy.emplace(topology);
+            policyPtr = &policy.value();
+        }
+
+        for (size_t di = 0; di < domains.size(); di++) {
+            auto& spec = domains[di];
+            kernel::numa::DomainID domainId{static_cast<uint16_t>(di)};
+
             // ---- Measuring pass: determine memory requirements for this domain ----
             BootstrapAllocator measuring;
-            createNumaPool(measuring, spec.ranges);
+            createNumaPool(measuring, spec.ranges, domainId);
             for (size_t i = 0; i < spec.cpuIds.size(); i++) {
-                createLocalPool(measuring);
+                createLocalPool(measuring, topology);
             }
 
             // ---- Allocate buffer (reserve guarantees no reallocation here) ----
@@ -848,15 +873,14 @@ struct TestPageAllocatorImpl {
 
             // ---- Real pass: construct NUMAPool and LocalPools in the buffer ----
             BootstrapAllocator real = domainBuffers.back().makeAllocator();
-            createNumaPool(real, spec.ranges); // NUMAPool lives inside the buffer
+            numaPools.push(createNumaPool(real, spec.ranges, domainId));
             for (size_t cpu : spec.cpuIds) {
-                localPools[cpu] = createLocalPool(real);
+                localPools[cpu] = createLocalPool(real, topology);
             }
-
-            perDomainAllocs.push(move(real));
         }
 
-        impl = createPageAllocator(move(perDomainAllocs), localPools);
+        impl = createPageAllocator(move(numaPools), localPools, processorCount,
+                                   nullptr, policyPtr);
     }
 };
 
@@ -918,6 +942,915 @@ TEST(PageAllocatorImpl_Scaffold_AsymmetricDomains) {
 }
 
 // ============================================================================
+// SmallPageAllocator — Occupancy state machine
+// ============================================================================
+
+TEST(SPA_Transition_EmptyToPartial) {
+    SmallPageAllocator spa(testBaseAddr);
+    OccupancyTransition t{};
+    spa.alloc([](PageRef){}, 1, t);
+
+    ASSERT_EQ(OccupancyState::Empty,   t.before);
+    ASSERT_EQ(OccupancyState::Partial, t.after);
+    ASSERT_FALSE(t.becameFull());
+    ASSERT_FALSE(t.becameEmpty());
+    ASSERT_FALSE(t.becameAvailable());
+    ASSERT_FALSE(spa.isEmpty());
+    ASSERT_FALSE(spa.isFull());
+}
+
+TEST(SPA_Transition_EmptyToFull) {
+    SmallPageAllocator spa(testBaseAddr);
+    OccupancyTransition t{};
+    spa.alloc([](PageRef){}, PageAllocator::smallPagesPerBigPage, t);
+
+    ASSERT_EQ(OccupancyState::Empty, t.before);
+    ASSERT_EQ(OccupancyState::Full,  t.after);
+    ASSERT_TRUE(t.becameFull());
+    ASSERT_FALSE(t.becameEmpty());
+    ASSERT_FALSE(t.becameAvailable());
+    ASSERT_FALSE(spa.isEmpty());
+    ASSERT_TRUE(spa.isFull());
+}
+
+TEST(SPA_Transition_PartialToFull) {
+    SmallPageAllocator spa(testBaseAddr);
+    spa.alloc([](PageRef){}, 1);
+    OccupancyTransition t{};
+    spa.alloc([](PageRef){}, PageAllocator::smallPagesPerBigPage - 1, t);
+
+    ASSERT_EQ(OccupancyState::Partial, t.before);
+    ASSERT_EQ(OccupancyState::Full,    t.after);
+    ASSERT_TRUE(t.becameFull());
+    ASSERT_FALSE(t.becameEmpty());
+    ASSERT_FALSE(t.becameAvailable());
+    ASSERT_TRUE(spa.isFull());
+}
+
+TEST(SPA_Transition_FullToPartial) {
+    SmallPageAllocator spa(testBaseAddr);
+    spa.allocAll();
+    PageRef p = PageRef::small(testBaseAddr);
+    OccupancyTransition t{};
+    spa.free(&p, 1, t);
+
+    ASSERT_EQ(OccupancyState::Full,    t.before);
+    ASSERT_EQ(OccupancyState::Partial, t.after);
+    ASSERT_FALSE(t.becameFull());
+    ASSERT_FALSE(t.becameEmpty());
+    ASSERT_TRUE(t.becameAvailable());
+    ASSERT_FALSE(spa.isEmpty());
+    ASSERT_FALSE(spa.isFull());
+}
+
+TEST(SPA_Transition_PartialToEmpty) {
+    SmallPageAllocator spa(testBaseAddr);
+    std::vector<PageRef> pages;
+    spa.alloc([&](PageRef r){ pages.push_back(r); }, 10);
+    OccupancyTransition t{};
+    spa.free(pages.data(), pages.size(), t);
+
+    ASSERT_EQ(OccupancyState::Partial, t.before);
+    ASSERT_EQ(OccupancyState::Empty,   t.after);
+    ASSERT_TRUE(t.becameEmpty());
+    ASSERT_FALSE(t.becameFull());
+    ASSERT_FALSE(t.becameAvailable());
+    ASSERT_TRUE(spa.isEmpty());
+    ASSERT_FALSE(spa.isFull());
+}
+
+TEST(SPA_Transition_FullToEmpty) {
+    // Alloc all, then free all in one call.
+    // Both becameEmpty() and becameAvailable() must be true — this is the exact
+    // case handled by the if/else-if ordering in freeSmallPageRun.
+    SmallPageAllocator spa(testBaseAddr);
+    spa.allocAll();
+    std::vector<PageRef> pages;
+    pages.reserve(PageAllocator::smallPagesPerBigPage);
+    for (size_t i = 0; i < PageAllocator::smallPagesPerBigPage; i++) {
+        pages.push_back(PageRef::small(testBaseAddr + i * arch::smallPageSize));
+    }
+    OccupancyTransition t{};
+    spa.free(pages.data(), pages.size(), t);
+
+    ASSERT_EQ(OccupancyState::Full,  t.before);
+    ASSERT_EQ(OccupancyState::Empty, t.after);
+    ASSERT_TRUE(t.becameEmpty());
+    ASSERT_TRUE(t.becameAvailable());  // Full → non-Full
+    ASSERT_FALSE(t.becameFull());
+    ASSERT_TRUE(spa.isEmpty());
+}
+
+TEST(SPA_Transition_PartialStaysPartial) {
+    SmallPageAllocator spa(testBaseAddr);
+    // Alloc 100 pages (discarded), then alloc 50 more (saved to free back).
+    spa.alloc([](PageRef){}, 100);
+    std::vector<PageRef> toFree;
+    spa.alloc([&](PageRef r){ toFree.push_back(r); }, 50);
+    OccupancyTransition t{};
+    spa.free(toFree.data(), toFree.size(), t);
+
+    ASSERT_EQ(OccupancyState::Partial, t.before);
+    ASSERT_EQ(OccupancyState::Partial, t.after);
+    ASSERT_FALSE(t.becameFull());
+    ASSERT_FALSE(t.becameEmpty());
+    ASSERT_FALSE(t.becameAvailable());
+}
+
+// ============================================================================
+// SmallPageAllocator — Address correctness
+// ============================================================================
+
+TEST(SPA_Addresses_AllUnique) {
+    SmallPageAllocator spa(testBaseAddr);
+    std::set<uint64_t> seen;
+    spa.alloc([&](PageRef r){ seen.insert(r.addr().value); }, PageAllocator::smallPagesPerBigPage);
+    ASSERT_EQ(PageAllocator::smallPagesPerBigPage, seen.size());
+}
+
+TEST(SPA_Addresses_InRange) {
+    SmallPageAllocator spa(testBaseAddr);
+    bool allInRange = true;
+    spa.alloc([&](PageRef r){
+        if (r.addr().value < testBaseAddr.value ||
+            r.addr().value >= testBaseAddr.value + arch::bigPageSize) {
+            allInRange = false;
+        }
+    }, PageAllocator::smallPagesPerBigPage);
+    ASSERT_TRUE(allInRange);
+}
+
+TEST(SPA_Addresses_Aligned) {
+    SmallPageAllocator spa(testBaseAddr);
+    bool allAligned = true;
+    spa.alloc([&](PageRef r){
+        if (r.addr().value % arch::smallPageSize != 0) allAligned = false;
+    }, PageAllocator::smallPagesPerBigPage);
+    ASSERT_TRUE(allAligned);
+}
+
+// ============================================================================
+// SmallPageAllocator — Lazy init and ring buffer
+// ============================================================================
+
+TEST(SPA_LazyInit_FirstPageIsBase) {
+    SmallPageAllocator spa(testBaseAddr);
+    PageRef got = INVALID_PAGE_REF;
+    spa.alloc([&](PageRef r){ got = r; }, 1);
+    ASSERT_EQ(testBaseAddr.value, got.addr().value);
+}
+
+TEST(SPA_LazyInit_Sequential) {
+    constexpr size_t N = 8;
+    SmallPageAllocator spa(testBaseAddr);
+    std::vector<PageRef> pages;
+    spa.alloc([&](PageRef r){ pages.push_back(r); }, N);
+    ASSERT_EQ(N, pages.size());
+    for (size_t i = 0; i < N; i++) {
+        ASSERT_EQ(testBaseAddr.value + i * arch::smallPageSize, pages[i].addr().value);
+    }
+}
+
+TEST(SPA_RingBuffer_ReturnsFreedPages) {
+    SmallPageAllocator spa(testBaseAddr);
+    // Exhaust lazy init by allocating everything, then free 5 specific pages.
+    spa.alloc([](PageRef){}, PageAllocator::smallPagesPerBigPage - 5);
+    std::vector<PageRef> freed;
+    spa.alloc([&](PageRef r){ freed.push_back(r); }, 5);
+    spa.free(freed.data(), freed.size());
+
+    // Reallocate 5 pages — they must come from the ring buffer.
+    std::set<uint64_t> expected;
+    for (const auto& pg : freed) expected.insert(pg.addr().value);
+
+    std::set<uint64_t> reallocated;
+    spa.alloc([&](PageRef r){ reallocated.insert(r.addr().value); }, 5);
+    ASSERT_EQ(expected, reallocated);
+}
+
+// ============================================================================
+// SmallPageAllocator — Reserved pages
+// ============================================================================
+
+TEST(SPA_Reserved_NeverAllocated) {
+    SmallPageAllocator spa(testBaseAddr);
+    spa.reservePage(testBaseAddr);
+
+    std::set<uint64_t> allocated;
+    spa.alloc([&](PageRef r){ allocated.insert(r.addr().value); },
+              PageAllocator::smallPagesPerBigPage - 1);
+    ASSERT_EQ(PageAllocator::smallPagesPerBigPage - 1, allocated.size());
+    ASSERT_EQ(0u, allocated.count(testBaseAddr.value));
+}
+
+TEST(SPA_Reserved_IsFullAt511) {
+    SmallPageAllocator spa(testBaseAddr);
+    spa.reservePage(testBaseAddr);
+    constexpr size_t maxAlloc = PageAllocator::smallPagesPerBigPage - 1;
+
+    spa.alloc([](PageRef){}, maxAlloc - 1);
+    ASSERT_FALSE(spa.isFull());
+
+    spa.alloc([](PageRef){}, 1);
+    ASSERT_TRUE(spa.isFull());
+}
+
+TEST(SPA_Reserved_FreePageCount) {
+    SmallPageAllocator spa(testBaseAddr);
+    spa.reservePage(testBaseAddr);
+    ASSERT_EQ(PageAllocator::smallPagesPerBigPage - 1, spa.freePageCount());
+}
+
+// ============================================================================
+// SmallPageAllocator — White-box invariant checks
+// ============================================================================
+
+TEST(SPA_Invariants_FreshAllocator) {
+    SmallPageAllocator spa(testBaseAddr);
+    ASSERT_TRUE(spa.checkInvariants());
+    ASSERT_EQ(0u, spa.getAllocatedCount());
+    ASSERT_EQ(0u, spa.getReservedCount());
+    ASSERT_EQ(0u, spa.getBitmapPopcount());
+}
+
+TEST(SPA_Invariants_AfterPartialAlloc) {
+    SmallPageAllocator spa(testBaseAddr);
+    spa.alloc([](PageRef){}, 100);
+    ASSERT_TRUE(spa.checkInvariants());
+    ASSERT_EQ(100u, spa.getAllocatedCount());
+    ASSERT_EQ(100u, spa.getBitmapPopcount());
+}
+
+TEST(SPA_Invariants_AfterAllocFree) {
+    SmallPageAllocator spa(testBaseAddr);
+    // Alloc all, free 200, alloc 100 from ring buffer.
+    spa.allocAll();
+    std::vector<PageRef> freed;
+    freed.reserve(200);
+    for (size_t i = 0; i < 200; i++) {
+        freed.push_back(PageRef::small(testBaseAddr + i * arch::smallPageSize));
+    }
+    spa.free(freed.data(), freed.size());
+    ASSERT_TRUE(spa.checkInvariants());
+    ASSERT_EQ(PageAllocator::smallPagesPerBigPage - 200, spa.getAllocatedCount());
+
+    spa.alloc([](PageRef){}, 100);
+    ASSERT_TRUE(spa.checkInvariants());
+    ASSERT_EQ(PageAllocator::smallPagesPerBigPage - 100, spa.getAllocatedCount());
+}
+
+TEST(SPA_Invariants_WithReserved) {
+    SmallPageAllocator spa(testBaseAddr);
+    spa.reservePage(testBaseAddr);
+    // Reserved page has its bit set in the bitmap but does not count toward allocatedCount.
+    ASSERT_TRUE(spa.checkInvariants());
+    ASSERT_EQ(1u, spa.getReservedCount());
+    ASSERT_EQ(1u, spa.getBitmapPopcount());  // reserved page bit is set
+    ASSERT_EQ(0u, spa.getAllocatedCount());
+
+    spa.alloc([](PageRef){}, 50);
+    ASSERT_TRUE(spa.checkInvariants());
+    ASSERT_EQ(51u, spa.getBitmapPopcount());  // 50 allocated + 1 reserved
+    ASSERT_EQ(50u, spa.getAllocatedCount());
+}
+
+// ============================================================================
+// NUMAPool — Initialization
+// ============================================================================
+
+TEST(NUMAPool_Init_AllPagesInFreeBigPages) {
+    auto p = TestNUMAPool::withBigPages(testDomainBase(0), 4);
+    ASSERT_EQ(4u, p.pool->getFreeBigPageCount());
+    ASSERT_EQ(0u, p.pool->getPAPagesCount());
+    ASSERT_TRUE(p.pool->checkInvariants());
+}
+
+TEST(NUMAPool_Init_BigPageOnlyAllocSucceeds) {
+    auto p = TestNUMAPool::withBigPages(testDomainBase(0), 4);
+    size_t count = 0;
+    BigPageMetadata* rem = nullptr;
+    size_t got = p.pool->allocatePages(4 * PageAllocator::smallPagesPerBigPage,
+                                       [&](PageRef){ count++; }, rem,
+                                       AllocBehavior::BIG_PAGE_ONLY);
+    ASSERT_EQ(4 * PageAllocator::smallPagesPerBigPage, got);
+    ASSERT_EQ(4u, count);
+    ASSERT_EQ(0u, p.pool->getFreeBigPageCount());
+}
+
+// ============================================================================
+// NUMAPool — BIG_PAGE_ONLY allocation
+// ============================================================================
+
+TEST(NUMAPool_BigPageOnly_ReturnsCorrectCount) {
+    auto p = TestNUMAPool::withBigPages(testDomainBase(0), 4);
+    size_t cbCount = 0;
+    BigPageMetadata* rem = nullptr;
+    size_t got = p.pool->allocatePages(2 * PageAllocator::smallPagesPerBigPage,
+                                       [&](PageRef){ cbCount++; }, rem,
+                                       AllocBehavior::BIG_PAGE_ONLY);
+    ASSERT_EQ(2 * PageAllocator::smallPagesPerBigPage, got);
+    ASSERT_EQ(2u, cbCount);
+    ASSERT_EQ(2u, p.pool->getFreeBigPageCount());
+}
+
+TEST(NUMAPool_BigPageOnly_PageRefSizeIsBig) {
+    auto p = TestNUMAPool::withBigPages(testDomainBase(0), 2);
+    std::vector<PageRef> pages;
+    BigPageMetadata* rem = nullptr;
+    p.pool->allocatePages(2 * PageAllocator::smallPagesPerBigPage,
+                          [&](PageRef r){ pages.push_back(r); }, rem,
+                          AllocBehavior::BIG_PAGE_ONLY);
+    for (const auto& pg : pages) {
+        ASSERT_EQ(PageSize::BIG, pg.size());
+    }
+}
+
+TEST(NUMAPool_BigPageOnly_ExhaustPool) {
+    auto p = TestNUMAPool::withBigPages(testDomainBase(0), 2);
+    BigPageMetadata* rem = nullptr;
+    p.pool->allocatePages(2 * PageAllocator::smallPagesPerBigPage,
+                          [](PageRef){}, rem, AllocBehavior::BIG_PAGE_ONLY);
+    ASSERT_EQ(0u, p.pool->getFreeBigPageCount());
+
+    size_t extra = 0;
+    size_t got = p.pool->allocatePages(PageAllocator::smallPagesPerBigPage,
+                                       [&](PageRef){ extra++; }, rem,
+                                       AllocBehavior::BIG_PAGE_ONLY);
+    ASSERT_EQ(0u, got);
+    ASSERT_EQ(0u, extra);
+}
+
+// ============================================================================
+// NUMAPool — Small-page allocation
+// ============================================================================
+
+TEST(NUMAPool_SmallPage_AllocFew) {
+    auto p = TestNUMAPool::withBigPages(testDomainBase(0), 1);
+    std::vector<PageRef> pages;
+    BigPageMetadata* rem = nullptr;
+    size_t got = p.pool->allocatePages(10, [&](PageRef r){ pages.push_back(r); }, rem);
+    ASSERT_EQ(10u, got);
+    ASSERT_EQ(10u, pages.size());
+    ASSERT_NE(nullptr, rem);
+    ASSERT_EQ(0u, p.pool->getFreeBigPageCount());
+}
+
+TEST(NUMAPool_SmallPage_PageRefSizeIsSmall) {
+    auto p = TestNUMAPool::withBigPages(testDomainBase(0), 1);
+    std::vector<PageRef> pages;
+    BigPageMetadata* rem = nullptr;
+    p.pool->allocatePages(10, [&](PageRef r){ pages.push_back(r); }, rem);
+    for (const auto& pg : pages) {
+        ASSERT_EQ(PageSize::SMALL, pg.size());
+    }
+}
+
+TEST(NUMAPool_SmallPage_FillOneBigPage) {
+    // Fill a big page using two alloc calls to force the small-page path.
+    // A single call of exactly 512 would be served via the whole-big-page path
+    // and return a big PageRef instead of small ones.
+    auto p = TestNUMAPool::withBigPages(testDomainBase(0), 1);
+    std::vector<PageRef> pages;
+    BigPageMetadata* rem = nullptr;
+    constexpr size_t total = PageAllocator::smallPagesPerBigPage;
+
+    // First alloc: partial page lands in rem (not yet in paPages).
+    p.pool->allocatePages(total - 1, [&](PageRef r){ pages.push_back(r); }, rem);
+    ASSERT_EQ(total - 1, pages.size());
+    ASSERT_NE(nullptr, rem);
+    rem->returnPage();  // register partial page in paPages
+
+    // Second alloc: exhausts the page from paPages.
+    rem = nullptr;
+    p.pool->allocatePages(1, [&](PageRef r){ pages.push_back(r); }, rem);
+    ASSERT_EQ(total, pages.size());
+    ASSERT_EQ(nullptr, rem);  // page became full; no partial page to return
+    ASSERT_EQ(0u, p.pool->getPAPagesCount());
+    ASSERT_EQ(0u, p.pool->getFreeBigPageCount());
+    for (const auto& pg : pages) {
+        ASSERT_EQ(PageSize::SMALL, pg.size());
+    }
+}
+
+TEST(NUMAPool_SmallPage_PARemainingPartial) {
+    auto p = TestNUMAPool::withBigPages(testDomainBase(0), 1);
+    std::vector<PageRef> pages;
+    BigPageMetadata* rem = nullptr;
+    p.pool->allocatePages(100, [&](PageRef r){ pages.push_back(r); }, rem);
+    // rem holds the partially-used big page; it is partial (not empty, not full).
+    ASSERT_NE(nullptr, rem);
+    ASSERT_FALSE(rem->isEmpty());
+    ASSERT_FALSE(rem->isFull());
+}
+
+// ============================================================================
+// NUMAPool — Free routing (occupancy transitions)
+// ============================================================================
+
+// Helper: fill a 1-big-page pool with small-page allocs and return all pages.
+// Uses two calls to force the small-page path (single call of 512 hits big-page path).
+static std::vector<PageRef> fillPoolSmallPages(TestNUMAPool& p) {
+    std::vector<PageRef> pages;
+    BigPageMetadata* rem = nullptr;
+    constexpr size_t total = PageAllocator::smallPagesPerBigPage;
+    p.pool->allocatePages(total - 1, [&](PageRef r){ pages.push_back(r); }, rem);
+    rem->returnPage();
+    rem = nullptr;
+    p.pool->allocatePages(1, [&](PageRef r){ pages.push_back(r); }, rem);
+    return pages;
+}
+
+TEST(NUMAPool_Routing_FullToPartial_GoesToPAPages) {
+    // Full → Partial: freed pages should land in paPages, not freeBigPages.
+    auto p = TestNUMAPool::withBigPages(testDomainBase(0), 1);
+    auto pages = fillPoolSmallPages(p);
+    ASSERT_EQ(0u, p.pool->getPAPagesCount());
+    ASSERT_EQ(0u, p.pool->getFreeBigPageCount());
+
+    p.pool->freePages(pages.data(), 1);
+    ASSERT_EQ(1u, p.pool->getPAPagesCount());
+    ASSERT_EQ(0u, p.pool->getFreeBigPageCount());
+    ASSERT_TRUE(p.pool->checkInvariants());
+}
+
+TEST(NUMAPool_Routing_FullToEmpty_GoesToFreeBigPages) {
+    // Full → Empty: freeing all pages at once should return the big page to freeBigPages.
+    auto p = TestNUMAPool::withBigPages(testDomainBase(0), 1);
+    auto pages = fillPoolSmallPages(p);
+
+    p.pool->freePages(pages.data(), pages.size());
+    ASSERT_EQ(0u, p.pool->getPAPagesCount());
+    ASSERT_EQ(1u, p.pool->getFreeBigPageCount());
+    ASSERT_TRUE(p.pool->checkInvariants());
+}
+
+TEST(NUMAPool_Routing_PartialToEmpty_GoesToFreeBigPages) {
+    // Partial → Empty: freeing all allocated pages should return the big page to freeBigPages.
+    auto p = TestNUMAPool::withBigPages(testDomainBase(0), 1);
+    std::vector<PageRef> pages;
+    BigPageMetadata* rem = nullptr;
+    p.pool->allocatePages(100, [&](PageRef r){ pages.push_back(r); }, rem);
+    rem->returnPage();  // register partial page in paPages
+    ASSERT_EQ(1u, p.pool->getPAPagesCount());
+
+    p.pool->freePages(pages.data(), pages.size());
+    ASSERT_EQ(0u, p.pool->getPAPagesCount());
+    ASSERT_EQ(1u, p.pool->getFreeBigPageCount());
+    ASSERT_TRUE(p.pool->checkInvariants());
+}
+
+TEST(NUMAPool_Routing_FreeBigPage_GoesToFreeBigPages) {
+    // Freeing a big PageRef should return it to freeBigPages.
+    auto p = TestNUMAPool::withBigPages(testDomainBase(0), 2);
+    ASSERT_EQ(2u, p.pool->getFreeBigPageCount());
+
+    std::vector<PageRef> pages;
+    BigPageMetadata* rem = nullptr;
+    p.pool->allocatePages(PageAllocator::smallPagesPerBigPage,
+                          [&](PageRef r){ pages.push_back(r); }, rem,
+                          AllocBehavior::BIG_PAGE_ONLY);
+    ASSERT_EQ(1u, p.pool->getFreeBigPageCount());
+    ASSERT_EQ(1u, pages.size());
+    ASSERT_EQ(PageSize::BIG, pages[0].size());
+
+    p.pool->freePages(pages.data(), pages.size());
+    ASSERT_EQ(2u, p.pool->getFreeBigPageCount());
+    ASSERT_TRUE(p.pool->checkInvariants());
+}
+
+// ============================================================================
+// NUMAPool — Run detection in freePages()
+// ============================================================================
+
+TEST(NUMAPool_RunDetection_MultipleBigPages) {
+    auto p = TestNUMAPool::withBigPages(testDomainBase(0), 4);
+    std::vector<PageRef> pages;
+    BigPageMetadata* rem = nullptr;
+    p.pool->allocatePages(3 * PageAllocator::smallPagesPerBigPage,
+                          [&](PageRef r){ pages.push_back(r); }, rem,
+                          AllocBehavior::BIG_PAGE_ONLY);
+    ASSERT_EQ(3u, pages.size());
+    ASSERT_EQ(1u, p.pool->getFreeBigPageCount());
+
+    // Free all 3 big pages in a single freePages() call.
+    p.pool->freePages(pages.data(), pages.size());
+    ASSERT_EQ(4u, p.pool->getFreeBigPageCount());
+    ASSERT_TRUE(p.pool->checkInvariants());
+}
+
+TEST(NUMAPool_RunDetection_MultipleSmallSameSuperpage) {
+    auto p = TestNUMAPool::withBigPages(testDomainBase(0), 1);
+    std::vector<PageRef> pages;
+    BigPageMetadata* rem = nullptr;
+    p.pool->allocatePages(100, [&](PageRef r){ pages.push_back(r); }, rem);
+    rem->returnPage();  // register in paPages so Partial→Empty routing works
+    ASSERT_EQ(1u, p.pool->getPAPagesCount());
+
+    // Free all 100 small pages in one call: Partial→Empty → freeBigPages.
+    p.pool->freePages(pages.data(), pages.size());
+    ASSERT_EQ(0u, p.pool->getPAPagesCount());
+    ASSERT_EQ(1u, p.pool->getFreeBigPageCount());
+    ASSERT_TRUE(p.pool->checkInvariants());
+}
+
+TEST(NUMAPool_RunDetection_MixedBigAndSmall) {
+    // One big-page free + one small-page run in the same freePages() call.
+    auto p = TestNUMAPool::withBigPages(testDomainBase(0), 2);
+
+    // Alloc 1 whole big page.
+    std::vector<PageRef> bigPages;
+    BigPageMetadata* rem = nullptr;
+    p.pool->allocatePages(PageAllocator::smallPagesPerBigPage,
+                          [&](PageRef r){ bigPages.push_back(r); }, rem,
+                          AllocBehavior::BIG_PAGE_ONLY);
+    ASSERT_EQ(1u, bigPages.size());
+
+    // Alloc 10 small pages from the remaining big page; register rem in paPages.
+    std::vector<PageRef> smallPages;
+    rem = nullptr;
+    p.pool->allocatePages(10, [&](PageRef r){ smallPages.push_back(r); }, rem);
+    ASSERT_NE(nullptr, rem);
+    rem->returnPage();  // necessary for Partial→Empty routing in freeSmallPageRun
+    ASSERT_EQ(1u, p.pool->getPAPagesCount());
+    ASSERT_EQ(0u, p.pool->getFreeBigPageCount());
+
+    // Combine and free everything in one call.
+    std::vector<PageRef> allPages;
+    allPages.insert(allPages.end(), bigPages.begin(), bigPages.end());
+    allPages.insert(allPages.end(), smallPages.begin(), smallPages.end());
+    p.pool->freePages(allPages.data(), allPages.size());
+
+    ASSERT_EQ(2u, p.pool->getFreeBigPageCount());
+    ASSERT_EQ(0u, p.pool->getPAPagesCount());
+    ASSERT_TRUE(p.pool->checkInvariants());
+}
+
+// ============================================================================
+// NUMAPool — Round-trips and invariants
+// ============================================================================
+
+TEST(NUMAPool_RoundTrip_AllocBigFreeAll) {
+    constexpr size_t N = 4;
+    auto p = TestNUMAPool::withBigPages(testDomainBase(0), N);
+    std::vector<PageRef> pages;
+    BigPageMetadata* rem = nullptr;
+
+    p.pool->allocatePages(N * PageAllocator::smallPagesPerBigPage,
+                          [&](PageRef r){ pages.push_back(r); }, rem,
+                          AllocBehavior::BIG_PAGE_ONLY);
+    ASSERT_EQ(N, pages.size());
+    ASSERT_EQ(0u, p.pool->getFreeBigPageCount());
+    ASSERT_EQ(0u, p.pool->getPAPagesCount());
+
+    p.pool->freePages(pages.data(), pages.size());
+    ASSERT_EQ(N, p.pool->getFreeBigPageCount());
+    ASSERT_EQ(0u, p.pool->getPAPagesCount());
+    ASSERT_TRUE(p.pool->checkInvariants());
+}
+
+TEST(NUMAPool_Invariants_AfterOperations) {
+    auto p = TestNUMAPool::withBigPages(testDomainBase(0), 4);
+
+    // Alloc 1 big page.
+    std::vector<PageRef> bigPages;
+    BigPageMetadata* rem = nullptr;
+    p.pool->allocatePages(PageAllocator::smallPagesPerBigPage,
+                          [&](PageRef r){ bigPages.push_back(r); }, rem,
+                          AllocBehavior::BIG_PAGE_ONLY);
+    ASSERT_TRUE(p.pool->checkInvariants());
+
+    // Alloc 50 small pages from a second big page; register rem.
+    std::vector<PageRef> smallPages;
+    rem = nullptr;
+    p.pool->allocatePages(50, [&](PageRef r){ smallPages.push_back(r); }, rem);
+    ASSERT_NE(nullptr, rem);
+    rem->returnPage();
+    ASSERT_TRUE(p.pool->checkInvariants());
+
+    // Free the small pages: Partial→Empty route.
+    p.pool->freePages(smallPages.data(), smallPages.size());
+    ASSERT_TRUE(p.pool->checkInvariants());
+
+    // Free the big page.
+    p.pool->freePages(bigPages.data(), bigPages.size());
+    ASSERT_TRUE(p.pool->checkInvariants());
+
+    ASSERT_EQ(4u, p.pool->getFreeBigPageCount());
+    ASSERT_EQ(0u, p.pool->getPAPagesCount());
+}
+
+// ============================================================================
+// BigPageMetadata — Direct interface tests
+// ============================================================================
+// All tests below obtain a BigPageMetadata* via findMetadata() and operate
+// on it directly, bypassing NUMAPool routing.  This isolates the BigPageMetadata
+// state machine from the pool-level tracking.
+
+TEST(BigPageMetadata_BaseAddr) {
+    // baseAddr() should return the big-page-aligned base passed at construction.
+    auto p = TestNUMAPool::withBigPages(testDomainBase(0), 2);
+    BigPageMetadata* meta = p.pool->findMetadata(phys_addr(testDomainBase(0)));
+    ASSERT_NE(nullptr, meta);
+    ASSERT_EQ(testDomainBase(0), meta->baseAddr().value);
+}
+
+TEST(BigPageMetadata_GetOwnerPool) {
+    // getOwnerPool() should return the NUMAPool that constructed this metadata.
+    auto p = TestNUMAPool::withBigPages(testDomainBase(0), 2);
+    BigPageMetadata* meta = p.pool->findMetadata(phys_addr(testDomainBase(0)));
+    ASSERT_NE(nullptr, meta);
+    ASSERT_EQ(p.pool, &meta->getOwnerPool());
+}
+
+TEST(BigPageMetadata_HasReservedSubpages_FreshPage) {
+    // A freshly created big page has no reserved subpages.
+    auto p = TestNUMAPool::withBigPages(testDomainBase(0), 1);
+    BigPageMetadata* meta = p.pool->findMetadata(phys_addr(testDomainBase(0)));
+    ASSERT_NE(nullptr, meta);
+    ASSERT_FALSE(meta->hasReservedSubpages());
+}
+
+TEST(BigPageMetadata_OccupancyTransition_EmptyToPartial) {
+    // Allocating fewer than the full capacity from an empty page yields
+    // an Empty→Partial transition.
+    auto p = TestNUMAPool::withBigPages(testDomainBase(0), 2);
+    BigPageMetadata* meta = p.pool->findMetadata(phys_addr(testDomainBase(0)));
+    ASSERT_NE(nullptr, meta);
+    ASSERT_TRUE(meta->isEmpty());
+
+    OccupancyTransition t{};
+    meta->allocatePages(10, [](PageRef){}, t);
+
+    ASSERT_EQ(OccupancyState::Empty,   t.before);
+    ASSERT_EQ(OccupancyState::Partial, t.after);
+    ASSERT_FALSE(t.becameFull());
+    ASSERT_FALSE(t.becameEmpty());
+    ASSERT_FALSE(meta->isEmpty());
+    ASSERT_FALSE(meta->isFull());
+}
+
+TEST(BigPageMetadata_OccupancyTransition_EmptyToFull) {
+    // Allocating all pages from an empty page yields an Empty→Full transition.
+    auto p = TestNUMAPool::withBigPages(testDomainBase(0), 2);
+    BigPageMetadata* meta = p.pool->findMetadata(phys_addr(testDomainBase(0)));
+    ASSERT_NE(nullptr, meta);
+
+    OccupancyTransition t{};
+    meta->allocatePages(PageAllocator::smallPagesPerBigPage, [](PageRef){}, t);
+
+    ASSERT_EQ(OccupancyState::Empty, t.before);
+    ASSERT_EQ(OccupancyState::Full,  t.after);
+    ASSERT_TRUE(t.becameFull());
+    ASSERT_TRUE(meta->isFull());
+    ASSERT_FALSE(meta->isEmpty());
+}
+
+TEST(BigPageMetadata_OccupancyTransition_FullToPartial) {
+    // Freeing one page from a full page yields a Full→Partial transition.
+    auto p = TestNUMAPool::withBigPages(testDomainBase(0), 2);
+    BigPageMetadata* meta = p.pool->findMetadata(phys_addr(testDomainBase(0)));
+    ASSERT_NE(nullptr, meta);
+
+    std::vector<PageRef> pages;
+    meta->allocatePages(PageAllocator::smallPagesPerBigPage,
+                        [&](PageRef r){ pages.push_back(r); });
+    ASSERT_TRUE(meta->isFull());
+
+    OccupancyTransition t{};
+    meta->freePages(pages.data(), 1, t);
+
+    ASSERT_EQ(OccupancyState::Full,    t.before);
+    ASSERT_EQ(OccupancyState::Partial, t.after);
+    ASSERT_TRUE(t.becameAvailable());
+    ASSERT_FALSE(t.becameEmpty());
+    ASSERT_FALSE(meta->isFull());
+    ASSERT_FALSE(meta->isEmpty());
+}
+
+TEST(BigPageMetadata_OccupancyTransition_PartialToEmpty) {
+    // Freeing all allocated pages from a partial page yields a Partial→Empty transition.
+    auto p = TestNUMAPool::withBigPages(testDomainBase(0), 2);
+    BigPageMetadata* meta = p.pool->findMetadata(phys_addr(testDomainBase(0)));
+    ASSERT_NE(nullptr, meta);
+
+    std::vector<PageRef> pages;
+    meta->allocatePages(50, [&](PageRef r){ pages.push_back(r); });
+
+    OccupancyTransition t{};
+    meta->freePages(pages.data(), pages.size(), t);
+
+    ASSERT_EQ(OccupancyState::Partial, t.before);
+    ASSERT_EQ(OccupancyState::Empty,   t.after);
+    ASSERT_TRUE(t.becameEmpty());
+    ASSERT_FALSE(t.becameFull());
+    ASSERT_TRUE(meta->isEmpty());
+}
+
+// ============================================================================
+// NUMAPool — findMetadata boundary conditions
+// ============================================================================
+
+TEST(NUMAPool_FindMetadata_AtRangeStart) {
+    // The exact range-start address maps to the first big page.
+    auto p = TestNUMAPool::withBigPages(testDomainBase(0), 4);
+    BigPageMetadata* meta = p.pool->findMetadata(phys_addr(testDomainBase(0)));
+    ASSERT_NE(nullptr, meta);
+    ASSERT_EQ(testDomainBase(0), meta->baseAddr().value);
+}
+
+TEST(NUMAPool_FindMetadata_AtLastBigPage) {
+    // The last big page's base address (rangeEnd - bigPageSize) should return
+    // valid metadata for that final page.
+    constexpr size_t N = 4;
+    auto p = TestNUMAPool::withBigPages(testDomainBase(0), N);
+    const uint64_t lastBase = testDomainBase(0) + (N - 1) * arch::bigPageSize;
+    BigPageMetadata* meta = p.pool->findMetadata(phys_addr(lastBase));
+    ASSERT_NE(nullptr, meta);
+    ASSERT_EQ(lastBase, meta->baseAddr().value);
+}
+
+TEST(NUMAPool_FindMetadata_BeforeRange_ReturnsNull) {
+    // An address one big page before the range start is outside the pool.
+    auto p = TestNUMAPool::withBigPages(testDomainBase(0), 4);
+    const uint64_t before = testDomainBase(0) - arch::bigPageSize;
+    ASSERT_EQ(nullptr, p.pool->findMetadata(phys_addr(before)));
+}
+
+TEST(NUMAPool_FindMetadata_AtRangeEnd_ReturnsNull) {
+    // rangeEnd itself is just past the last page and should not map to anything.
+    constexpr size_t N = 4;
+    auto p = TestNUMAPool::withBigPages(testDomainBase(0), N);
+    const uint64_t rangeEnd = testDomainBase(0) + N * arch::bigPageSize;
+    ASSERT_EQ(nullptr, p.pool->findMetadata(phys_addr(rangeEnd)));
+}
+
+// ============================================================================
+// NUMAPool — BIG_PAGE_ONLY overallocation
+// ============================================================================
+
+TEST(NUMAPool_BigPageOnly_Overallocates_NonDivisibleCount) {
+    // BIG_PAGE_ONLY rounds the requested count UP to a whole big page.
+    // Requesting just 1 small page should still return a full big page's worth.
+    auto p = TestNUMAPool::withBigPages(testDomainBase(0), 2);
+    BigPageMetadata* rem = nullptr;
+    size_t cbCount = 0;
+    size_t got = p.pool->allocatePages(1, [&](PageRef r){
+        ASSERT_EQ(PageSize::BIG, r.size());
+        cbCount++;
+    }, rem, AllocBehavior::BIG_PAGE_ONLY);
+
+    ASSERT_EQ(PageAllocator::smallPagesPerBigPage, got);
+    ASSERT_EQ(1u, cbCount);
+    ASSERT_EQ(1u, p.pool->getFreeBigPageCount());  // 1 of 2 consumed
+}
+
+// ============================================================================
+// NUMAPool — Allocation fallback path
+// ============================================================================
+//
+// The allocatePages() fallback path (lines 881-913 of NewPageAllocator.cpp):
+//   1. allocateFromPAPages(RELAXED_RETRIES) — exhausts paPages or gives up quickly.
+//   2. Fallback loop — grabs free big pages when paPages cannot satisfy the request.
+//   3. allocateFromPAPages(DETERMINED_RETRIES) — final sweep of any newly-added paPages.
+//
+// The tests below exercise two distinct scenarios that reach the fallback loop.
+
+TEST(NUMAPool_Fallback_PAPagesEmpty_AllocatesFromFreeBigPages) {
+    // Scenario: paPages is empty from the start, so allocateFromPAPages(16)
+    // exits immediately.  The remainder after the initial whole-big-page grab
+    // must be satisfied by the fallback loop grabbing another big page and
+    // performing a small-page alloc from it.
+    //
+    // Pool: 3 big pages, all in freeBigPages, paPages = 0.
+    // Request 600 small pages:
+    //   - Initial grab: floor(600/512) = 1 big page → emits BIG PageRef, smallPageCount = 88.
+    //   - allocateFromPAPages(16): paPages empty → returns immediately.
+    //   - Fallback loop: requiredPages = 1 → grabs 1 more, allocates 88 small from it.
+    //   - Total: 512 + 88 = 600, paPageRemaining points to the partial fallback page.
+    auto p = TestNUMAPool::withBigPages(testDomainBase(0), 3);
+    ASSERT_EQ(3u, p.pool->getFreeBigPageCount());
+    ASSERT_EQ(0u, p.pool->getPAPagesCount());
+
+    constexpr size_t request = 600;
+    constexpr size_t remainder = request - PageAllocator::smallPagesPerBigPage; // 88
+    std::vector<PageRef> pages;
+    BigPageMetadata* rem = nullptr;
+    size_t got = p.pool->allocatePages(request, [&](PageRef r){ pages.push_back(r); }, rem);
+
+    ASSERT_EQ(request, got);
+    // 1 whole big page consumed by initial grab + 1 partial big page consumed by fallback.
+    ASSERT_EQ(1u, p.pool->getFreeBigPageCount());
+    // The fallback page is partial; paPageRemaining must be non-null.
+    ASSERT_NE(nullptr, rem);
+    ASSERT_FALSE(rem->isEmpty());
+    ASSERT_FALSE(rem->isFull());
+    // Verify the mix: 1 BIG PageRef (initial grab) + remainder small PageRefs (fallback).
+    size_t bigCount = 0, smallCount = 0;
+    for (const auto& pg : pages) {
+        if (pg.size() == PageSize::BIG) bigCount++;
+        else smallCount++;
+    }
+    ASSERT_EQ(1u, bigCount);
+    ASSERT_EQ(remainder, smallCount);
+    ASSERT_TRUE(p.pool->checkInvariants());
+}
+
+TEST(NUMAPool_Fallback_PAPagesExhaustedMidRequest) {
+    // Scenario: paPages is non-empty but holds fewer pages than needed after
+    // the initial big-page grab.  allocateFromPAPages(16) exhausts paPages
+    // without satisfying the remainder, so the fallback loop handles the rest.
+    //
+    // Setup: alloc 462 (=512-50) small pages → paPageRemaining has 50 free.
+    //        returnPage() → paPages = {bigPage0 with 50 free}, freeBigPages = 2.
+    // Request 600:
+    //   - Initial grab: 1 big page → smallPageCount = 88.
+    //   - allocateFromPAPages(16): bigPage0 has 50 free → allocates 50, becomes full.
+    //     smallPageCount = 38.  paPages now empty.
+    //   - Fallback loop: requiredPages = 1 → grabs last free big page, allocs 38 small.
+    //   - Total: 512 (big) + 50 (paPages) + 38 (fallback) = 600.
+    auto p = TestNUMAPool::withBigPages(testDomainBase(0), 3);
+
+    constexpr size_t preAlloc = PageAllocator::smallPagesPerBigPage - 50;
+    BigPageMetadata* rem = nullptr;
+    p.pool->allocatePages(preAlloc, [](PageRef){}, rem);
+    ASSERT_NE(nullptr, rem);
+    rem->returnPage();
+    ASSERT_EQ(1u, p.pool->getPAPagesCount());
+    ASSERT_EQ(2u, p.pool->getFreeBigPageCount());
+
+    constexpr size_t request = 600;
+    std::vector<PageRef> pages;
+    rem = nullptr;
+    size_t got = p.pool->allocatePages(request, [&](PageRef r){ pages.push_back(r); }, rem);
+
+    ASSERT_EQ(request, got);
+    // bigPage0 became full (removed from paPages), both other big pages consumed.
+    ASSERT_EQ(0u, p.pool->getPAPagesCount());
+    ASSERT_EQ(0u, p.pool->getFreeBigPageCount());
+    ASSERT_NE(nullptr, rem);  // fallback big page is partially used
+    ASSERT_TRUE(p.pool->checkInvariants());
+}
+
+TEST(NUMAPool_Fallback_OOM_PartialSatisfaction) {
+    // When the pool cannot satisfy the full request, allocatePages returns
+    // however many pages were available rather than asserting or panicking.
+    auto p = TestNUMAPool::withBigPages(testDomainBase(0), 1);
+    BigPageMetadata* rem = nullptr;
+    size_t got = p.pool->allocatePages(2 * PageAllocator::smallPagesPerBigPage,
+                                       [](PageRef){}, rem);
+    // Only 1 big page's worth available.
+    ASSERT_EQ(PageAllocator::smallPagesPerBigPage, got);
+    ASSERT_EQ(0u, p.pool->getFreeBigPageCount());
+    ASSERT_EQ(0u, p.pool->getPAPagesCount());
+    ASSERT_TRUE(p.pool->checkInvariants());
+}
+
+// ============================================================================
+// NUMAPool — Small-page runs spanning multiple big pages
+// ============================================================================
+
+TEST(NUMAPool_Free_SmallPagesFromMultipleBigPages) {
+    // freePages() must dispatch each big page's small-page run to a separate
+    // freeSmallPageRun() call.  This test allocates 100 small pages from two
+    // different big pages and frees 50 from each in a single freePages() call,
+    // verifying that both big pages remain partial and in paPages.
+    auto p = TestNUMAPool::withBigPages(testDomainBase(0), 3);
+
+    BigPageMetadata* rem0 = nullptr;
+    BigPageMetadata* rem1 = nullptr;
+    std::vector<PageRef> pages0, pages1;
+
+    // First alloc: paPages is empty → fallback grabs the first free big page.
+    p.pool->allocatePages(100, [&](PageRef r){ pages0.push_back(r); }, rem0);
+    ASSERT_NE(nullptr, rem0);
+
+    // Second alloc: paPages is still empty (rem0 not yet registered) → fallback
+    // grabs the second free big page.  rem1 must differ from rem0.
+    p.pool->allocatePages(100, [&](PageRef r){ pages1.push_back(r); }, rem1);
+    ASSERT_NE(nullptr, rem1);
+    ASSERT_NE(rem0, rem1);
+
+    // Register both partial pages so freeSmallPageRun's Partial→Partial path can fire.
+    rem0->returnPage();
+    rem1->returnPage();
+    ASSERT_EQ(2u, p.pool->getPAPagesCount());
+    ASSERT_EQ(1u, p.pool->getFreeBigPageCount());
+
+    // Free 50 from each big page in one call.  After address-sort, all pages0
+    // entries precede all pages1 entries, so freePages sees two distinct runs.
+    std::vector<PageRef> toFree;
+    toFree.insert(toFree.end(), pages0.begin(), pages0.begin() + 50);
+    toFree.insert(toFree.end(), pages1.begin(), pages1.begin() + 50);
+    p.pool->freePages(toFree.data(), toFree.size());
+
+    // Each big page went Partial→Partial (50 still allocated), so both remain
+    // in paPages and the free-big-page count is unchanged.
+    ASSERT_EQ(2u, p.pool->getPAPagesCount());
+    ASSERT_EQ(1u, p.pool->getFreeBigPageCount());
+    ASSERT_TRUE(p.pool->checkInvariants());
+}
+
+// ============================================================================
 // Concurrent Tests (SmallPageAllocator)
 // ============================================================================
 
@@ -966,4 +1899,196 @@ TEST(SmallPageAllocator_ConcurrentAllocFreeCycles) {
     ASSERT_GT(successfulCycles.load(), 0ul);
     // All pages should be back (each thread frees what it allocates)
     ASSERT_EQ(numThreads * pagesPerCycle, spa.freePageCount());
+}
+
+// ============================================================================
+// Concurrent Tests (NUMAPool)
+// ============================================================================
+
+TEST_WITH_TIMEOUT_NO_TRACKING(NUMAPool_ConcurrentStress_SmallPages, 8000) {
+    constexpr size_t numBigPages  = 32;
+    constexpr int    numThreads   = 8;
+    constexpr int    numEpochs    = 50;
+    constexpr int    epochMs      = 10;
+    constexpr size_t maxSmallReq  = 128;
+
+    auto p = TestNUMAPool::withBigPages(testDomainBase(0), numBigPages);
+
+    for (int epoch = 0; epoch < numEpochs; epoch++) {
+        std::atomic<bool> stop{false};
+        std::vector<std::thread> threads;
+        threads.reserve(numThreads);
+
+        for (int t = 0; t < numThreads; t++) {
+            threads.emplace_back([&, t]() {
+                std::mt19937_64 rng(std::random_device{}() ^ (uint64_t(t) << 32));
+                std::uniform_int_distribution<size_t> pick(1, maxSmallReq);
+
+                while (!stop.load(std::memory_order_relaxed)) {
+                    PageRef pages[maxSmallReq];
+                    size_t pageCount = 0;
+                    BigPageMetadata* rem = nullptr;
+                    size_t count = pick(rng);
+
+                    p.pool->allocatePages(count, [&](PageRef r){ pages[pageCount++] = r; }, rem);
+
+                    if (rem && !rem->isEmpty() && !rem->isFull())
+                        rem->returnPage();
+
+                    if (pageCount > 0)
+                        p.pool->freePages(pages, pageCount);
+                }
+            });
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(epochMs));
+        stop.store(true, std::memory_order_relaxed);
+        for (auto& th : threads) th.join();
+
+        ASSERT_TRUE(p.pool->checkInvariants());
+        ASSERT_LE(p.pool->getFreeBigPageCount() + p.pool->getPAPagesCount(), numBigPages);
+    }
+}
+
+TEST_WITH_TIMEOUT_NO_TRACKING(NUMAPool_ConcurrentStress_BigPages, 8000) {
+    constexpr size_t numBigPages = 32;
+    constexpr int    numThreads  = 8;
+    constexpr int    numEpochs   = 50;
+    constexpr int    epochMs     = 10;
+
+    auto p = TestNUMAPool::withBigPages(testDomainBase(0), numBigPages);
+
+    pauseTracking();
+    for (int epoch = 0; epoch < numEpochs; epoch++) {
+        std::atomic<bool> stop{false};
+        std::vector<std::thread> threads;
+        threads.reserve(numThreads);
+
+        for (int t = 0; t < numThreads; t++) {
+            threads.emplace_back([&]() {
+                while (!stop.load(std::memory_order_relaxed)) {
+                    PageRef page[1];
+                    size_t pageCount = 0;
+                    BigPageMetadata* rem = nullptr;
+
+                    p.pool->allocatePages(
+                        PageAllocator::smallPagesPerBigPage,
+                        [&](PageRef r){ page[pageCount++] = r; },
+                        rem,
+                        AllocBehavior::BIG_PAGE_ONLY);
+
+                    if (pageCount > 0)
+                        p.pool->freePages(page, pageCount);
+                }
+            });
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(epochMs));
+        stop.store(true, std::memory_order_relaxed);
+        for (auto& th : threads) th.join();
+
+        ASSERT_TRUE(p.pool->checkInvariants());
+        ASSERT_EQ(numBigPages, p.pool->getFreeBigPageCount());
+    }
+}
+
+TEST_WITH_TIMEOUT_NO_TRACKING(NUMAPool_ConcurrentStress_Mixed, 8000) {
+    constexpr size_t numBigPages = 32;
+    constexpr int    numThreads  = 8;
+    constexpr int    numEpochs   = 50;
+    constexpr int    epochMs     = 10;
+    constexpr size_t maxSmallReq = 128;
+
+    auto p = TestNUMAPool::withBigPages(testDomainBase(0), numBigPages);
+
+    pauseTracking();
+    for (int epoch = 0; epoch < numEpochs; epoch++) {
+        std::atomic<bool> stop{false};
+        std::vector<std::thread> threads;
+        threads.reserve(numThreads);
+
+        for (int t = 0; t < numThreads; t++) {
+            threads.emplace_back([&, t]() {
+                std::mt19937_64 rng(std::random_device{}() ^ (uint64_t(t) << 32));
+                std::uniform_int_distribution<size_t> smallPick(1, maxSmallReq);
+
+                while (!stop.load(std::memory_order_relaxed)) {
+                    PageRef pages[maxSmallReq];
+                    size_t pageCount = 0;
+                    BigPageMetadata* rem = nullptr;
+
+                    if (rng() & 1) {
+                        p.pool->allocatePages(
+                            PageAllocator::smallPagesPerBigPage,
+                            [&](PageRef r){ pages[pageCount++] = r; },
+                            rem,
+                            AllocBehavior::BIG_PAGE_ONLY);
+                    } else {
+                        size_t count = smallPick(rng);
+                        p.pool->allocatePages(count, [&](PageRef r){ pages[pageCount++] = r; }, rem);
+
+                        if (rem && !rem->isEmpty() && !rem->isFull())
+                            rem->returnPage();
+                    }
+
+                    if (pageCount > 0)
+                        p.pool->freePages(pages, pageCount);
+                }
+            });
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(epochMs));
+        stop.store(true, std::memory_order_relaxed);
+        for (auto& th : threads) th.join();
+
+        ASSERT_TRUE(p.pool->checkInvariants());
+    }
+}
+
+TEST_WITH_TIMEOUT_NO_TRACKING(NUMAPool_ConcurrentStress_MultiRange, 8000) {
+    constexpr size_t rangeCount      = 3;
+    constexpr size_t bigPagesPerRange = 8;
+    constexpr size_t numBigPages     = rangeCount * bigPagesPerRange;
+    constexpr int    numThreads      = 8;
+    constexpr int    numEpochs       = 50;
+    constexpr int    epochMs         = 10;
+    constexpr size_t maxSmallReq     = 128;
+
+    auto p = TestNUMAPool::withRanges(testDomainBase(0), rangeCount, bigPagesPerRange);
+
+    pauseTracking();
+    for (int epoch = 0; epoch < numEpochs; epoch++) {
+        std::atomic<bool> stop{false};
+        std::vector<std::thread> threads;
+        threads.reserve(numThreads);
+
+        for (int t = 0; t < numThreads; t++) {
+            threads.emplace_back([&, t]() {
+                std::mt19937_64 rng(std::random_device{}() ^ (uint64_t(t) << 32));
+                std::uniform_int_distribution<size_t> pick(1, maxSmallReq);
+
+                while (!stop.load(std::memory_order_relaxed)) {
+                    PageRef pages[maxSmallReq];
+                    size_t pageCount = 0;
+                    BigPageMetadata* rem = nullptr;
+                    size_t count = pick(rng);
+
+                    p.pool->allocatePages(count, [&](PageRef r){ pages[pageCount++] = r; }, rem);
+
+                    if (rem && !rem->isEmpty() && !rem->isFull())
+                        rem->returnPage();
+
+                    if (pageCount > 0)
+                        p.pool->freePages(pages, pageCount);
+                }
+            });
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(epochMs));
+        stop.store(true, std::memory_order_relaxed);
+        for (auto& th : threads) th.join();
+
+        ASSERT_TRUE(p.pool->checkInvariants());
+        ASSERT_LE(p.pool->getFreeBigPageCount() + p.pool->getPAPagesCount(), numBigPages);
+    }
 }

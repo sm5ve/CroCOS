@@ -14,6 +14,17 @@
 #include <core/atomic/AtomicBitPool.h>
 
 #include <mem/mm.h>
+#include <core/Flags.h>
+
+// ==================== Allocation Behavior Flags ====================
+
+enum class AllocBehavior : uint32_t {
+    BIG_PAGE_ONLY   = 1u << 0,  // Only allocate big (2MiB) pages; never fall back to small pages
+    LOCAL_DOMAIN_ONLY = 1u << 1,  // Only allocate from the calling CPU's local pool; never go to NUMA pool
+    GRACEFUL_OOM   = 1u << 2,
+};
+template<> struct is_flags_enum<AllocBehavior> { static constexpr bool value = true; };
+using AllocFlags = Flags<AllocBehavior>;
 
 // ==================== Struct Definitions ====================
 
@@ -48,15 +59,25 @@ struct PageRef {
     [[nodiscard]] kernel::mm::PageSize size() const;
     [[nodiscard]] kernel::mm::phys_addr addr() const;
 
-    void setRunLength(size_t);
-    [[nodiscard]] size_t runLength() const;
-
     bool operator==(const PageRef& other) const {return other.value == value;}
 } __attribute__((packed));
 
 constexpr auto INVALID_PAGE_REF = PageRef{static_cast<uint64_t>(-1)};
 
 using PageAllocationCallback = FunctionRef<void(PageRef)>;
+
+// ==================== Occupancy Transition ====================
+
+enum class OccupancyState : uint8_t { Empty, Partial, Full };
+
+struct OccupancyTransition {
+    OccupancyState before;
+    OccupancyState after;
+
+    [[nodiscard]] bool becameFull()      const { return before != OccupancyState::Full  && after == OccupancyState::Full; }
+    [[nodiscard]] bool becameEmpty()     const { return before != OccupancyState::Empty && after == OccupancyState::Empty; }
+    [[nodiscard]] bool becameAvailable() const { return before == OccupancyState::Full  && after != OccupancyState::Full; }
+};
 
 // ==================== Small Page Allocator ====================
 
@@ -73,23 +94,38 @@ class SmallPageAllocator {
 
     Atomic<SmallPageCount> lazilyInitialized = 0;
     SmallPageCount reservedCount = 0;
+    Atomic<SmallPageCount> allocatedCount = 0;
 
     [[nodiscard]] bool isPageFree(SmallPageIndex index) const;
     bool markPageFreeState(SmallPageIndex index, bool isFree);
     [[nodiscard]] kernel::mm::phys_addr fromPageIndex(SmallPageIndex index) const;
+    [[nodiscard]] static OccupancyState stateFromCount(size_t count, size_t maxAlloc);
 
 public:
     explicit SmallPageAllocator(kernel::mm::phys_addr base);
 
     [[nodiscard]] bool isPageFree(PageRef page) const;
-    void free(PageRef* pages, size_t count);
-    size_t alloc(PageAllocationCallback cb, size_t count);
+    size_t alloc(PageAllocationCallback cb, size_t count, OccupancyTransition& transition);
+    void free(PageRef* pages, size_t count, OccupancyTransition& transition);
+    size_t alloc(PageAllocationCallback cb, size_t count) { OccupancyTransition t; return alloc(cb, count, t); }
+    void free(PageRef* pages, size_t count) { OccupancyTransition t; free(pages, count, t); }
     [[nodiscard]] bool isFull() const;
     [[nodiscard]] bool isEmpty() const;
+    [[nodiscard]] bool hasReservedPages() const { return reservedCount > 0; }
     [[nodiscard]] size_t freePageCount() const;
     void freeAll();
     void allocAll();
     void reservePage(kernel::mm::phys_addr addr);
+
+#ifdef CROCOS_TESTING
+    [[nodiscard]] size_t getAllocatedCount()  const { return static_cast<size_t>(allocatedCount.load(RELAXED)); }
+    [[nodiscard]] size_t getReservedCount()   const { return reservedCount; }
+    [[nodiscard]] size_t getRingBufferSize()  const { return ringBuffer.availableToRead(); }
+    [[nodiscard]] size_t getBitmapPopcount()  const;
+    // Invariant: bitmapPopcount == allocatedCount + reservedCount.
+    // Safe to call only in quiescent (single-threaded) state.
+    [[nodiscard]] bool   checkInvariants()    const;
+#endif
 };
 
 // ==================== Big Page Metadata ====================
@@ -98,23 +134,35 @@ class NUMAPool;
 
 class BigPageMetadata {
     SmallPageAllocator subpageAllocator;
-    NUMAPool& ownerPool;
+    NUMAPool* ownerPool;
 
 public:
     BigPageMetadata(NUMAPool& pool, kernel::mm::phys_addr baseAddr);
 
-    [[nodiscard]] size_t allocatePages(size_t smallPageCount, PageAllocationCallback cb);
-    void freePages(PageRef* pages, size_t count);
+    [[nodiscard]] size_t allocatePages(size_t smallPageCount, PageAllocationCallback cb, OccupancyTransition& transition);
+    void freePages(PageRef* pages, size_t count, OccupancyTransition& transition);
+    [[nodiscard]] size_t allocatePages(size_t smallPageCount, PageAllocationCallback cb) { OccupancyTransition t; return allocatePages(smallPageCount, cb, t); }
+    void freePages(PageRef* pages, size_t count) { OccupancyTransition t; freePages(pages, count, t); }
 
     [[nodiscard]] bool isFull() const;
     [[nodiscard]] bool isEmpty() const;
 
-    [[nodiscard]] NUMAPool& getOwnerPool() const { return ownerPool; }
+    void allocAll() {subpageAllocator.allocAll();}
+    void freeAll() {subpageAllocator.freeAll();}
+
+    // Reserve a small page so it is never handed to callers (init-time only).
+    void reservePage(kernel::mm::phys_addr addr) { subpageAllocator.reservePage(addr); }
+    [[nodiscard]] bool hasReservedSubpages() const { return subpageAllocator.hasReservedPages(); }
+
+    [[nodiscard]] NUMAPool& getOwnerPool() const { return *ownerPool; }
+    void returnPage();
+    [[nodiscard]] kernel::mm::phys_addr baseAddr() const {return subpageAllocator.baseAddr;}
 };
 
 struct SubrangeInfo {
-    kernel::mm::phys_memory_range base;
-    size_t bitPoolOffset;
+    kernel::mm::phys_addr rangeStart;  // big-page-aligned start of merged range
+    kernel::mm::phys_addr rangeEnd;    // big-page-aligned end of merged range
+    BigPageMetadata* metadataBase;     // pointer to first BigPageMetadata for this range
 };
 
 class NUMAPool {
@@ -124,22 +172,122 @@ class NUMAPool {
     kernel::numa::DomainID associatedDomain;
     SubrangeInfo* subrangeInfo;
     size_t subrangeCount;
+#ifdef CROCOS_TESTING
+    size_t bigPageCount;
+#endif
 public:
-    NUMAPool(const Vector<kernel::mm::phys_memory_range>& memoryRanges, void* bufferStart, size_t bufferSize);
+    NUMAPool(BigPageMetadata* metadataBuffer,
+             BigPageMetadata** freeBuffer,
+             Atomic<size_t>* wgc,
+             Atomic<size_t>* rgc,
+             AtomicBitPool&& paPagesBitPool,
+             SubrangeInfo* subrangeBuffer,
+             size_t numSubranges,
+             size_t totalBigPageCount,
+             kernel::numa::DomainID domain);
+
+    // Returns the BigPageMetadata for the big page containing addr,
+    // or nullptr if addr is not within any subrange of this pool.
+    BigPageMetadata* findMetadata(kernel::mm::phys_addr addr);
+
+    // Returns the pool-global index of a BigPageMetadata (its position in metadataBuffer).
+    size_t metadataIndex(const BigPageMetadata* meta) const { return static_cast<size_t>(meta - bigPageMetadataBuffer); }
+
+    [[nodiscard]] size_t allocatePages(size_t smallPageCount, PageAllocationCallback cb, BigPageMetadata*& paPageRemaining, AllocFlags flags = {});
+    void freePages(PageRef* pages, size_t count);
+    void returnPage(BigPageMetadata& metadata);
+
+    kernel::numa::DomainID domain() const { return associatedDomain; }
+
+    const SubrangeInfo* getSubranges()    const { return subrangeInfo; }
+    size_t              getSubrangeCount() const { return subrangeCount; }
+
+#ifdef CROCOS_TESTING
+    // Number of free big pages currently in the freeBigPages ring buffer.
+    [[nodiscard]] size_t getFreeBigPageCount() const { return freeBigPages.availableToRead(); }
+    // Number of indices currently set in paPages.  Quiescent state only.
+    [[nodiscard]] size_t getPAPagesCount()     const { return paPages.countSet(); }
+    [[nodiscard]] size_t getTotalBigPageCount()const { return bigPageCount; }
+    // Returns true if the given pool-global big-page index is currently in paPages.
+    [[nodiscard]] bool   isInPAPages(size_t i) const { return paPages.isSet(i); }
+    // Quiescent-state invariant check: all paPages entries must be partial pages.
+    [[nodiscard]] bool   checkInvariants()     const;
+#endif
 };
 
 class LocalPool {
+    BigPageMetadata* paPage1 = nullptr;
+    BigPageMetadata* paPage2 = nullptr;
+    const kernel::numa::NUMATopology* topology;
+public:
+    explicit LocalPool(const kernel::numa::NUMATopology& topo) : topology(&topo) {}
 
+    [[nodiscard]] size_t allocatePages(size_t smallPageCount, PageAllocationCallback cb, AllocFlags flags = {});
+    void tryGivePAPage(BigPageMetadata& page);
 };
 
 // ==================== New Page Allocator ====================
 
-struct PageAllocatorImpl {
-    // TODO: full implementation TBD
+// One entry per SubrangeInfo (merged range) across all NUMA domains.
+// Sorted by rangeStart for binary search in findMetadata.
+struct NUMADomainEntry {
+    kernel::mm::phys_addr rangeStart;
+    kernel::mm::phys_addr rangeEnd;
+    NUMAPool* pool;
 };
 
-NUMAPool*         createNumaPool(BootstrapAllocator& alloc, const Vector<kernel::mm::phys_memory_range>& ranges);
-LocalPool*        createLocalPool(BootstrapAllocator& alloc);
-PageAllocatorImpl createPageAllocator(Vector<NUMAPool*>&& perDomainAllocs, LocalPool** localPools);
+struct PageAllocatorImpl {
+    NUMAPool** numaPools;
+    size_t numDomains;
+    LocalPool** localPools;
+    NUMADomainEntry* domainTable;
+    size_t domainTableSize;
+    // Physical memory with no NUMA affinity; queried last during allocation.
+    // nullptr when no unowned ranges exist.
+    NUMAPool* unownedPool;
+    // NUMA policy used to order domain preference during allocation.
+    // nullptr means no topology information is available (treat all domains equally).
+    const kernel::numa::NUMAPolicy* numaPolicy;
+    // Precomputed per-CPU nearest pool table.  cpuNearestPool[p] is the DomainID
+    // of the closest non-null NUMAPool for logical CPU p.  When numaPolicy is
+    // non-null, ordered by the policy's domain fallback order.  When numaPolicy
+    // is null (trivial single-domain topology), all entries point to the one pool.
+    // Sentinel DomainID{} (UINT16_MAX) means no pool was found (should not occur
+    // after createPageAllocator completes successfully).
+    kernel::numa::DomainID cpuNearestPool[arch::MAX_PROCESSOR_COUNT];
+
+    // Returns the nearest non-null NUMAPool for the given CPU, using the
+    // precomputed cpuNearestPool table.  Asserts if no pool was found.
+    [[nodiscard]] NUMAPool& nearestPool(arch::ProcessorID cpu) const {
+        const kernel::numa::DomainID domain = cpuNearestPool[cpu];
+        if (domain == kernel::numa::DomainID{}) {
+            assert(unownedPool != nullptr, "no NUMAPool found for CPU");
+            return *unownedPool;
+        }
+        return *numaPools[domain.value];
+    }
+
+    // Looks up the BigPageMetadata for the big page containing addr.
+    // Returns nullptr if addr is outside all known ranges.
+    BigPageMetadata* findMetadata(kernel::mm::phys_addr addr);
+
+    [[nodiscard]] size_t allocatePages(size_t smallPageCount, PageAllocationCallback cb, AllocFlags flags = {});
+    void freePages(PageRef* pages, size_t count);
+};
+
+NUMAPool*         createNumaPool(BootstrapAllocator& alloc,
+                                 const Vector<kernel::mm::phys_memory_range>& ranges,
+                                 kernel::numa::DomainID domain = kernel::numa::DomainID{0});
+LocalPool*        createLocalPool(BootstrapAllocator& alloc, const kernel::numa::NUMATopology& topology);
+
+// CONTRACT: perDomainAllocs must be sized to (maxDomainID + 1), with nullptr
+// slots for any domain IDs that have no physical memory.  This allows O(1)
+// lookup via numaPools[domainID] in the hot allocation path.
+// processorCount is the number of valid logical CPU IDs ([0, processorCount)).
+// It is used to populate cpuNearestPool when numaPolicy is provided.
+PageAllocatorImpl createPageAllocator(Vector<NUMAPool*>&& perDomainAllocs, LocalPool** localPools,
+                                      size_t processorCount,
+                                      NUMAPool* unownedPool = nullptr,
+                                      const kernel::numa::NUMAPolicy* numaPolicy = nullptr);
 
 #endif //CROCOS_PAGEALLOCATOR_H

@@ -3,12 +3,14 @@
 //
 
 #include "../test.h"
+#include "TestHarness.h"
 #include <arch.h>
 #include <kernel.h>
 #include <thread>
 #include <mutex>
 #include <unordered_map>
 #include <atomic>
+#include "MemoryTracker.h"
 
 // ============================================================================
 // kernel::klog() stub — routes to Core::cout() for test visibility
@@ -41,7 +43,7 @@ namespace arch {
             std::lock_guard<std::mutex> lock(processorIdMapMutex);
             threadToProcessorId.clear();
             nextProcessorId.store(0);
-            // Note: thread_local variables persist, but will be reassigned on next access
+            processorIdCached = false;
         }
 
         void setProcessorCount(size_t count) {
@@ -75,9 +77,14 @@ namespace arch {
                 return cachedProcessorId;
             }
 
-            // Assign a new processor ID (round-robin across available processors)
+            // Assign a new processor ID (round-robin across available processors).
+            // Pause tracking: threadToProcessorId is arch-mock infrastructure that
+            // persists across tests; its allocations must not be attributed to any
+            // individual test's memory-leak check.
             ProcessorID pid = nextProcessorId.fetch_add(1) % mockProcessorCount;
+            CroCOSTest::pauseTracking();
             threadToProcessorId[tid] = pid;
+            CroCOSTest::resumeTracking();
 
             cachedProcessorId = pid;
             processorIdCached = true;
@@ -94,3 +101,13 @@ namespace arch {
         return 64;
     }
 }
+
+// ============================================================================
+// Between-test cleanup
+// ============================================================================
+
+static void archMocksCleanup() {
+    arch::testing::resetProcessorState();
+}
+
+REGISTER_TEST_CLEANUP(archMocksCleanup)

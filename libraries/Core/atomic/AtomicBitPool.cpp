@@ -47,14 +47,25 @@ size_t AtomicBitPool::requiredBufferSize(size_t capacity, size_t entryStride) {
     return total;
 }
 
-AtomicBitPool::AtomicBitPool(size_t capacity, void* buffer, size_t stride) {
-    entryStride = max(stride, sizeof(Entry));
-    capacity = (1ull << log2ceil(capacity));
+AtomicBitPool::AtomicBitPool(AtomicBitPool&& other) noexcept
+    : storage(other.storage), entryStride(other.entryStride),
+      levelCount(other.levelCount), l1BitmapLog2Width(other.l1BitmapLog2Width),
+      capacity(other.capacity) {
+    other.storage = nullptr;
+    other.entryStride = 0;
+    other.levelCount = 0;
+    other.l1BitmapLog2Width = 0;
+    other.capacity = 0;
+}
+
+AtomicBitPool::AtomicBitPool(size_t cap, void* buffer, size_t stride) {
+    const size_t roundedCap = (1ull << log2ceil(cap));
     this->storage = buffer;
-    this->entryStride = stride;
-    this->levelCount = computeLevelCount(capacity);
-    this->l1BitmapLog2Width = computeL1BitmapLog2Width(capacity, levelCount);
-    memset(storage, 0, requiredBufferSize(capacity, stride));
+    this->entryStride = max(stride, sizeof(Entry));
+    this->levelCount = computeLevelCount(roundedCap);
+    this->l1BitmapLog2Width = computeL1BitmapLog2Width(roundedCap, levelCount);
+    this->capacity = roundedCap;
+    memset(storage, 0, requiredBufferSize(roundedCap, stride));
 }
 
 static constexpr size_t geometricSum = ((1ull << (6 * AtomicBitPool::maxLevelCount)) - 1) / 63;
@@ -299,6 +310,15 @@ AtomicBitPool::GetResult AtomicBitPool::getAny(size_t threadId, size_t& outIndex
 }
 
 #ifdef CROCOS_TESTING
+size_t AtomicBitPool::countSet() const {
+    const size_t leafEntryCount = (capacity + 63) / 64;
+    size_t total = 0;
+    for (size_t i = 0; i < leafEntryCount; i++) {
+        total += static_cast<size_t>(__builtin_popcountll(entryAt(i, 0).bitmap.load(RELAXED)));
+    }
+    return total;
+}
+
 bool AtomicBitPool::checkInvariants() const {
     size_t numEntries = 1;
     for (size_t k = levelCount - 1; k-- > 0;) {

@@ -18,25 +18,25 @@
     // On macOS, we need to use getsectiondata to access the custom section
     #include <mach-o/getsect.h>
     #include <mach-o/dyld.h>
-    
+
     static const CroCOSTest::TestInfo** getMacOSTests(unsigned long* count) {
-        // Get the main executable's mach header (index 0 is always the main executable)
         const struct mach_header_64* header = (const struct mach_header_64*)_dyld_get_image_header(0);
-
-        if (!header) {
-            *count = 0;
-            return nullptr;
-        }
-        
+        if (!header) { *count = 0; return nullptr; }
         unsigned long size;
-        const CroCOSTest::TestInfo** section_data = 
+        const CroCOSTest::TestInfo** section_data =
             (const CroCOSTest::TestInfo**)getsectiondata(header, "__DATA", "crocos_tests", &size);
+        if (section_data) { *count = size / sizeof(const CroCOSTest::TestInfo*); return section_data; }
+        *count = 0;
+        return nullptr;
+    }
 
-        if (section_data) {
-            *count = size / sizeof(const CroCOSTest::TestInfo*);
-            return section_data;
-        }
-        
+    static const CroCOSTest::TestCleanupHook** getMacOSCleanupHooks(unsigned long* count) {
+        const struct mach_header_64* header = (const struct mach_header_64*)_dyld_get_image_header(0);
+        if (!header) { *count = 0; return nullptr; }
+        unsigned long size;
+        const CroCOSTest::TestCleanupHook** section_data =
+            (const CroCOSTest::TestCleanupHook**)getsectiondata(header, "__DATA", "crocos_cleanup", &size);
+        if (section_data) { *count = size / sizeof(const CroCOSTest::TestCleanupHook*); return section_data; }
         *count = 0;
         return nullptr;
     }
@@ -44,6 +44,8 @@
     // Linux/ELF format using weak symbols
     extern "C" const CroCOSTest::TestInfo* __crocos_unit_tests_start[] __attribute__((weak));
     extern "C" const CroCOSTest::TestInfo* __crocos_unit_tests_end[] __attribute__((weak));
+    extern "C" const CroCOSTest::TestCleanupHook* __crocos_test_cleanup_start[] __attribute__((weak));
+    extern "C" const CroCOSTest::TestCleanupHook* __crocos_test_cleanup_end[] __attribute__((weak));
 #endif
 
 // Function pointer approach - more reliable across platforms
@@ -59,7 +61,7 @@ static void call_presort_if_exists() {
 }
 
 namespace CroCOSTest {
-    
+
     const TestInfo* const* TestRunner::getTests(size_t& testCount) {
 #ifdef __APPLE__
         unsigned long macCount;
@@ -67,13 +69,31 @@ namespace CroCOSTest {
         testCount = macCount;
         return tests;
 #else
-        if (__crocos_unit_tests_start == nullptr || __crocos_unit_tests_end == nullptr || 
+        if (__crocos_unit_tests_start == nullptr || __crocos_unit_tests_end == nullptr ||
             __crocos_unit_tests_start >= __crocos_unit_tests_end) {
             testCount = 0;
             return nullptr;
         } else {
             testCount = __crocos_unit_tests_end - __crocos_unit_tests_start;
             return __crocos_unit_tests_start;
+        }
+#endif
+    }
+
+    const TestCleanupHook* const* TestRunner::getCleanupHooks(size_t& hookCount) {
+#ifdef __APPLE__
+        unsigned long macCount;
+        const TestCleanupHook** hooks = getMacOSCleanupHooks(&macCount);
+        hookCount = macCount;
+        return hooks;
+#else
+        if (__crocos_test_cleanup_start == nullptr || __crocos_test_cleanup_end == nullptr ||
+            __crocos_test_cleanup_start >= __crocos_test_cleanup_end) {
+            hookCount = 0;
+            return nullptr;
+        } else {
+            hookCount = __crocos_test_cleanup_end - __crocos_test_cleanup_start;
+            return __crocos_test_cleanup_start;
         }
 #endif
     }
@@ -149,8 +169,24 @@ namespace CroCOSTest {
             }
         }
 
-        // Check for memory leaks after test completion
-        if (MemoryTracker::hasLeaks()) {
+        // Run between-test cleanup hooks (registered via REGISTER_TEST_CLEANUP).
+        // Hooks run after every test regardless of pass/fail, with tracking paused
+        // so their internal bookkeeping does not appear as leaks.
+        {
+            size_t hookCount;
+            const TestCleanupHook* const* hooks = getCleanupHooks(hookCount);
+            if (hooks) {
+                pauseTracking();
+                for (size_t i = 0; i < hookCount; ++i) {
+                    if (hooks[i] != nullptr)
+                        hooks[i]->cleanupFunc();
+                }
+                resumeTracking();
+            }
+        }
+
+        // Check for memory leaks after test completion (skip for noTracking tests)
+        if (!test->noTracking && MemoryTracker::hasLeaks()) {
             std::string leakMsg = "Memory leak detected: " +
                                 std::to_string(MemoryTracker::getCurrentUsage()) +
                                 " bytes leaked in " +

@@ -31,6 +31,7 @@ class AtomicBitPool {
     size_t entryStride;
     size_t levelCount;
     size_t l1BitmapLog2Width;
+    size_t capacity;
 
     [[nodiscard]] size_t localIndex(size_t absoluteIndex, size_t level) const;
     [[nodiscard]] Entry& entryAt(size_t index, size_t level);
@@ -71,6 +72,7 @@ public:
     static size_t requiredBufferSize(size_t capacity, size_t entryStride = 64);
 
     AtomicBitPool(size_t capacity, void* storage, size_t entryStride = 64);
+    AtomicBitPool(AtomicBitPool&&) noexcept;
 
     AddResult add(size_t absoluteIndex);
     RemoveResult remove(size_t absoluteIndex);
@@ -78,6 +80,17 @@ public:
     GetResult getAny(size_t threadId, size_t &outIndex, size_t maxRetries = 16);
 #ifdef CROCOS_TESTING
     [[nodiscard]] bool checkInvariants() const;
+
+    // Returns true if the given index is currently set in the pool.
+    // Only safe to call in quiescent (single-threaded) state.
+    [[nodiscard]] bool isSet(size_t absoluteIndex) const {
+        const size_t bitIdx   = bitIndexForLevel(absoluteIndex, 0);
+        const size_t entryIdx = entryIndexForLevel(absoluteIndex, 0);
+        return (entryAt(entryIdx, 0).bitmap.load(RELAXED) >> bitIdx) & 1u;
+    }
+
+    // Count of all currently set indices.  Only safe in quiescent state.
+    [[nodiscard]] size_t countSet() const;
 #endif
 };
 

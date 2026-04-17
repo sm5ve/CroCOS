@@ -283,6 +283,24 @@ public:
         return actualCount;
     }
 
+    // Single-item write with spin-wait (mirrors bulkWrite semantics).
+    // Returns true if successful, false if the buffer is full.
+    bool write(const T& value) {
+        return bulkWrite(1, [&](size_t, T& slot) { slot = value; });
+    }
+
+    // Non-blocking single-item write (mirrors tryBulkWrite semantics).
+    // Returns true if successful, false if the buffer is full.
+    bool tryWrite(const T& value) {
+        return tryBulkWrite(1, [&](size_t, T& slot) { slot = value; });
+    }
+
+    // Non-blocking single-item read (mirrors tryBulkRead semantics).
+    // Writes the item into `out` and returns true if one was available, false otherwise.
+    bool tryRead(T& out) {
+        return tryBulkRead(1, [&](size_t, const T& slot) { out = slot; });
+    }
+
     // Conservative estimate of slots available for writing.
     size_t availableToWrite() const {
         return cap - (writeHead.load(ACQUIRE) - readHead.load(ACQUIRE));
@@ -567,6 +585,24 @@ public:
         return actualCount;
     }
 
+    // Single-item write with spin-wait (mirrors bulkWrite semantics).
+    // Returns true if successful, false if the buffer is full.
+    bool write(const T& value) {
+        return bulkWrite(1, [&](size_t, T& slot) { slot = value; });
+    }
+
+    // Non-blocking single-item write (mirrors tryBulkWrite semantics).
+    // Returns true if successful, false if the buffer is full.
+    bool tryWrite(const T& value) {
+        return tryBulkWrite(1, [&](size_t, T& slot) { slot = value; });
+    }
+
+    // Non-blocking single-item read (mirrors tryBulkRead semantics).
+    // Writes the item into `out` and returns true if one was available, false otherwise.
+    bool tryRead(T& out) {
+        return tryBulkRead(1, [&](size_t, const T& slot) { out = slot; });
+    }
+
     // Conservative estimate of slots available for writing.
     size_t availableToWrite() const {
         return cap - (writeHead.load(ACQUIRE) - readHead.load(ACQUIRE));
@@ -733,6 +769,9 @@ public:
         return buffer.bulkWriteBestEffort(count, forward<WriteCallback>(callback));
     }
 
+    bool write(const T& value)    { return buffer.write(value); }
+    bool tryWrite(const T& value) { return buffer.tryWrite(value); }
+
     // --- Read interface: per-consumer with broadcast acknowledgement ---
     //
     // Each headNumber must be used by exactly one consumer thread (single-writer).
@@ -762,6 +801,12 @@ public:
             ackSlot(myHead + i);
         }
         return true;
+    }
+
+    // Non-blocking single-item read for a specific consumer.
+    // Writes the item into `out` and returns true if one was available, false otherwise.
+    bool tryRead(size_t headNumber, T& out) {
+        return tryBulkRead(headNumber, 1, [&](size_t, const T& slot) { out = slot; });
     }
 
     // Best-effort: read up to count items, returns actual count read.
