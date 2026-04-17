@@ -25,6 +25,13 @@ endif()
 add_subdirectory(libraries)
 add_subdirectory(tools)
 add_subdirectory(kernel)
+add_custom_target(build_stress_tests
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/stress_tests
+        COMMAND cmake -B build -DCMAKE_BUILD_TYPE=Release
+        COMMAND cmake --build build
+        COMMENT "Building CroCOS stress tests"
+        USES_TERMINAL
+)
 
 add_custom_target(run
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}

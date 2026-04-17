@@ -17,6 +17,7 @@ target_sources(CoreTests PRIVATE
     OptionalTest.cpp
     PermutationTest.cpp
     RingBufferTest.cpp
+    HighReliabilityRingBufferTests.cpp
     SmartPointerTest.cpp
     TreeTest.cpp
     VariantTest.cpp

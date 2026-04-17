@@ -1,4 +1,5 @@
 cmake-build-amd64-kernel-debug/
 tests/build/
 tools/__pycache__
+stress_tests/build/
 CLAUDE.md

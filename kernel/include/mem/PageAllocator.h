@@ -10,6 +10,7 @@
 #include <core/utility.h>
 #include <core/atomic.h>
 #include <core/atomic/RingBuffer.h>
+#include <core/ds/HighReliabilityRingBuffer.h>
 #include <mem/NUMA.h>
 #include <core/atomic/AtomicBitPool.h>
 
@@ -174,7 +175,7 @@ struct SubrangeInfo {
 
 class NUMAPool {
     BigPageMetadata* bigPageMetadataBuffer;
-    MPMCRingBuffer<BigPageMetadata*, false, true> freeBigPages;
+    HighReliabilityRingBuffer<BigPageMetadata*, false, true> freeBigPages;
     AtomicBitPool paPages;
     kernel::numa::DomainID associatedDomain;
     SubrangeInfo* subrangeInfo;
@@ -186,7 +187,6 @@ public:
     NUMAPool(BigPageMetadata* metadataBuffer,
              BigPageMetadata** freeBuffer,
              Atomic<size_t>* wgc,
-             Atomic<size_t>* rgc,
              AtomicBitPool&& paPagesBitPool,
              SubrangeInfo* subrangeBuffer,
              size_t numSubranges,
