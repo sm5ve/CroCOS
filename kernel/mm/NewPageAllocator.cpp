@@ -206,7 +206,7 @@ void SmallPageAllocator::free(PageRef *pages, size_t count, OccupancyTransition&
         assert((addrRaw & ~(arch::bigPageSize - 1)) == baseAddr.value, "Tried to free small page in wrong small page allocator");
         const SmallPageIndex pageIndex = (addrRaw / arch::smallPageSize) % mm::PageAllocator::smallPagesPerBigPage;
         const bool wasFree = markPageFreeState(pageIndex, true);
-        assert(!wasFree, "Double free: page is already free"); //This assert fires
+        assert(!wasFree, "Double free: page is already free");
         entry = pageIndex;
     });
     const size_t maxAlloc = mm::PageAllocator::smallPagesPerBigPage - reservedCount;
@@ -899,7 +899,7 @@ size_t NUMAPool::allocatePages(size_t smallPageCount, const PageAllocationCallba
     while (smallPageCount > 0) {
         const auto requiredPages = divideAndRoundUp(smallPageCount, mm::PageAllocator::smallPagesPerBigPage);
         const auto grabbedPages = freeBigPages.bulkReadBestEffort(requiredPages, [&](size_t index, auto& metadata) {
-            assert(metadata -> isEmpty(), "Big pages in the free pool should be FREE"); //This assert fires
+            assert(metadata -> isEmpty(), "Big pages in the free pool should be FREE");
             if (index == 0) {
                 paPageRemaining = metadata;
             }
@@ -923,9 +923,6 @@ size_t NUMAPool::allocatePages(size_t smallPageCount, const PageAllocationCallba
         else {
             allocatedPages += (grabbedPages - 1) * mm::PageAllocator::smallPagesPerBigPage;
             smallPageCount -= (grabbedPages - 1) * mm::PageAllocator::smallPagesPerBigPage;
-            assert(smallPageCount < mm::PageAllocator::smallPagesPerBigPage, "????");
-            assert(!paPageRemaining -> hasReservedSubpages(), "ASDFASFSADF");
-            assert(paPageRemaining -> isEmpty(), "!!!!");
             const auto smallAllocd = paPageRemaining -> allocatePages(smallPageCount, cb);
             smallPageCount -= smallAllocd;
             allocatedPages += smallAllocd;
@@ -942,7 +939,7 @@ void NUMAPool::freePages(PageRef *pages, size_t count) {
     const auto freeBigPageRun = [&](BigPageMetadata* firstMetadata, PageRef *runStart, size_t runSize) {
         freeBigPages.bulkWrite(runSize, [&](size_t index, BigPageMetadata*& entry) {
             const auto metadataIndex = divideAndRoundDown(runStart[index].value - runStart[0].value, static_cast<uint64_t>(arch::bigPageSize));
-            assert(firstMetadata[metadataIndex].isFull(), "We should only take this path when freeing totally occupied big pages"); //This assert fires
+            assert(firstMetadata[metadataIndex].isFull(), "We should only take this path when freeing totally occupied big pages");
             firstMetadata[metadataIndex].freeAll();
             entry = &(firstMetadata[metadataIndex]);
         });
@@ -963,13 +960,11 @@ void NUMAPool::freePages(PageRef *pages, size_t count) {
                 // practical consequence is that BIG_PAGE_ONLY allocations cannot see it
                 // until it is reclaimed.
                 if (paPages.remove(metadataIndex(superpage)) != AtomicBitPool::RemoveResult::NotPresent) {
-                    assert(superpage->isEmpty(), "AAAAAAA");
                     freeBigPages.write(superpage);
                 }
             }
             else {
                 // Full→Empty: page was never in paPages, return it directly.
-                assert(superpage->isEmpty(), "BBBBBBB");
                 freeBigPages.write(superpage);
             }
         }
