@@ -72,7 +72,7 @@ namespace kernel{
         return true;
     }
 
-    extern "C" void kernel_main() {
+    extern "C" [[noreturn]] void kernel_main() {
         klog() << "\n"; // newline to separate from the "Booting from ROM.." message from qemu
         init::kinit(true, KERNEL_INIT_LOG_LEVEL, false);
 

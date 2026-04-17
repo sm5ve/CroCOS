@@ -838,7 +838,7 @@ size_t NUMAPool::allocatePages(size_t smallPageCount, const PageAllocationCallba
     if (flags.has(AllocBehavior::BIG_PAGE_ONLY)) {
         //Overallocate in case smallPageCount is not divisible by smallPagesPerBigPage
         const auto bigPageCount = divideAndRoundUp(smallPageCount, mm::PageAllocator::smallPagesPerBigPage);
-        const auto allocatedPages = freeBigPages.bulkReadBestEffort(bigPageCount, [&](size_t _, const auto& metadata) {
+        const auto allocatedPages = freeBigPages.bulkReadBestEffort(bigPageCount, [&](size_t, const auto& metadata) {
             const auto pageAddr = metadata -> baseAddr();
             metadata -> allocAll();
             cb(PageRef::big(pageAddr));
@@ -847,7 +847,7 @@ size_t NUMAPool::allocatePages(size_t smallPageCount, const PageAllocationCallba
     }
     //First try allocating as much as we can from big pages
     const auto bigPageCount = divideAndRoundDown(smallPageCount, mm::PageAllocator::smallPagesPerBigPage);
-    size_t allocatedPages = freeBigPages.bulkReadBestEffort(bigPageCount, [&](size_t _, const auto& metadata) {
+    size_t allocatedPages = freeBigPages.bulkReadBestEffort(bigPageCount, [&](size_t, const auto& metadata) {
         const auto pageAddr = metadata -> baseAddr();
         metadata -> allocAll();
         cb(PageRef::big(pageAddr));
