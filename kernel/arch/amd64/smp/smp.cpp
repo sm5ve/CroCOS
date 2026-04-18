@@ -34,7 +34,11 @@ namespace arch::amd64::smp{
         auto& madt = acpi::the<MADT>();
         pinfo = new ProcessorInfo[processorCount()];
         size_t countedAPs = 0; //minus the BSP
-        auto bspLapicID = interrupts::getLAPICDomain() -> getID();
+        // Read the BSP's LAPIC ID via CPUID (leaf 1, EBX[31:24]) so this function
+        // has no dependency on the LAPIC MMIO domain being set up yet.
+        uint32_t eax, ebx, ecx, edx;
+        cpuid(eax, ebx, ecx, edx, 1);
+        auto bspLapicID = static_cast<uint8_t>((ebx >> 24) & 0xffu);
         for(auto& entry : madt.entries<MADT_LAPIC_Entry>()){
             if((entry.flags & 3) == 1){
                 //Always ensure the BSP is marked as CPU 0

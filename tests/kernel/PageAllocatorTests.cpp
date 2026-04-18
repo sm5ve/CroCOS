@@ -796,7 +796,7 @@ struct DomainSpec {
 // TestPageAllocatorImpl — RAII owner of a PageAllocatorImpl and all its
 // backing memory (one BootstrapBuffer per NUMA domain).
 //
-// Mirrors the structure of initNewPageAllocator() exactly so that any
+// Mirrors the structure of initPageAllocator() exactly so that any
 // bugs caught here would also manifest in the real initialisation path.
 //
 // IMPORTANT: domainBuffers is reserved before the construction loop so that
@@ -865,7 +865,7 @@ struct TestPageAllocatorImpl {
             BootstrapAllocator measuring;
             createNumaPool(measuring, spec.ranges, domainId);
             for (size_t i = 0; i < spec.cpuIds.size(); i++) {
-                createLocalPool(measuring, topology);
+                createLocalPool(measuring, &topology);
             }
 
             // ---- Allocate buffer (reserve guarantees no reallocation here) ----
@@ -875,7 +875,7 @@ struct TestPageAllocatorImpl {
             BootstrapAllocator real = domainBuffers.back().makeAllocator();
             numaPools.push(createNumaPool(real, spec.ranges, domainId));
             for (size_t cpu : spec.cpuIds) {
-                localPools[cpu] = createLocalPool(real, topology);
+                localPools[cpu] = createLocalPool(real, &topology);
             }
         }
 

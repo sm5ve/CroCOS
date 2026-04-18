@@ -34,7 +34,6 @@ set(KERNEL_SRC
         timing/BlockingSleep.cpp
         arch/amd64/smp/smpboot.asm
         init.cpp
-        mm/NewPageAllocator.cpp
         mm/MemTypes.cpp
         mm/NUMA.cpp
         acpi/NUMAIterators.cpp

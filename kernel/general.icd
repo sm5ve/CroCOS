@@ -1,9 +1,18 @@
+[ZeroBSS]
+
+name = "Zero BSS"
+required = true
+per_cpu = false
+phase = "cpp_init"
+routine = "kernel::zeroBSS"
+
 [EarlyHeapInit]
 
 name = "Early Heap Initialization"
 required = true
 per_cpu = false
 phase = "cpp_init"
+depends_on = ["ZeroBSS"]
 routine = "kernel::heapEarlyInit"
 
 [PresortCRClassParents]
@@ -12,6 +21,7 @@ name = "Presort CRClassParents"
 required = true
 per_cpu = false
 phase = "cpp_init"
+depends_on = ["ZeroBSS"]
 routine = "kernel::initCRClassMetadata"
 
 [RunGlobalConstructors]
@@ -29,7 +39,7 @@ name = "Page Allocator"
 required = true
 per_cpu = false
 phase = "memory_management"
-depends_on_capabilities = ["cpu_count"]
+depends_on_capabilities = ["cpu_count", "numa_topology"]
 routine = "kernel::mm::initPageAllocator"
 
 [PTM]

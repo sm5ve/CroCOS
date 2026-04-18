@@ -27,7 +27,7 @@ target_include_directories(KernelTests PUBLIC
 target_sources(KernelTests PRIVATE
         ../../kernel/interrupts/InterruptGraphManager.cpp
         ../../kernel/interrupts/ExplicitTypes.cpp
-        ../../kernel/mm/NewPageAllocator.cpp
+        ../../kernel/mm/PageAllocator.cpp
         ../../kernel/mm/MemTypes.cpp
         ../../kernel/mm/NUMA.cpp
         ../../kernel/arch/arch.cpp
@@ -68,7 +68,7 @@ set_source_files_properties(
     ../../libraries/Core/str.cpp
     ../../libraries/Core/Object.cpp
     ../../libraries/Core/atomic/atomic.cpp
-    ../../kernel/mm/NewPageAllocator.cpp
+    ../../kernel/mm/PageAllocator.cpp
     ../../kernel/mm/NUMA.cpp
     ../../kernel/arch/arch.cpp
     PROPERTIES COMPILE_FLAGS "-include ${CMAKE_CURRENT_SOURCE_DIR}/../test.h -DCROCOS_TEST_INSTRUMENT_ALLOCATORS"

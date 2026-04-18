@@ -28,8 +28,12 @@ namespace kernel{
         return klogStream;
     }
 
-    bool runGlobalConstructors(){
+    bool zeroBSS(){
         memset(&__bss_virt_start, 0, reinterpret_cast<size_t>(&__bss_virt_end) - reinterpret_cast<size_t>(&__bss_virt_start));
+        return true;
+    }
+
+    bool runGlobalConstructors(){
         for (void (**ctor)() = __init_array_start; ctor != __init_array_end; ctor++) {
             (*ctor)();
         }

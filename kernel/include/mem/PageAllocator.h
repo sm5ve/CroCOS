@@ -180,9 +180,9 @@ class NUMAPool {
     kernel::numa::DomainID associatedDomain;
     SubrangeInfo* subrangeInfo;
     size_t subrangeCount;
-#ifdef CROCOS_TESTING
     size_t bigPageCount;
-#endif
+
+    void fixupAfterReserveRange();
 public:
     NUMAPool(BigPageMetadata* metadataBuffer,
              BigPageMetadata** freeBuffer,
@@ -204,6 +204,10 @@ public:
     [[nodiscard]] size_t allocatePages(size_t smallPageCount, PageAllocationCallback cb, BigPageMetadata*& paPageRemaining, AllocFlags flags = {});
     void freePages(PageRef* pages, size_t count);
     void returnPage(BigPageMetadata& metadata);
+
+    // Reserve all small pages within range that fall in this pool.
+    // Must be called before any allocation (init-time only).
+    void reserveRange(kernel::mm::phys_memory_range range);
 
     kernel::numa::DomainID domain() const { return associatedDomain; }
 
@@ -231,7 +235,7 @@ class LocalPool {
     BigPageMetadata* paPage2 = nullptr;
     const kernel::numa::NUMATopology* topology;
 public:
-    explicit LocalPool(const kernel::numa::NUMATopology& topo) : topology(&topo) {}
+    explicit LocalPool(const kernel::numa::NUMATopology* topo = nullptr) : topology(topo) {}
 
     [[nodiscard]] size_t allocatePages(size_t smallPageCount, PageAllocationCallback cb, AllocFlags flags = {});
     void tryGivePAPage(BigPageMetadata& page);
@@ -285,6 +289,9 @@ struct PageAllocatorImpl {
     [[nodiscard]] size_t allocatePages(size_t smallPageCount, PageAllocationCallback cb, AllocFlags flags = {});
     void freePages(PageRef* pages, size_t count);
 
+    // Reserve all small pages in range across all pools (init-time only).
+    void reserveRange(kernel::mm::phys_memory_range range);
+
 #ifdef CROCOS_TESTING
     // Sum of free subpages across all NUMAPools (and the unowned pool, if present).
     // Includes pages cached in LocalPools, since their SmallPageAllocators track occupancy
@@ -300,7 +307,8 @@ struct PageAllocatorImpl {
 NUMAPool*         createNumaPool(BootstrapAllocator& alloc,
                                  const Vector<kernel::mm::phys_memory_range>& ranges,
                                  kernel::numa::DomainID domain = kernel::numa::DomainID{0});
-LocalPool*        createLocalPool(BootstrapAllocator& alloc, const kernel::numa::NUMATopology& topology);
+LocalPool*        createLocalPool(BootstrapAllocator& alloc,
+                                  const kernel::numa::NUMATopology* topology = nullptr);
 
 // CONTRACT: perDomainAllocs must be sized to (maxDomainID + 1), with nullptr
 // slots for any domain IDs that have no physical memory.  This allows O(1)
@@ -311,5 +319,8 @@ PageAllocatorImpl createPageAllocator(Vector<NUMAPool*>&& perDomainAllocs, Local
                                       size_t processorCount,
                                       NUMAPool* unownedPool = nullptr,
                                       const kernel::numa::NUMAPolicy* numaPolicy = nullptr);
+
+// Global page allocator instance, set by initPageAllocator().
+extern PageAllocatorImpl* gPageAllocator;
 
 #endif //CROCOS_PAGEALLOCATOR_H

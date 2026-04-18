@@ -48,7 +48,7 @@ struct Config {
     size_t numDomains        = 2;
     size_t bigPagesPerDomain = 128;
     size_t threadsPerDomain  = 4;
-    size_t maxBatch          = 1024;
+    size_t maxBatch          = 4096;
     size_t reportIntervalMs  = 5000;
 };
 
@@ -148,7 +148,7 @@ struct StressAllocatorImpl {
             BootstrapAllocator measuring;
             createNumaPool(measuring, ranges, domainId);
             for (size_t t = 0; t < threadsPerDomain; t++)
-                createLocalPool(measuring, topology);
+                createLocalPool(measuring, &topology);
 
             domainBuffers.emplace_back(measuring.bytesNeeded());
 
@@ -158,7 +158,7 @@ struct StressAllocatorImpl {
 
             size_t cpuBase = d * threadsPerDomain;
             for (size_t t = 0; t < threadsPerDomain; t++)
-                localPools[cpuBase + t] = createLocalPool(real, topology);
+                localPools[cpuBase + t] = createLocalPool(real, &topology);
         }
 
         impl = createPageAllocator(move(numaPools), localPools,

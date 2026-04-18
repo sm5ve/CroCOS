@@ -866,7 +866,8 @@ namespace arch::amd64::PageTableManager{
 
         //Set up our initial metadata page
         for(auto i = 0; i < 3; i++){
-            internalTableMetadataMapping[i] = PageDirectoryEntry(mm::PageAllocator::allocateSmallPage().value | 3 | (1 << 8));
+            auto pg = mm::PageAllocator::allocateSmallPage();
+            internalTableMetadataMapping[i] = PageDirectoryEntry(pg.value | 3 | (1 << 8));
         }
 
         //set up our pointers

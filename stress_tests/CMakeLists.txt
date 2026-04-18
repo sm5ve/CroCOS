@@ -27,7 +27,7 @@ project(CroCOSStressTests LANGUAGES CXX)
 
 # ---- Kernel and library sources ----
 set(KERNEL_SOURCES
-    ../kernel/mm/NewPageAllocator.cpp
+    ../kernel/mm/PageAllocator.cpp
     ../kernel/mm/MemTypes.cpp
     ../kernel/mm/NUMA.cpp
     ../kernel/arch/arch.cpp

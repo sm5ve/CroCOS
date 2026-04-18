@@ -52,8 +52,16 @@ NUMATopology NUMATopology::buildInternal(
         NUMATopology topo;
         ProximityDomain d;
         d.id = DomainID(0);
+        d.isInitiatorDomain = true;
         topo.proximityDomains.push(move(d));
         topo.cacheInfo.push(Optional<DomainCacheInfo>{});
+        // Assign all known CPUs to domain 0.
+        const size_t totalCpus = arch::processorCount();
+        for (size_t i = 0; i < totalCpus; i++) {
+            topo.cpuToDomain.push(DomainID(0));
+            topo.cpuToClockDomain.push(ClockDomainID{});
+            topo.proximityDomains[0].processors.push(static_cast<arch::ProcessorID>(i));
+        }
         klog() << "[NUMA] No SRAT data — trivial single-domain topology\n";
         return topo;
     }
@@ -827,9 +835,11 @@ NUMAMemoryPartition partitionMemoryByDomain(
 // ============================================================================
 
 static NUMAPolicy* gNUMAPolicy = nullptr;
+static const NUMATopology* gNUMATopology = nullptr;
 
 void initNUMAPolicy(const NUMATopology& topology) {
     assert(gNUMAPolicy == nullptr, "initNUMAPolicy called more than once");
+    gNUMATopology = &topology;
     gNUMAPolicy = new NUMAPolicy(topology);
     klog() << "[NUMA] Policy initialised: "
                    << static_cast<uint32_t>(topology.domainCount()) << " domains\n";
@@ -838,6 +848,10 @@ void initNUMAPolicy(const NUMATopology& topology) {
 const NUMAPolicy& numaPolicy() {
     assert(gNUMAPolicy != nullptr, "numaPolicy() called before initNUMAPolicy()");
     return *gNUMAPolicy;
+}
+
+const NUMATopology* getCurrentTopology() {
+    return gNUMATopology;
 }
 
 } // namespace kernel::numa

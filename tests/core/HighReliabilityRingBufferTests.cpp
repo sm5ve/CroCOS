@@ -4,7 +4,7 @@
 
 #include "../test.h"
 #include <harness/TestHarness.h>
-#include <core/ds/HighReliabilityRingBuffer.h>
+#include <core/atomic/HighReliabilityRingBuffer.h>
 
 #include <thread>
 #include <vector>

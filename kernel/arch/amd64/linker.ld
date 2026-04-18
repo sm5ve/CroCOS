@@ -64,7 +64,7 @@ SECTIONS
 	    PROVIDE(bss_start = . - @KERNEL_BASE@);
 	    PROVIDE(__bss_virt_start = .);
 		*(COMMON)
-		*(.bss)
+		*(.bss .bss.*)
 		PROVIDE(__bss_virt_end = .);
 	}
 

@@ -553,6 +553,9 @@ void initNUMAPolicy(const NUMATopology& topology);
 // Returns the global NUMAPolicy.  Asserts if not yet initialised.
 const NUMAPolicy& numaPolicy();
 
+// Returns the NUMATopology passed to initNUMAPolicy, or nullptr if not yet called.
+const NUMATopology* getCurrentTopology();
+
 // ============================================================================
 // Memory partitioning
 // ============================================================================

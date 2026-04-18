@@ -21,28 +21,12 @@ namespace kernel::mm{
     };
 
     namespace PageAllocator{
-        struct page_allocator_range_info{
-            phys_memory_range range;
-            //The architecture initialization routine MUST reserve adequately sized buffers for each
-            //memory range as specified by requestedBufferSizeForRange. The buffers are expected to be
-            //zeroed out.
-            void* buffer_start;
-        };
-        // Calculate the maximum page counts
+        // Page count constants used throughout the allocator.
         constexpr size_t smallPagesPerBigPage = arch::bigPageSize / arch::smallPageSize;
         constexpr size_t bigPagesInMaxMemory = arch::maxMemorySupported / arch::bigPageSize;
-        void init(Vector<page_allocator_range_info>& regions, size_t processor_count);
-        size_t requestedBufferSizeForRange(mm::phys_memory_range range, size_t processor_count);
-        void reservePhysicalRange(phys_memory_range);
+
         phys_addr allocateSmallPage();
-        phys_addr allocateBigPage();
-        void freeLocalSmallPage(phys_addr);
-        void freeLocalBigPage(phys_addr);
         void freeSmallPage(phys_addr);
-        void freeBigPage(phys_addr);
-        bool allocatePages(size_t requestedCapacityInBytes, Vector<phys_addr>& smallPages, Vector<phys_addr>& bigPages);
-        void freePages(Vector<phys_addr>& smallPages, Vector<phys_addr>& bigPages);
-        void freeLocalPages(Vector<phys_addr>& smallPages, Vector<phys_addr>& bigPages);
     }
 
     namespace vm {

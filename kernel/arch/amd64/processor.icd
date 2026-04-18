@@ -72,8 +72,8 @@ routine = "arch::amd64::setupInterruptControllers"
 name = "Setup SMP Tables"
 required = true
 per_cpu = false
-phase = "core_devices"
-depends_on = ["InterruptControllers"]
+phase = "processor_early"
+depends_on = ["ACPISearch"]
 routine = "arch::amd64::smp::populateProcessorInfo"
 
 [PIT]
@@ -109,6 +109,7 @@ routine = "arch::amd64::smp::smpInit"
 name = "NUMA Topology Discovery"
 required = true
 per_cpu = false
-phase = "core_devices"
+phase = "processor_early"
 depends_on = ["SMPTableInit"]
+provides_capabilities = ["numa_topology"]
 routine = "arch::amd64::initNUMAInfo"

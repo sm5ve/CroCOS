@@ -1,1021 +1,1154 @@
 //
-// Created by Spencer Martin on 2/12/25.
+// Created by Spencer Martin on 2/4/26.
 //
 
-#include <../include/mem/mm.h>
-#include <arch.h>
-#include "core/atomic.h"
-#include <core/ds/Vector.h>
-#include <kernel.h>
+#include <mem/PageAllocator.h>
 #include <core/math.h>
+#include <core/ds/Trees.h>
+#include <core/algo/sort.h>
+#include <mem/NUMA.h>
 
-#define ALLOCATOR_DEBUG
+constexpr size_t PA_BITPOOL_RELAXED_RETRIES = 16;
+constexpr size_t PA_BITPOOL_DETERMINED_RETRIES = 1000000;
 
-namespace kernel::mm::PageAllocator{
+constexpr size_t bigPagesInRange(const kernel::mm::phys_memory_range range) {
+    const auto alignedTop = roundUpToNearestMultiple(range.end.value, static_cast<uint64_t>(arch::bigPageSize));
+    const auto alignedBottom = roundDownToNearestMultiple(range.start.value, static_cast<uint64_t>(arch::bigPageSize));
+    return (alignedTop - alignedBottom)/arch::bigPageSize;
+}
 
-    using namespace arch;
+// ================= Bootstrap Allocator ==================
 
-    using BufferId = SmallestUInt_t<RequiredBits(arch::MAX_PROCESSOR_COUNT)>;
-    const BufferId GLOBAL_POOL = arch::MAX_PROCESSOR_COUNT;
+using namespace kernel;
 
-    struct ContiguousRangeAllocator{
-    private:
-        using SubpageIndexRawType = SmallestUInt_t<RequiredBits(smallPagesPerBigPage)>;
-        using SuperpageIndexRawType = SmallestUInt_t<RequiredBits(bigPagesInMaxMemory)>;
+BootstrapAllocator::BootstrapAllocator() : current(nullptr), end(nullptr), measuring(true) {}
 
-        using SubpageStackMarker = SmallestUInt_t<RequiredBits(smallPagesPerBigPage + 1)>;
-        using SuperpageStackMarker = uint64_t; //used for simplicity when doing atomic stuff.
+BootstrapAllocator::BootstrapAllocator(void* buffer, size_t size)
+        : current(static_cast<uint8_t *>(buffer)),
+          end(static_cast<uint8_t *>(buffer) + size),
+          measuring(false) {}
 
-        struct SubpagePool;
-        struct RawSubpagePool{
-        private:
-            struct SubpageIndex{
-                SubpageIndexRawType value;
+template<typename T>
+T* BootstrapAllocator::allocate() {
+    return allocate<T>(1);
+}
 
-                static SubpageIndex fromAddress(phys_addr addr){
-                    return SubpageIndex((addr.value / smallPageSize) % smallPagesPerBigPage);
-                }
+template<typename T>
+T* BootstrapAllocator::allocate(const size_t count, size_t alignment) {
+    const auto addr = reinterpret_cast<size_t>(current);
+    const size_t aligned = roundUpToNearestMultiple(addr, alignment);
+    const size_t paddedObjSize = roundUpToNearestMultiple(sizeof(T), alignof(T));
+    const size_t size = paddedObjSize * (count - 1) + sizeof(T);
 
-                [[nodiscard]]
-                uint64_t getOffsetIntoSuperpage() const{
-                    return value * smallPageSize;
-                }
+    if (measuring) {
+        current = reinterpret_cast<uint8_t *>(aligned + size);
+        return nullptr;
+    }
 
-                bool operator==(const SubpageIndex&) const = default;
-            };
-            struct SubpageFreeStackIndex{
-                SubpageIndexRawType value;
+    current = reinterpret_cast<uint8_t *>(aligned);
+    T* result = static_cast<T *>(static_cast<void*>(current));
+    current += size;
+    memset(static_cast<void *>(result), 0, paddedObjSize);
 
-                bool operator==(const SubpageFreeStackIndex&) const = default;
-            };
-            friend SubpagePool;
-            SubpageIndex subpageFreeStack[smallPagesPerBigPage];
-            SubpageFreeStackIndex subpageStackIndexMap[smallPagesPerBigPage];
+    assert(current <= end, "Bootstrap allocator overflow");
+    return result;
+}
 
-            SubpageIndex& getSubpageIndex(SubpageIndex ind){
-                return subpageFreeStack[subpageStackIndexMap[ind.value].value];
+template<typename T>
+T* BootstrapAllocator::allocate(FunctionRef<void(T&)> init, const size_t count, size_t alignment) {
+    T* result = allocate<T>(count, alignment);
+    if (!measuring) {
+        for (size_t i = 0; i < count; i++) {
+            init(result[i]);
+        }
+    }
+    return result;
+}
+
+size_t BootstrapAllocator::bytesNeeded() const {
+    return reinterpret_cast<size_t>(current);
+}
+
+size_t BootstrapAllocator::bytesRemaining() const {
+    return measuring ? 0ul : static_cast<size_t>(end - current);
+}
+
+// ======================= PageRef ========================
+mm::phys_addr PageRef::addr() const {
+    return mm::phys_addr{value & ~(arch::smallPageSize - 1)};
+}
+
+mm::PageSize PageRef::size() const {
+    return (value & 1) ? mm::PageSize::BIG : mm::PageSize::SMALL;
+}
+
+PageRef PageRef::small(mm::phys_addr addr) {
+    assert(addr.value % arch::smallPageSize == 0, "Physical address is not small page aligned");
+    return {addr.value};
+}
+
+PageRef PageRef::big(mm::phys_addr addr) {
+    assert(addr.value % arch::bigPageSize == 0, "Physical address is not big page aligned");
+    return {addr.value | 1};
+}
+
+static_assert(mm::PageAllocator::smallPagesPerBigPage * 2 <= arch::smallPageSize, "Can't smuggle run length in bottom of PageRef");
+
+constexpr uint64_t pageRefRunMask = arch::smallPageSize - 2; //mask off all lower bits except for bottom
+
+// ==================== SmallPageAllocator ====================
+SmallPageAllocator::SmallPageAllocator(mm::phys_addr b) : ringBuffer(buffer, mm::PageAllocator::smallPagesPerBigPage), baseAddr(b){
+
+}
+
+void SmallPageAllocator::allocAll() {
+    assert(reservedCount == 0, "Can't allocate all from page with reserved subpages");
+    ringBuffer.clear();
+    lazilyInitialized = mm::PageAllocator::smallPagesPerBigPage;
+    for (auto& i : occupiedBitmap) {
+        i = static_cast<uint64_t>(-1);
+    }
+    allocatedCount.store(static_cast<SmallPageCount>(mm::PageAllocator::smallPagesPerBigPage - reservedCount), RELEASE);
+}
+
+void SmallPageAllocator::freeAll() {
+    assert(reservedCount == 0, "Can't free all from page with reserved subpages");
+    ringBuffer.clear();
+    lazilyInitialized = 0;
+    for (auto& i : occupiedBitmap) {
+        i = 0;
+    }
+    allocatedCount.store(0, RELEASE);
+}
+
+OccupancyState SmallPageAllocator::stateFromCount(const size_t count, const size_t maxAlloc) {
+    if (count == 0) return OccupancyState::Empty;
+    if (count >= maxAlloc) return OccupancyState::Full;
+    return OccupancyState::Partial;
+}
+
+size_t SmallPageAllocator::alloc(PageAllocationCallback cb, size_t count, OccupancyTransition& transition) {
+    SmallPageCount allocated = 0;
+
+    // Try to allocate from uninitialized range
+    while (allocated < count) {
+        auto prevLazilyInitialized = lazilyInitialized.load(ACQUIRE);
+        if (prevLazilyInitialized >= mm::PageAllocator::smallPagesPerBigPage) {
+            break;  // No more uninitialized pages
+        }
+
+        // Claim a batch
+        const size_t needed = count - allocated;
+        const auto updatedValue = static_cast<SmallPageCount>(
+            min(mm::PageAllocator::smallPagesPerBigPage,
+                static_cast<size_t>(prevLazilyInitialized) + needed));
+
+        if (!lazilyInitialized.compare_exchange(prevLazilyInitialized, updatedValue, RELEASE, ACQUIRE)) {
+            continue;  // CAS failed, retry
+        }
+
+        // Process the claimed range [prevLazilyInitialized, updatedValue)
+        for (SmallPageCount i = prevLazilyInitialized; i < updatedValue; i++) {
+            if (isPageFree(i)) {  // Not reserved
+                const auto wasFree = markPageFreeState(i, false);  // Mark as occupied
+                assert(wasFree, "Double-allocated somehow?");
+                cb(PageRef::small(fromPageIndex(i)));
+                allocated++;
             }
-            SubpageIndex& getSubpageIndex(SubpageFreeStackIndex ind){
-                return subpageFreeStack[ind.value];
-            }
-            SubpageIndex& getSubpageIndex(SubpageStackMarker marker){
-                return subpageFreeStack[marker];
-            }
+            // If reserved, skip (it stays in occupied bitmap, we don't allocate it)
+        }
+    }
 
-            SubpageFreeStackIndex& getSubpageFreeStackIndex(SubpageFreeStackIndex& ind){
-                return ind;
-            }
+    // Fall back to ring buffer
+    allocated += static_cast<SmallPageCount>(ringBuffer.bulkReadBestEffort(count - allocated, [&](auto _, SmallPageIndex index) {
+        (void)_;
+        markPageFreeState(index, false);
+        cb(PageRef::small(fromPageIndex(index)));
+    }));
 
-            SubpageFreeStackIndex& getSubpageFreeStackIndex(SubpageIndex ind){
-                return subpageStackIndexMap[ind.value];
-            }
+    const size_t maxAlloc = mm::PageAllocator::smallPagesPerBigPage - reservedCount;
+    const auto prevAllocated = allocatedCount.fetch_add(allocated, ACQ_REL);
+    transition.before = stateFromCount(prevAllocated, maxAlloc);
+    transition.after  = stateFromCount(static_cast<size_t>(prevAllocated) + allocated, maxAlloc);
+    return allocated;
+}
 
-            SubpageFreeStackIndex& getSubpageFreeStackIndex(SubpageStackMarker ind){
-#ifdef ALLOCATOR_DEBUG
-                assert(ind < smallPagesPerBigPage, "Tried to get out of bounds small page");
+bool SmallPageAllocator::markPageFreeState(SmallPageIndex index, bool isFree) {
+    constexpr auto bitmapWordSize = sizeof(occupiedBitmap[0]) * 8;
+    auto wordIndex = divideAndRoundDown(static_cast<size_t>(index), bitmapWordSize);
+    auto bitIndex = index % bitmapWordSize;
+    auto bit = 1ull << bitIndex;
+    uint64_t oldBitmapWord;
+    if (isFree) {
+        oldBitmapWord = occupiedBitmap[wordIndex].fetch_and(~bit, RELEASE);
+    }
+    else {
+        oldBitmapWord = occupiedBitmap[wordIndex].fetch_or(bit, RELEASE);
+    }
+    return !((oldBitmapWord >> bitIndex) & 1);
+}
+
+bool SmallPageAllocator::isPageFree(SmallPageIndex index) const {
+    constexpr auto bitmapWordSize = sizeof(occupiedBitmap[0]) * 8;
+    auto wordIndex = divideAndRoundDown(static_cast<size_t>(index), bitmapWordSize);
+    auto bitIndex = index % bitmapWordSize;
+    return !((occupiedBitmap[wordIndex].load(ACQUIRE) >> bitIndex) & 1);
+}
+
+bool SmallPageAllocator::isPageFree(PageRef page) const {
+    const auto addrRaw = page.addr().value;
+    const SmallPageIndex index = (addrRaw / arch::smallPageSize) % mm::PageAllocator::smallPagesPerBigPage;
+    return isPageFree(index);
+}
+
+void SmallPageAllocator::free(PageRef *pages, size_t count, OccupancyTransition& transition) {
+    ringBuffer.bulkWrite(count, [&](auto index, auto& entry) {
+        const auto addrRaw = pages[index].addr().value;
+        assert((addrRaw & ~(arch::bigPageSize - 1)) == baseAddr.value, "Tried to free small page in wrong small page allocator");
+        const SmallPageIndex pageIndex = (addrRaw / arch::smallPageSize) % mm::PageAllocator::smallPagesPerBigPage;
+        const bool wasFree = markPageFreeState(pageIndex, true);
+        assert(!wasFree, "Double free: page is already free");
+        entry = pageIndex;
+    });
+    const size_t maxAlloc = mm::PageAllocator::smallPagesPerBigPage - reservedCount;
+    const auto prevAllocated = allocatedCount.fetch_sub(static_cast<SmallPageCount>(count), ACQ_REL);
+    transition.before = stateFromCount(prevAllocated, maxAlloc);
+    transition.after  = stateFromCount(static_cast<size_t>(prevAllocated) - count, maxAlloc);
+}
+
+size_t SmallPageAllocator::freePageCount() const {
+    const size_t maxAlloc = mm::PageAllocator::smallPagesPerBigPage - reservedCount;
+    return maxAlloc - static_cast<size_t>(allocatedCount.load(ACQUIRE));
+}
+
+bool SmallPageAllocator::isEmpty() const {
+    return allocatedCount.load(ACQUIRE) == 0;
+}
+
+bool SmallPageAllocator::isFull() const {
+    return allocatedCount.load(ACQUIRE) == static_cast<SmallPageCount>(mm::PageAllocator::smallPagesPerBigPage - reservedCount);
+}
+
+mm::phys_addr SmallPageAllocator::fromPageIndex(SmallPageIndex index) const {
+    return baseAddr + index * arch::smallPageSize;
+}
+
+void SmallPageAllocator::reservePage(kernel::mm::phys_addr addr) {
+    assert(lazilyInitialized.load(RELAXED) == 0, "Can only reserve pages during memory allocator init");
+    assert(addr.value % arch::smallPageSize == 0, "Address must be page aligned");
+    SmallPageIndex index = (addr.value / arch::smallPageSize) % mm::PageAllocator::smallPagesPerBigPage;
+    const bool wasFreeBefore = markPageFreeState(index, false);
+    if (wasFreeBefore) {
+        reservedCount++;
+    }
+}
+
+#ifdef CROCOS_TESTING
+size_t SmallPageAllocator::getBitmapPopcount() const {
+    size_t total = 0;
+    for (const auto& word : occupiedBitmap) {
+        total += static_cast<size_t>(__builtin_popcountll(word.load(RELAXED)));
+    }
+    return total;
+}
+
+bool SmallPageAllocator::checkInvariants() const {
+    return getBitmapPopcount() == getAllocatedCount() + getReservedCount();
+}
 #endif
-                return getSubpageFreeStackIndex(getSubpageIndex(ind));
-            }
 
-#ifdef ALLOCATOR_DEBUG
-            template <typename T>
-            void verifyMapSanity(T t){
-                assert(getSubpageIndex(t) == getSubpageIndex(getSubpageFreeStackIndex(t)), "Subpage pool state insane");
-                assert(getSubpageFreeStackIndex(t) == getSubpageFreeStackIndex(getSubpageIndex(t)), "Subpage pool state insane");
-            }
+// ==================== BigPageMetadata ====================
+
+BigPageMetadata::BigPageMetadata(NUMAPool& pool, mm::phys_addr baseAddr)
+    : subpageAllocator(baseAddr), ownerPool(&pool) {}
+
+size_t BigPageMetadata::allocatePages(size_t smallPageCount, PageAllocationCallback cb, OccupancyTransition& transition) {
+    size_t allocated = 0;
+    while (allocated < smallPageCount) {
+        allocated += subpageAllocator.alloc(cb, smallPageCount - allocated, transition);
+        if (transition.becameFull()) {
+            break;
+        }
+    }
+    return allocated;
+}
+
+void BigPageMetadata::freePages(PageRef *pages, size_t count, OccupancyTransition& transition) {
+    subpageAllocator.free(pages, count, transition);
+}
+
+bool BigPageMetadata::isEmpty() const {
+    return subpageAllocator.isEmpty();
+}
+
+bool BigPageMetadata::isFull() const {
+    return subpageAllocator.isFull();
+}
+
+// ==================== NUMAPool ====================
+
+NUMAPool::NUMAPool(BigPageMetadata* metadataBuffer,
+                   BigPageMetadata** freeBuffer,
+                   Atomic<size_t>* wgc,
+                   Atomic<size_t>* rgc,
+                   AtomicBitPool&& paPagesBitPool,
+                   SubrangeInfo* subrangeBuffer,
+                   size_t numSubranges,
+                   size_t totalBigPageCount,
+                   kernel::numa::DomainID domain)
+    : bigPageMetadataBuffer(metadataBuffer),
+      freeBigPages(freeBuffer, totalBigPageCount, wgc, rgc),
+      paPages(move(paPagesBitPool)),
+      associatedDomain(domain),
+      subrangeInfo(subrangeBuffer),
+      subrangeCount(numSubranges),
+      bigPageCount(totalBigPageCount)
+{
+    // Separate fully-free pages from partially-reserved pages.
+    // Pages with reserved subpages cannot be handed out as whole big pages, so
+    // they belong in the PA bitpool for small-page allocation rather than in the
+    // free ring buffer.
+    size_t freePagesCount = 0;
+    for (size_t i = 0; i < totalBigPageCount; i++) {
+        if (!bigPageMetadataBuffer[i].hasReservedSubpages()) {
+            freePagesCount++;
+        }
+    }
+
+    // Publish only fully-free big pages in the ring buffer.
+    size_t freeIdx = 0;
+    freeBigPages.bulkWrite(freePagesCount, [&](size_t, BigPageMetadata*& slot) {
+        while (bigPageMetadataBuffer[freeIdx].hasReservedSubpages()) {
+            freeIdx++;
+        }
+        slot = &bigPageMetadataBuffer[freeIdx++];
+    });
+
+    // Mark partially-reserved pages in the PA bitpool so they are available
+    // for small-page allocation.
+    for (size_t i = 0; i < totalBigPageCount; i++) {
+        if (bigPageMetadataBuffer[i].hasReservedSubpages()) {
+            paPages.add(i);
+        }
+    }
+}
+
+BigPageMetadata* NUMAPool::findMetadata(mm::phys_addr addr) {
+    const uint64_t addrAligned = roundDownToNearestMultiple(addr.value, static_cast<uint64_t>(arch::bigPageSize));
+    for (size_t i = 0; i < subrangeCount; i++) {
+        const SubrangeInfo& sr = subrangeInfo[i];
+        if (addrAligned >= sr.rangeStart.value && addrAligned < sr.rangeEnd.value) {
+            const size_t bigPageIndex = static_cast<size_t>((addrAligned - sr.rangeStart.value) / arch::bigPageSize);
+            return &sr.metadataBase[bigPageIndex];
+        }
+    }
+    return nullptr;
+}
+
+void BigPageMetadata::returnPage() {
+    getOwnerPool().returnPage(*this);
+}
+
+void NUMAPool::reserveRange(mm::phys_memory_range range) {
+    for (size_t i = 0; i < bigPageCount; i++) {
+        auto& meta = bigPageMetadataBuffer[i];
+        const mm::phys_addr bigStart = meta.baseAddr();
+        const mm::phys_addr bigEnd{bigStart.value + arch::bigPageSize};
+
+        if (range.end.value <= bigStart.value || range.start.value >= bigEnd.value) continue;
+
+        const uint64_t alignedStart = roundDownToNearestMultiple(
+            max(range.start.value, bigStart.value), static_cast<uint64_t>(arch::smallPageSize));
+        const uint64_t alignedEnd = roundUpToNearestMultiple(
+            min(range.end.value, bigEnd.value), static_cast<uint64_t>(arch::smallPageSize));
+
+        for (uint64_t addr = alignedStart; addr < alignedEnd; addr += arch::smallPageSize) {
+            meta.reservePage(mm::phys_addr{addr});
+        }
+    }
+    fixupAfterReserveRange();
+}
+
+void NUMAPool::fixupAfterReserveRange() {
+    // Drain freeBigPages (discard — we rebuild from metadata below).
+    freeBigPages.bulkReadBestEffort(bigPageCount, [](size_t, BigPageMetadata*) {});
+
+    // Rebuild freeBigPages and paPages from the current metadata state.
+    size_t newFreeCount = 0;
+    for (size_t i = 0; i < bigPageCount; i++) {
+        auto& meta = bigPageMetadataBuffer[i];
+        if (!meta.hasReservedSubpages()) {
+            newFreeCount++;
+        } else if (!meta.isFull()) {
+            (void)paPages.add(i);   // Idempotent: OK if already present.
+        } else {
+            (void)paPages.remove(i); // All subpages reserved; remove if present.
+        }
+    }
+
+    size_t freeIdx = 0;
+    freeBigPages.bulkWrite(newFreeCount, [&](size_t, BigPageMetadata*& slot) {
+        while (bigPageMetadataBuffer[freeIdx].hasReservedSubpages()) freeIdx++;
+        slot = &bigPageMetadataBuffer[freeIdx++];
+    });
+}
+
+#ifdef CROCOS_TESTING
+#include <kernel.h>
+bool NUMAPool::checkInvariants() const {
+    size_t emptyInPA = 0;
+    for (size_t i = 0; i < bigPageCount; i++) {
+        if (isInPAPages(i)) {
+            const BigPageMetadata& meta = bigPageMetadataBuffer[i];
+            if (meta.isFull()) return false;
+            if (meta.isEmpty()) emptyInPA++;
+        }
+    }
+    if (emptyInPA > 0)
+        kernel::klog() << "  [NUMAPool::checkInvariants] warning: " << static_cast<uint64_t>(emptyInPA) << " empty page(s) in paPages\n";
+    if (getFreeBigPageCount() + getPAPagesCount() > bigPageCount) return false;
+    return true;
+}
+
+size_t NUMAPool::countTotalFreePages() const {
+    size_t total = 0;
+    for (size_t i = 0; i < bigPageCount; i++) {
+        total += bigPageMetadataBuffer[i].freeSubpageCount();
+    }
+    return total;
+}
 #endif
 
-            template <typename T, typename S>
-            void swapPages(T t, S s){
-#ifdef ALLOCATOR_DEBUG
-                //This is a very paranoid check, but since the old allocator was having issues, I'd rather be paranoid.
-                verifyMapSanity(t);
-                verifyMapSanity(s);
-#endif
-                //It's important that we grab these references before doing the swaps, otherwise
-                //getSubpageFreeStackIndex may yield unexpected results
-                auto& sit = getSubpageIndex(t);
-                auto& sis = getSubpageIndex(s);
-                auto& sft = getSubpageFreeStackIndex(t);
-                auto& sfs = getSubpageFreeStackIndex(s);
-                swap(sit, sis);
-                swap(sft, sfs);
-#ifdef ALLOCATOR_DEBUG
-                verifyMapSanity(t);
-                verifyMapSanity(s);
-#endif
+
+// ==================== Page Allocator Factory ====================
+
+namespace {
+
+// Maximum ranges per NUMA domain we handle. In practice this is 1-3.
+constexpr size_t MAX_RANGES_PER_DOMAIN = 64;
+
+// A merged range: big-page-aligned bounds + which original ranges it covers.
+struct TempMergedRange {
+    mm::phys_addr start;      // bigPageAlignDown of merged range
+    mm::phys_addr end;        // bigPageAlignUp of merged range
+    size_t firstOrigIdx;      // inclusive index into sorted input
+    size_t lastOrigIdx;       // inclusive index into sorted input
+    size_t bigPageCount;
+};
+
+// Sort a copy of the input ranges by start address, then compute merged ranges.
+// Returns the number of merged ranges written to `out`.
+size_t computeMergedRanges(const Vector<mm::phys_memory_range>& ranges,
+                            TempMergedRange* out, size_t maxOut,
+                            mm::phys_memory_range* sortedOut) {
+    const size_t n = ranges.size();
+    assert(n <= MAX_RANGES_PER_DOMAIN, "Too many memory ranges for NUMA domain");
+    assert(n <= maxOut, "Not enough space for merged ranges");
+
+    if (n == 0) return 0;
+
+    for (size_t i = 0; i < n; i++) sortedOut[i] = ranges[i];
+
+    auto comp = [](const mm::phys_memory_range& a, const mm::phys_memory_range& b) {
+        return a.start.value < b.start.value;
+    };
+    if (n > 1) algorithm::sort(sortedOut, n, comp);
+
+    size_t count = 0;
+    mm::phys_addr mergedStart{roundDownToNearestMultiple(sortedOut[0].start.value,
+                                                          static_cast<uint64_t>(arch::bigPageSize))};
+    mm::phys_addr mergedEnd  {roundUpToNearestMultiple  (sortedOut[0].end.value,
+                                                          static_cast<uint64_t>(arch::bigPageSize))};
+    size_t firstIdx = 0;
+
+    for (size_t i = 1; i < n; i++) {
+        const mm::phys_addr nextBigPageStart{
+            roundDownToNearestMultiple(sortedOut[i].start.value,
+                                       static_cast<uint64_t>(arch::bigPageSize))};
+
+        if (nextBigPageStart.value < mergedEnd.value) {
+            // This range starts within a big page already covered — extend the merge.
+            const mm::phys_addr candidate{
+                roundUpToNearestMultiple(sortedOut[i].end.value,
+                                         static_cast<uint64_t>(arch::bigPageSize))};
+            if (candidate.value > mergedEnd.value) mergedEnd = candidate;
+        } else {
+            // Emit current merged range.
+            assert(count < maxOut, "Merged range overflow");
+            out[count++] = { mergedStart, mergedEnd, firstIdx, i - 1,
+                             (mergedEnd.value - mergedStart.value) / arch::bigPageSize };
+            mergedStart = nextBigPageStart;
+            mergedEnd   = mm::phys_addr{roundUpToNearestMultiple(sortedOut[i].end.value,
+                                                                  static_cast<uint64_t>(arch::bigPageSize))};
+            firstIdx    = i;
+        }
+    }
+    // Emit final merged range.
+    assert(count < maxOut, "Merged range overflow");
+    out[count++] = { mergedStart, mergedEnd, firstIdx, n - 1,
+                     (mergedEnd.value - mergedStart.value) / arch::bigPageSize };
+    return count;
+}
+
+// Reserve all small pages in [reserveStart, reserveEnd) within the given BigPageMetadata.
+// reserveStart and reserveEnd must lie within the big page's bounds.
+void reserveSmallPageRange(BigPageMetadata& meta,
+                            mm::phys_addr reserveStart, mm::phys_addr reserveEnd) {
+    assert(reserveStart.value % arch::smallPageSize == 0, "reserveStart not small-page aligned");
+    assert(reserveEnd.value   % arch::smallPageSize == 0, "reserveEnd not small-page aligned");
+    for (mm::phys_addr p = reserveStart; p.value < reserveEnd.value; p += arch::smallPageSize) {
+        meta.reservePage(p);
+    }
+}
+
+} // namespace
+
+NUMAPool* createNumaPool(BootstrapAllocator& alloc,
+                          const Vector<mm::phys_memory_range>& ranges,
+                          kernel::numa::DomainID domain) {
+    // --- Phase 1: compute merged ranges (same in both measure and real mode) ---
+    TempMergedRange merged[MAX_RANGES_PER_DOMAIN];
+    mm::phys_memory_range sorted[MAX_RANGES_PER_DOMAIN];
+    const size_t mergedCount = computeMergedRanges(ranges, merged, MAX_RANGES_PER_DOMAIN, sorted);
+
+    size_t totalBigPageCount = 0;
+    for (size_t i = 0; i < mergedCount; i++) totalBigPageCount += merged[i].bigPageCount;
+    assert(totalBigPageCount > 0, "createNumaPool: domain has no big pages");
+
+    // --- Phase 2: allocate all structures from the bootstrap allocator ---
+    NUMAPool* poolPtr = alloc.allocate<NUMAPool>();
+
+    BigPageMetadata* metadata = alloc.allocate<BigPageMetadata>(totalBigPageCount);
+
+    BigPageMetadata** freeBuffer = alloc.allocate<BigPageMetadata*>(totalBigPageCount);
+
+    // Gen counter arrays for the ring buffer (ScanOnComplete = true).
+    Atomic<size_t>* wgc = alloc.allocate<Atomic<size_t>>(totalBigPageCount);
+    Atomic<size_t>* rgc = alloc.allocate<Atomic<size_t>>(totalBigPageCount);
+
+    // BitPool backing storage, cache-line aligned.
+    const size_t bitPoolBytes = AtomicBitPool::requiredBufferSize(totalBigPageCount, arch::CACHE_LINE_SIZE);
+    void* bitPoolStorage = alloc.allocate<uint8_t>(bitPoolBytes, arch::CACHE_LINE_SIZE);
+
+    SubrangeInfo* subranges = alloc.allocate<SubrangeInfo>(mergedCount);
+
+    // --- Phase 3: populate structures (real mode only) ---
+    if (!alloc.isFake()) {
+        size_t metaIdx = 0;
+
+        for (size_t mi = 0; mi < mergedCount; mi++) {
+            const TempMergedRange& mr = merged[mi];
+            BigPageMetadata* rangeMetaBase = &metadata[metaIdx];
+
+            // Construct BigPageMetadata for each big page in this merged range.
+            for (size_t bpIdx = 0; bpIdx < mr.bigPageCount; bpIdx++) {
+                mm::phys_addr bigPageBase{mr.start.value + bpIdx * arch::bigPageSize};
+                new (&metadata[metaIdx + bpIdx]) BigPageMetadata(*poolPtr, bigPageBase);
             }
 
-            void initialize(){
-                for(size_t i = 0; i < smallPagesPerBigPage; i++){
-                    subpageFreeStack[i] = SubpageIndex{(SubpageIndexRawType)i};
-                    subpageStackIndexMap[i] = SubpageFreeStackIndex{(SubpageIndexRawType)i};
-                }
-            }
-        };
+            // Reserve pages in each big page based on which portions are outside
+            // any original range (alignment gaps) or in gaps between original ranges.
+            for (size_t bpIdx = 0; bpIdx < mr.bigPageCount; bpIdx++) {
+                mm::phys_addr bigPageStart{mr.start.value + bpIdx * arch::bigPageSize};
+                mm::phys_addr bigPageEnd  {bigPageStart.value + arch::bigPageSize};
+                BigPageMetadata& meta = metadata[metaIdx + bpIdx];
 
-        static_assert(sizeof(RawSubpagePool) == 2 * smallPagesPerBigPage * sizeof(SubpageIndexRawType), "RawSubpagePool of unexpected size");
+                // Walk original ranges within this merged range, tracking covered intervals.
+                mm::phys_addr prevEnd = bigPageStart; // last covered address within this big page
 
-        struct SubpagePool{
-        private:
-            RawSubpagePool& pool;
-            SubpageStackMarker& bottomOfFreeMarker;
-            phys_addr base;
+                for (size_t ri = mr.firstOrigIdx; ri <= mr.lastOrigIdx; ri++) {
+                    const mm::phys_memory_range& orig = sorted[ri];
 
+                    // Clamp original range to this big page's extent.
+                    const mm::phys_addr origClampedStart{
+                        orig.start.value > bigPageStart.value ? orig.start.value : bigPageStart.value};
+                    const mm::phys_addr origClampedEnd{
+                        orig.end.value < bigPageEnd.value ? orig.end.value : bigPageEnd.value};
 
-            SubpageStackMarker topOfUsed(){
-                return bottomOfFreeMarker - 1;
-            }
+                    if (origClampedStart.value >= bigPageEnd.value) break;  // past this big page
+                    if (origClampedEnd.value   <= bigPageStart.value) continue; // before this big page
 
-        public:
-
-            SubpagePool(RawSubpagePool& p, SubpageStackMarker& m, phys_addr b) : pool(p), bottomOfFreeMarker(m), base(b){
-#ifdef ALLOCATOR_DEBUG
-                assert(b.value % bigPageSize == 0, "Misaligned superpage");
-#endif
-            }
-
-            [[nodiscard]]
-            bool isFull() const{
-#ifdef ALLOCATOR_DEBUG
-                assert(bottomOfFreeMarker <= smallPagesPerBigPage, "Subpage stack bottomOfFreeMarker out of bounds");
-#endif
-                return bottomOfFreeMarker == smallPagesPerBigPage;
-            }
-
-            [[nodiscard]]
-            bool isEmpty() const{
-#ifdef ALLOCATOR_DEBUG
-                assert(bottomOfFreeMarker <= smallPagesPerBigPage, "Subpage stack bottomOfFreeMarker out of bounds");
-#endif
-                return bottomOfFreeMarker == 0;
-            }
-
-            phys_addr allocateSubpage(){
-#ifdef ALLOCATOR_DEBUG
-                assert(!isFull(), "Tried to allocate small page from full pool");
-#endif
-                return phys_addr(pool.getSubpageIndex(bottomOfFreeMarker++).getOffsetIntoSuperpage() + base.value);
-            }
-
-            void freeSubpage(phys_addr addr){
-                auto subpageIndex = RawSubpagePool::SubpageIndex::fromAddress(addr);
-#ifdef ALLOCATOR_DEBUG
-                assert(pool.getSubpageFreeStackIndex(subpageIndex).value < bottomOfFreeMarker, "Double-freed subpage");
-#endif
-                pool.swapPages(subpageIndex, topOfUsed());
-                bottomOfFreeMarker--;
-            }
-
-            //Does not error if you reserve a page that is already allocated - this is to allow for simpler
-            //initialization of the allocator. However, this will return 'false' if the page was already reserved,
-            //so the caller may decide to error if it wishes
-            bool reserveSubpage(phys_addr addr){
-                auto subpageIndex = RawSubpagePool::SubpageIndex::fromAddress(addr);
-                //If the subpage is already below the free marker, it's already allocated so we do nothing
-                if(subpageIndex.value < bottomOfFreeMarker) {
-                    return false;
-                }
-                //Otherwise, we swapPages the page to the bottom of the free zone and bump the marker
-                pool.swapPages(subpageIndex, bottomOfFreeMarker);
-                bottomOfFreeMarker++;
-                return true;
-            }
-
-            void initialize(){
-                bottomOfFreeMarker = 0;
-                pool.initialize();
-            }
-        };
-
-        struct SuperpagePool{
-        public:
-            struct SuperpageIndex{
-                SuperpageIndexRawType value;
-
-                static SuperpageIndex fromAddress(phys_addr addr, phys_addr b){
-                    return SuperpageIndex((SuperpageIndexRawType)((addr.value - b.value)/ bigPageSize));
-                }
-
-                [[nodiscard]]
-                phys_addr toAddress(phys_addr b) const{
-                    return phys_addr(value * bigPageSize + b.value);
-                }
-
-                bool operator==(const SuperpageIndex&) const = default;
-            };
-            struct SuperpageFreeStackIndex{
-                SuperpageIndexRawType value;
-                BufferId bufferId;
-
-                bool operator==(const SuperpageFreeStackIndex&) const = default;
-            };
-
-        private:
-            SuperpageIndex* superpagePool;
-            SuperpageFreeStackIndex* superpagePoolIndexMap;
-            SuperpageStackMarker poolSize;
-            const uint64_t maxPoolSize;
-            const BufferId bufferId;
-
-            SuperpageIndex& getSuperpageIndex(SuperpageFreeStackIndex fsi){
-#ifdef ALLOCATOR_DEBUG
-                assert(fsi.bufferId == bufferId, "Tried to get superpage from wrong pool");
-#endif
-                return superpagePool[fsi.value];
-            }
-            SuperpageIndex& getSuperpageIndex(phys_addr addr){
-#ifdef ALLOCATOR_DEBUG
-                assert(addr.value % bigPageSize == 0, "Misaligned superpage");
-#endif
-                return getSuperpageIndex(SuperpageIndex::fromAddress(addr, base));
-            }
-            SuperpageIndex& getSuperpageIndex(SuperpageIndex spi){
-                auto poolIndex = superpagePoolIndexMap[spi.value];
-                return getSuperpageIndex(poolIndex);
-            }
-            SuperpageIndex& getSuperpageIndex(SuperpageStackMarker ssm){
-#ifdef ALLOCATOR_DEBUG
-                assert(ssm < poolSize, "Tried to get out of bounds superpage");
-#endif
-                return superpagePool[ssm];
-            }
-
-            SuperpageFreeStackIndex& getFreeStackIndex(SuperpageIndex spi){
-                auto& out = superpagePoolIndexMap[spi.value];
-#ifdef ALLOCATOR_DEBUG
-                assert(out.bufferId == bufferId, "Tried to get superpage from wrong pool");
-#endif
-                return out;
-            }
-            SuperpageFreeStackIndex& getFreeStackIndex(SuperpageFreeStackIndex& fsi){
-                return fsi;
-            }
-            SuperpageFreeStackIndex& getFreeStackIndex(phys_addr addr){
-#ifdef ALLOCATOR_DEBUG
-                assert(addr.value % bigPageSize == 0, "Misaligned superpage");
-#endif
-                return getFreeStackIndex(SuperpageIndex::fromAddress(addr, base));
-            }
-
-
-            SuperpageStackMarker poolTopMarker(){
-#ifdef ALLOCATOR_DEBUG
-                assert(poolSize > 0, "Tried to get top of empty pool");
-#endif
-                return poolSize - 1;
-            }
-
-            SuperpageIndex& poolTop(){
-                return getSuperpageIndex(poolTopMarker());
-            }
-
-            void transferSuperpageOwner(SuperpageIndex ind, BufferId priorOwner, SuperpageIndexRawType newPosition){
-                SuperpageFreeStackIndex& fsi = superpagePoolIndexMap[ind.value];
-#ifdef ALLOCATOR_DEBUG
-                assert(fsi.bufferId == priorOwner, "Tried to transfer superpage from different owner than expected");
-#else
-                (void)priorOwner;
-#endif
-                fsi.bufferId = bufferId;
-                fsi.value = newPosition;
-            }
-        public:
-#ifdef ALLOCATOR_DEBUG
-            template <typename T>
-            void verifyMapSanity(T t){
-                assert(getSuperpageIndex(t) == getSuperpageIndex(getFreeStackIndex(t)), "Superpage pool state insane 1");
-                assert(getFreeStackIndex(t) == getFreeStackIndex(getSuperpageIndex(t)), "Superpage pool state insane 2");
-                assert(getFreeStackIndex(t).bufferId == bufferId, "Superpage pool state insane 3");
-            }
-#endif
-            RWSpinlock lock;
-            const phys_addr base;
-
-            SuperpagePool(void* spp, void* spim, phys_addr b, SuperpageStackMarker initSize, uint64_t maxSize, BufferId bid) :
-            maxPoolSize(maxSize), bufferId(bid), base(b){
-                superpagePool = (SuperpageIndex*) spp;
-                superpagePoolIndexMap = (SuperpageFreeStackIndex*) spim;
-                poolSize = initSize;
-                assert(b.value % bigPageSize == 0, "misaligned superpage pool base");
-                //If we're the global pool, we're in charge of initializing all our data
-                if(bid == GLOBAL_POOL){
-                    assert(initSize == maxSize, "Global pool should have all superpages on initialization");
-                    for(size_t i = 0; i < maxSize; i++){
-                        superpagePool[i] = SuperpageIndex((SuperpageIndexRawType) i);
-                        superpagePoolIndexMap[i] = SuperpageFreeStackIndex((SuperpageIndexRawType) i, GLOBAL_POOL);
+                    // Reserve the gap between prevEnd and the start of this original range.
+                    if (prevEnd.value < origClampedStart.value) {
+                        reserveSmallPageRange(meta, prevEnd, origClampedStart);
+                    }
+                    if (origClampedEnd.value > prevEnd.value) {
+                        prevEnd = origClampedEnd;
                     }
                 }
+
+                // Reserve tail gap (from last covered address to end of big page).
+                if (prevEnd.value < bigPageEnd.value) {
+                    reserveSmallPageRange(meta, prevEnd, bigPageEnd);
+                }
             }
 
-            template <typename T, typename S>
-            void swapPages(T t, S s){
-#ifdef ALLOCATOR_DEBUG
-                //This is a very paranoid check, but since the old allocator was having issues, I'd rather be paranoid.
-                verifyMapSanity(t);
-                verifyMapSanity(s);
-                assert(lock.writer_lock_taken(), "It is unsafe to call this method without acquiring the writer acquire on the pool");
-#endif
-                //It's important that we grab these references before doing the swaps, otherwise
-                //getFreeStackIndex may yield unexpected results
-                auto& spt = getSuperpageIndex(t);
-                auto& sps = getSuperpageIndex(s);
-                auto& sft = getFreeStackIndex(t);
-                auto& sfs = getFreeStackIndex(s);
+            // Populate SubrangeInfo for this merged range.
+            subranges[mi].rangeStart   = mr.start;
+            subranges[mi].rangeEnd     = mr.end;
+            subranges[mi].metadataBase = rangeMetaBase;
 
-                swap(spt, sps);
-                swap(sft, sfs);
-#ifdef ALLOCATOR_DEBUG
-                verifyMapSanity(t);
-                verifyMapSanity(s);
-#endif
+            metaIdx += mr.bigPageCount;
+        }
+
+        // Construct the AtomicBitPool and move it into the NUMAPool constructor.
+        AtomicBitPool paPages(totalBigPageCount, bitPoolStorage, arch::CACHE_LINE_SIZE);
+
+        // Initialize Atomic gen counters to 0 (they're raw memory from BootstrapAllocator).
+        for (size_t i = 0; i < totalBigPageCount; i++) {
+            new (&wgc[i]) Atomic<size_t>(0);
+            new (&rgc[i]) Atomic<size_t>(0);
+        }
+
+        new (poolPtr) NUMAPool(metadata, freeBuffer, wgc, rgc,
+                               move(paPages), subranges, mergedCount,
+                               totalBigPageCount, domain);
+    }
+
+    return poolPtr;
+}
+
+LocalPool* createLocalPool(BootstrapAllocator& alloc, const kernel::numa::NUMATopology* topology) {
+    return alloc.allocate<LocalPool>([&](LocalPool& lp) { new(&lp) LocalPool(topology); }, 1);
+}
+
+// ==================== PageAllocatorImpl ====================
+
+BigPageMetadata* PageAllocatorImpl::findMetadata(mm::phys_addr addr) {
+    // Binary search the domain table for the subrange containing addr.
+    size_t lo = 0, hi = domainTableSize;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (addr.value < domainTable[mid].rangeStart.value) {
+            hi = mid;
+        } else if (addr.value >= domainTable[mid].rangeEnd.value) {
+            lo = mid + 1;
+        } else {
+            return domainTable[mid].pool->findMetadata(addr);
+        }
+    }
+    return nullptr;
+}
+
+// Static storage for the domain lookup table. Built once at boot.
+static NUMADomainEntry gDomainTable[512];
+static NUMAPool*       gNumaPoolStorage[arch::MAX_PROCESSOR_COUNT];
+
+PageAllocatorImpl createPageAllocator(Vector<NUMAPool*>&& numaPools, LocalPool** localPools,
+                                       size_t processorCount,
+                                       NUMAPool* unownedPool,
+                                       const kernel::numa::NUMAPolicy* numaPolicy) {
+    // Copy pool pointers into stable static storage.
+    // numDomains == maxDomainID + 1; slots for empty domains hold nullptr.
+    const size_t numDomains = numaPools.size();
+    for (size_t i = 0; i < numDomains; i++) gNumaPoolStorage[i] = numaPools[i];
+
+    // Build the global domain table: one entry per subrange (merged range) per pool.
+    // Skip nullptr slots (domains with no physical memory).
+    size_t tableSize = 0;
+    for (size_t pi = 0; pi < numDomains; pi++) {
+        NUMAPool* pool = gNumaPoolStorage[pi];
+        if (pool == nullptr) continue;
+        for (size_t si = 0; si < pool->getSubrangeCount(); si++) {
+            assert(tableSize < 512, "Domain table overflow");
+            gDomainTable[tableSize++] = {
+                pool->getSubranges()[si].rangeStart,
+                pool->getSubranges()[si].rangeEnd,
+                pool
+            };
+        }
+    }
+
+    // Sort the domain table by rangeStart for binary search.
+    if (tableSize > 1) {
+        auto comp = [](const NUMADomainEntry& a, const NUMADomainEntry& b) {
+            return a.rangeStart.value < b.rangeStart.value;
+        };
+        algorithm::sort(gDomainTable, tableSize, comp);
+    }
+
+    PageAllocatorImpl impl{gNumaPoolStorage, numDomains, localPools, gDomainTable, tableSize, unownedPool, numaPolicy, {}};
+
+    // Precompute cpuNearestPool: for each CPU, record the nearest non-null pool.
+    if (numaPolicy != nullptr) {
+        // Walk the policy's domain fallback order for each CPU.
+        for (size_t p = 0; p < processorCount; p++) {
+            const auto home = numaPolicy->homeDomain(static_cast<arch::ProcessorID>(p));
+            for (const auto domainID : numaPolicy->domainOrder(home)) {
+                if (domainID.value < numDomains && gNumaPoolStorage[domainID.value] != nullptr) {
+                    impl.cpuNearestPool[p] = domainID;
+                    break;
+                }
             }
-
-            template <typename T, typename S, typename R>
-            void rotatePagesLeft(T t, S s, R r){
-#ifdef ALLOCATOR_DEBUG
-                //This is a very paranoid check, but since the old allocator was having issues, I'd rather be paranoid.
-                verifyMapSanity(t);
-                verifyMapSanity(s);
-                verifyMapSanity(r);
-                assert(lock.writer_lock_taken(), "It is unsafe to call this method without acquiring the writer acquire on the pool");
-#endif
-                //It's important that we grab these references before doing the swaps, otherwise
-                //getFreeStackIndex may yield unexpected results
-                auto& spt = getSuperpageIndex(t);
-                auto& sps = getSuperpageIndex(s);
-                auto& spr = getSuperpageIndex(r);
-                auto& sft = getFreeStackIndex(t);
-                auto& sfs = getFreeStackIndex(s);
-                auto& sfr = getFreeStackIndex(r);
-#ifdef ALLOCATOR_DEBUG
-                assert(spt != sps, "Arguments to rotate must point to distinct pages");
-                assert(spt != spr, "Arguments to rotate must point to distinct pages");
-                assert(spr != sps, "Arguments to rotate must point to distinct pages");
-                assert(sft != sfs, "Arguments to rotate must point to distinct pages");
-                assert(sft != sfr, "Arguments to rotate must point to distinct pages");
-                assert(sfr != sfs, "Arguments to rotate must point to distinct pages");
-#endif
-                rotateLeft(spt, sps, spr);
-                //You need to do the inverse permutation for the inverse mapping, you dummy!
-                rotateRight(sft, sfs, sfr);
-
-#ifdef ALLOCATOR_DEBUG
-                verifyMapSanity(t); //asserts here
-                verifyMapSanity(s);
-                verifyMapSanity(r);
-#endif
+        }
+    } else {
+        // Trivial single-domain topology: enforce exactly one pool with no unowned pool,
+        // then point every CPU at it so that nearestPool() works without a policy.
+        assert(unownedPool == nullptr,
+               "createPageAllocator: unownedPool must be null when numaPolicy is null");
+        size_t singleDomainIdx = numDomains; // sentinel — set below
+        for (size_t i = 0; i < numDomains; i++) {
+            if (gNumaPoolStorage[i] != nullptr) {
+                assert(singleDomainIdx == numDomains,
+                       "createPageAllocator: more than one NUMAPool provided with null numaPolicy");
+                singleDomainIdx = i;
             }
+        }
+        assert(singleDomainIdx != numDomains,
+               "createPageAllocator: no NUMAPool provided with null numaPolicy");
+        const auto singleDomain = kernel::numa::DomainID{static_cast<uint16_t>(singleDomainIdx)};
+        for (size_t p = 0; p < processorCount; p++) {
+            impl.cpuNearestPool[p] = singleDomain;
+        }
+    }
 
-            template <typename T, typename S, typename R>
-            void rotatePagesRight(T t, S s, R r){
-#ifdef ALLOCATOR_DEBUG
-                //This is a very paranoid check, but since the old allocator was having issues, I'd rather be paranoid.
-                verifyMapSanity(t);
-                verifyMapSanity(s);
-                verifyMapSanity(r);
-                assert(lock.writer_lock_taken(), "It is unsafe to call this method without acquiring the writer acquire on the pool");
-#endif
-                //It's important that we grab these references before doing the swaps, otherwise
-                //getFreeStackIndex may yield unexpected results
-                auto& spt = getSuperpageIndex(t);
-                auto& sps = getSuperpageIndex(s);
-                auto& spr = getSuperpageIndex(r);
-                auto& sft = getFreeStackIndex(t);
-                auto& sfs = getFreeStackIndex(s);
-                auto& sfr = getFreeStackIndex(r);
-#ifdef ALLOCATOR_DEBUG
-                assert(spt != sps, "Arguments to rotate must point to distinct pages");
-                assert(spt != spr, "Arguments to rotate must point to distinct pages");
-                assert(spr != sps, "Arguments to rotate must point to distinct pages");
-                assert(sft != sfs, "Arguments to rotate must point to distinct pages");
-                assert(sft != sfr, "Arguments to rotate must point to distinct pages");
-                assert(sfr != sfs, "Arguments to rotate must point to distinct pages");
-#endif
-                rotateRight(spt, sps, spr);
-                rotateLeft(sft, sfs, sfr);
-#ifdef ALLOCATOR_DEBUG
-                verifyMapSanity(t);
-                verifyMapSanity(s);
-                verifyMapSanity(r);
-#endif
+    return impl;
+}
+
+void PageAllocatorImpl::reserveRange(mm::phys_memory_range range) {
+    for (size_t i = 0; i < numDomains; i++) {
+        if (numaPools[i] != nullptr) {
+            numaPools[i]->reserveRange(range);
+        }
+    }
+    if (unownedPool != nullptr) {
+        unownedPool->reserveRange(range);
+    }
+}
+
+size_t PageAllocatorImpl::allocatePages(size_t smallPageCount, PageAllocationCallback cb, AllocFlags flags) {
+    size_t allocatedPages = 0;
+    const auto pid = arch::getCurrentProcessorID();
+    auto& localPool = *localPools[pid];
+
+    const auto allocFromLocalPool = [&](const size_t count, const AllocFlags f) {
+        const auto allocCount = localPool.allocatePages(count, cb, f);
+        smallPageCount -= allocCount;
+        allocatedPages += allocCount;
+    };
+
+    const auto allocFromNumaPool = [&](const size_t count, NUMAPool& pool, const AllocFlags f) {
+        BigPageMetadata* extras = nullptr;
+        const auto allocCount = pool.allocatePages(count, cb, extras, f);
+        //Make sure we don't underflow if we're allocating big pages only and the requested page count is not divisible
+        //by smallPagesPerBigPage
+        smallPageCount -= min(allocCount, smallPageCount);
+        allocatedPages += allocCount;
+        if (extras != nullptr) {
+            localPool.tryGivePAPage(*extras);
+        }
+    };
+
+    //If we're allowed to use small pages, then the best strategy is to first try allocating big pages from the nearest
+    //NUMA pool, then try to fill in the remaining small pages using locally cached PA pages from that same NUMA pool
+    if (!flags.has(AllocBehavior::BIG_PAGE_ONLY)) {
+        allocFromNumaPool(roundDownToNearestMultiple(smallPageCount, mm::PageAllocator::smallPagesPerBigPage), nearestPool(pid), flags | AllocBehavior::BIG_PAGE_ONLY);
+        allocFromLocalPool(smallPageCount, flags | AllocBehavior::LOCAL_DOMAIN_ONLY);
+    }
+
+    //Check if we're done before iterating through the various NUMA pools.
+    if (smallPageCount == 0) {
+        return allocatedPages;
+    }
+
+    //If we still need more pages, we'll begin by iterating over the NUMA domains in appropriate order - closest to furthest
+    if (numaPolicy != nullptr) {
+        const auto homeID = numaPolicy->homeDomain(pid);
+        if (flags.has(AllocBehavior::LOCAL_DOMAIN_ONLY)) {
+            allocFromNumaPool(smallPageCount, nearestPool(pid), flags);
+        }
+        else {
+            for (const auto domain : numaPolicy->domainOrder(homeID)) {
+                if (auto* poolPtr = numaPools[domain.value]) {
+                    allocFromNumaPool(smallPageCount, *poolPtr, flags);
+                }
+                if (smallPageCount == 0) {
+                    return allocatedPages;
+                }
             }
+        }
+    } else {
+        // Trivial single-domain topology: nearestPool() returns the one pool.
+        // Make a final pass without BIG_PAGE_ONLY to satisfy any remaining small-page demand.
+        allocFromNumaPool(smallPageCount, nearestPool(pid), flags);
+    }
 
-            bool isEmpty(){
-                return poolSize == 0;
-            }
+    if (!flags.has(AllocBehavior::BIG_PAGE_ONLY)) {
+        allocFromLocalPool(smallPageCount, flags);
+    }
 
-            //To be used for taking a high number of superpages. The caller is required to acquire the writer acquire on
-            //both this pool and the argument pool
-            void takePageFromExclusive(SuperpagePool& pool){
-#ifdef ALLOCATOR_DEBUG
-                assert(!pool.isEmpty(), "Tried to steal page from empty pool");
-                assert(pool.lock.writer_lock_taken(),
-                       "It is unsafe to call this method without acquiring the writer acquire on the source pool");
-                assert(lock.writer_lock_taken(),
-                       "It is unsafe to call this method without acquiring the writer acquire on the target pool");
-#endif
-                auto newPage = pool.poolTop();
-                pool.poolSize--;
-                transferSuperpageOwner(newPage, pool.bufferId, (SuperpageIndexRawType) poolSize);
-                superpagePool[poolSize++] = newPage;
-#ifdef ALLOCATOR_DEBUG
-                assert(poolSize <= maxPoolSize, "Pool has somehow grown too large");
-                verifyMapSanity(newPage);
-#endif
-            }
+    //As a last resort, if any pages don't belong to any sort of NUMA domain (due to a firmware misconfiguration)
+    //try to allocate from the unowned pool
+    if (unownedPool != nullptr) {
+        allocFromNumaPool(smallPageCount, *unownedPool, flags);
+    }
 
-            //To be used for taking a small number of pages with the possibility of doing so concurrently.
-            //Useful in grabbing pages from the global pool
-            bool tryStealPage(SuperpagePool& pool){
-#ifdef ALLOCATOR_DEBUG
-                assert(lock.writer_lock_taken(),
-                       "It is unsafe to call this method without acquiring the writer acquire on the target pool");
-#endif
-                pool.lock.acquire_reader();
-                SuperpageIndex newPage;
-                while(true){
-                    auto oldSize = pool.poolSize;
-                    if(oldSize == 0){
-                        pool.lock.release_reader();
-                        return false;
+    if (!flags.has(AllocBehavior::GRACEFUL_OOM)) {
+        if (smallPageCount != 0) {
+            assertNotReached("Panic!!! Page allocator is out of memory");
+        }
+    }
+
+    return allocatedPages;
+}
+
+size_t LocalPool::allocatePages(size_t smallPageCount, PageAllocationCallback cb, AllocFlags flags) {
+    if (flags.has(AllocBehavior::BIG_PAGE_ONLY)) {
+        return 0;
+    }
+    size_t allocatedPages = 0;
+    const auto allocFromPAPage = [&](BigPageMetadata& metadata) {
+        if (metadata.isEmpty()) {
+            metadata.returnPage();
+            return true;
+        }
+        OccupancyTransition transition{};
+        const auto allocd = metadata.allocatePages(smallPageCount, cb, transition);
+        smallPageCount -= allocd;
+        allocatedPages += allocd;
+        if (transition.becameFull()) {
+            metadata.returnPage();
+            return true;
+        }
+        return false;
+    };
+
+    if (paPage1 && allocFromPAPage(*paPage1)) {
+        paPage1 = paPage2;
+        paPage2 = nullptr;
+    }
+    if (smallPageCount == 0) {
+        return allocatedPages;
+    }
+    if (paPage1 && allocFromPAPage(*paPage1)) {
+        paPage1 = nullptr;
+    }
+
+    return allocatedPages;
+}
+
+void LocalPool::tryGivePAPage(BigPageMetadata& page) {
+    // Never hold empty pages — they have nothing to give and would only occupy a slot.
+    if (page.isEmpty()) {
+        page.returnPage();
+        return;
+    }
+
+    // Without NUMA topology, accept pages with simple FIFO priority.
+    if (topology == nullptr) {
+        if (paPage1 == nullptr) { paPage1 = &page; return; }
+        if (paPage2 == nullptr) { paPage2 = &page; return; }
+        page.returnPage();
+        return;
+    }
+
+    const arch::ProcessorID pid = arch::getCurrentProcessorID();
+    const kernel::numa::DomainID cpuDomain = topology->domainForCpu(pid).id;
+
+    // Read latency from the CPU's home domain to a page's NUMA domain, used as
+    // the proximity metric.  Falls back to UINT64_MAX when no latency data is
+    // available, so unknown domains are treated as maximally far away.
+    const auto distanceTo = [&](const BigPageMetadata& pg) -> uint64_t {
+        const auto lat = topology->latencyBetween(cpuDomain, pg.getOwnerPool().domain());
+        return lat.occupied() ? *lat : UINT64_MAX;
+    };
+
+    const uint64_t dNew = distanceTo(page);
+
+    // Pool is empty — paPage2 is always null when paPage1 is null.
+    if (paPage1 == nullptr) {
+        paPage1 = &page;
+        return;
+    }
+
+    // One slot occupied — insert in closest-first order, no eviction needed.
+    if (paPage2 == nullptr) {
+        if (dNew <= distanceTo(*paPage1)) {
+            paPage2 = paPage1;
+            paPage1 = &page;
+        } else {
+            paPage2 = &page;
+        }
+        return;
+    }
+
+    // Both slots occupied. Only accept the incoming page if it is strictly closer
+    // than the current furthest-away slot; otherwise return it to its NUMA pool.
+    const uint64_t d2 = distanceTo(*paPage2);
+    if (dNew >= d2) {
+        page.returnPage();
+        return;
+    }
+
+    // The incoming page displaces paPage2. Re-sort so paPage1 remains the closer one.
+    BigPageMetadata* toReturn = paPage2;
+    if (dNew <= distanceTo(*paPage1)) {
+        paPage2 = paPage1;
+        paPage1 = &page;
+    } else {
+        paPage2 = &page;
+    }
+
+    toReturn->returnPage();
+}
+
+void NUMAPool::returnPage(BigPageMetadata &metadata) {
+    //Returning a full page is a noop
+    if (metadata.isFull()) {
+        return;
+    }
+    if (metadata.isEmpty()) {
+        freeBigPages.write(&metadata);
+        return;
+    }
+    // NOTE: there is a benign TOCTOU window between the isEmpty() check above and
+    // paPages.add() below. A concurrent free on another CPU can decrement allocatedCount
+    // to zero (Partial→Empty) and call paPages.remove() — which returns NotPresent since
+    // we haven't added yet — leaving the page unrouted. We then add an empty page to
+    // paPages. The page is still fully allocatable for small-page requests and will
+    // self-correct through normal allocation activity; the only consequence is that
+    // BIG_PAGE_ONLY allocations cannot claim it until it is reclaimed.
+    const auto index = metadataIndex(&metadata);
+    paPages.add(index);
+}
+
+size_t NUMAPool::allocatePages(size_t smallPageCount, const PageAllocationCallback cb, BigPageMetadata *&paPageRemaining, const AllocFlags flags) {
+    //If we can only allocate from big pages, we're forced to only allocate from the freeBigPages buffer
+    if (flags.has(AllocBehavior::BIG_PAGE_ONLY)) {
+        //Overallocate in case smallPageCount is not divisible by smallPagesPerBigPage
+        const auto numBigPages = divideAndRoundUp(smallPageCount, mm::PageAllocator::smallPagesPerBigPage);
+        const auto allocatedPages = freeBigPages.bulkReadBestEffort(numBigPages, [&](size_t, const auto& metadata) {
+            const auto pageAddr = metadata -> baseAddr();
+            metadata -> allocAll();
+            cb(PageRef::big(pageAddr));
+        });
+        return allocatedPages * mm::PageAllocator::smallPagesPerBigPage;
+    }
+    //First try allocating as much as we can from big pages
+    const auto numBigPages = divideAndRoundDown(smallPageCount, mm::PageAllocator::smallPagesPerBigPage);
+    size_t allocatedPages = freeBigPages.bulkReadBestEffort(numBigPages, [&](size_t, const auto& metadata) {
+        const auto pageAddr = metadata -> baseAddr();
+        metadata -> allocAll();
+        cb(PageRef::big(pageAddr));
+    }) * mm::PageAllocator::smallPagesPerBigPage;
+
+    smallPageCount -= allocatedPages;
+
+    const auto allocateFromPAPages = [&](const size_t maxRetries) {
+        while (smallPageCount > 0) {
+            if (size_t paIndex; paPages.getAny(arch::getCurrentProcessorID(), paIndex, maxRetries) == AtomicBitPool::GetResult::Success) {
+                auto& bigPage = bigPageMetadataBuffer[paIndex];
+                OccupancyTransition stateChange {};
+                while (true) {
+                    const auto allocated = bigPage.allocatePages(smallPageCount, cb, stateChange);
+                    assert(allocated > 0, "A page in the PAPage bitmap should never be full");
+                    smallPageCount -= allocated;
+                    allocatedPages += allocated;
+                    if (stateChange.becameFull()) {
+                        break;
                     }
-                    newPage = pool.poolTop();
-                    if(atomic_cmpxchg(pool.poolSize, oldSize, oldSize - 1)){
-                        pool.lock.release_reader();
+                    if (smallPageCount == 0) {
+                        paPageRemaining = &bigPage;
                         break;
                     }
                 }
-                transferSuperpageOwner(newPage, pool.bufferId, (SuperpageIndexRawType) poolSize);
-                superpagePool[poolSize++] = newPage;
-#ifdef ALLOCATOR_DEBUG
-                assert(poolSize <= maxPoolSize, "Pool has somehow grown too large");
-                verifyMapSanity(newPage);
-#endif
-                return true;
             }
-
-            template <typename T>
-            bool isBelowMarker(T t, SuperpageStackMarker marker){
-                return getFreeStackIndex(t).value < marker;
-            }
-
-            template <typename T>
-            bool isAtOrAboveMarker(T t, SuperpageStackMarker marker){
-                return getFreeStackIndex(t).value >= marker;
-            }
-
-            SuperpageIndex fromAddress(phys_addr addr){
-                return SuperpageIndex::fromAddress(addr, base);
-            }
-
-            SuperpageIndex fromMarker(SuperpageStackMarker marker){
-                return this -> getSuperpageIndex(marker);
-            }
-
-            size_t getPoolSize(){
-                return poolSize;
-            }
-
-            void movePageToTop(phys_addr addr){
-                swapPages(fromAddress(addr), poolTop());
-            }
-        };
-
-        struct alignas(arch::CACHE_LINE_SIZE) LocalPool{
-        private:
-            SuperpagePool& spp;
-            SuperpageStackMarker fullyOccupiedZoneStart;
-            SuperpageStackMarker freeZoneStart;
-
-            SuperpageStackMarker partiallyOccupiedZoneTop(){
-#ifdef ALLOCATOR_DEBUG
-                assert(fullyOccupiedZoneStart != 0, "partially occupied zone is empty");
-#endif
-                return fullyOccupiedZoneStart - 1;
-            }
-
-            SuperpageStackMarker fullyOccupiedZoneTop(){
-                return freeZoneStart - 1;
-            }
-
-            void movePageFromFreeToFull(phys_addr addr){
-#ifdef ALLOCATOR_DEBUG
-                assert(spp.isAtOrAboveMarker(addr, freeZoneStart), "Tried to move page that isn't free");
-#endif
-                spp.swapPages(spp.fromAddress(addr), spp.fromMarker(freeZoneStart));
-                freeZoneStart++;
-#ifdef ALLOCATOR_DEBUG
-                assert(spp.isAtOrAboveMarker(addr, fullyOccupiedZoneStart), "movePageFromFreeToFull failed");
-                assert(spp.isBelowMarker(addr, freeZoneStart), "movePageFromFreeToFull failed");
-#endif
-            }
-
-            void movePageFromFullToFree(phys_addr addr){
-#ifdef ALLOCATOR_DEBUG
-                assert(spp.isBelowMarker(addr, freeZoneStart), "Tried to move page that isn't full");
-                assert(spp.isAtOrAboveMarker(addr, fullyOccupiedZoneStart), "Tried to move page that isn't full");
-#endif
-                spp.swapPages(spp.fromAddress(addr), spp.fromMarker(fullyOccupiedZoneTop()));
-                freeZoneStart--;
-#ifdef ALLOCATOR_DEBUG
-                assert(spp.isAtOrAboveMarker(addr, freeZoneStart), "movePageFromFullToFree failed");
-#endif
-            }
-
-            void movePageFromFullToPartiallyOccupied(phys_addr addr){
-#ifdef ALLOCATOR_DEBUG
-                assert(spp.isBelowMarker(addr, freeZoneStart), "Tried to move page that isn't full");
-                assert(spp.isAtOrAboveMarker(addr, fullyOccupiedZoneStart), "Tried to move page that isn't full");
-#endif
-                spp.swapPages(spp.fromAddress(addr), spp.fromMarker(fullyOccupiedZoneStart));
-                fullyOccupiedZoneStart++;
-#ifdef ALLOCATOR_DEBUG
-                assert(spp.isBelowMarker(addr, fullyOccupiedZoneStart), "movePageFromFullToPartiallyOccupied failed");
-#endif
-            }
-
-            void movePageFromPartiallyOccupiedToFull(phys_addr addr){
-#ifdef ALLOCATOR_DEBUG
-                assert(spp.isBelowMarker(addr, fullyOccupiedZoneStart), "Tried to move page that isn't partially occupied");
-#endif
-                spp.swapPages(spp.fromAddress(addr), spp.fromMarker(partiallyOccupiedZoneTop()));
-                fullyOccupiedZoneStart--;
-#ifdef ALLOCATOR_DEBUG
-                assert(spp.isBelowMarker(addr, freeZoneStart), "movePageFromPartiallyOccupiedToFull failed");
-                assert(spp.isAtOrAboveMarker(addr, fullyOccupiedZoneStart), "movePageFromPartiallyOccupiedToFull failed");
-#endif
-            }
-
-            void movePageFromFreeToPartiallyOccupied(phys_addr addr){
-#ifdef ALLOCATOR_DEBUG
-                assert(spp.isAtOrAboveMarker(addr, freeZoneStart), "Tried to move page that isn't free");
-                spp.verifyMapSanity(spp.fromAddress(addr));
-#endif
-                auto addrSuperpageIndex = spp.fromAddress(addr);
-                auto freeZoneStartSuperpageIndex = spp.fromMarker(freeZoneStart);
-                auto fullyOccupiedZoneStartSuperpageIndex = spp.fromMarker(fullyOccupiedZoneStart);
-                //If the fully occupied zone is empty, do a swap
-                if (freeZoneStartSuperpageIndex == fullyOccupiedZoneStartSuperpageIndex) {
-                    spp.swapPages(spp.fromAddress(addr), freeZoneStartSuperpageIndex);
-                }
-                //If we're freeing the base page of the free zone, also swap
-                else if (addrSuperpageIndex == freeZoneStartSuperpageIndex) {
-                    spp.swapPages(spp.fromAddress(addr), fullyOccupiedZoneStartSuperpageIndex);
-                }
-                //Otherwise rotate
-                else {
-                    spp.rotatePagesRight(addrSuperpageIndex, fullyOccupiedZoneStartSuperpageIndex, freeZoneStartSuperpageIndex);
-                }
-                freeZoneStart++;
-                fullyOccupiedZoneStart++;
-#ifdef ALLOCATOR_DEBUG
-                spp.verifyMapSanity(spp.fromAddress(addr));
-                assert(spp.isBelowMarker(addr, fullyOccupiedZoneStart), "movePageFromFreeToPartiallyOccupied failed");
-#endif
-            }
-
-            void movePageFromPartiallyOccupiedToFree(phys_addr addr){
-#ifdef ALLOCATOR_DEBUG
-                assert(spp.isBelowMarker(addr, fullyOccupiedZoneStart), "Tried to move page that isn't partially occupied");
-#endif
-                auto addrSuperpageIndex = spp.fromAddress(addr);
-                auto partiallyOccupiedZoneTopSuperpageIndex = spp.fromMarker(partiallyOccupiedZoneTop());
-                auto fullyOccupiedZoneTopSuperpageIndex = spp.fromMarker(fullyOccupiedZoneTop());
-                //If the fully occupied zone is empty, swap the partially occupied page up to be the new base
-                //of the free zone
-                if (partiallyOccupiedZoneTopSuperpageIndex == fullyOccupiedZoneTopSuperpageIndex) {
-                    spp.swapPages(addrSuperpageIndex, fullyOccupiedZoneTopSuperpageIndex);
-                }
-                //If we're at the top of the partially occupied pool, we can also swap.
-                else if (addrSuperpageIndex == partiallyOccupiedZoneTopSuperpageIndex) {
-                    spp.swapPages(addrSuperpageIndex, fullyOccupiedZoneTopSuperpageIndex);
-                }
-                else {
-                    spp.rotatePagesLeft(spp.fromAddress(addr), spp.fromMarker(partiallyOccupiedZoneTop()),
-                                        spp.fromMarker(fullyOccupiedZoneTop()));
-                }
-                freeZoneStart--;
-                fullyOccupiedZoneStart--;
-
-#ifdef ALLOCATOR_DEBUG
-                assert(spp.isAtOrAboveMarker(addr, freeZoneStart), "movePageFromPartiallyOccupiedToFree failed");
-#endif
-            }
-
-            void moveFreePageToTopOfPartiallyAllocated(){
-                spp.swapPages(spp.fromMarker(fullyOccupiedZoneStart), spp.fromMarker(freeZoneStart));
-                fullyOccupiedZoneStart++;
-                freeZoneStart++;
-            }
-        public:
-            LocalPool(SuperpagePool& pp) : spp(pp){
-                fullyOccupiedZoneStart = 0;
-                freeZoneStart = 0;
-            }
-
-            void acquireLock(){
-                spp.lock.acquire_writer();
-            }
-
-            void releaseLock(){
-                spp.lock.release_writer();
-            }
-
-            size_t remainingFreeSuperpages(){
-                return spp.getPoolSize() - freeZoneStart;
-            }
-
-            size_t remainingPartiallyAllocatedSuperpages(){
-                return fullyOccupiedZoneStart;
-            }
-
-            bool hasFreeSuperpages(){
-                return remainingFreeSuperpages() != 0;
-            }
-
-            bool hasPartiallyAllocatedSuperpages(){
-                return remainingPartiallyAllocatedSuperpages() != 0;
-            }
-
-            phys_addr allocateSuperpage(){
-#ifdef ALLOCATOR_DEBUG
-                assert(hasFreeSuperpages(), "Tried to allocate superpage when pool has none free");
-#endif
-                return spp.fromMarker(freeZoneStart++).toAddress(spp.base);
-            }
-
-            void reserveSuperpage(phys_addr addr){
-                auto page = spp.fromAddress(addr);
-                //if the page we want to reserve is currently partially occupied call the appropriate method
-                if(spp.isBelowMarker(page, fullyOccupiedZoneStart)){
-                    movePageFromPartiallyOccupiedToFull(addr);
-                }
-                    //otherwise if it's free, call the corresponding method
-                else if(spp.isAtOrAboveMarker(page, freeZoneStart)){
-                    movePageFromFreeToFull(addr);
-                }
-
-#ifdef ALLOCATOR_DEBUG
-                assert(spp.isAtOrAboveMarker(addr, fullyOccupiedZoneStart) && spp.isBelowMarker(addr, freeZoneStart), "Superpage not in fully occupied zone???");
-#endif
-            }
-
-            void reserveSuperpageAsPartiallyAllocated(phys_addr addr){
-                auto page = spp.fromAddress(addr);
-                //if the page we want to reserve is currently partially occupied call the appropriate method
-                if(spp.isAtOrAboveMarker(page, freeZoneStart)){
-                    movePageFromFreeToPartiallyOccupied(addr);
-                }
-            }
-
-            void markFullSuperpageFree(phys_addr addr){
-                movePageFromFreeToFull(addr);
-            }
-
-            phys_addr getPageForSubpageAllocation(){
-                if(!hasPartiallyAllocatedSuperpages()){
-#ifdef ALLOCATOR_DEBUG
-                    assert(hasFreeSuperpages(), "LocalPool completely full");
-#endif
-                    moveFreePageToTopOfPartiallyAllocated();
-                }
-#ifdef ALLOCATOR_DEBUG
-                assert(hasPartiallyAllocatedSuperpages(), "LocalPool state insane");
-#endif
-                return spp.fromMarker(partiallyOccupiedZoneTop()).toAddress(spp.base);
-            }
-
-            void markTopPartiallyAllocatedPageAsFull(){
-#ifdef ALLOCATOR_DEBUG
-                assert(hasPartiallyAllocatedSuperpages(), "Tried to mark nonexistent partially allocate page as full");
-#endif
-                fullyOccupiedZoneStart--;
-            }
-
-            void markPartiallyAllocatedPageAsFull(phys_addr addr){
-#ifdef ALLOCATOR_DEBUG
-                assert(spp.isBelowMarker(spp.fromAddress(addr), fullyOccupiedZoneStart), "Page not partially occupied");
-#endif
-                spp.swapPages(spp.fromAddress(addr), spp.fromMarker(partiallyOccupiedZoneTop()));
-                markTopPartiallyAllocatedPageAsFull();
-            }
-
-            void ensureSuperpageMarkedPartiallyOccupied(phys_addr addr){
-                auto page = spp.fromAddress(addr);
-                if(spp.isAtOrAboveMarker(page, freeZoneStart)){
-                    movePageFromFreeToPartiallyOccupied(addr);
-                }
-                //If it's already marked as partially occupied, bail
-                else if(spp.isBelowMarker(page, fullyOccupiedZoneStart)){
-                    return;
-                }
-                else{
-                    movePageFromFullToPartiallyOccupied(addr);
-                }
-            }
-
-            void markPartiallyOccupiedSuperpageFree(phys_addr addr){
-                movePageFromPartiallyOccupiedToFree(addr);
-            }
-
-            bool stealPageFrom(SuperpagePool& otherPool){
-                return spp.tryStealPage(otherPool);
-            }
-        };
-
-        struct LocalAllocator{
-        private:
-            LocalPool& localPool;
-            SuperpagePool& globalPool;
-            RawSubpagePool* subpagePools;
-            SubpageStackMarker* subpageStackMarkers;
-
-            auto subpagePoolForSuperpage(phys_addr addr){
-                addr = phys_addr(addr.value & ~(bigPageSize - 1));
-                size_t index = (addr.value - globalPool.base.value) / bigPageSize;
-                return SubpagePool(subpagePools[index], subpageStackMarkers[index], addr);
-            }
-        public:
-            LocalAllocator(LocalPool& lp, SuperpagePool& gp, RawSubpagePool* sp, SubpageStackMarker* ssm) :
-            localPool(lp), globalPool(gp), subpagePools(sp), subpageStackMarkers(ssm){}
-
-            phys_addr allocateBigPage(){
-                //Make sure the
-                localPool.acquireLock();
-                if(!localPool.hasFreeSuperpages()){
-                    bool didSteal = localPool.stealPageFrom(globalPool);
-                    assert(didSteal, "Global pool out of memory");
-                }
-                auto out = localPool.allocateSuperpage();
-                localPool.releaseLock();
-                return out;
-            }
-
-            //TODO keep track of the number of small pages allocated to help determine the bulk allocation strategy
-            //when the time comes
-            phys_addr allocateSmallPage(){
-                localPool.acquireLock();
-                if(!(localPool.hasFreeSuperpages() || localPool.hasPartiallyAllocatedSuperpages())){
-                    auto didSteal = localPool.stealPageFrom(globalPool);
-                    assert(didSteal, "Global pool out of memory");
-                }
-                phys_addr superPage = localPool.getPageForSubpageAllocation();
-                localPool.releaseLock();
-                auto out = subpagePoolForSuperpage(superPage).allocateSubpage();
-                if(subpagePoolForSuperpage(superPage).isFull()){
-                    localPool.markTopPartiallyAllocatedPageAsFull();
-                }
-                return out;
-            }
-
-            void freeBigPage(phys_addr addr){
-                localPool.acquireLock();
-                localPool.markFullSuperpageFree(addr);
-                localPool.releaseLock();
-            }
-
-            void freeSmallPage(phys_addr addr){
-                localPool.acquireLock();
-                auto smallPool = subpagePoolForSuperpage(addr);
-                smallPool.freeSubpage(addr);
-                phys_addr aligned_base(addr.value & ~(bigPageSize - 1));
-                if(smallPool.isEmpty()){
-                    localPool.markPartiallyOccupiedSuperpageFree(aligned_base);
-                }
-                else{
-                    localPool.ensureSuperpageMarkedPartiallyOccupied(aligned_base);
-                }
-                localPool.releaseLock();
-            }
-
-            void reserveSmallPage(phys_addr addr){
-                phys_addr aligned_base(addr.value & ~(bigPageSize - 1));
-                localPool.acquireLock();
-                localPool.ensureSuperpageMarkedPartiallyOccupied(aligned_base);
-                auto pool = subpagePoolForSuperpage(addr);
-                pool.reserveSubpage(addr);
-
-                if(pool.isFull()){
-                    localPool.markPartiallyAllocatedPageAsFull(addr);
-                }
-                localPool.releaseLock();
-            }
-
-            void reserveBigPage(phys_addr addr){
-                phys_addr aligned_base(addr.value & ~(bigPageSize - 1));
-                localPool.acquireLock();
-                localPool.reserveSuperpage(aligned_base);
-                localPool.releaseLock();
-            }
-        };
-
-        RawSubpagePool* subpagePools;
-        SubpageStackMarker* subpageFreeMarkers;
-        SuperpagePool::SuperpageFreeStackIndex* superpageFreeIndices;
-        SuperpagePool* superpagePools;
-        SuperpagePool* globalPool;
-        LocalPool* localPools;
-        LocalAllocator* localAllocators;
-        phys_memory_range range;
-
-        static void incrementPtrCacheAligned(void*& ptr, size_t amt){
-            assert((uint64_t)ptr % arch::CACHE_LINE_SIZE == 0, "buffer not cache line aligned");
-            amt = divideAndRoundUp(amt, arch::CACHE_LINE_SIZE) * arch::CACHE_LINE_SIZE;
-            ptr = (void*)((size_t)ptr + amt);
-        }
-
-        [[nodiscard]]
-        BufferId getBufferIDForAddress(phys_addr addr){
-#ifdef ALLOCATOR_DEBUG
-            assert(range.contains(addr), "address out of range for allocator");
-#endif
-            auto aligned = (addr.value & ~(bigPageSize - 1));
-            auto index = (aligned - range.start.value) / bigPageSize;
-            return superpageFreeIndices[index].bufferId;
-        }
-
-        void moveSpecificBigPageFromGlobalPoolToLocalPool(phys_addr addr, BufferId bid){
-            phys_addr aligned(addr.value & ~(bigPageSize - 1));
-            assert(getBufferIDForAddress(addr) == GLOBAL_POOL, "Tried to move big page that was not in global pool");
-            assert(bid != GLOBAL_POOL, "Tried to move big page to global pool");
-
-            localPools[bid].acquireLock();
-            globalPool -> lock.acquire_writer();
-            globalPool->movePageToTop(addr);
-            globalPool -> lock.release_writer();
-            localPools[bid].stealPageFrom(*globalPool);
-            localPools[bid].releaseLock();
-        }
-
-        void reserveSmallPage(phys_addr addr){
-            BufferId bid = getBufferIDForAddress(addr);
-            if(bid == GLOBAL_POOL){
-                moveSpecificBigPageFromGlobalPoolToLocalPool(addr, 0);
-                bid = 0;
-            }
-            auto allocator = localAllocators[bid];
-            allocator.reserveSmallPage(addr);
-        }
-
-        void reserveBigPage(phys_addr addr){
-            BufferId bid = getBufferIDForAddress(addr);
-            if(bid == GLOBAL_POOL){
-                moveSpecificBigPageFromGlobalPoolToLocalPool(addr, 0);
-                bid = 0;
-            }
-            auto allocator = localAllocators[bid];
-            allocator.reserveBigPage(addr);
-        }
-
-        void reserveOverlap(phys_memory_range trueRange){
-            phys_addr bigPageAlignedTop = phys_addr(roundUpToNearestMultiple(trueRange.end.value, bigPageSize));
-            phys_addr bigPageAlignedBot = phys_addr(roundDownToNearestMultiple(trueRange.start.value, bigPageSize));
-
-            reservePhysMemoryRange({bigPageAlignedBot, trueRange.start}); //Reserve stuff below the start of the memory range
-            reservePhysMemoryRange({trueRange.end, bigPageAlignedTop}); //Reserve stuff above the end of the memory range
-        }
-
-    public:
-        void reservePhysMemoryRange(phys_memory_range to_reserve){
-            uint64_t rangeTop = roundUpToNearestMultiple(range.end.value, bigPageSize);
-            uint64_t rangeBot = roundDownToNearestMultiple(range.start.value, bigPageSize);
-            if(to_reserve.start.value >= rangeTop){
+            else {
                 return;
             }
-            if(to_reserve.end.value <= rangeBot){
-                return;
-            }
-
-            uint64_t bottom = max(to_reserve.start.value, rangeBot);
-            uint64_t top = min(to_reserve.end.value, rangeTop);
-            //if we're trying to reserve a memory range of 0 size, just bail
-            if(bottom == top){
-                return;
-            }
-            //page align our endpoints
-            bottom = roundDownToNearestMultiple(bottom, smallPageSize);
-            top = roundUpToNearestMultiple(top, smallPageSize);
-
-            phys_addr toReserve(bottom);
-
-            while(toReserve.value < top){
-                //if we can reserve a big page, do it
-                if((toReserve.value % bigPageSize == 0) && (toReserve.value + bigPageSize <= top)){
-                    reserveBigPage(toReserve);
-                    toReserve.value += bigPageSize;
-                }
-                else{
-                    reserveSmallPage(toReserve);
-                    toReserve.value += smallPageSize;
-                }
-            }
         }
-
-        ContiguousRangeAllocator(page_allocator_range_info info, size_t processorCount){
-            phys_addr rangeBottom(roundUpToNearestMultiple(info.range.start.value, bigPageSize));
-            phys_addr rangeTop(roundDownToNearestMultiple(info.range.end.value, bigPageSize));
-            size_t totalSuperpages = (rangeTop.value - rangeBottom.value) / bigPageSize;
-            void* buffPtr = info.buffer_start;
-            assert((uint64_t)buffPtr % smallPageSize == 0, "Buffer not page-aligned");
-            subpagePools = (RawSubpagePool*)buffPtr;
-            incrementPtrCacheAligned(buffPtr, sizeof(RawSubpagePool) * totalSuperpages);
-            subpageFreeMarkers = (SubpageStackMarker*)buffPtr;
-            incrementPtrCacheAligned(buffPtr, sizeof(SubpageStackMarker) * totalSuperpages);
-            superpagePools = (SuperpagePool*) kmalloc(sizeof(SuperpagePool) * (processorCount + 1), std::align_val_t{arch::CACHE_LINE_SIZE});
-            localPools = (LocalPool*) kmalloc(sizeof(LocalPool) * processorCount, std::align_val_t{arch::CACHE_LINE_SIZE});
-            localAllocators = (LocalAllocator*) kmalloc(sizeof(LocalAllocator) * processorCount, std::align_val_t{arch::CACHE_LINE_SIZE});
-
-            superpageFreeIndices = (SuperpagePool::SuperpageFreeStackIndex*) buffPtr;
-            incrementPtrCacheAligned(buffPtr, sizeof(SuperpagePool::SuperpageFreeStackIndex) * totalSuperpages);
-
-            globalPool = &superpagePools[processorCount];
-
-            for(size_t i = 0; i < processorCount + 1; i++){
-                void* spp = buffPtr;
-                incrementPtrCacheAligned(buffPtr, sizeof(SuperpagePool::SuperpageIndex) * totalSuperpages);
-                BufferId bid = (BufferId)i;
-                size_t initSize = 0;
-                if(i == processorCount){
-                    bid = GLOBAL_POOL;
-                    initSize = totalSuperpages;
-                }
-                new (&superpagePools[i]) SuperpagePool(spp, superpageFreeIndices, rangeBottom, initSize, totalSuperpages, bid);
-                if(i < processorCount){
-                    new(&localPools[i]) LocalPool(superpagePools[i]);
-                    new(&localAllocators[i]) LocalAllocator(localPools[i], *globalPool, subpagePools, subpageFreeMarkers);
-                }
-            }
-
-            //Initialize the subpage pools
-            for(size_t i = 0; i < totalSuperpages; i++){
-                SubpagePool(subpagePools[i], subpageFreeMarkers[i], phys_addr(rangeBottom.value + i * bigPageSize)).initialize();
-            }
-
-            range = phys_memory_range(rangeBottom, rangeTop);
-
-            reserveOverlap(info.range);
-        }
-
-        phys_addr allocateSmallPage(){
-            auto allocator = localAllocators[arch::getCurrentProcessorID()];
-            return allocator.allocateSmallPage();
-        }
-
-        void freeSmallPage(phys_addr addr){
-            auto id = getBufferIDForAddress(addr);
-            assert(id != GLOBAL_POOL, "tried to free address owned by global pool");
-            localAllocators[id].freeSmallPage(addr);
-        }
-
-        static const size_t rawSubpagePoolSize = sizeof(RawSubpagePool);
-        static const size_t subpageStackMarkerSize = sizeof(SubpageStackMarker);
-        static const size_t superpageIndexMarkerSize = sizeof(SuperpagePool::SuperpageIndex);
-        static const size_t superpageFreeStackIndex = sizeof(SuperpagePool::SuperpageFreeStackIndex);
     };
 
-    WITH_GLOBAL_CONSTRUCTOR(Vector<ContiguousRangeAllocator>, allocators);
+    allocateFromPAPages(PA_BITPOOL_RELAXED_RETRIES);
+    while (smallPageCount > 0) {
+        const auto requiredPages = divideAndRoundUp(smallPageCount, mm::PageAllocator::smallPagesPerBigPage);
+        const auto grabbedPages = freeBigPages.bulkReadBestEffort(requiredPages, [&](size_t index, auto& metadata) {
+            assert(metadata -> isEmpty(), "Big pages in the free pool should be FREE");
+            if (index == 0) {
+                paPageRemaining = metadata;
+            }
+            else {
+                const auto pageAddr = metadata -> baseAddr();
+                metadata -> allocAll();
+                cb(PageRef::big(pageAddr));
+            }
+        });
+        if (grabbedPages == 0) {
+            break;
+        }
+        if (grabbedPages < requiredPages) {
+            const auto pageAddr = paPageRemaining -> baseAddr();
+            paPageRemaining -> allocAll();
+            cb(PageRef::big(pageAddr));
+            paPageRemaining = nullptr;
+            allocatedPages += grabbedPages * mm::PageAllocator::smallPagesPerBigPage;
+            smallPageCount -= grabbedPages * mm::PageAllocator::smallPagesPerBigPage;
+        }
+        else {
+            allocatedPages += (grabbedPages - 1) * mm::PageAllocator::smallPagesPerBigPage;
+            smallPageCount -= (grabbedPages - 1) * mm::PageAllocator::smallPagesPerBigPage;
+            const auto smallAllocd = paPageRemaining -> allocatePages(smallPageCount, cb);
+            smallPageCount -= smallAllocd;
+            allocatedPages += smallAllocd;
+            assert(smallPageCount == 0, "OK, we should only be here if we need less than a full big page, and yet the allocation wasn't totally fulfilled");
+            return allocatedPages;
+        }
+    }
+    allocateFromPAPages(PA_BITPOOL_DETERMINED_RETRIES);
 
-    void init(Vector<page_allocator_range_info>& regions, size_t processor_count){
-        for(auto region : regions){
-            allocators.push(ContiguousRangeAllocator(region, processor_count));
+    return allocatedPages;
+}
+
+void NUMAPool::freePages(PageRef *pages, size_t count) {
+    const auto freeBigPageRun = [&](BigPageMetadata* firstMetadata, PageRef *runStart, size_t runSize) {
+        freeBigPages.bulkWrite(runSize, [&](size_t index, BigPageMetadata*& entry) {
+            const auto metadataIndex = divideAndRoundDown(runStart[index].value - runStart[0].value, static_cast<uint64_t>(arch::bigPageSize));
+            assert(firstMetadata[metadataIndex].isFull(), "We should only take this path when freeing totally occupied big pages");
+            firstMetadata[metadataIndex].freeAll();
+            entry = &(firstMetadata[metadataIndex]);
+        });
+    };
+    const auto freeSmallPageRun = [&](BigPageMetadata* superpage, PageRef *runStart, size_t runSize) {
+        OccupancyTransition transition {};
+        superpage->freePages(runStart, runSize, transition);
+
+        if (transition.becameEmpty()) {
+            if (transition.before == OccupancyState::Partial) {
+                // The page was partial, so it may be in paPages. Attempt to remove it and
+                // move it to freeBigPages. If remove returns NotPresent, a concurrent free
+                // of the same page beat us here: that thread will have already added it to
+                // paPages (Full→Partial) but our Partial→Empty remove will see NotPresent,
+                // leaving an empty page stranded in paPages. This is a known benign race:
+                // the page remains fully allocatable for small-page requests and will find
+                // its way back to freeBigPages through normal allocation activity. The only
+                // practical consequence is that BIG_PAGE_ONLY allocations cannot see it
+                // until it is reclaimed.
+                if (paPages.remove(metadataIndex(superpage)) != AtomicBitPool::RemoveResult::NotPresent) {
+                    freeBigPages.write(superpage);
+                }
+            }
+            else {
+                // Full→Empty: page was never in paPages, return it directly.
+                freeBigPages.write(superpage);
+            }
+        }
+        else if (transition.becameAvailable()) {
+            // Full→Partial: page newly has free subpages; publish it for small-page allocation.
+            paPages.add(metadataIndex(superpage));
+        }
+    };
+
+    // Subrange cursor: only advances forward since pages are sorted by address.
+    size_t subrangeIdx = 0;
+    size_t i = 0;
+
+    while (i < count) {
+        if (pages[i].size() == mm::PageSize::BIG) {
+            const uint64_t addr = pages[i].addr().value;
+
+            // Advance the subrange cursor past entries that end before this big page.
+            while (subrangeIdx < subrangeCount && addr >= subrangeInfo[subrangeIdx].rangeEnd.value) {
+                subrangeIdx++;
+            }
+
+            // Collect consecutive big pages within the same subrange.
+            assert(subrangeIdx < subrangeCount, "NUMAPool::freePages: big page address outside all subranges");
+            const size_t runStart = i;
+            const uint64_t subrangeEnd = subrangeInfo[subrangeIdx].rangeEnd.value;
+            while (i < count && pages[i].size() == mm::PageSize::BIG
+                              && pages[i].addr().value < subrangeEnd) {
+                i++;
+            }
+
+            freeBigPageRun(findMetadata(pages[runStart].addr()), &pages[runStart], i - runStart);
+        } else {
+            // Small page: collect consecutive small pages in the same superpage.
+            const uint64_t bigPageBase = pages[i].addr().value & ~static_cast<uint64_t>(arch::bigPageSize - 1);
+            const size_t runStart = i;
+            while (i < count && pages[i].size() == mm::PageSize::SMALL
+                              && (pages[i].addr().value & ~static_cast<uint64_t>(arch::bigPageSize - 1)) == bigPageBase) {
+                i++;
+            }
+
+            freeSmallPageRun(findMetadata(pages[runStart].addr()), &pages[runStart], i - runStart);
+        }
+    }
+}
+
+void PageAllocatorImpl::freePages(PageRef *pages, size_t count) {
+    algorithm::sort(pages, count, [](const PageRef& p1, const PageRef& p2) {
+        return p1.addr().value < p2.addr().value;
+    });
+
+    // Walk the sorted page list alongside the sorted domain table.
+    // Both are ordered by address, so tableIdx only ever advances forward.
+    size_t tableIdx = 0;
+    size_t runStart = 0;
+    NUMAPool* runPool = nullptr;
+
+    for (size_t i = 0; i < count; i++) {
+        const uint64_t addr = pages[i].addr().value;
+
+        // Advance the table cursor past entries whose range ends before this address.
+        while (tableIdx < domainTableSize && addr >= domainTable[tableIdx].rangeEnd.value) {
+            tableIdx++;
+        }
+
+        // Determine the pool that owns this page (nullptr if outside all known ranges).
+        NUMAPool* pagePool = nullptr;
+        if (tableIdx < domainTableSize && addr >= domainTable[tableIdx].rangeStart.value) {
+            pagePool = domainTable[tableIdx].pool;
+        }
+
+        // Pool changed — flush the accumulated run to the previous pool.
+        if (pagePool != runPool) {
+            if (runPool != nullptr) {
+                runPool->freePages(&pages[runStart], i - runStart);
+            }
+            runStart = i;
+            runPool = pagePool;
         }
     }
 
-    void incrementSizeWithAlignment(size_t& size, size_t amount){
-        size += divideAndRoundUp(amount, arch::CACHE_LINE_SIZE) * arch::CACHE_LINE_SIZE;
+    // Flush the final run.
+    if (runPool != nullptr) {
+        runPool->freePages(&pages[runStart], count - runStart);
+    }
+}
+
+#ifdef CROCOS_TESTING
+size_t PageAllocatorImpl::countFreePages() const {
+    size_t total = 0;
+    for (size_t i = 0; i < numDomains; i++) {
+        if (numaPools[i]) total += numaPools[i]->countTotalFreePages();
+    }
+    if (unownedPool) total += unownedPool->countTotalFreePages();
+    return total;
+}
+
+bool PageAllocatorImpl::isPageAllocated(PageRef page) {
+    BigPageMetadata* meta = findMetadata(page.addr());
+    if (meta == nullptr) return false;
+    if (page.size() == kernel::mm::PageSize::BIG) {
+        return meta->isFull();
+    }
+    return meta->isSubpageAllocated(page);
+}
+#endif
+
+// ==================== Global allocator and wrappers ====================
+
+PageAllocatorImpl* gPageAllocator = nullptr;
+
+namespace kernel::mm::PageAllocator {
+    phys_addr allocateSmallPage() {
+        phys_addr result{};
+        (void)gPageAllocator->allocatePages(1, [&](PageRef ref) { result = ref.addr(); });
+        return result;
     }
 
-    size_t requestedBufferSizeForRange(mm::phys_memory_range range, size_t processor_count){
-        size_t out = 0;
-        phys_addr rangeBottom(roundDownToNearestMultiple(range.start.value, bigPageSize));
-        phys_addr rangeTop(roundUpToNearestMultiple(range.end.value, bigPageSize));
-        size_t totalSuperpages = (rangeTop.value - rangeBottom.value) / bigPageSize;
-
-        incrementSizeWithAlignment(out, ContiguousRangeAllocator::rawSubpagePoolSize * totalSuperpages);
-        incrementSizeWithAlignment(out, ContiguousRangeAllocator::subpageStackMarkerSize * totalSuperpages);
-
-        incrementSizeWithAlignment(out, ContiguousRangeAllocator::superpageFreeStackIndex * totalSuperpages);
-
-        for(size_t i = 0; i < processor_count + 1; i++){
-            incrementSizeWithAlignment(out, ContiguousRangeAllocator::superpageIndexMarkerSize * totalSuperpages);
-        }
-
-        return out;
-    }
-
-    void reservePhysicalRange(phys_memory_range range){
-        //temporary just to confirm things are working okay
-        //We will have to replace this by an iteration over the vector in time.
-        allocators[0].reservePhysMemoryRange(range);
-    }
-
-    phys_addr allocateSmallPage(){
-        auto out = allocators[0].allocateSmallPage();
-        return out;
-    }
-
-    void freeSmallPage(phys_addr addr){
-        allocators[0].freeSmallPage(addr);
+    void freeSmallPage(phys_addr addr) {
+        PageRef ref = PageRef::small(addr);
+        gPageAllocator->freePages(&ref, 1);
     }
 }

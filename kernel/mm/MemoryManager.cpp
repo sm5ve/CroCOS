@@ -11,6 +11,8 @@
 
 extern uint32_t phys_end;
 
+static PageAllocatorImpl gPageAllocatorImpl;
+
 namespace kernel::mm{
     template<size_t level>
     void unmapIdentity(arch::PageTable<level>& pageTable) {
@@ -358,45 +360,9 @@ namespace kernel::mm{
         static_assert(supportsSimpleBootstrapPageAllocatorMapping, "Page allocator buffer mapping not supported on this architecture with the simple mapping construction");
     }
 
-    // Overload that computes the required buffer size from the old PageAllocator formula.
-    void* reservePageAllocatorBufferForRange(phys_memory_range& range) {
-        // Peek at the aligned range to compute the old allocator's buffer requirement.
-        phys_memory_range aligned = range;
-        aligned.end &= ~(arch::smallPageSize - 1);
-        aligned.start.value = roundUpToNearestMultiple(aligned.start.value, arch::smallPageSize);
-        const size_t requiredBufferSize = PageAllocator::requestedBufferSizeForRange(aligned, arch::processorCount());
-        return reservePageAllocatorBufferForRange(range, requiredBufferSize);
-    }
-
     bool initPageAllocator() {
-        Vector<PageAllocator::page_allocator_range_info> free_memory_regions;
+        const numa::NUMATopology* topology = numa::getCurrentTopology();
 
-        for (auto entry : arch::getMemoryMap()) {
-            if (entry.type == arch::USABLE) {
-                if(entry.range.getSize() > (arch::bigPageSize * 2)){
-                    auto range = entry.range;
-                    const auto buff = static_cast<uint64_t*>(reservePageAllocatorBufferForRange(range));
-                    free_memory_regions.push({range, buff});
-                }
-            }
-        }
-
-        unmapTemporaryWindow();
-
-        kernel::mm::PageAllocator::init(free_memory_regions, arch::processorCount());
-        //Find the memory range where the kernel resides and reserve it so we don't overwrite anything!
-        phys_memory_range range{.start=mm::phys_addr(nullptr), .end=mm::phys_addr(&phys_end)};
-        PageAllocator::reservePhysicalRange(range);
-        return true;
-    }
-
-    // New NUMA-aware page allocator initialisation.
-    // Measures how much metadata memory each NUMA domain needs, carves that space
-    // out of the domain's largest physical range (mapping it into the kernel address
-    // space via the page-allocator zones), then constructs the pools for real.
-    // The "New" prefix is intentional: this replaces initPageAllocator() once the
-    // implementation is complete.
-    bool initNewPageAllocator(const numa::NUMATopology& topology) {
         // Collect usable physical ranges from the firmware memory map.
         Vector<phys_memory_range> usableRanges;
         for (auto entry : arch::getMemoryMap()) {
@@ -405,79 +371,117 @@ namespace kernel::mm{
             }
         }
 
-        numa::NUMAMemoryPartition partition =
-            numa::partitionMemoryByDomain(usableRanges, arch::processorCount(), topology);
-
         // Per-processor LocalPool pointer table (indexed by ProcessorID).
         static LocalPool* localPools[arch::MAX_PROCESSOR_COUNT] = {};
 
-        Vector<NUMAPool*>         numaPools;
-        const size_t processorCount = partition.processorDomain.size();
-
-        for (size_t domainIdx = 0; domainIdx < partition.rangesPerDomain.size(); domainIdx++) {
-            auto& ranges = partition.rangesPerDomain[domainIdx];
-            if (ranges.empty()) {
-                // Preserve the contract: numaPools[domainID] must be valid for
-                // all domain IDs up to maxDomainID, with nullptr for empty domains.
-                numaPools.push(nullptr);
-                continue;
-            }
-
-            const numa::DomainID domainId{static_cast<uint16_t>(domainIdx)};
-
-            // ---- Stage 1 & 2: measure required memory ----
-            BootstrapAllocator measuringAlloc;
-            createNumaPool(measuringAlloc, ranges, domainId);
-            for (size_t cpu = 0; cpu < processorCount; cpu++) {
-                if (partition.processorDomain[cpu] == domainId) {
-                    createLocalPool(measuringAlloc, topology);
-                }
-            }
-
-            // ---- Stage 3: find largest range and carve out the buffer ----
-            phys_memory_range* largestRange = &ranges[0];
-            for (size_t i = 1; i < ranges.size(); i++) {
-                if (ranges[i].getSize() > largestRange->getSize()) {
-                    largestRange = &ranges[i];
-                }
-            }
-            void* buffer = reservePageAllocatorBufferForRange(*largestRange, measuringAlloc.bytesNeeded());
-
-            // ---- Stage 4: create the NUMAPool using real memory ----
-            BootstrapAllocator realAlloc(buffer, measuringAlloc.bytesNeeded());
-            numaPools.push(createNumaPool(realAlloc, ranges, domainId));
-
-            // ---- Stage 5: create LocalPools for processors in this domain ----
-            for (size_t cpu = 0; cpu < processorCount; cpu++) {
-                if (partition.processorDomain[cpu] == domainId) {
-                    localPools[cpu] = createLocalPool(realAlloc, topology);
-                }
-            }
-        }
-
-        // ---- Unowned ranges: physical memory with no NUMA domain affinity ----
-        // Constructed after the domain loop so it doesn't compete for zone slots.
-        // Queried last during allocation as a final fallback.
+        Vector<NUMAPool*> numaPools;
         NUMAPool* unownedPool = nullptr;
-        if (!partition.unownedRanges.empty()) {
-            BootstrapAllocator measuringAlloc;
-            createNumaPool(measuringAlloc, partition.unownedRanges);
+        size_t processorCount = arch::processorCount();
+        const kernel::numa::NUMAPolicy* allocPolicy = nullptr;
 
-            phys_memory_range* largestRange = &partition.unownedRanges[0];
-            for (size_t i = 1; i < partition.unownedRanges.size(); i++) {
-                if (partition.unownedRanges[i].getSize() > largestRange->getSize())
-                    largestRange = &partition.unownedRanges[i];
+        if (topology != nullptr) {
+            // NUMA-aware path: partition ranges by proximity domain.
+            numa::NUMAMemoryPartition partition =
+                numa::partitionMemoryByDomain(usableRanges, processorCount, *topology);
+            processorCount = partition.processorDomain.size();
+
+            bool anyDomainHasMemory = false;
+            for (size_t d = 0; d < partition.rangesPerDomain.size(); d++) {
+                if (!partition.rangesPerDomain[d].empty()) { anyDomainHasMemory = true; break; }
             }
-            void* buffer = reservePageAllocatorBufferForRange(*largestRange, measuringAlloc.bytesNeeded());
 
+            if (!anyDomainHasMemory) {
+                // Topology exists but has no SRAT memory regions (e.g., trivial single-domain
+                // on QEMU): all usable memory ended up in unownedRanges. Fall back to a single
+                // pool with no NUMA policy so createPageAllocator's invariants hold.
+                auto& ranges = partition.unownedRanges;
+                BootstrapAllocator measuringAlloc;
+                createNumaPool(measuringAlloc, ranges);
+                for (size_t cpu = 0; cpu < processorCount; cpu++)
+                    createLocalPool(measuringAlloc, nullptr);
+                phys_memory_range* largestRange = &ranges[0];
+                for (size_t i = 1; i < ranges.size(); i++)
+                    if (ranges[i].getSize() > largestRange->getSize()) largestRange = &ranges[i];
+                void* buffer = reservePageAllocatorBufferForRange(*largestRange, measuringAlloc.bytesNeeded());
+                BootstrapAllocator realAlloc(buffer, measuringAlloc.bytesNeeded());
+                numaPools.push(createNumaPool(realAlloc, ranges));
+                for (size_t cpu = 0; cpu < processorCount; cpu++)
+                    localPools[cpu] = createLocalPool(realAlloc, nullptr);
+            } else {
+                for (size_t domainIdx = 0; domainIdx < partition.rangesPerDomain.size(); domainIdx++) {
+                    auto& ranges = partition.rangesPerDomain[domainIdx];
+                    if (ranges.empty()) {
+                        numaPools.push(nullptr);
+                        continue;
+                    }
+                    const numa::DomainID domainId{static_cast<uint16_t>(domainIdx)};
+
+                    // ---- Measure required memory ----
+                    BootstrapAllocator measuringAlloc;
+                    createNumaPool(measuringAlloc, ranges, domainId);
+                    for (size_t cpu = 0; cpu < processorCount; cpu++) {
+                        if (partition.processorDomain[cpu] == domainId)
+                            createLocalPool(measuringAlloc, topology);
+                    }
+
+                    // ---- Carve out buffer from the largest range ----
+                    phys_memory_range* largestRange = &ranges[0];
+                    for (size_t i = 1; i < ranges.size(); i++)
+                        if (ranges[i].getSize() > largestRange->getSize()) largestRange = &ranges[i];
+                    void* buffer = reservePageAllocatorBufferForRange(*largestRange, measuringAlloc.bytesNeeded());
+
+                    // ---- Construct pools ----
+                    BootstrapAllocator realAlloc(buffer, measuringAlloc.bytesNeeded());
+                    numaPools.push(createNumaPool(realAlloc, ranges, domainId));
+                    for (size_t cpu = 0; cpu < processorCount; cpu++) {
+                        if (partition.processorDomain[cpu] == domainId)
+                            localPools[cpu] = createLocalPool(realAlloc, topology);
+                    }
+                }
+
+                allocPolicy = &kernel::numa::numaPolicy();
+
+                // ---- Unowned ranges (no NUMA affinity) ----
+                if (!partition.unownedRanges.empty()) {
+                    BootstrapAllocator measuringAlloc;
+                    createNumaPool(measuringAlloc, partition.unownedRanges);
+                    phys_memory_range* largestRange = &partition.unownedRanges[0];
+                    for (size_t i = 1; i < partition.unownedRanges.size(); i++)
+                        if (partition.unownedRanges[i].getSize() > largestRange->getSize())
+                            largestRange = &partition.unownedRanges[i];
+                    void* buffer = reservePageAllocatorBufferForRange(*largestRange, measuringAlloc.bytesNeeded());
+                    BootstrapAllocator realAlloc(buffer, measuringAlloc.bytesNeeded());
+                    unownedPool = createNumaPool(realAlloc, partition.unownedRanges);
+                }
+            }
+        } else {
+            // Non-NUMA path: single pool for all memory.
+            BootstrapAllocator measuringAlloc;
+            createNumaPool(measuringAlloc, usableRanges);
+            for (size_t cpu = 0; cpu < processorCount; cpu++)
+                createLocalPool(measuringAlloc, topology);
+            phys_memory_range* largestRange = &usableRanges[0];
+            for (size_t i = 1; i < usableRanges.size(); i++)
+                if (usableRanges[i].getSize() > largestRange->getSize()) largestRange = &usableRanges[i];
+            void* buffer = reservePageAllocatorBufferForRange(*largestRange, measuringAlloc.bytesNeeded());
             BootstrapAllocator realAlloc(buffer, measuringAlloc.bytesNeeded());
-            unownedPool = createNumaPool(realAlloc, partition.unownedRanges);
+            numaPools.push(createNumaPool(realAlloc, usableRanges));
+            for (size_t cpu = 0; cpu < processorCount; cpu++)
+                localPools[cpu] = createLocalPool(realAlloc, topology);
         }
 
         unmapTemporaryWindow();
 
-        auto impl = createPageAllocator(move(numaPools), localPools, processorCount, unownedPool);
-        (void)impl; // TODO: store in a global once PageAllocatorImpl is fully implemented
+        gPageAllocatorImpl = createPageAllocator(move(numaPools), localPools, processorCount, unownedPool, allocPolicy);
+        gPageAllocator = &gPageAllocatorImpl;
+        klog() << "[PA] initPageAllocator complete, gPageAllocator=" << (void*)gPageAllocator << " localPools[0]=" << (void*)localPools[0] << "\n";
+
+        // Reserve the kernel image so it can never be handed out as free memory.
+        phys_memory_range kernelRange{.start = phys_addr(nullptr), .end = phys_addr(&phys_end)};
+        klog() << "[PA] kernelRange.end = " << (void*)kernelRange.end.value << "\n";
+        gPageAllocator->reserveRange(kernelRange);
+        klog() << "[PA] reserveRange done\n";
+
         return true;
     }
 }
