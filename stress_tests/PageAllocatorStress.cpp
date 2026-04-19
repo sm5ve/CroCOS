@@ -49,7 +49,7 @@ struct Config {
     size_t numDomains        = 2;
     size_t bigPagesPerDomain = 128;
     size_t threadsPerDomain  = 4;
-    size_t maxBatch          = 1;
+    size_t maxBatch          = 4096;
     size_t reportIntervalMs  = 5000;
     size_t maxIntervals      = 0;   // 0 = run until SIGINT/SIGTERM
 };
@@ -157,11 +157,12 @@ struct StressAllocatorImpl {
 
             // Real pass
             BootstrapAllocator real = domainBuffers.back().makeAllocator();
-            numaPools.push(createNumaPool(real, ranges, domainId));
+            NUMAPool* domainPool = createNumaPool(real, ranges, domainId);
+            numaPools.push(domainPool);
 
             size_t cpuBase = d * threadsPerDomain;
             for (size_t t = 0; t < threadsPerDomain; t++)
-                localPools[cpuBase + t] = createLocalPool(real, &topology);
+                localPools[cpuBase + t] = createLocalPool(real, &topology, domainPool);
         }
 
         impl = createPageAllocator(move(numaPools), localPools,

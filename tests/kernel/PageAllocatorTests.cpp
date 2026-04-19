@@ -873,9 +873,10 @@ struct TestPageAllocatorImpl {
 
             // ---- Real pass: construct NUMAPool and LocalPools in the buffer ----
             BootstrapAllocator real = domainBuffers.back().makeAllocator();
-            numaPools.push(createNumaPool(real, spec.ranges, domainId));
+            NUMAPool* domainPool = createNumaPool(real, spec.ranges, domainId);
+            numaPools.push(domainPool);
             for (size_t cpu : spec.cpuIds) {
-                localPools[cpu] = createLocalPool(real, &topology);
+                localPools[cpu] = createLocalPool(real, &topology, domainPool);
             }
         }
 

@@ -234,8 +234,10 @@ class LocalPool {
     BigPageMetadata* paPage1 = nullptr;
     BigPageMetadata* paPage2 = nullptr;
     const kernel::numa::NUMATopology* topology;
+    NUMAPool* homePool = nullptr;
 public:
-    explicit LocalPool(const kernel::numa::NUMATopology* topo = nullptr) : topology(topo) {}
+    explicit LocalPool(const kernel::numa::NUMATopology* topo = nullptr, NUMAPool* home = nullptr)
+        : topology(topo), homePool(home) {}
 
     [[nodiscard]] size_t allocatePages(size_t smallPageCount, PageAllocationCallback cb, AllocFlags flags = {});
     void tryGivePAPage(BigPageMetadata& page);
@@ -285,7 +287,10 @@ struct PageAllocatorImpl {
     // Looks up the BigPageMetadata for the big page containing addr.
     // Returns nullptr if addr is outside all known ranges.
     BigPageMetadata* findMetadata(kernel::mm::phys_addr addr);
-
+private:
+    [[nodiscard]] inline size_t allocateFast(size_t smallPageCount, PageAllocationCallback cb, AllocFlags flags);
+    [[nodiscard]] inline size_t allocateFallback(size_t smallPageCount, PageAllocationCallback cb, AllocFlags flags);
+public:
     [[nodiscard]] size_t allocatePages(size_t smallPageCount, PageAllocationCallback cb, AllocFlags flags = {});
     void freePages(PageRef* pages, size_t count);
 
@@ -308,7 +313,8 @@ NUMAPool*         createNumaPool(BootstrapAllocator& alloc,
                                  const Vector<kernel::mm::phys_memory_range>& ranges,
                                  kernel::numa::DomainID domain = kernel::numa::DomainID{0});
 LocalPool*        createLocalPool(BootstrapAllocator& alloc,
-                                  const kernel::numa::NUMATopology* topology = nullptr);
+                                  const kernel::numa::NUMATopology* topology = nullptr,
+                                  NUMAPool* homePool = nullptr);
 
 // CONTRACT: perDomainAllocs must be sized to (maxDomainID + 1), with nullptr
 // slots for any domain IDs that have no physical memory.  This allows O(1)

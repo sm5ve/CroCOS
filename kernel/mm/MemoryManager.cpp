@@ -404,9 +404,10 @@ namespace kernel::mm{
                     if (ranges[i].getSize() > largestRange->getSize()) largestRange = &ranges[i];
                 void* buffer = reservePageAllocatorBufferForRange(*largestRange, measuringAlloc.bytesNeeded());
                 BootstrapAllocator realAlloc(buffer, measuringAlloc.bytesNeeded());
-                numaPools.push(createNumaPool(realAlloc, ranges));
+                NUMAPool* singlePool = createNumaPool(realAlloc, ranges);
+                numaPools.push(singlePool);
                 for (size_t cpu = 0; cpu < processorCount; cpu++)
-                    localPools[cpu] = createLocalPool(realAlloc, nullptr);
+                    localPools[cpu] = createLocalPool(realAlloc, nullptr, singlePool);
             } else {
                 for (size_t domainIdx = 0; domainIdx < partition.rangesPerDomain.size(); domainIdx++) {
                     auto& ranges = partition.rangesPerDomain[domainIdx];
@@ -432,10 +433,11 @@ namespace kernel::mm{
 
                     // ---- Construct pools ----
                     BootstrapAllocator realAlloc(buffer, measuringAlloc.bytesNeeded());
-                    numaPools.push(createNumaPool(realAlloc, ranges, domainId));
+                    NUMAPool* domainPool = createNumaPool(realAlloc, ranges, domainId);
+                    numaPools.push(domainPool);
                     for (size_t cpu = 0; cpu < processorCount; cpu++) {
                         if (partition.processorDomain[cpu] == domainId)
-                            localPools[cpu] = createLocalPool(realAlloc, topology);
+                            localPools[cpu] = createLocalPool(realAlloc, topology, domainPool);
                     }
                 }
 
@@ -465,9 +467,10 @@ namespace kernel::mm{
                 if (usableRanges[i].getSize() > largestRange->getSize()) largestRange = &usableRanges[i];
             void* buffer = reservePageAllocatorBufferForRange(*largestRange, measuringAlloc.bytesNeeded());
             BootstrapAllocator realAlloc(buffer, measuringAlloc.bytesNeeded());
-            numaPools.push(createNumaPool(realAlloc, usableRanges));
+            NUMAPool* singlePool = createNumaPool(realAlloc, usableRanges);
+            numaPools.push(singlePool);
             for (size_t cpu = 0; cpu < processorCount; cpu++)
-                localPools[cpu] = createLocalPool(realAlloc, topology);
+                localPools[cpu] = createLocalPool(realAlloc, topology, singlePool);
         }
 
         unmapTemporaryWindow();

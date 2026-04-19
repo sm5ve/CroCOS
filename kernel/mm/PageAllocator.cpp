@@ -608,8 +608,8 @@ NUMAPool* createNumaPool(BootstrapAllocator& alloc,
     return poolPtr;
 }
 
-LocalPool* createLocalPool(BootstrapAllocator& alloc, const kernel::numa::NUMATopology* topology) {
-    return alloc.allocate<LocalPool>([&](LocalPool& lp) { new(&lp) LocalPool(topology); }, 1);
+LocalPool* createLocalPool(BootstrapAllocator& alloc, const kernel::numa::NUMATopology* topology, NUMAPool* homePool) {
+    return alloc.allocate<LocalPool>([&](LocalPool& lp) { new(&lp) LocalPool(topology, homePool); }, 1);
 }
 
 // ==================== PageAllocatorImpl ====================
@@ -716,7 +716,24 @@ void PageAllocatorImpl::reserveRange(mm::phys_memory_range range) {
     }
 }
 
+size_t PageAllocatorImpl::allocateFast(size_t smallPageCount, PageAllocationCallback cb, AllocFlags flags) {
+    if (!flags.has(AllocBehavior::BIG_PAGE_ONLY) && smallPageCount < mm::PageAllocator::smallPagesPerBigPage) {
+        const auto pid = arch::getCurrentProcessorID();
+        auto& localPool = *localPools[pid];
+        return localPool.allocatePages(smallPageCount, cb, flags | AllocBehavior::LOCAL_DOMAIN_ONLY);
+    }
+    return 0;
+}
+
 size_t PageAllocatorImpl::allocatePages(size_t smallPageCount, PageAllocationCallback cb, AllocFlags flags) {
+    const auto fastAllocs = allocateFast(smallPageCount, cb, flags);
+    if (fastAllocs != smallPageCount) {
+        return fastAllocs + allocateFallback(smallPageCount - fastAllocs, cb, flags);
+    }
+    return fastAllocs;
+}
+
+size_t PageAllocatorImpl::allocateFallback(size_t smallPageCount, PageAllocationCallback cb, AllocFlags flags) {
     size_t allocatedPages = 0;
     const auto pid = arch::getCurrentProcessorID();
     auto& localPool = *localPools[pid];
@@ -799,8 +816,15 @@ size_t LocalPool::allocatePages(size_t smallPageCount, PageAllocationCallback cb
     size_t allocatedPages = 0;
     const auto allocFromPAPage = [&](BigPageMetadata& metadata) {
         if (metadata.isEmpty()) {
-            metadata.returnPage();
-            return true;
+            // Hysteresis: if this is the only cached page and it belongs to the home pool,
+            // hold onto it rather than returning it to freeBigPages. This avoids the
+            // paPages↔freeBigPages round-trip when the same page is repeatedly alloc/freed.
+            // It will be released in tryGivePAPage when a fresh home-pool page arrives,
+            // or immediately if paPage2 is occupied (a real page is already available).
+            if (!(paPage2 == nullptr && homePool != nullptr && &metadata.getOwnerPool() == homePool)) {
+                metadata.returnPage();
+                return true;
+            }
         }
         OccupancyTransition transition{};
         const auto allocd = metadata.allocatePages(smallPageCount, cb, transition);
@@ -828,9 +852,19 @@ size_t LocalPool::allocatePages(size_t smallPageCount, PageAllocationCallback cb
 }
 
 void LocalPool::tryGivePAPage(BigPageMetadata& page) {
-    // Never hold empty pages — they have nothing to give and would only occupy a slot.
+    // Never hold new empty pages — they have nothing to give and would only occupy a slot.
     if (page.isEmpty()) {
         page.returnPage();
+        return;
+    }
+
+    // Hysteresis release: if paPage1 is an empty home-pool page being held as a reservation,
+    // release it now that a fresh home-pool page has arrived to replace it.
+    if (paPage1 != nullptr && paPage1->isEmpty() && paPage2 == nullptr &&
+        homePool != nullptr && &paPage1->getOwnerPool() == homePool &&
+        &page.getOwnerPool() == homePool) {
+        paPage1->returnPage();
+        paPage1 = &page;
         return;
     }
 
