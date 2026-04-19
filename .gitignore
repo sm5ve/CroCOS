@@ -3,3 +3,5 @@ tests/build/
 tools/__pycache__
 stress_tests/build/
 CLAUDE.md
+compile_commands.json
+test.img

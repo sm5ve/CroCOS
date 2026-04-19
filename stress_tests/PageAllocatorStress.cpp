@@ -5,11 +5,12 @@
 // Usage:
 //   ./PageAllocatorStress [options]
 //
-//   --domains  N       NUMA domains (default 2)
-//   --pages    N       Big pages per domain (default 128)
-//   --threads  N       Worker threads per domain (default 4)
-//   --batch    N       Max pages per alloc call (default 64)
-//   --interval N       Report interval in milliseconds (default 5000)
+//   --domains   N      NUMA domains (default 2)
+//   --pages     N      Big pages per domain (default 128)
+//   --threads   N      Worker threads per domain (default 4)
+//   --batch     N      Max pages per alloc call (default 64)
+//   --interval  N      Report interval in milliseconds (default 5000)
+//   --intervals N      Stop after N report intervals (default 0 = run forever)
 //
 // Ctrl+C to stop gracefully.
 
@@ -48,18 +49,20 @@ struct Config {
     size_t numDomains        = 2;
     size_t bigPagesPerDomain = 128;
     size_t threadsPerDomain  = 4;
-    size_t maxBatch          = 4096;
+    size_t maxBatch          = 1;
     size_t reportIntervalMs  = 5000;
+    size_t maxIntervals      = 0;   // 0 = run until SIGINT/SIGTERM
 };
 
 static Config parseArgs(int argc, char** argv) {
     Config cfg;
     for (int i = 1; i < argc - 1; i++) {
-        if (strcmp(argv[i], "--domains")  == 0) cfg.numDomains        = atoi(argv[++i]);
-        if (strcmp(argv[i], "--pages")    == 0) cfg.bigPagesPerDomain = atoi(argv[++i]);
-        if (strcmp(argv[i], "--threads")  == 0) cfg.threadsPerDomain  = atoi(argv[++i]);
-        if (strcmp(argv[i], "--batch")    == 0) cfg.maxBatch          = atoi(argv[++i]);
-        if (strcmp(argv[i], "--interval") == 0) cfg.reportIntervalMs  = atoi(argv[++i]);
+        if (strcmp(argv[i], "--domains")   == 0) cfg.numDomains        = atoi(argv[++i]);
+        if (strcmp(argv[i], "--pages")     == 0) cfg.bigPagesPerDomain = atoi(argv[++i]);
+        if (strcmp(argv[i], "--threads")   == 0) cfg.threadsPerDomain  = atoi(argv[++i]);
+        if (strcmp(argv[i], "--batch")     == 0) cfg.maxBatch          = atoi(argv[++i]);
+        if (strcmp(argv[i], "--interval")  == 0) cfg.reportIntervalMs  = atoi(argv[++i]);
+        if (strcmp(argv[i], "--intervals") == 0) cfg.maxIntervals      = atoi(argv[++i]);
     }
     return cfg;
 }
@@ -230,7 +233,8 @@ static void workerThread(PageAllocatorImpl& impl,
 static void reporterThread(PageAllocatorImpl& impl,
                             std::vector<ThreadStats>& stats,
                             size_t totalPages,
-                            size_t reportIntervalMs) {
+                            size_t reportIntervalMs,
+                            size_t maxIntervals) {
     using Clock = std::chrono::steady_clock;
 
     auto startTime = Clock::now();
@@ -240,6 +244,8 @@ static void reporterThread(PageAllocatorImpl& impl,
     const size_t n = stats.size();
     std::vector<uint64_t> prevAlloc(n, 0), prevFree(n, 0),
                           prevPages(n, 0), prevOom(n, 0);
+
+    size_t intervalsDone = 0;
 
     while (!g_stop.load(std::memory_order_relaxed)) {
         std::this_thread::sleep_for(std::chrono::milliseconds(reportIntervalMs));
@@ -272,6 +278,10 @@ static void reporterThread(PageAllocatorImpl& impl,
                fmtNum(freeCount).c_str(),
                fmtNum(totalPages).c_str());
         fflush(stdout);
+
+        ++intervalsDone;
+        if (maxIntervals > 0 && intervalsDone >= maxIntervals)
+            g_stop.store(true, std::memory_order_relaxed);
     }
 }
 
@@ -307,6 +317,9 @@ int main(int argc, char** argv) {
            totalThreads, cfg.threadsPerDomain);
     printf("  Max alloc batch:  %zu pages\n", cfg.maxBatch);
     printf("  Report interval:  %zu ms\n", cfg.reportIntervalMs);
+    if (cfg.maxIntervals > 0)
+        printf("  Max intervals:    %zu  (%.1f s total)\n",
+               cfg.maxIntervals, cfg.maxIntervals * cfg.reportIntervalMs / 1000.0);
     printf("  Press Ctrl+C to stop.\n\n");
 
     printf("Building allocator...\n");
@@ -324,7 +337,8 @@ int main(int argc, char** argv) {
 
     // Launch reporter first so it's ready before workers start flooding
     std::thread reporter([&]() {
-        reporterThread(allocator.impl, stats, totalPages, cfg.reportIntervalMs);
+        reporterThread(allocator.impl, stats, totalPages,
+                       cfg.reportIntervalMs, cfg.maxIntervals);
     });
 
     // Launch worker threads
