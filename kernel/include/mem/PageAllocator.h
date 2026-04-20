@@ -91,10 +91,10 @@ class SmallPageAllocator {
     // bit=1: page is available for the current alloc CPU to hand out.
     // Non-atomic: only ever touched by the one CPU that currently owns this big page
     // for allocation (either a LocalPool CPU or a single NUMAPool allocating thread).
-    uint64_t allocBitmap[bitmapWordCount];
+    alignas(64) uint64_t allocBitmap[bitmapWordCount];
     // bit=1: page has been freed by any CPU and is waiting to be picked up.
     // Atomic: written concurrently by any freeing CPU; drained exclusively by the alloc CPU.
-    Atomic<uint64_t> freeBitmap[bitmapWordCount]{};
+    alignas(64) Atomic<uint64_t> freeBitmap[bitmapWordCount]{};
 
     kernel::mm::phys_addr baseAddr;
     SmallPageCount reservedCount = 0;

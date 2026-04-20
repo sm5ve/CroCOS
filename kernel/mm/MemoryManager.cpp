@@ -315,6 +315,7 @@ namespace kernel::mm{
     //
     // Returns: Virtual address of the mapped buffer
     void* reservePageAllocatorBufferForRange(phys_memory_range& range, size_t requiredBufferSize) {
+        klog() << "[PA] reserving " << requiredBufferSize << " bytes for page allocator\n";
         if constexpr (supportsSimpleBootstrapPageAllocatorMapping) {
             //Align range to page boundaries
             range.end &= ~(arch::smallPageSize - 1);
