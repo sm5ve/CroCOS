@@ -49,7 +49,7 @@ struct Config {
     size_t numDomains        = 2;
     size_t bigPagesPerDomain = 128;
     size_t threadsPerDomain  = 4;
-    size_t maxBatch          = 4096;
+    size_t maxBatch          = 1;
     size_t reportIntervalMs  = 5000;
     size_t maxIntervals      = 0;   // 0 = run until SIGINT/SIGTERM
 };

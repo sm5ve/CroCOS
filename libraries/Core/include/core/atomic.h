@@ -522,6 +522,13 @@ public:
         return atomic_fetch_xor(value, mask, order);
     }
 
+    T exchange(T desired, MemoryOrder order = SEQ_CST) {
+        if constexpr (is_pointer_v<T>)
+            return reinterpret_cast<T>(__atomic_exchange_n(&value, reinterpret_cast<S>(desired), order));
+        else
+            return static_cast<T>(__atomic_exchange_n(&value, static_cast<S>(desired), order));
+    }
+
     T operator &=(T mask) requires is_integral_v<T> {
         return atomic_and_fetch(value, mask);
     }

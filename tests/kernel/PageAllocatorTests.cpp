@@ -468,24 +468,28 @@ TEST(SmallPageAllocator_DoubleFreeDetected) {
     } catch (const AssertionFailure& e) {
         exceptionCaught = true;
         std::string message = e.what();
-        ASSERT_TRUE(message.find("already free") != std::string::npos);
+        ASSERT_TRUE(message.find("Double free") != std::string::npos);
     }
     ASSERT_TRUE(exceptionCaught);
 }
 
 TEST(SmallPageAllocator_FreeUnallocatedPageDetected) {
+    // The split-bitmap design detects a double-free via freeBitmap: if the bit
+    // is already set when free() is called, the assert fires.  Free a page
+    // twice without an intervening alloc to exercise this path.
     SmallPageAllocator spa(testBaseAddr);
+    spa.allocAll();
 
-    // Try to free a page that was never allocated (still in lazy-init range)
     PageRef page = PageRef::small(testBaseAddr);
+    spa.free(&page, 1);   // first free — sets bit in freeBitmap
 
     bool exceptionCaught = false;
     try {
-        spa.free(&page, 1);
+        spa.free(&page, 1);  // second free — bit already set → assert
     } catch (const AssertionFailure& e) {
         exceptionCaught = true;
         std::string message = e.what();
-        ASSERT_TRUE(message.find("already free") != std::string::npos);
+        ASSERT_TRUE(message.find("Double free") != std::string::npos);
     }
     ASSERT_TRUE(exceptionCaught);
 }
@@ -494,172 +498,85 @@ TEST(SmallPageAllocator_FreeUnallocatedPageDetected) {
 // Concurrent Tests
 // ============================================================================
 
-TEST(SmallPageAllocator_ConcurrentLazyInitAlloc) {
-    // Multiple threads race to allocate pages through the lazy init CAS path.
-    // All allocated pages must be unique and the total must equal the big page.
-    constexpr size_t numThreads = 4;
-    constexpr size_t pagesPerThread = PageAllocator::smallPagesPerBigPage / numThreads;
-
+TEST(SmallPageAllocator_DrainAllocBitmap) {
+    // The split-bitmap design uses a single alloc CPU.  Verify that a single
+    // thread can drain all 512 pages from a fresh allocator, producing unique,
+    // in-range, aligned addresses.
     SmallPageAllocator spa(testBaseAddr);
-    std::atomic<bool> start{false};
 
-    std::mutex perThreadMutex[numThreads];
-    std::vector<uint64_t> perThread[numThreads];
-
-    auto worker = [&](size_t id) {
-        while (!start.load(std::memory_order_acquire)) {}
-        std::vector<uint64_t> local;
-        spa.alloc([&](PageRef ref) {
-            local.push_back(ref.addr().value);
-        }, pagesPerThread);
-        std::lock_guard<std::mutex> lock(perThreadMutex[id]);
-        perThread[id] = std::move(local);
-    };
-
-    pauseTracking();
-    std::vector<std::thread> threads;
-    for (size_t i = 0; i < numThreads; i++) {
-        threads.emplace_back(worker, i);
-    }
-    resumeTracking();
-
-    start.store(true, std::memory_order_release);
-
-    pauseTracking();
-    for (auto& t : threads) t.join();
-    resumeTracking();
-
-    // Collect all allocated addresses
     std::set<uint64_t> allAddresses;
-    size_t totalAllocated = 0;
-    for (size_t i = 0; i < numThreads; i++) {
-        totalAllocated += perThread[i].size();
-        for (auto addr : perThread[i]) {
-            allAddresses.insert(addr);
-        }
-    }
+    spa.alloc([&](PageRef ref) {
+        allAddresses.insert(ref.addr().value);
+    }, PageAllocator::smallPagesPerBigPage);
 
-    // Every page should be unique (no double-allocation)
-    ASSERT_EQ(totalAllocated, allAddresses.size());
-    // Total should cover the entire big page
-    ASSERT_EQ(PageAllocator::smallPagesPerBigPage, totalAllocated);
-
-    // All addresses should be within range and aligned
+    ASSERT_EQ(PageAllocator::smallPagesPerBigPage, allAddresses.size());
     for (auto addr : allAddresses) {
         ASSERT_GE(addr, testBaseAddr.value);
         ASSERT_LT(addr, testBaseAddr.value + arch::bigPageSize);
         ASSERT_EQ(0ul, addr % arch::smallPageSize);
     }
+    ASSERT_TRUE(spa.isFull());
 }
 
-TEST(SmallPageAllocator_ConcurrentRingBufferAlloc) {
-    // Multiple threads race to allocate from the ring buffer path.
-    constexpr size_t numThreads = 4;
+TEST(SmallPageAllocator_DrainFreeBitmap) {
+    // Verify the freeBitmap→allocBitmap refresh path: start fully allocated,
+    // free all pages into freeBitmap, then a single alloc thread drains them.
     constexpr size_t totalPages = PageAllocator::smallPagesPerBigPage;
-    constexpr size_t pagesPerThread = totalPages / numThreads;
 
     MAKE_SPA_WITH_FREE_PAGES(spa, totalPages);
-    std::atomic<bool> start{false};
-
-    std::mutex perThreadMutex[numThreads];
-    std::vector<uint64_t> perThread[numThreads];
-
-    auto worker = [&](size_t id) {
-        while (!start.load(std::memory_order_acquire)) {}
-        std::vector<uint64_t> local;
-        spa.alloc([&](PageRef ref) {
-            local.push_back(ref.addr().value);
-        }, pagesPerThread);
-        std::lock_guard<std::mutex> lock(perThreadMutex[id]);
-        perThread[id] = std::move(local);
-    };
-
-    pauseTracking();
-    std::vector<std::thread> threads;
-    for (size_t i = 0; i < numThreads; i++) {
-        threads.emplace_back(worker, i);
-    }
-    resumeTracking();
-
-    start.store(true, std::memory_order_release);
-
-    pauseTracking();
-    for (auto& t : threads) t.join();
-    resumeTracking();
 
     std::set<uint64_t> allAddresses;
-    size_t totalAllocated = 0;
-    for (size_t i = 0; i < numThreads; i++) {
-        totalAllocated += perThread[i].size();
-        for (auto addr : perThread[i]) {
-            allAddresses.insert(addr);
-        }
-    }
+    spa.alloc([&](PageRef ref) {
+        allAddresses.insert(ref.addr().value);
+    }, totalPages);
 
-    ASSERT_EQ(totalAllocated, allAddresses.size());
-    ASSERT_EQ(totalPages, totalAllocated);
+    ASSERT_EQ(totalPages, allAddresses.size());
     ASSERT_TRUE(spa.isFull());
 }
 
 TEST(SmallPageAllocator_ConcurrentAllocAndFree) {
-    // Producer threads free pages back into the allocator while consumer
-    // threads allocate them. Tests the ring buffer under concurrent read/write.
-    constexpr size_t numAllocators = 2;
+    // One alloc thread + two free threads: freers concurrently write to
+    // freeBitmap while the single alloc thread refreshes from it.
+    // Verifies no double-allocation and that all freed pages are recovered.
     constexpr size_t numFreers = 2;
     constexpr size_t pagesPerFreer = 64;
     constexpr size_t totalPages = numFreers * pagesPerFreer;
 
-    // Start fully allocated so lazy init is exhausted, then free pages
-    // from the freer threads into the ring buffer.
     SmallPageAllocator spa(testBaseAddr);
     spa.allocAll();
 
     std::atomic<bool> start{false};
     std::atomic<size_t> totalFreed{0};
-    std::atomic<size_t> totalAllocated{0};
 
-    // Each freer owns a disjoint set of page indices to free
+    // Each freer owns a disjoint set of page addresses.
     auto freer = [&](size_t id) {
         while (!start.load(std::memory_order_acquire)) {}
         size_t base = id * pagesPerFreer;
-        // Free in small batches to interleave with allocators
         for (size_t i = 0; i < pagesPerFreer; i += 4) {
             size_t batch = std::min(size_t(4), pagesPerFreer - i);
             PageRef refs[4];
-            for (size_t j = 0; j < batch; j++) {
+            for (size_t j = 0; j < batch; j++)
                 refs[j] = PageRef::small(testBaseAddr + (base + i + j) * arch::smallPageSize);
-            }
             spa.free(refs, batch);
             totalFreed.fetch_add(batch, std::memory_order_relaxed);
         }
     };
 
-    std::mutex allocMutex[numAllocators];
-    std::vector<uint64_t> perAllocator[numAllocators];
-
-    auto allocator = [&](size_t id) {
+    // Single alloc thread: spin-allocates until it has recovered all freed pages.
+    std::vector<uint64_t> allocAddresses;
+    auto allocator = [&]() {
         while (!start.load(std::memory_order_acquire)) {}
-        std::vector<uint64_t> local;
-        size_t myTotal = 0;
-        size_t target = totalPages / numAllocators;
-        while (myTotal < target) {
-            size_t got = spa.alloc([&](PageRef ref) {
-                local.push_back(ref.addr().value);
-            }, std::min(size_t(4), target - myTotal));
-            myTotal += got;
+        while (allocAddresses.size() < totalPages) {
+            spa.alloc([&](PageRef ref) {
+                allocAddresses.push_back(ref.addr().value);
+            }, totalPages - allocAddresses.size());
         }
-        std::lock_guard<std::mutex> lock(allocMutex[id]);
-        perAllocator[id] = std::move(local);
     };
 
     pauseTracking();
     std::vector<std::thread> threads;
-    for (size_t i = 0; i < numFreers; i++) {
-        threads.emplace_back(freer, i);
-    }
-    for (size_t i = 0; i < numAllocators; i++) {
-        threads.emplace_back(allocator, i);
-    }
+    for (size_t i = 0; i < numFreers; i++) threads.emplace_back(freer, i);
+    threads.emplace_back(allocator);
     resumeTracking();
 
     start.store(true, std::memory_order_release);
@@ -668,20 +585,9 @@ TEST(SmallPageAllocator_ConcurrentAllocAndFree) {
     for (auto& t : threads) t.join();
     resumeTracking();
 
-    // Collect all allocated addresses
-    std::set<uint64_t> allAddresses;
-    size_t allocated = 0;
-    for (size_t i = 0; i < numAllocators; i++) {
-        allocated += perAllocator[i].size();
-        for (auto addr : perAllocator[i]) {
-            allAddresses.insert(addr);
-        }
-    }
-
-    // Every allocated page should be unique
-    ASSERT_EQ(allocated, allAddresses.size());
-    // Should have allocated all freed pages
-    ASSERT_EQ(totalPages, allocated);
+    ASSERT_EQ(totalPages, allocAddresses.size());
+    std::set<uint64_t> unique(allocAddresses.begin(), allocAddresses.end());
+    ASSERT_EQ(totalPages, unique.size());
 }
 
 // ============================================================================
@@ -1167,19 +1073,21 @@ TEST(SPA_Reserved_FreePageCount) {
 // ============================================================================
 
 TEST(SPA_Invariants_FreshAllocator) {
+    // Fresh allocator: all 512 pages are free in allocBitmap, none allocated.
     SmallPageAllocator spa(testBaseAddr);
     ASSERT_TRUE(spa.checkInvariants());
     ASSERT_EQ(0u, spa.getAllocatedCount());
     ASSERT_EQ(0u, spa.getReservedCount());
-    ASSERT_EQ(0u, spa.getBitmapPopcount());
+    ASSERT_EQ(PageAllocator::smallPagesPerBigPage, spa.getBitmapPopcount());
 }
 
 TEST(SPA_Invariants_AfterPartialAlloc) {
+    // After allocating 100 pages, 412 remain free in allocBitmap.
     SmallPageAllocator spa(testBaseAddr);
     spa.alloc([](PageRef){}, 100);
     ASSERT_TRUE(spa.checkInvariants());
     ASSERT_EQ(100u, spa.getAllocatedCount());
-    ASSERT_EQ(100u, spa.getBitmapPopcount());
+    ASSERT_EQ(PageAllocator::smallPagesPerBigPage - 100, spa.getBitmapPopcount());
 }
 
 TEST(SPA_Invariants_AfterAllocFree) {
@@ -1201,17 +1109,18 @@ TEST(SPA_Invariants_AfterAllocFree) {
 }
 
 TEST(SPA_Invariants_WithReserved) {
+    // Reserved pages are removed from allocBitmap and excluded from both bitmaps.
     SmallPageAllocator spa(testBaseAddr);
     spa.reservePage(testBaseAddr);
-    // Reserved page has its bit set in the bitmap but does not count toward allocatedCount.
     ASSERT_TRUE(spa.checkInvariants());
     ASSERT_EQ(1u, spa.getReservedCount());
-    ASSERT_EQ(1u, spa.getBitmapPopcount());  // reserved page bit is set
+    ASSERT_EQ(PageAllocator::smallPagesPerBigPage - 1, spa.getBitmapPopcount());
     ASSERT_EQ(0u, spa.getAllocatedCount());
 
     spa.alloc([](PageRef){}, 50);
     ASSERT_TRUE(spa.checkInvariants());
-    ASSERT_EQ(51u, spa.getBitmapPopcount());  // 50 allocated + 1 reserved
+    // 512 - 1 reserved - 50 allocated = 461 free pages remain in bitmaps.
+    ASSERT_EQ(PageAllocator::smallPagesPerBigPage - 51, spa.getBitmapPopcount());
     ASSERT_EQ(50u, spa.getAllocatedCount());
 }
 
@@ -1856,38 +1765,82 @@ TEST(NUMAPool_Free_SmallPagesFromMultipleBigPages) {
 // ============================================================================
 
 TEST(SmallPageAllocator_ConcurrentAllocFreeCycles) {
-    // Multiple threads independently do alloc-then-free cycles on the same
-    // allocator, stress-testing the ring buffer and lazy init atomics.
-    constexpr size_t numThreads = 4;
-    constexpr size_t cyclesPerThread = 2000;
-    constexpr size_t pagesPerCycle = 32;
+    // The split-bitmap design has a single-alloc-CPU invariant: only one thread
+    // allocates at a time (non-atomic allocBitmap), while any thread may free
+    // concurrently (atomic freeBitmap fetch_or).  This test validates:
+    //   - One alloc thread drains allocBitmap, then refreshes from freeBitmap.
+    //   - Multiple free threads write to freeBitmap concurrently with no data races.
+    constexpr size_t numFreeThreads = 3;
+    constexpr size_t totalCycles    = 3000;
+    constexpr size_t pagesPerCycle  = 16;
+    constexpr size_t totalPages     = pagesPerCycle * totalCycles;
 
-    // Set up with enough pages in the ring buffer for all threads
-    MAKE_SPA_WITH_FREE_PAGES(spa, numThreads * pagesPerCycle);
+    MAKE_SPA_WITH_FREE_PAGES(spa, pagesPerCycle);
     std::atomic<bool> start{false};
-    std::atomic<size_t> successfulCycles{0};
+    std::atomic<bool> done{false};
 
-    auto worker = [&](size_t) {
+    // A lock-free queue of pages waiting to be freed by the free threads.
+    // Each slot holds one page to free; producer (alloc thread) writes,
+    // consumers (free threads) atomically claim slots.
+    struct alignas(64) Slot {
+        std::atomic<uint64_t> val{static_cast<uint64_t>(-1)};
+    };
+    constexpr size_t queueSize = pagesPerCycle * 4;
+    std::vector<Slot> queue(queueSize);
+    std::atomic<size_t> writeIdx{0};
+    std::atomic<size_t> freeCount{0};
+    std::atomic<size_t> allocCount{0};
+
+    // Alloc thread: one cycle = alloc up to pagesPerCycle, enqueue each page.
+    auto allocWorker = [&]() {
         while (!start.load(std::memory_order_acquire)) {}
-        for (size_t cycle = 0; cycle < cyclesPerThread; cycle++) {
+        size_t cycles = 0;
+        while (cycles < totalCycles) {
             PageRef pages[pagesPerCycle];
             size_t got = 0;
-            spa.alloc([&](PageRef ref) {
-                pages[got++] = ref;
-            }, pagesPerCycle);
-
-            if (got > 0) {
-                spa.free(pages, got);
-                successfulCycles.fetch_add(1, std::memory_order_relaxed);
+            spa.alloc([&](PageRef ref) { pages[got++] = ref; }, pagesPerCycle);
+            if (got == 0) continue;
+            allocCount.fetch_add(got, std::memory_order_relaxed);
+            for (size_t i = 0; i < got; i++) {
+                size_t slot = writeIdx.fetch_add(1, std::memory_order_relaxed) % queueSize;
+                // Spin until the free threads have consumed the previous occupant.
+                uint64_t expected = static_cast<uint64_t>(-1);
+                while (!queue[slot].val.compare_exchange_weak(
+                           expected, pages[i].value,
+                           std::memory_order_release, std::memory_order_relaxed)) {
+                    expected = static_cast<uint64_t>(-1);
+                }
             }
+            cycles++;
+        }
+        done.store(true, std::memory_order_release);
+    };
+
+    // Free threads: each spins scanning the queue for filled slots and frees them.
+    auto freeWorker = [&]() {
+        while (!start.load(std::memory_order_acquire)) {}
+        size_t pos = 0;
+        while (!done.load(std::memory_order_relaxed) ||
+               freeCount.load(std::memory_order_relaxed) < allocCount.load(std::memory_order_relaxed)) {
+            Slot& slot = queue[pos % queueSize];
+            uint64_t v = slot.val.load(std::memory_order_acquire);
+            if (v == static_cast<uint64_t>(-1)) { pos++; continue; }
+            if (!slot.val.compare_exchange_strong(v, static_cast<uint64_t>(-1),
+                                                  std::memory_order_acquire,
+                                                  std::memory_order_relaxed)) {
+                pos++; continue;
+            }
+            PageRef ref{v};
+            spa.free(&ref, 1);
+            freeCount.fetch_add(1, std::memory_order_relaxed);
+            pos++;
         }
     };
 
     pauseTracking();
     std::vector<std::thread> threads;
-    for (size_t i = 0; i < numThreads; i++) {
-        threads.emplace_back(worker, i);
-    }
+    threads.emplace_back(allocWorker);
+    for (size_t i = 0; i < numFreeThreads; i++) threads.emplace_back(freeWorker);
     resumeTracking();
 
     start.store(true, std::memory_order_release);
@@ -1896,10 +1849,9 @@ TEST(SmallPageAllocator_ConcurrentAllocFreeCycles) {
     for (auto& t : threads) t.join();
     resumeTracking();
 
-    // At least some cycles should have succeeded
-    ASSERT_GT(successfulCycles.load(), 0ul);
-    // All pages should be back (each thread frees what it allocates)
-    ASSERT_EQ(numThreads * pagesPerCycle, spa.freePageCount());
+    ASSERT_EQ(allocCount.load(), freeCount.load());
+    ASSERT_TRUE(spa.checkInvariants());
+    ASSERT_EQ(pagesPerCycle, spa.freePageCount());
 }
 
 // ============================================================================

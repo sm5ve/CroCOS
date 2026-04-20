@@ -88,19 +88,25 @@ class SmallPageAllocator {
     using SmallPageCount = SmallestUInt_t<log2ceil(kernel::mm::PageAllocator::smallPagesPerBigPage + 1)>;
     constexpr static size_t bitmapWordCount = kernel::mm::PageAllocator::smallPagesPerBigPage / (8 * sizeof(uint64_t));
 
-    SmallPageIndex buffer[kernel::mm::PageAllocator::smallPagesPerBigPage];
-    Atomic<uint64_t> occupiedBitmap[bitmapWordCount]{};
-    MPMCRingBuffer<SmallPageIndex, false> ringBuffer;
-    kernel::mm::phys_addr baseAddr;
+    // bit=1: page is available for the current alloc CPU to hand out.
+    // Non-atomic: only ever touched by the one CPU that currently owns this big page
+    // for allocation (either a LocalPool CPU or a single NUMAPool allocating thread).
+    uint64_t allocBitmap[bitmapWordCount];
+    // bit=1: page has been freed by any CPU and is waiting to be picked up.
+    // Atomic: written concurrently by any freeing CPU; drained exclusively by the alloc CPU.
+    Atomic<uint64_t> freeBitmap[bitmapWordCount]{};
 
-    Atomic<SmallPageCount> lazilyInitialized = 0;
+    kernel::mm::phys_addr baseAddr;
     SmallPageCount reservedCount = 0;
     Atomic<SmallPageCount> allocatedCount = 0;
+    // First allocBitmap word index that might be non-zero. Non-atomic: alloc CPU only.
+    uint8_t allocHint = 0;
 
-    [[nodiscard]] bool isPageFree(SmallPageIndex index) const;
-    bool markPageFreeState(SmallPageIndex index, bool isFree);
     [[nodiscard]] kernel::mm::phys_addr fromPageIndex(SmallPageIndex index) const;
     [[nodiscard]] static OccupancyState stateFromCount(size_t count, size_t maxAlloc);
+    // Flush any remaining allocBitmap pages into freeBitmap before handing this
+    // big page back to the NUMAPool, so the next alloc CPU finds them in freeBitmap.
+    void flushAllocBitmap();
 
 public:
     explicit SmallPageAllocator(kernel::mm::phys_addr base);
@@ -119,13 +125,13 @@ public:
     void reservePage(kernel::mm::phys_addr addr);
 
 #ifdef CROCOS_TESTING
-    [[nodiscard]] size_t getAllocatedCount()  const { return static_cast<size_t>(allocatedCount.load(RELAXED)); }
-    [[nodiscard]] size_t getReservedCount()   const { return reservedCount; }
-    [[nodiscard]] size_t getRingBufferSize()  const { return ringBuffer.availableToRead(); }
-    [[nodiscard]] size_t getBitmapPopcount()  const;
-    // Invariant: bitmapPopcount == allocatedCount + reservedCount.
+    [[nodiscard]] size_t getAllocatedCount() const { return static_cast<size_t>(allocatedCount.load(RELAXED)); }
+    [[nodiscard]] size_t getReservedCount()  const { return reservedCount; }
+    // Count of pages currently in allocBitmap or freeBitmap (i.e. free and not reserved).
     // Safe to call only in quiescent (single-threaded) state.
-    [[nodiscard]] bool   checkInvariants()    const;
+    [[nodiscard]] size_t getBitmapPopcount() const;
+    // Invariant: bitmapPopcount + allocatedCount + reservedCount == smallPagesPerBigPage.
+    [[nodiscard]] bool   checkInvariants()   const;
 #endif
 };
 
@@ -136,6 +142,11 @@ class NUMAPool;
 class BigPageMetadata {
     SmallPageAllocator subpageAllocator;
     NUMAPool* ownerPool;
+    // Hint: true when this big page is currently cached in a LocalPool.
+    // Written by the LocalPool CPU (set on accept, cleared in returnPage).
+    // Read by freeing CPUs in NUMAPool::freePages to skip a paPages.remove()
+    // that is guaranteed to return NotPresent anyway.
+    Atomic<bool> inLocalPool{false};
 
 public:
     BigPageMetadata(NUMAPool& pool, kernel::mm::phys_addr baseAddr);
@@ -158,6 +169,9 @@ public:
     [[nodiscard]] NUMAPool& getOwnerPool() const { return *ownerPool; }
     void returnPage();
     [[nodiscard]] kernel::mm::phys_addr baseAddr() const {return subpageAllocator.baseAddr;}
+
+    void markInLocalPool()  { inLocalPool.store(true,  RELEASE); }
+    [[nodiscard]] bool isInLocalPool() const { return inLocalPool.load(ACQUIRE); }
 
 #ifdef CROCOS_TESTING
     // Number of subpages that are currently free (not allocated or reserved).

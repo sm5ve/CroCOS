@@ -97,28 +97,11 @@ static_assert(mm::PageAllocator::smallPagesPerBigPage * 2 <= arch::smallPageSize
 constexpr uint64_t pageRefRunMask = arch::smallPageSize - 2; //mask off all lower bits except for bottom
 
 // ==================== SmallPageAllocator ====================
-SmallPageAllocator::SmallPageAllocator(mm::phys_addr b) : ringBuffer(buffer, mm::PageAllocator::smallPagesPerBigPage), baseAddr(b){
 
-}
-
-void SmallPageAllocator::allocAll() {
-    assert(reservedCount == 0, "Can't allocate all from page with reserved subpages");
-    ringBuffer.clear();
-    lazilyInitialized = mm::PageAllocator::smallPagesPerBigPage;
-    for (auto& i : occupiedBitmap) {
-        i = static_cast<uint64_t>(-1);
-    }
-    allocatedCount.store(static_cast<SmallPageCount>(mm::PageAllocator::smallPagesPerBigPage - reservedCount), RELEASE);
-}
-
-void SmallPageAllocator::freeAll() {
-    assert(reservedCount == 0, "Can't free all from page with reserved subpages");
-    ringBuffer.clear();
-    lazilyInitialized = 0;
-    for (auto& i : occupiedBitmap) {
-        i = 0;
-    }
-    allocatedCount.store(0, RELEASE);
+SmallPageAllocator::SmallPageAllocator(mm::phys_addr b) : baseAddr(b) {
+    // All pages start available in the alloc bitmap.
+    // freeBitmap and allocatedCount are zero-initialized by BootstrapAllocator's memset.
+    for (auto& w : allocBitmap) w = ~0ull;
 }
 
 OccupancyState SmallPageAllocator::stateFromCount(const size_t count, const size_t maxAlloc) {
@@ -127,98 +110,104 @@ OccupancyState SmallPageAllocator::stateFromCount(const size_t count, const size
     return OccupancyState::Partial;
 }
 
+void SmallPageAllocator::allocAll() {
+    assert(reservedCount == 0, "Can't allocate all from page with reserved subpages");
+    for (auto& w : allocBitmap) w = 0;
+    for (auto& w : freeBitmap)  w.store(0, RELEASE);
+    allocatedCount.store(static_cast<SmallPageCount>(mm::PageAllocator::smallPagesPerBigPage), RELEASE);
+}
+
+void SmallPageAllocator::freeAll() {
+    assert(reservedCount == 0, "Can't free all from page with reserved subpages");
+    for (auto& w : allocBitmap) w = ~0ull;
+    for (auto& w : freeBitmap)  w.store(0, RELEASE);
+    allocatedCount.store(0, RELEASE);
+}
+
+mm::phys_addr SmallPageAllocator::fromPageIndex(SmallPageIndex index) const {
+    return baseAddr + index * arch::smallPageSize;
+}
+
+void SmallPageAllocator::flushAllocBitmap() {
+    // Move any unclaimed allocBitmap pages into freeBitmap so the next alloc CPU
+    // can find them after picking this big page up from the pool.
+    for (size_t w = 0; w < bitmapWordCount; w++) {
+        if (allocBitmap[w]) {
+            freeBitmap[w].fetch_or(allocBitmap[w], RELEASE);
+            allocBitmap[w] = 0;
+        }
+    }
+    allocHint = 0;
+}
+
 size_t SmallPageAllocator::alloc(PageAllocationCallback cb, size_t count, OccupancyTransition& transition) {
-    SmallPageCount allocated = 0;
+    size_t allocated = 0;
+    const size_t maxAlloc = mm::PageAllocator::smallPagesPerBigPage - reservedCount;
 
-    // Try to allocate from uninitialized range
-    while (allocated < count) {
-        auto prevLazilyInitialized = lazilyInitialized.load(ACQUIRE);
-        if (prevLazilyInitialized >= mm::PageAllocator::smallPagesPerBigPage) {
-            break;  // No more uninitialized pages
+    // Pass 0: scan allocBitmap starting at allocHint (zero atomics).
+    // Pass 1: drain freeBitmap into allocBitmap, reset allocHint, scan again.
+    for (int pass = 0; pass < 2 && allocated < count; pass++) {
+        if (pass == 1) {
+            size_t newHint = bitmapWordCount;
+            for (size_t w = 0; w < bitmapWordCount; w++) {
+                const uint64_t freed = freeBitmap[w].exchange(0ull, ACQ_REL);
+                if (freed) {
+                    allocBitmap[w] = freed;
+                    if (newHint == bitmapWordCount) newHint = w;
+                }
+            }
+            if (newHint == bitmapWordCount) break;  // truly nothing left
+            allocHint = static_cast<uint8_t>(newHint);
         }
 
-        // Claim a batch
-        const size_t needed = count - allocated;
-        const auto updatedValue = static_cast<SmallPageCount>(
-            min(mm::PageAllocator::smallPagesPerBigPage,
-                static_cast<size_t>(prevLazilyInitialized) + needed));
-
-        if (!lazilyInitialized.compare_exchange(prevLazilyInitialized, updatedValue, RELEASE, ACQUIRE)) {
-            continue;  // CAS failed, retry
-        }
-
-        // Process the claimed range [prevLazilyInitialized, updatedValue)
-        for (SmallPageCount i = prevLazilyInitialized; i < updatedValue; i++) {
-            if (isPageFree(i)) {  // Not reserved
-                const auto wasFree = markPageFreeState(i, false);  // Mark as occupied
-                assert(wasFree, "Double-allocated somehow?");
-                cb(PageRef::small(fromPageIndex(i)));
+        for (size_t w = allocHint; w < bitmapWordCount && allocated < count; w++) {
+            while (allocBitmap[w] && allocated < count) {
+                const int bit = __builtin_ctzll(allocBitmap[w]);
+                allocBitmap[w] &= allocBitmap[w] - 1;  // clear lowest set bit
+                cb(PageRef::small(fromPageIndex(static_cast<SmallPageIndex>(w * 64u + static_cast<unsigned>(bit)))));
                 allocated++;
             }
-            // If reserved, skip (it stays in occupied bitmap, we don't allocate it)
+            if (!allocBitmap[w] && w == allocHint) allocHint = static_cast<uint8_t>(w + 1);
         }
     }
 
-    // Fall back to ring buffer
-    allocated += static_cast<SmallPageCount>(ringBuffer.bulkReadBestEffort(count - allocated, [&](auto _, SmallPageIndex index) {
-        (void)_;
-        markPageFreeState(index, false);
-        cb(PageRef::small(fromPageIndex(index)));
-    }));
-
-    const size_t maxAlloc = mm::PageAllocator::smallPagesPerBigPage - reservedCount;
-    const auto prevAllocated = allocatedCount.fetch_add(allocated, ACQ_REL);
+    const auto prevAllocated = allocatedCount.fetch_add(static_cast<SmallPageCount>(allocated), ACQ_REL);
     transition.before = stateFromCount(prevAllocated, maxAlloc);
     transition.after  = stateFromCount(static_cast<size_t>(prevAllocated) + allocated, maxAlloc);
     return allocated;
 }
 
-bool SmallPageAllocator::markPageFreeState(SmallPageIndex index, bool isFree) {
-    constexpr auto bitmapWordSize = sizeof(occupiedBitmap[0]) * 8;
-    auto wordIndex = divideAndRoundDown(static_cast<size_t>(index), bitmapWordSize);
-    auto bitIndex = index % bitmapWordSize;
-    auto bit = 1ull << bitIndex;
-    uint64_t oldBitmapWord;
-    if (isFree) {
-        oldBitmapWord = occupiedBitmap[wordIndex].fetch_and(~bit, RELEASE);
-    }
-    else {
-        oldBitmapWord = occupiedBitmap[wordIndex].fetch_or(bit, RELEASE);
-    }
-    return !((oldBitmapWord >> bitIndex) & 1);
-}
-
-bool SmallPageAllocator::isPageFree(SmallPageIndex index) const {
-    constexpr auto bitmapWordSize = sizeof(occupiedBitmap[0]) * 8;
-    auto wordIndex = divideAndRoundDown(static_cast<size_t>(index), bitmapWordSize);
-    auto bitIndex = index % bitmapWordSize;
-    return !((occupiedBitmap[wordIndex].load(ACQUIRE) >> bitIndex) & 1);
-}
-
-bool SmallPageAllocator::isPageFree(PageRef page) const {
-    const auto addrRaw = page.addr().value;
-    const SmallPageIndex index = (addrRaw / arch::smallPageSize) % mm::PageAllocator::smallPagesPerBigPage;
-    return isPageFree(index);
-}
-
-void SmallPageAllocator::free(PageRef *pages, size_t count, OccupancyTransition& transition) {
-    ringBuffer.bulkWrite(count, [&](auto index, auto& entry) {
-        const auto addrRaw = pages[index].addr().value;
-        assert((addrRaw & ~(arch::bigPageSize - 1)) == baseAddr.value, "Tried to free small page in wrong small page allocator");
-        const SmallPageIndex pageIndex = (addrRaw / arch::smallPageSize) % mm::PageAllocator::smallPagesPerBigPage;
-        const bool wasFree = markPageFreeState(pageIndex, true);
-        assert(!wasFree, "Double free: page is already free");
-        entry = pageIndex;
-    });
+void SmallPageAllocator::free(PageRef* pages, size_t count, OccupancyTransition& transition) {
     const size_t maxAlloc = mm::PageAllocator::smallPagesPerBigPage - reservedCount;
+
+    uint64_t pending[bitmapWordCount] = {};
+    for (size_t i = 0; i < count; i++) {
+        const auto addrRaw = pages[i].addr().value;
+        assert((addrRaw & ~(arch::bigPageSize - 1)) == baseAddr.value,
+               "Tried to free small page in wrong small page allocator");
+        const SmallPageIndex pageIndex =
+            static_cast<SmallPageIndex>((addrRaw / arch::smallPageSize) % mm::PageAllocator::smallPagesPerBigPage);
+        pending[pageIndex / 64] |= 1ull << (pageIndex % 64);
+    }
+
+    for (size_t w = 0; w < bitmapWordCount; w++) {
+        if (!pending[w]) continue;
+        const uint64_t old = freeBitmap[w].fetch_or(pending[w], RELEASE);
+        assert(!(old & pending[w]), "Double free: page is already in freeBitmap");
+    }
+
     const auto prevAllocated = allocatedCount.fetch_sub(static_cast<SmallPageCount>(count), ACQ_REL);
     transition.before = stateFromCount(prevAllocated, maxAlloc);
     transition.after  = stateFromCount(static_cast<size_t>(prevAllocated) - count, maxAlloc);
 }
 
-size_t SmallPageAllocator::freePageCount() const {
-    const size_t maxAlloc = mm::PageAllocator::smallPagesPerBigPage - reservedCount;
-    return maxAlloc - static_cast<size_t>(allocatedCount.load(ACQUIRE));
+bool SmallPageAllocator::isPageFree(PageRef page) const {
+    const auto addrRaw = page.addr().value;
+    const SmallPageIndex index =
+        static_cast<SmallPageIndex>((addrRaw / arch::smallPageSize) % mm::PageAllocator::smallPagesPerBigPage);
+    const size_t w     = index / 64;
+    const uint64_t bit = 1ull << (index % 64);
+    return (allocBitmap[w] & bit) || (freeBitmap[w].load(ACQUIRE) & bit);
 }
 
 bool SmallPageAllocator::isEmpty() const {
@@ -226,19 +215,24 @@ bool SmallPageAllocator::isEmpty() const {
 }
 
 bool SmallPageAllocator::isFull() const {
-    return allocatedCount.load(ACQUIRE) == static_cast<SmallPageCount>(mm::PageAllocator::smallPagesPerBigPage - reservedCount);
+    return allocatedCount.load(ACQUIRE) ==
+           static_cast<SmallPageCount>(mm::PageAllocator::smallPagesPerBigPage - reservedCount);
 }
 
-mm::phys_addr SmallPageAllocator::fromPageIndex(SmallPageIndex index) const {
-    return baseAddr + index * arch::smallPageSize;
+size_t SmallPageAllocator::freePageCount() const {
+    return (mm::PageAllocator::smallPagesPerBigPage - reservedCount)
+           - static_cast<size_t>(allocatedCount.load(ACQUIRE));
 }
 
 void SmallPageAllocator::reservePage(kernel::mm::phys_addr addr) {
-    assert(lazilyInitialized.load(RELAXED) == 0, "Can only reserve pages during memory allocator init");
+    assert(allocatedCount.load(RELAXED) == 0, "Can only reserve pages during memory allocator init");
     assert(addr.value % arch::smallPageSize == 0, "Address must be page aligned");
-    SmallPageIndex index = (addr.value / arch::smallPageSize) % mm::PageAllocator::smallPagesPerBigPage;
-    const bool wasFreeBefore = markPageFreeState(index, false);
-    if (wasFreeBefore) {
+    const SmallPageIndex index =
+        static_cast<SmallPageIndex>((addr.value / arch::smallPageSize) % mm::PageAllocator::smallPagesPerBigPage);
+    const size_t w     = index / 64;
+    const uint64_t bit = 1ull << (index % 64);
+    if (allocBitmap[w] & bit) {
+        allocBitmap[w] &= ~bit;
         reservedCount++;
     }
 }
@@ -246,14 +240,16 @@ void SmallPageAllocator::reservePage(kernel::mm::phys_addr addr) {
 #ifdef CROCOS_TESTING
 size_t SmallPageAllocator::getBitmapPopcount() const {
     size_t total = 0;
-    for (const auto& word : occupiedBitmap) {
-        total += static_cast<size_t>(__builtin_popcountll(word.load(RELAXED)));
+    for (size_t w = 0; w < bitmapWordCount; w++) {
+        total += static_cast<size_t>(__builtin_popcountll(allocBitmap[w]));
+        total += static_cast<size_t>(__builtin_popcountll(freeBitmap[w].load(RELAXED)));
     }
     return total;
 }
 
 bool SmallPageAllocator::checkInvariants() const {
-    return getBitmapPopcount() == getAllocatedCount() + getReservedCount();
+    return getBitmapPopcount() + getAllocatedCount() + getReservedCount()
+           == mm::PageAllocator::smallPagesPerBigPage;
 }
 #endif
 
@@ -346,6 +342,8 @@ BigPageMetadata* NUMAPool::findMetadata(mm::phys_addr addr) {
 }
 
 void BigPageMetadata::returnPage() {
+    inLocalPool.store(false, RELEASE);
+    subpageAllocator.flushAllocBitmap();
     getOwnerPool().returnPage(*this);
 }
 
@@ -864,14 +862,15 @@ void LocalPool::tryGivePAPage(BigPageMetadata& page) {
         homePool != nullptr && &paPage1->getOwnerPool() == homePool &&
         &page.getOwnerPool() == homePool) {
         paPage1->returnPage();
+        page.markInLocalPool();
         paPage1 = &page;
         return;
     }
 
     // Without NUMA topology, accept pages with simple FIFO priority.
     if (topology == nullptr) {
-        if (paPage1 == nullptr) { paPage1 = &page; return; }
-        if (paPage2 == nullptr) { paPage2 = &page; return; }
+        if (paPage1 == nullptr) { page.markInLocalPool(); paPage1 = &page; return; }
+        if (paPage2 == nullptr) { page.markInLocalPool(); paPage2 = &page; return; }
         page.returnPage();
         return;
     }
@@ -891,12 +890,14 @@ void LocalPool::tryGivePAPage(BigPageMetadata& page) {
 
     // Pool is empty — paPage2 is always null when paPage1 is null.
     if (paPage1 == nullptr) {
+        page.markInLocalPool();
         paPage1 = &page;
         return;
     }
 
     // One slot occupied — insert in closest-first order, no eviction needed.
     if (paPage2 == nullptr) {
+        page.markInLocalPool();
         if (dNew <= distanceTo(*paPage1)) {
             paPage2 = paPage1;
             paPage1 = &page;
@@ -916,6 +917,7 @@ void LocalPool::tryGivePAPage(BigPageMetadata& page) {
 
     // The incoming page displaces paPage2. Re-sort so paPage1 remains the closer one.
     BigPageMetadata* toReturn = paPage2;
+    page.markInLocalPool();
     if (dNew <= distanceTo(*paPage1)) {
         paPage2 = paPage1;
         paPage1 = &page;
@@ -1047,7 +1049,12 @@ void NUMAPool::freePages(PageRef *pages, size_t count) {
         superpage->freePages(runStart, runSize, transition);
 
         if (transition.becameEmpty()) {
-            if (transition.before == OccupancyState::Partial) {
+            // If the page is cached in a LocalPool it is not in paPages, so skip the
+            // remove. The LocalPool will call returnPage() when it evicts or uses it up,
+            // which routes it correctly at that point.
+            if (superpage->isInLocalPool()) {
+                // nothing to do
+            } else if (transition.before == OccupancyState::Partial) {
                 // The page was partial, so it may be in paPages. Attempt to remove it and
                 // move it to freeBigPages. If remove returns NotPresent, a concurrent free
                 // of the same page beat us here: that thread will have already added it to
@@ -1060,8 +1067,7 @@ void NUMAPool::freePages(PageRef *pages, size_t count) {
                 if (paPages.remove(metadataIndex(superpage)) != AtomicBitPool::RemoveResult::NotPresent) {
                     freeBigPages.write(superpage);
                 }
-            }
-            else {
+            } else {
                 // Full→Empty: page was never in paPages, return it directly.
                 freeBigPages.write(superpage);
             }
