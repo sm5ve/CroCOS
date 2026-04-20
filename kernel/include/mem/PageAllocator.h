@@ -139,7 +139,7 @@ public:
 
 class NUMAPool;
 
-class BigPageMetadata {
+class alignas(64) BigPageMetadata {
     SmallPageAllocator subpageAllocator;
     NUMAPool* ownerPool;
     // Hint: true when this big page is currently cached in a LocalPool.
