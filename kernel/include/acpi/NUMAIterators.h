@@ -142,8 +142,8 @@ struct HMAT_SLLBI {
     uint8_t  dataType;             // HMATDataType
     uint8_t  minXferSize;
     uint8_t  reserved1;
-    uint16_t numInitiatorDomains;
-    uint16_t numTargetDomains;
+    uint32_t numInitiatorDomains;
+    uint32_t numTargetDomains;
     uint32_t reserved2;
     uint64_t entryBaseUnit;        // picoseconds (latency) or MB/s (bandwidth)
     // Followed by: uint32_t initiatorDomains[numInitiatorDomains]
