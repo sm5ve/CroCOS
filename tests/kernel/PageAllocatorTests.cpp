@@ -782,7 +782,7 @@ struct TestPageAllocatorImpl {
             NUMAPool* domainPool = createNumaPool(real, spec.ranges, domainId);
             numaPools.push(domainPool);
             for (size_t cpu : spec.cpuIds) {
-                localPools[cpu] = createLocalPool(real, &topology, domainPool);
+                localPools[cpu] = createLocalPool(real, &topology, domainPool, static_cast<arch::ProcessorID>(cpu));
             }
         }
 
@@ -1488,8 +1488,10 @@ TEST(BigPageMetadata_OccupancyTransition_EmptyToPartial) {
     ASSERT_NE(nullptr, meta);
     ASSERT_TRUE(meta->isEmpty());
 
+    meta->markAllocHolder(arch::getCurrentProcessorID());
     OccupancyTransition t{};
     meta->allocatePages(10, [](PageRef){}, t);
+    meta->releaseAllocHolder();
 
     ASSERT_EQ(OccupancyState::Empty,   t.before);
     ASSERT_EQ(OccupancyState::Partial, t.after);
@@ -1505,8 +1507,10 @@ TEST(BigPageMetadata_OccupancyTransition_EmptyToFull) {
     BigPageMetadata* meta = p.pool->findMetadata(phys_addr(testDomainBase(0)));
     ASSERT_NE(nullptr, meta);
 
+    meta->markAllocHolder(arch::getCurrentProcessorID());
     OccupancyTransition t{};
     meta->allocatePages(PageAllocator::smallPagesPerBigPage, [](PageRef){}, t);
+    meta->releaseAllocHolder();
 
     ASSERT_EQ(OccupancyState::Empty, t.before);
     ASSERT_EQ(OccupancyState::Full,  t.after);
@@ -1522,8 +1526,10 @@ TEST(BigPageMetadata_OccupancyTransition_FullToPartial) {
     ASSERT_NE(nullptr, meta);
 
     std::vector<PageRef> pages;
+    meta->markAllocHolder(arch::getCurrentProcessorID());
     meta->allocatePages(PageAllocator::smallPagesPerBigPage,
                         [&](PageRef r){ pages.push_back(r); });
+    meta->releaseAllocHolder();
     ASSERT_TRUE(meta->isFull());
 
     OccupancyTransition t{};
@@ -1544,7 +1550,9 @@ TEST(BigPageMetadata_OccupancyTransition_PartialToEmpty) {
     ASSERT_NE(nullptr, meta);
 
     std::vector<PageRef> pages;
+    meta->markAllocHolder(arch::getCurrentProcessorID());
     meta->allocatePages(50, [&](PageRef r){ pages.push_back(r); });
+    meta->releaseAllocHolder();
 
     OccupancyTransition t{};
     meta->freePages(pages.data(), pages.size(), t);

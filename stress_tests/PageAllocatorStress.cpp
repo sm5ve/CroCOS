@@ -49,7 +49,7 @@ struct Config {
     size_t numDomains        = 2;
     size_t bigPagesPerDomain = 128;
     size_t threadsPerDomain  = 4;
-    size_t maxBatch          = 1;
+    size_t maxBatch          = 2048;
     size_t reportIntervalMs  = 5000;
     size_t maxIntervals      = 0;   // 0 = run until SIGINT/SIGTERM
 };
@@ -162,7 +162,7 @@ struct StressAllocatorImpl {
 
             size_t cpuBase = d * threadsPerDomain;
             for (size_t t = 0; t < threadsPerDomain; t++)
-                localPools[cpuBase + t] = createLocalPool(real, &topology, domainPool);
+                localPools[cpuBase + t] = createLocalPool(real, &topology, domainPool, static_cast<arch::ProcessorID>(cpuBase + t));
         }
 
         impl = createPageAllocator(move(numaPools), localPools,

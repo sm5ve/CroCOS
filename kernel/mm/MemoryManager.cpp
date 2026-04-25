@@ -408,7 +408,7 @@ namespace kernel::mm{
                 NUMAPool* singlePool = createNumaPool(realAlloc, ranges);
                 numaPools.push(singlePool);
                 for (size_t cpu = 0; cpu < processorCount; cpu++)
-                    localPools[cpu] = createLocalPool(realAlloc, nullptr, singlePool);
+                    localPools[cpu] = createLocalPool(realAlloc, nullptr, singlePool, static_cast<arch::ProcessorID>(cpu));
             } else {
                 for (size_t domainIdx = 0; domainIdx < partition.rangesPerDomain.size(); domainIdx++) {
                     auto& ranges = partition.rangesPerDomain[domainIdx];
@@ -438,7 +438,7 @@ namespace kernel::mm{
                     numaPools.push(domainPool);
                     for (size_t cpu = 0; cpu < processorCount; cpu++) {
                         if (partition.processorDomain[cpu] == domainId)
-                            localPools[cpu] = createLocalPool(realAlloc, topology, domainPool);
+                            localPools[cpu] = createLocalPool(realAlloc, topology, domainPool, static_cast<arch::ProcessorID>(cpu));
                     }
                 }
 
@@ -471,7 +471,7 @@ namespace kernel::mm{
             NUMAPool* singlePool = createNumaPool(realAlloc, usableRanges);
             numaPools.push(singlePool);
             for (size_t cpu = 0; cpu < processorCount; cpu++)
-                localPools[cpu] = createLocalPool(realAlloc, topology, singlePool);
+                localPools[cpu] = createLocalPool(realAlloc, topology, singlePool, static_cast<arch::ProcessorID>(cpu));
         }
 
         unmapTemporaryWindow();

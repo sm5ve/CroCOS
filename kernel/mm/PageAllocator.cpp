@@ -48,7 +48,7 @@ T* BootstrapAllocator::allocate(const size_t count, size_t alignment) {
     current = reinterpret_cast<uint8_t *>(aligned);
     T* result = static_cast<T *>(static_cast<void*>(current));
     current += size;
-    memset(static_cast<void *>(result), 0, paddedObjSize);
+    memset(static_cast<void *>(result), 0, size);
 
     assert(current <= end, "Bootstrap allocator overflow");
     return result;
@@ -192,6 +192,7 @@ void SmallPageAllocator::free(PageRef* pages, size_t count, OccupancyTransition&
 
     for (size_t w = 0; w < bitmapWordCount; w++) {
         if (!pending[w]) continue;
+        assert(!(atomic_load(allocBitmap[w]) & pending[w]), "Double free: page is already in allocBitmap");
         const uint64_t old = freeBitmap[w].fetch_or(pending[w], RELEASE);
         assert(!(old & pending[w]), "Double free: page is already in freeBitmap");
     }
@@ -259,6 +260,8 @@ BigPageMetadata::BigPageMetadata(NUMAPool& pool, mm::phys_addr baseAddr)
     : subpageAllocator(baseAddr), ownerPool(&pool) {}
 
 size_t BigPageMetadata::allocatePages(size_t smallPageCount, PageAllocationCallback cb, OccupancyTransition& transition) {
+    assert(allocHolder.load() != SIZE_MAX, "Allocating from big page without setting alloc holder");
+    assert(allocHolder.load() == static_cast<size_t>(arch::getCurrentProcessorID()), "Two CPUs allocating from same page simultaneously");
     size_t allocated = 0;
     while (allocated < smallPageCount) {
         allocated += subpageAllocator.alloc(cb, smallPageCount - allocated, transition);
@@ -341,10 +344,10 @@ BigPageMetadata* NUMAPool::findMetadata(mm::phys_addr addr) {
     return nullptr;
 }
 
-void BigPageMetadata::returnPage() {
-    inLocalPool.store(false, RELEASE);
+void BigPageMetadata::returnPage(bool evictedAsFull) {
     subpageAllocator.flushAllocBitmap();
-    getOwnerPool().returnPage(*this);
+    releaseAllocHolder();
+    getOwnerPool().returnPage(*this, evictedAsFull);
 }
 
 void NUMAPool::reserveRange(mm::phys_memory_range range) {
@@ -606,8 +609,8 @@ NUMAPool* createNumaPool(BootstrapAllocator& alloc,
     return poolPtr;
 }
 
-LocalPool* createLocalPool(BootstrapAllocator& alloc, const kernel::numa::NUMATopology* topology, NUMAPool* homePool) {
-    return alloc.allocate<LocalPool>([&](LocalPool& lp) { new(&lp) LocalPool(topology, homePool); }, 1);
+LocalPool* createLocalPool(BootstrapAllocator& alloc, const kernel::numa::NUMATopology* topology, NUMAPool* homePool, arch::ProcessorID pid) {
+    return alloc.allocate<LocalPool>([&](LocalPool& lp) { new(&lp) LocalPool(topology, homePool, pid); }, 1);
 }
 
 // ==================== PageAllocatorImpl ====================
@@ -829,7 +832,7 @@ size_t LocalPool::allocatePages(size_t smallPageCount, PageAllocationCallback cb
         smallPageCount -= allocd;
         allocatedPages += allocd;
         if (transition.becameFull()) {
-            metadata.returnPage();
+            metadata.returnPage(true);
             return true;
         }
         return false;
@@ -862,20 +865,19 @@ void LocalPool::tryGivePAPage(BigPageMetadata& page) {
         homePool != nullptr && &paPage1->getOwnerPool() == homePool &&
         &page.getOwnerPool() == homePool) {
         paPage1->returnPage();
-        page.markInLocalPool();
+        page.markAllocHolder(pid);
         paPage1 = &page;
         return;
     }
 
     // Without NUMA topology, accept pages with simple FIFO priority.
     if (topology == nullptr) {
-        if (paPage1 == nullptr) { page.markInLocalPool(); paPage1 = &page; return; }
-        if (paPage2 == nullptr) { page.markInLocalPool(); paPage2 = &page; return; }
+        if (paPage1 == nullptr) { page.markAllocHolder(pid); paPage1 = &page; return; }
+        if (paPage2 == nullptr) { page.markAllocHolder(pid); paPage2 = &page; return; }
         page.returnPage();
         return;
     }
 
-    const arch::ProcessorID pid = arch::getCurrentProcessorID();
     const kernel::numa::DomainID cpuDomain = topology->domainForCpu(pid).id;
 
     // Read latency from the CPU's home domain to a page's NUMA domain, used as
@@ -890,14 +892,14 @@ void LocalPool::tryGivePAPage(BigPageMetadata& page) {
 
     // Pool is empty — paPage2 is always null when paPage1 is null.
     if (paPage1 == nullptr) {
-        page.markInLocalPool();
+        page.markAllocHolder(pid);
         paPage1 = &page;
         return;
     }
 
     // One slot occupied — insert in closest-first order, no eviction needed.
     if (paPage2 == nullptr) {
-        page.markInLocalPool();
+        page.markAllocHolder(pid);
         if (dNew <= distanceTo(*paPage1)) {
             paPage2 = paPage1;
             paPage1 = &page;
@@ -917,7 +919,7 @@ void LocalPool::tryGivePAPage(BigPageMetadata& page) {
 
     // The incoming page displaces paPage2. Re-sort so paPage1 remains the closer one.
     BigPageMetadata* toReturn = paPage2;
-    page.markInLocalPool();
+    page.markAllocHolder(pid);
     if (dNew <= distanceTo(*paPage1)) {
         paPage2 = paPage1;
         paPage1 = &page;
@@ -928,9 +930,9 @@ void LocalPool::tryGivePAPage(BigPageMetadata& page) {
     toReturn->returnPage();
 }
 
-void NUMAPool::returnPage(BigPageMetadata &metadata) {
+void NUMAPool::returnPage(BigPageMetadata &metadata, const bool evictedAsFull) {
     //Returning a full page is a noop
-    if (metadata.isFull()) {
+    if (evictedAsFull || metadata.isFull()) {
         return;
     }
     if (metadata.isEmpty()) {
@@ -970,10 +972,13 @@ size_t NUMAPool::allocatePages(size_t smallPageCount, const PageAllocationCallba
 
     smallPageCount -= allocatedPages;
 
+    const auto pid = arch::getCurrentProcessorID();
+
     const auto allocateFromPAPages = [&](const size_t maxRetries) {
         while (smallPageCount > 0) {
-            if (size_t paIndex; paPages.getAny(arch::getCurrentProcessorID(), paIndex, maxRetries) == AtomicBitPool::GetResult::Success) {
+            if (size_t paIndex; paPages.getAny(pid, paIndex, maxRetries) == AtomicBitPool::GetResult::Success) {
                 auto& bigPage = bigPageMetadataBuffer[paIndex];
+                bigPage.markAllocHolder(pid);
                 OccupancyTransition stateChange {};
                 while (true) {
                     const auto allocated = bigPage.allocatePages(smallPageCount, cb, stateChange);
@@ -981,10 +986,12 @@ size_t NUMAPool::allocatePages(size_t smallPageCount, const PageAllocationCallba
                     smallPageCount -= allocated;
                     allocatedPages += allocated;
                     if (stateChange.becameFull()) {
+                        bigPage.releaseAllocHolder();
                         break;
                     }
                     if (smallPageCount == 0) {
                         paPageRemaining = &bigPage;
+                        bigPage.releaseAllocHolder();
                         break;
                     }
                 }
@@ -1023,7 +1030,9 @@ size_t NUMAPool::allocatePages(size_t smallPageCount, const PageAllocationCallba
         else {
             allocatedPages += (grabbedPages - 1) * mm::PageAllocator::smallPagesPerBigPage;
             smallPageCount -= (grabbedPages - 1) * mm::PageAllocator::smallPagesPerBigPage;
+            paPageRemaining->markAllocHolder(pid);
             const auto smallAllocd = paPageRemaining -> allocatePages(smallPageCount, cb);
+            paPageRemaining->releaseAllocHolder();
             smallPageCount -= smallAllocd;
             allocatedPages += smallAllocd;
             assert(smallPageCount == 0, "OK, we should only be here if we need less than a full big page, and yet the allocation wasn't totally fulfilled");
@@ -1052,7 +1061,7 @@ void NUMAPool::freePages(PageRef *pages, size_t count) {
             // If the page is cached in a LocalPool it is not in paPages, so skip the
             // remove. The LocalPool will call returnPage() when it evicts or uses it up,
             // which routes it correctly at that point.
-            if (superpage->isInLocalPool()) {
+            if (superpage->hasAllocHolder()) {
                 // nothing to do
             } else if (transition.before == OccupancyState::Partial) {
                 // The page was partial, so it may be in paPages. Attempt to remove it and
@@ -1074,6 +1083,12 @@ void NUMAPool::freePages(PageRef *pages, size_t count) {
         }
         else if (transition.becameAvailable()) {
             // Full→Partial: page newly has free subpages; publish it for small-page allocation.
+            size_t spinCount = 0;
+            while (superpage->hasAllocHolder()) {
+                tight_spin();
+                spinCount++;
+                assert(spinCount < 100000, "stuck waiting for alloc holder to release hold");
+            }
             paPages.add(metadataIndex(superpage));
         }
     };

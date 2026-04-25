@@ -142,11 +142,13 @@ class NUMAPool;
 class alignas(64) BigPageMetadata {
     [[no_unique_address]] SmallPageAllocator subpageAllocator;
     NUMAPool* ownerPool;
-    // Hint: true when this big page is currently cached in a LocalPool.
-    // Written by the LocalPool CPU (set on accept, cleared in returnPage).
+    // SIZE_MAX when not held for allocation by any CPU; otherwise the ProcessorID of
+    // the CPU currently allocating small pages from this big page (always via a LocalPool).
+    // Written by the LocalPool CPU (set on accept via markAllocHolder, cleared in returnPage).
     // Read by freeing CPUs in NUMAPool::freePages to skip a paPages.remove()
     // that is guaranteed to return NotPresent anyway.
-    Atomic<bool> inLocalPool{false};
+    // Only valid transitions: SIZE_MAX → pid and pid → SIZE_MAX (never pid → pid directly).
+    Atomic<size_t> allocHolder{static_cast<size_t>(-1)};
 
 public:
     BigPageMetadata(NUMAPool& pool, kernel::mm::phys_addr baseAddr);
@@ -167,11 +169,16 @@ public:
     [[nodiscard]] bool hasReservedSubpages() const { return subpageAllocator.hasReservedPages(); }
 
     [[nodiscard]] NUMAPool& getOwnerPool() const { return *ownerPool; }
-    void returnPage();
+    void returnPage(bool evictedAsFull = false);
     [[nodiscard]] kernel::mm::phys_addr baseAddr() const {return subpageAllocator.baseAddr;}
 
-    void markInLocalPool()  { inLocalPool.store(true,  RELEASE); }
-    [[nodiscard]] bool isInLocalPool() const { return inLocalPool.load(ACQUIRE); }
+    void markAllocHolder(arch::ProcessorID pid) {
+        size_t expected = static_cast<size_t>(-1);
+        const bool claimed = allocHolder.compare_exchange(expected, static_cast<size_t>(pid), ACQUIRE, RELAXED);
+        assert(claimed, "markAllocHolder: page already held for allocation by another CPU");
+    }
+    void releaseAllocHolder() { allocHolder.store(static_cast<size_t>(-1), RELEASE); }
+    [[nodiscard]] bool hasAllocHolder() const { return allocHolder.load(ACQUIRE) != static_cast<size_t>(-1); }
 
 #ifdef CROCOS_TESTING
     // Number of subpages that are currently free (not allocated or reserved).
@@ -217,7 +224,7 @@ public:
 
     [[nodiscard]] size_t allocatePages(size_t smallPageCount, PageAllocationCallback cb, BigPageMetadata*& paPageRemaining, AllocFlags flags = {});
     void freePages(PageRef* pages, size_t count);
-    void returnPage(BigPageMetadata& metadata);
+    void returnPage(BigPageMetadata& metadata, bool evictedAsFull = false);
 
     // Reserve all small pages within range that fall in this pool.
     // Must be called before any allocation (init-time only).
@@ -249,9 +256,10 @@ class LocalPool {
     BigPageMetadata* paPage2 = nullptr;
     const kernel::numa::NUMATopology* topology;
     NUMAPool* homePool = nullptr;
+    const arch::ProcessorID pid;
 public:
-    explicit LocalPool(const kernel::numa::NUMATopology* topo = nullptr, NUMAPool* home = nullptr)
-        : topology(topo), homePool(home) {}
+    explicit LocalPool(const kernel::numa::NUMATopology* topo = nullptr, NUMAPool* home = nullptr, arch::ProcessorID proc_id = 0)
+        : topology(topo), homePool(home), pid(proc_id) {}
 
     [[nodiscard]] size_t allocatePages(size_t smallPageCount, PageAllocationCallback cb, AllocFlags flags = {});
     void tryGivePAPage(BigPageMetadata& page);
@@ -328,7 +336,7 @@ NUMAPool*         createNumaPool(BootstrapAllocator& alloc,
                                  kernel::numa::DomainID domain = kernel::numa::DomainID{0});
 LocalPool*        createLocalPool(BootstrapAllocator& alloc,
                                   const kernel::numa::NUMATopology* topology = nullptr,
-                                  NUMAPool* homePool = nullptr);
+                                  NUMAPool* homePool = nullptr, arch::ProcessorID procId = 0);
 
 // CONTRACT: perDomainAllocs must be sized to (maxDomainID + 1), with nullptr
 // slots for any domain IDs that have no physical memory.  This allows O(1)

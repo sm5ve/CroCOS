@@ -457,6 +457,22 @@ public:
         }
     }
 
+    bool compare_exchange_weak(T& expected, T desired,
+                          MemoryOrder success_order = SEQ_CST,
+                          MemoryOrder failure_order = SEQ_CST) {
+        if(failure_order > success_order) failure_order = success_order;
+        if constexpr (is_pointer_v<T>) {
+            S exp_storage = reinterpret_cast<S>(expected);
+            bool result = atomic_cmpxchg(value, exp_storage, reinterpret_cast<S>(desired),
+                                         true, success_order, failure_order);
+            if (!result) expected = reinterpret_cast<T>(exp_storage);
+            return result;
+        } else {
+            return atomic_cmpxchg(value, static_cast<S&>(expected), static_cast<S>(desired),
+                                  true, success_order, failure_order);
+        }
+    }
+
     bool compare_exchange_v(T expected, T desired,
                           MemoryOrder success_order = SEQ_CST,
                           MemoryOrder failure_order = SEQ_CST) {
