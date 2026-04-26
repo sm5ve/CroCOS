@@ -17,16 +17,6 @@
 #include <mem/mm.h>
 #include <core/Flags.h>
 
-// ==================== Allocation Behavior Flags ====================
-
-enum class AllocBehavior : uint32_t {
-    BIG_PAGE_ONLY   = 1u << 0,  // Only allocate big (2MiB) pages; never fall back to small pages
-    LOCAL_DOMAIN_ONLY = 1u << 1,  // Only allocate from the calling CPU's local pool; never go to NUMA pool
-    GRACEFUL_OOM   = 1u << 2,
-};
-template<> struct is_flags_enum<AllocBehavior> { static constexpr bool value = true; };
-using AllocFlags = Flags<AllocBehavior>;
-
 // ==================== Struct Definitions ====================
 
 class BootstrapAllocator {
@@ -50,20 +40,6 @@ public:
     [[nodiscard]] size_t bytesRemaining() const;
     [[nodiscard]] bool isFake() const {return measuring;}
 };
-
-struct PageRef {
-    uint64_t value;
-
-    static PageRef small(kernel::mm::phys_addr addr);
-    static PageRef big(kernel::mm::phys_addr addr);
-
-    [[nodiscard]] kernel::mm::PageSize size() const;
-    [[nodiscard]] kernel::mm::phys_addr addr() const;
-
-    bool operator==(const PageRef& other) const {return other.value == value;}
-} __attribute__((packed));
-
-constexpr auto INVALID_PAGE_REF = PageRef{static_cast<uint64_t>(-1)};
 
 using PageAllocationCallback = FunctionRef<void(PageRef)>;
 
@@ -314,6 +290,8 @@ private:
     [[nodiscard]] inline size_t allocateFallback(size_t smallPageCount, PageAllocationCallback cb, AllocFlags flags);
 public:
     [[nodiscard]] size_t allocatePages(size_t smallPageCount, PageAllocationCallback cb, AllocFlags flags = {});
+    [[nodiscard]] size_t allocatePages(size_t smallPageCount, PageAllocationCallback cb, kernel::numa::DomainID targetDomain, AllocFlags flags = {});
+    [[nodiscard]] size_t allocatePages(size_t smallPageCount, PageAllocationCallback cb, arch::ProcessorID targetProc, AllocFlags flags = {});
     void freePages(PageRef* pages, size_t count);
 
     // Reserve all small pages in range across all pools (init-time only).

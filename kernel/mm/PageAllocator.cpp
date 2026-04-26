@@ -717,6 +717,57 @@ void PageAllocatorImpl::reserveRange(mm::phys_memory_range range) {
     }
 }
 
+size_t PageAllocatorImpl::allocatePages(size_t smallPageCount, PageAllocationCallback cb, kernel::numa::DomainID targetDomain, AllocFlags flags) {
+    size_t allocatedPages = 0;
+
+    const auto allocFromPool = [&](NUMAPool& pool) {
+        if (smallPageCount == 0) return;
+        BigPageMetadata* extras = nullptr;
+        const auto allocCount = pool.allocatePages(smallPageCount, cb, extras, flags);
+        smallPageCount -= min(allocCount, smallPageCount);
+        allocatedPages += allocCount;
+        // extras has its allocHolder already released by NUMAPool; returnPage flushes
+        // allocBitmap → freeBitmap and routes it back to paPages or freeBigPages.
+        if (extras != nullptr) {
+            extras->returnPage();
+        }
+    };
+
+    if (numaPolicy != nullptr) {
+        if (flags.has(AllocBehavior::LOCAL_DOMAIN_ONLY)) {
+            if (targetDomain.value < numDomains && numaPools[targetDomain.value] != nullptr) {
+                allocFromPool(*numaPools[targetDomain.value]);
+            }
+        } else {
+            for (const auto domain : numaPolicy->domainOrder(targetDomain)) {
+                if (smallPageCount == 0) break;
+                if (domain.value < numDomains && numaPools[domain.value] != nullptr) {
+                    allocFromPool(*numaPools[domain.value]);
+                }
+            }
+        }
+    } else {
+        allocFromPool(nearestPool(static_cast<arch::ProcessorID>(0)));
+    }
+
+    if (smallPageCount > 0 && unownedPool != nullptr) {
+        allocFromPool(*unownedPool);
+    }
+
+    if (!flags.has(AllocBehavior::GRACEFUL_OOM) && smallPageCount != 0) {
+        assertNotReached("Panic!!! Page allocator is out of memory");
+    }
+
+    return allocatedPages;
+}
+
+size_t PageAllocatorImpl::allocatePages(size_t smallPageCount, PageAllocationCallback cb, arch::ProcessorID targetProc, AllocFlags flags) {
+    const kernel::numa::DomainID targetDomain = (numaPolicy != nullptr)
+        ? numaPolicy->homeDomain(targetProc)
+        : cpuNearestPool[targetProc];
+    return allocatePages(smallPageCount, cb, targetDomain, flags);
+}
+
 size_t PageAllocatorImpl::allocateFast(size_t smallPageCount, PageAllocationCallback cb, AllocFlags flags) {
     if (!flags.has(AllocBehavior::BIG_PAGE_ONLY) && smallPageCount < mm::PageAllocator::smallPagesPerBigPage) {
         const auto pid = arch::getCurrentProcessorID();
@@ -1196,14 +1247,84 @@ bool PageAllocatorImpl::isPageAllocated(PageRef page) {
 PageAllocatorImpl* gPageAllocator = nullptr;
 
 namespace kernel::mm::PageAllocator {
+
+    // ---- Single-page allocation ----
+
     phys_addr allocateSmallPage() {
         phys_addr result{};
         (void)gPageAllocator->allocatePages(1, [&](PageRef ref) { result = ref.addr(); });
         return result;
     }
 
+    phys_addr allocateSmallPage(numa::DomainID targetDomain) {
+        phys_addr result{};
+        (void)gPageAllocator->allocatePages(1, [&](PageRef ref) { result = ref.addr(); }, targetDomain);
+        return result;
+    }
+
+    phys_addr allocateSmallPage(arch::ProcessorID targetProc) {
+        phys_addr result{};
+        (void)gPageAllocator->allocatePages(1, [&](PageRef ref) { result = ref.addr(); }, targetProc);
+        return result;
+    }
+
+    phys_addr allocateBigPage() {
+        phys_addr result{};
+        (void)gPageAllocator->allocatePages(smallPagesPerBigPage, [&](PageRef ref) { result = ref.addr(); }, AllocBehavior::BIG_PAGE_ONLY);
+        return result;
+    }
+
+    phys_addr allocateBigPage(numa::DomainID targetDomain) {
+        phys_addr result{};
+        (void)gPageAllocator->allocatePages(smallPagesPerBigPage, [&](PageRef ref) { result = ref.addr(); }, targetDomain, AllocBehavior::BIG_PAGE_ONLY);
+        return result;
+    }
+
+    phys_addr allocateBigPage(arch::ProcessorID targetProc) {
+        phys_addr result{};
+        (void)gPageAllocator->allocatePages(smallPagesPerBigPage, [&](PageRef ref) { result = ref.addr(); }, targetProc, AllocBehavior::BIG_PAGE_ONLY);
+        return result;
+    }
+
+    // ---- Bulk allocation ----
+
+    static size_t allocatePagesImpl(size_t count, FunctionRef<void(PageRef)> cb, AllocFlags flags) {
+        if (flags.has(AllocBehavior::BIG_PAGE_ONLY))
+            return gPageAllocator->allocatePages(count * smallPagesPerBigPage, cb, flags) / smallPagesPerBigPage;
+        return gPageAllocator->allocatePages(count, cb, flags);
+    }
+
+    size_t allocatePages(size_t count, FunctionRef<void(PageRef)> cb, AllocFlags flags) {
+        return allocatePagesImpl(count, cb, flags);
+    }
+
+    size_t allocatePages(size_t count, FunctionRef<void(PageRef)> cb, numa::DomainID targetDomain, AllocFlags flags) {
+        if (flags.has(AllocBehavior::BIG_PAGE_ONLY))
+            return gPageAllocator->allocatePages(count * smallPagesPerBigPage, cb, targetDomain, flags) / smallPagesPerBigPage;
+        return gPageAllocator->allocatePages(count, cb, targetDomain, flags);
+    }
+
+    size_t allocatePages(size_t count, FunctionRef<void(PageRef)> cb, arch::ProcessorID targetProc, AllocFlags flags) {
+        if (flags.has(AllocBehavior::BIG_PAGE_ONLY))
+            return gPageAllocator->allocatePages(count * smallPagesPerBigPage, cb, targetProc, flags) / smallPagesPerBigPage;
+        return gPageAllocator->allocatePages(count, cb, targetProc, flags);
+    }
+
+    // ---- Single-page free ----
+
     void freeSmallPage(phys_addr addr) {
         PageRef ref = PageRef::small(addr);
         gPageAllocator->freePages(&ref, 1);
+    }
+
+    void freeBigPage(phys_addr addr) {
+        PageRef ref = PageRef::big(addr);
+        gPageAllocator->freePages(&ref, 1);
+    }
+
+    // ---- Bulk free ----
+
+    void freePages(PageRef* pages, size_t count) {
+        gPageAllocator->freePages(pages, count);
     }
 }

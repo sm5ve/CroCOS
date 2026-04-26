@@ -9,8 +9,19 @@
 #include <core/TypeTraits.h>
 #include <arch.h>
 #include <core/ds/Vector.h>
+#include <core/Flags.h>
 #include <mem/MemTypes.h>
 #include <mem/NUMA.h>
+
+// ==================== Allocation Behavior Flags ====================
+
+enum class AllocBehavior : uint32_t {
+    BIG_PAGE_ONLY     = 1u << 0,  // Only allocate big (2MiB) pages; never fall back to small pages
+    LOCAL_DOMAIN_ONLY = 1u << 1,  // Only allocate from the calling CPU's local pool; never go to NUMA pool
+    GRACEFUL_OOM      = 1u << 2,  // Return a short count instead of panicking when memory is exhausted
+};
+template<> struct is_flags_enum<AllocBehavior> { static constexpr bool value = true; };
+using AllocFlags = Flags<AllocBehavior>;
 
 namespace kernel::mm{
 
@@ -25,8 +36,33 @@ namespace kernel::mm{
         constexpr size_t smallPagesPerBigPage = arch::bigPageSize / arch::smallPageSize;
         constexpr size_t bigPagesInMaxMemory = arch::maxMemorySupported / arch::bigPageSize;
 
+        // ---- Single-page allocation (returns phys_addr) ----
+
         phys_addr allocateSmallPage();
+        phys_addr allocateSmallPage(numa::DomainID targetDomain);
+        phys_addr allocateSmallPage(arch::ProcessorID targetProc);
+
+        phys_addr allocateBigPage();
+        phys_addr allocateBigPage(numa::DomainID targetDomain);
+        phys_addr allocateBigPage(arch::ProcessorID targetProc);
+
+        // ---- Bulk allocation (callback receives one PageRef per page) ----
+        // count is in small pages normally; in big pages when BIG_PAGE_ONLY is set.
+        // Returns the number of pages allocated. With default flags this always equals
+        // count (panics on OOM). Pass GRACEFUL_OOM to get a short count instead.
+
+        size_t allocatePages(size_t count, FunctionRef<void(PageRef)> cb, AllocFlags flags = {});
+        size_t allocatePages(size_t count, FunctionRef<void(PageRef)> cb, numa::DomainID targetDomain, AllocFlags flags = {});
+        size_t allocatePages(size_t count, FunctionRef<void(PageRef)> cb, arch::ProcessorID targetProc, AllocFlags flags = {});
+
+        // ---- Single-page free ----
+
         void freeSmallPage(phys_addr);
+        void freeBigPage(phys_addr);
+
+        // ---- Bulk free (pages array is sorted in place) ----
+
+        void freePages(PageRef* pages, size_t count);
     }
 
     namespace vm {

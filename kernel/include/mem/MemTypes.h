@@ -77,6 +77,20 @@ namespace kernel::mm{
     };
 }
 
+struct PageRef {
+    uint64_t value;
+
+    static PageRef small(kernel::mm::phys_addr addr);
+    static PageRef big(kernel::mm::phys_addr addr);
+
+    [[nodiscard]] kernel::mm::PageSize size() const;
+    [[nodiscard]] kernel::mm::phys_addr addr() const;
+
+    bool operator==(const PageRef& other) const { return other.value == value; }
+} __attribute__((packed));
+
+constexpr auto INVALID_PAGE_REF = PageRef{static_cast<uint64_t>(-1)};
+
 inline Core::PrintStream& operator<<(Core::PrintStream& ps, kernel::mm::phys_addr paddr){
     return ps << "phys_addr(" << (void*)paddr.value << ")";
 }
