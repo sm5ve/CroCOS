@@ -14,8 +14,8 @@ namespace kernel::mm::VMSubstrate {
 
     void ensureTLBEntryFresh(void*);
 
-    void* malloc(size_t size);
-    void free(void*);
+    void* vmsmalloc(size_t size);
+    void vmsfree(void*);
 
     template <typename T>
     struct SafePtr {
@@ -37,7 +37,7 @@ namespace kernel::mm::VMSubstrate {
 
     template <typename T, typename... Ts>
     SafePtr<T> make(Ts&&... args) {
-        auto* mem = malloc(sizeof(T));
+        auto* mem = vmsmalloc(sizeof(T));
         return new (mem) T(forward<Ts>(args)...);
     }
 
@@ -45,7 +45,7 @@ namespace kernel::mm::VMSubstrate {
     void destroy(SafePtr<T> obj) {
         if (obj) {
             obj->~T();
-            free(obj.raw());
+            vmsfree(obj.raw());
         }
     }
 }
