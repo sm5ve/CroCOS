@@ -22,6 +22,10 @@ namespace kernel::mm{
         phys_addr operator&(const size_t mask) const {return phys_addr(value & mask);}
         phys_addr& operator&=(const size_t mask) {value &= mask; return *this;}
         bool operator==(const phys_addr & other) const {return value == other.value;}
+        bool operator<(const phys_addr & other) const {return value < other.value;}
+        bool operator>(const phys_addr & other) const {return value > other.value;}
+        bool operator<=(const phys_addr & other) const {return value <= other.value;}
+        bool operator>=(const phys_addr & other) const {return value >= other.value;}
     };
 
     struct virt_addr {
@@ -36,6 +40,10 @@ namespace kernel::mm{
         virt_addr& operator+=(const size_t offset) {value += offset; return *this;}
         virt_addr& operator-=(const size_t offset) {value -= offset; return *this;}
         bool operator==(const virt_addr & other) const {return value == other.value;}
+        bool operator<(const virt_addr & other) const {return value < other.value;}
+        bool operator>(const virt_addr & other) const {return value > other.value;}
+        bool operator<=(const virt_addr & other) const {return value <= other.value;}
+        bool operator>=(const virt_addr & other) const {return value >= other.value;}
     };
 
     struct phys_memory_range {
@@ -46,7 +54,7 @@ namespace kernel::mm{
         [[nodiscard]] bool contains(phys_addr) const;
         [[nodiscard]] phys_memory_range intersect(phys_memory_range) const;
 
-        bool operator==(const phys_memory_range & other) const {return start == other.start && end == other.end;};
+        bool operator==(const phys_memory_range & other) const {return start == other.start && end == other.end;}
     };
 
     struct virt_memory_range {
@@ -56,6 +64,7 @@ namespace kernel::mm{
         [[nodiscard]] bool isEmpty() const;
         [[nodiscard]] bool contains(virt_addr) const;
         [[nodiscard]] virt_memory_range intersect(virt_memory_range) const;
+        bool operator==(const virt_memory_range & other) const {return start == other.start && end == other.end;}
     };
 
     enum class PageMappingPermissions : uint8_t {

@@ -54,6 +54,9 @@ namespace arch{
     inline void flushTLB() {
         amd64::flushTLB();
     }
+    inline void invlpg(mm::virt_addr addr) {
+        amd64::invlpg(addr.value);
+    }
     using MemMapIterator = amd64::MultibootMMapIterator;
     inline size_t debugEarlyBootCPUID() {
         return amd64::debugEarlyBootCPUID();
@@ -252,6 +255,9 @@ namespace arch{
         }
        return true;
     }(), "Page tables must have a power-of-two number of entries");
+    constexpr bool recursivePageTablesSupported = supportsRecursivePageTables(pageTableDescriptor);
+    static_assert(recursivePageTablesSupported,
+        "Page table descriptor does not satisfy recursive page table invariants");
 #endif
 
     size_t getCacheLineSize();

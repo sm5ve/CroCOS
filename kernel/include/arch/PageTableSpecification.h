@@ -105,10 +105,41 @@ namespace arch{
             return kernel::mm::virt_addr(static_cast<UnsignedType>(sgn));
         }
 
-        [[nodiscard]] constexpr size_t getTableSize(size_t level) {
-            return entryCount[level] * levels[level].entryWidth / 8;
-        }
     };
+
+    // Verifies that the descriptor satisfies the four invariants required for the recursive
+    // page table trick (self-referential entries that let you access/modify PTEs via
+    // virtual addresses without a separate physical mapping window):
+    //   1. Every level's table fits in exactly one leaf page.
+    //   2. The present bit occupies the same position at every level.
+    //   3. The leaf/subtable discriminator bit and its polarity are consistent across all
+    //      levels that support subtables.
+    //   4. Subtable physical address encoding at every level matches the bottom-level leaf
+    //      encoding, so a self-referential subtable entry is a valid PT-level leaf entry.
+    template <size_t N>
+    constexpr bool supportsRecursivePageTables(const PageTableDescriptor<N>& desc) {
+        const size_t leafPageSize = desc.entryCount[N - 1] * desc.levels[N - 1].entryWidth / 8;
+        for (size_t i = 0; i < N; i++) {
+            if (desc.getTableSize(i) != leafPageSize) return false;
+        }
+        for (size_t i = 1; i < N; i++) {
+            if (desc.levels[i].present != desc.levels[0].present) return false;
+        }
+        for (size_t i = 1; i < N; i++) {
+            if (!desc.levels[i].canBeSubtable) continue;
+            if (desc.levels[i].leafIndexBit != desc.levels[0].leafIndexBit) return false;
+            if (desc.levels[i].isLeafOnOne != desc.levels[0].isLeafOnOne) return false;
+        }
+        const auto& leafEnc = desc.levels[N - 1].leafEncoding;
+        for (size_t i = 0; i < N; i++) {
+            if (!desc.levels[i].canBeSubtable) continue;
+            const auto& sub = desc.levels[i].subtableEncoding;
+            if (sub.physAddrLowestBit != leafEnc.physAddrLowestBit) return false;
+            if (sub.physAddrTotalBits != leafEnc.physAddrTotalBits) return false;
+            if (sub.addrStartInEntry != leafEnc.addrStartInEntry) return false;
+        }
+        return true;
+    }
 
     constexpr bool isPTESizeValid(size_t size){
         switch (size) {
@@ -301,7 +332,7 @@ namespace arch{
         void setAccessedFlag(const bool accessed = true) {
             const PageTableEntryBit accessedBit = encoding.getEncoding(isLeafEntry()).properties.accessed;
 #ifdef PARANOID_PAGING_ASSERTIONS
-            assert(hasDirtyBit(), "Cannot mark global on this entry");
+            assert(hasAccessedBit(), "Cannot set accessed flag on this entry");
 #endif
             DataType bit = (1ULL << accessedBit);
             DataType newData = data & (~bit);
