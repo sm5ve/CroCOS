@@ -342,8 +342,8 @@ TEST(HRRBScanOnCompleteNoItemsLost) {
 // Comparison: read failure rates under heavy write contention
 //
 // Runs the same MPMC workload on:
-//   (A) SimpleMPMCRingBuffer<size_t, true, false>  — no scan
-//   (B) SimpleMPMCRingBuffer<size_t, true, true>   — scan, no HRRB
+//   (A) MPMCRingBuffer<size_t, true, false>  — no scan
+//   (B) MPMCRingBuffer<size_t, true, true>   — scan, no HRRB
 //   (C) HighReliabilityRingBuffer<size_t, true, true> — scan + HRRB
 //
 // Asserts that (C) has zero read failures.

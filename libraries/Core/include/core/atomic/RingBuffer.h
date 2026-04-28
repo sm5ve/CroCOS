@@ -91,246 +91,6 @@ inline void advanceCompletionHeadWithScan(Atomic<size_t>& head, const Atomic<siz
 
 } // namespace RingBufferInternal
 
-// Three-head MPMC ring buffer for use cases with structural guarantees against overflow.
-//
-// Heads:
-//   writeHead    - next slot to claim for writing
-//   writtenHead  - next slot available for reading (published writes)
-//   readHead     - next slot to claim for reading
-//
-// No protection against readers seeing stale data if the buffer overflows;
-// the caller must structurally guarantee that overflow cannot occur.
-//
-// Template parameters:
-//   T              - element type
-//   Owning         - if true, buffer owns its backing storage
-//   ScanOnComplete - if true, uses per-slot generation counters with SEQ_CST
-//                    ordering so that out-of-order producers can return early
-//                    and a single scanner coalesces all completed batches into
-//                    one head advancement. If false, each producer spin-waits
-//                    its turn (lower per-operation overhead, no gen counter arrays).
-//
-// Design note: all head pointers are monotonically increasing logical positions,
-// mapped to physical slots via (head % capacity). This avoids ABA problems in
-// CAS loops and simplifies generation tracking. This assumes fewer than 2^64
-// total operations over the lifetime of the buffer, which is not reachable in
-// practice (at 1 billion ops/sec, overflow would take ~585 years).
-template<typename T, bool Owning = true, bool ScanOnComplete = false>
-class SimpleMPMCRingBuffer {
-    T* buffer;
-    Atomic<size_t>* writeGenCounters;
-    size_t cap;
-
-    Atomic<size_t> writeHead{size_t(0)};
-    Atomic<size_t> writtenHead{size_t(0)};
-    Atomic<size_t> readHead{size_t(0)};
-
-    bool tryClaimWrite(size_t count, size_t& claimed) {
-        do {
-            claimed = writeHead.load(ACQUIRE);
-            size_t rh = readHead.load(ACQUIRE);
-            if (count > cap - (claimed - rh)) return false;
-        } while (!writeHead.compare_exchange(claimed, claimed + count, ACQUIRE, RELAXED));
-        return true;
-    }
-
-    template<typename WriteCallback>
-    void executeWrite(size_t claimed, size_t count, WriteCallback& callback) {
-        for (size_t i = 0; i < count; i++) {
-            callback(i, buffer[(claimed + i) % cap]);
-        }
-        if constexpr (ScanOnComplete) {
-            for (size_t i = 0; i < count; i++) {
-                size_t slotIdx = (claimed + i) % cap;
-                size_t gen = (claimed + i) / cap + 1;
-				writeGenCounters[slotIdx].store(gen, SEQ_CST);
-            }
-            RingBufferInternal::advanceCompletionHeadWithScan(
-                writtenHead, writeGenCounters, cap, claimed, claimed + count);
-        } else {
-            RingBufferInternal::advanceCompletionHead(writtenHead, claimed, claimed + count);
-        }
-    }
-
-    bool tryClaimRead(size_t count, size_t& claimed) {
-        do {
-            claimed = readHead.load(ACQUIRE);
-            size_t wth = writtenHead.load(ACQUIRE);
-            if (count > wth - claimed) return false;
-        } while (!readHead.compare_exchange(claimed, claimed + count, ACQUIRE, RELAXED));
-        return true;
-    }
-
-    template<typename ReadCallback>
-    void executeRead(size_t claimed, size_t count, ReadCallback& callback) {
-        for (size_t i = 0; i < count; i++) {
-            callback(i, static_cast<const T&>(buffer[(claimed + i) % cap]));
-        }
-    }
-
-    size_t claimBestEffortWrite(size_t maxCount, size_t& claimed) {
-        size_t actualCount;
-        do {
-            claimed = writeHead.load(ACQUIRE);
-            size_t rh = readHead.load(ACQUIRE);
-            size_t available = cap - (claimed - rh);
-            actualCount = min(maxCount, available);
-            if (actualCount == 0) return 0;
-        } while (!writeHead.compare_exchange(claimed, claimed + actualCount, ACQUIRE, RELAXED));
-        return actualCount;
-    }
-
-    size_t claimBestEffortRead(size_t maxCount, size_t& claimed) {
-        size_t actualCount;
-        do {
-            claimed = readHead.load(ACQUIRE);
-            size_t wth = writtenHead.load(ACQUIRE);
-            size_t available = wth - claimed;
-            actualCount = min(maxCount, available);
-            if (actualCount == 0) return 0;
-        } while (!readHead.compare_exchange(claimed, claimed + actualCount, ACQUIRE, RELAXED));
-        return actualCount;
-    }
-
-    // Non-copyable, non-movable
-    SimpleMPMCRingBuffer(const SimpleMPMCRingBuffer&) = delete;
-    SimpleMPMCRingBuffer& operator=(const SimpleMPMCRingBuffer&) = delete;
-
-    template<typename U, bool O> friend class BroadcastRingBuffer;
-
-public:
-    // Owning constructor: allocates internal storage
-    explicit SimpleMPMCRingBuffer(size_t capacity) requires (Owning)
-        : writeGenCounters(nullptr), cap(capacity) {
-        buffer = static_cast<T*>(operator new(sizeof(T) * capacity, std::align_val_t{alignof(T)}));
-        if constexpr (ScanOnComplete) {
-            writeGenCounters = new Atomic<size_t>[capacity]();
-        }
-    }
-
-    // Non-owning constructor: borrows external buffer (no gen counters)
-    SimpleMPMCRingBuffer(T* buf, size_t capacity) requires (!Owning && !ScanOnComplete)
-        : buffer(buf), writeGenCounters(nullptr), cap(capacity) {}
-
-    // Non-owning constructor: borrows external buffer and gen counter array
-    SimpleMPMCRingBuffer(T* buf, size_t capacity, Atomic<size_t>* wgc) requires (!Owning && ScanOnComplete)
-        : buffer(buf), writeGenCounters(wgc), cap(capacity) {}
-
-    ~SimpleMPMCRingBuffer() {
-        if constexpr (Owning) {
-            size_t rh = readHead.load(RELAXED);
-            size_t wth = writtenHead.load(RELAXED);
-            if constexpr (!is_trivially_copyable_v<T>) {
-                for (size_t i = rh; i < wth; i++) {
-                    buffer[i % cap].~T();
-                }
-            }
-            operator delete(buffer, std::align_val_t{alignof(T)});
-            delete[] writeGenCounters;
-        }
-    }
-
-    // All-or-nothing write. For SimpleMPMCRingBuffer this is identical to tryBulkWrite
-    // since structural guarantees prevent overflow.
-    template<typename WriteCallback>
-    bool bulkWrite(size_t count, WriteCallback callback) {
-        return tryBulkWrite(count, forward<WriteCallback>(callback));
-    }
-
-    // Non-blocking all-or-nothing write.
-    // Returns true if successful, false if insufficient space.
-    template<typename WriteCallback>
-    bool tryBulkWrite(size_t count, WriteCallback callback) {
-        size_t claimed;
-        if (!tryClaimWrite(count, claimed)) return false;
-        executeWrite(claimed, count, callback);
-        return true;
-    }
-
-    // Best-effort: write up to count items, returns actual count written.
-    template<typename WriteCallback>
-    size_t bulkWriteBestEffort(size_t count, WriteCallback callback) {
-        size_t claimed;
-        size_t actualCount = claimBestEffortWrite(count, claimed);
-        if (actualCount == 0) return 0;
-        executeWrite(claimed, actualCount, callback);
-        return actualCount;
-    }
-
-    // All-or-nothing read. For SimpleMPMCRingBuffer this is identical to tryBulkRead.
-    template<typename ReadCallback>
-    bool bulkRead(size_t count, ReadCallback callback) {
-        return tryBulkRead(count, forward<ReadCallback>(callback));
-    }
-
-    // Non-blocking all-or-nothing read.
-    // Returns true if successful, false if insufficient items available.
-    template<typename ReadCallback>
-    bool tryBulkRead(size_t count, ReadCallback callback) {
-        size_t claimed;
-        if (!tryClaimRead(count, claimed)) return false;
-        executeRead(claimed, count, callback);
-        return true;
-    }
-
-    // Best-effort: read up to count items, returns actual count read.
-    template<typename ReadCallback>
-    size_t bulkReadBestEffort(size_t count, ReadCallback callback) {
-        size_t claimed;
-        size_t actualCount = claimBestEffortRead(count, claimed);
-        if (actualCount == 0) return 0;
-        executeRead(claimed, actualCount, callback);
-        return actualCount;
-    }
-
-    // Single-item write with spin-wait (mirrors bulkWrite semantics).
-    // Returns true if successful, false if the buffer is full.
-    bool write(const T& value) {
-        return bulkWrite(1, [&](size_t, T& slot) { slot = value; });
-    }
-
-    // Non-blocking single-item write (mirrors tryBulkWrite semantics).
-    // Returns true if successful, false if the buffer is full.
-    bool tryWrite(const T& value) {
-        return tryBulkWrite(1, [&](size_t, T& slot) { slot = value; });
-    }
-
-    // Non-blocking single-item read (mirrors tryBulkRead semantics).
-    // Writes the item into `out` and returns true if one was available, false otherwise.
-    bool tryRead(T& out) {
-        return tryBulkRead(1, [&](size_t, const T& slot) { out = slot; });
-    }
-
-    // Conservative estimate of slots available for writing.
-    size_t availableToWrite() const {
-        return cap - (writeHead.load(ACQUIRE) - readHead.load(ACQUIRE));
-    }
-
-    // Conservative estimate of slots available for reading.
-    size_t availableToRead() const {
-        return writtenHead.load(ACQUIRE) - readHead.load(ACQUIRE);
-    }
-
-    bool empty() const { return availableToRead() == 0; }
-    bool full() const { return availableToWrite() == 0; }
-
-    // Discard all readable items. Must not be called concurrently with
-    // any other operation on this buffer.
-    void clear() {
-        if constexpr (Owning) {
-            size_t rh = readHead.load(RELAXED);
-            size_t wth = writtenHead.load(RELAXED);
-            if constexpr (!is_trivially_copyable_v<T>) {
-                for (size_t i = rh; i < wth; i++) {
-                    buffer[i % cap].~T();
-                }
-            }
-        }
-        readHead.store(writtenHead.load(RELAXED), RELAXED);
-    }
-};
-
-
 // Four-head MPMC ring buffer for general use where overflow must be prevented.
 //
 // Heads:
@@ -339,7 +99,7 @@ public:
 //   readingHead  - next slot to claim for reading
 //   readHead     - fully consumed slot (read completion pointer)
 //
-// Key difference from SimpleMPMCRingBuffer:
+// Key distinction from BroadcastRingBuffer:
 //   bulkWrite checks against readingHead to assess space availability
 //   (optimistic: reads are in-flight and will complete), then spin-waits
 //   per-slot for readHead to catch up before actually writing.
@@ -352,7 +112,11 @@ public:
 //                    ordering on both write and read completion heads for
 //                    scan-ahead with early return. If false, uses simple spin-wait.
 //
-// See SimpleMPMCRingBuffer for the monotonic head pointer design note.
+// Design note: all head pointers are monotonically increasing logical positions,
+// mapped to physical slots via (head % capacity). This avoids ABA problems in
+// CAS loops and simplifies generation tracking. This assumes fewer than 2^64
+// total operations over the lifetime of the buffer, which is not reachable in
+// practice (at 1 billion ops/sec, overflow would take ~585 years).
 template<typename T, bool Owning = true, bool ScanOnComplete = false>
 class MPMCRingBuffer {
     T* buffer;
@@ -637,9 +401,10 @@ public:
 // Broadcast MPMC ring buffer where all registered consumers must read each item
 // before its slot can be reused by producers.
 //
-// Wraps a SimpleMPMCRingBuffer for the write path and manages per-consumer read
-// heads externally. A slot is only freed (global readHead advances) when every
-// consumer has acknowledged it.
+// Manages the write path with three heads (writeHead, writtenHead, readHead) and
+// per-consumer read heads externally. A slot is only freed (global readHead advances)
+// when every consumer has acknowledged it. The write-side logic is structurally
+// guaranteed not to overflow (callers must ensure in-flight items never exceed capacity).
 //
 // Ack counters pack a 32-bit generation tag and 32-bit consumer count into a
 // single Atomic<uint64_t>. The generation disambiguates reuse of physical slots
@@ -658,11 +423,48 @@ public:
 // correspond to a logical consumer ID (e.g., CPU ID for TLB shootdowns).
 template<typename T, bool Owning = true>
 class BroadcastRingBuffer {
-    SimpleMPMCRingBuffer<T, Owning, false> buffer;
+    T* data;
+    size_t cap;
+    Atomic<size_t> writeHead{size_t(0)};
+    Atomic<size_t> writtenHead{size_t(0)};
+    Atomic<size_t> readHead{size_t(0)};
+
     Atomic<size_t>* readHeads;      // one per consumer, single-writer
     Atomic<uint64_t>* ackCounters;  // one per physical slot, packs {gen:32, count:32}
     size_t consumerCount;
-    size_t cap;
+
+    // --- Write-side helpers (structural overflow guarantee; no ScanOnComplete needed) ---
+
+    bool tryClaimWrite(size_t count, size_t& claimed) {
+        do {
+            claimed = writeHead.load(ACQUIRE);
+            size_t rh = readHead.load(ACQUIRE);
+            if (count > cap - (claimed - rh)) return false;
+        } while (!writeHead.compare_exchange(claimed, claimed + count, ACQUIRE, RELAXED));
+        return true;
+    }
+
+    template<typename WriteCallback>
+    void executeWrite(size_t claimed, size_t count, WriteCallback& callback) {
+        for (size_t i = 0; i < count; i++) {
+            callback(i, data[(claimed + i) % cap]);
+        }
+        RingBufferInternal::advanceCompletionHead(writtenHead, claimed, claimed + count);
+    }
+
+    size_t claimBestEffortWrite(size_t maxCount, size_t& claimed) {
+        size_t actualCount;
+        do {
+            claimed = writeHead.load(ACQUIRE);
+            size_t rh = readHead.load(ACQUIRE);
+            size_t available = cap - (claimed - rh);
+            actualCount = min(maxCount, available);
+            if (actualCount == 0) return 0;
+        } while (!writeHead.compare_exchange(claimed, claimed + actualCount, ACQUIRE, RELAXED));
+        return actualCount;
+    }
+
+    // --- Ack / read-head helpers ---
 
     static constexpr uint64_t packAck(uint32_t gen, uint32_t count) {
         return (static_cast<uint64_t>(gen) << 32) | count;
@@ -711,7 +513,7 @@ class BroadcastRingBuffer {
     // consecutive slots whose ack counters show full consumption.
     void tryAdvanceReadHead() {
         while (true) {
-            size_t current = buffer.readHead.load(ACQUIRE);
+            size_t current = readHead.load(ACQUIRE);
             size_t slot = current % cap;
             uint64_t val = ackCounters[slot].load(ACQUIRE);
             uint32_t gen = ackGen(val);
@@ -721,7 +523,7 @@ class BroadcastRingBuffer {
             if (gen != expectedGen || count != static_cast<uint32_t>(consumerCount)) break;
 
             // All consumers have acked this slot — try to advance
-            if (!buffer.readHead.compare_exchange(current, current + 1, RELEASE, RELAXED)) {
+            if (!readHead.compare_exchange(current, current + 1, RELEASE, RELAXED)) {
                 continue; // Someone else advanced, retry from new position
             }
         }
@@ -734,7 +536,8 @@ class BroadcastRingBuffer {
 public:
     // Owning constructor: allocates internal storage
     BroadcastRingBuffer(size_t capacity, size_t ccount) requires (Owning)
-        : buffer(capacity), consumerCount(ccount), cap(capacity) {
+        : cap(capacity), consumerCount(ccount) {
+        data = static_cast<T*>(operator new(sizeof(T) * capacity, std::align_val_t{alignof(T)}));
         readHeads = new Atomic<size_t>[consumerCount]();
         ackCounters = new Atomic<uint64_t>[capacity]();
     }
@@ -742,35 +545,50 @@ public:
     // Non-owning constructor: borrows all external arrays
     BroadcastRingBuffer(T* buf, size_t capacity, size_t consumers,
                         Atomic<size_t>* readHeadsBuff, Atomic<uint64_t>* ackCountersBuff) requires (!Owning)
-        : buffer(buf, capacity), readHeads(readHeadsBuff), ackCounters(ackCountersBuff),
-          consumerCount(consumers), cap(capacity) {}
+        : data(buf), cap(capacity), consumerCount(consumers),
+          readHeads(readHeadsBuff), ackCounters(ackCountersBuff) {}
 
     ~BroadcastRingBuffer() {
         if constexpr (Owning) {
+            size_t rh = readHead.load(RELAXED);
+            size_t wth = writtenHead.load(RELAXED);
+            if constexpr (!is_trivially_copyable_v<T>) {
+                for (size_t i = rh; i < wth; i++) {
+                    data[i % cap].~T();
+                }
+            }
+            operator delete(data, std::align_val_t{alignof(T)});
             delete[] readHeads;
             delete[] ackCounters;
         }
     }
 
-    // --- Write interface: delegates directly to underlying buffer ---
+    // --- Write interface ---
 
     template<typename WriteCallback>
     bool bulkWrite(size_t count, WriteCallback callback) {
-        return buffer.bulkWrite(count, forward<WriteCallback>(callback));
+        return tryBulkWrite(count, forward<WriteCallback>(callback));
     }
 
     template<typename WriteCallback>
     bool tryBulkWrite(size_t count, WriteCallback callback) {
-        return buffer.tryBulkWrite(count, forward<WriteCallback>(callback));
+        size_t claimed;
+        if (!tryClaimWrite(count, claimed)) return false;
+        executeWrite(claimed, count, callback);
+        return true;
     }
 
     template<typename WriteCallback>
     size_t bulkWriteBestEffort(size_t count, WriteCallback callback) {
-        return buffer.bulkWriteBestEffort(count, forward<WriteCallback>(callback));
+        size_t claimed;
+        size_t actualCount = claimBestEffortWrite(count, claimed);
+        if (actualCount == 0) return 0;
+        executeWrite(claimed, actualCount, callback);
+        return actualCount;
     }
 
-    bool write(const T& value)    { return buffer.write(value); }
-    bool tryWrite(const T& value) { return buffer.tryWrite(value); }
+    bool write(const T& value)    { return tryBulkWrite(1, [&](size_t, T& slot) { slot = value; }); }
+    bool tryWrite(const T& value) { return tryBulkWrite(1, [&](size_t, T& slot) { slot = value; }); }
 
     // --- Read interface: per-consumer with broadcast acknowledgement ---
     //
@@ -788,11 +606,11 @@ public:
     template<typename ReadCallback>
     bool tryBulkRead(size_t headNumber, size_t count, ReadCallback callback) {
         size_t myHead = readHeads[headNumber].load(RELAXED); // single-writer
-        size_t wth = buffer.writtenHead.load(ACQUIRE);
+        size_t wth = writtenHead.load(ACQUIRE);
         if (count > wth - myHead) return false;
 
         for (size_t i = 0; i < count; i++) {
-            callback(i, static_cast<const T&>(buffer.buffer[(myHead + i) % cap]));
+            callback(i, static_cast<const T&>(data[(myHead + i) % cap]));
         }
 
         readHeads[headNumber].store(myHead + count, RELEASE);
@@ -813,13 +631,13 @@ public:
     template<typename ReadCallback>
     size_t bulkReadBestEffort(size_t headNumber, size_t count, ReadCallback callback) {
         size_t myHead = readHeads[headNumber].load(RELAXED); // single-writer
-        size_t wth = buffer.writtenHead.load(ACQUIRE);
+        size_t wth = writtenHead.load(ACQUIRE);
         size_t available = wth - myHead;
         size_t actualCount = min(count, available);
         if (actualCount == 0) return 0;
 
         for (size_t i = 0; i < actualCount; i++) {
-            callback(i, static_cast<const T&>(buffer.buffer[(myHead + i) % cap]));
+            callback(i, static_cast<const T&>(data[(myHead + i) % cap]));
         }
 
         readHeads[headNumber].store(myHead + actualCount, RELEASE);
@@ -834,23 +652,26 @@ public:
 
     // Conservative estimate of items available for a specific consumer.
     size_t availableToRead(size_t headNumber) const {
-        return buffer.writtenHead.load(ACQUIRE) - readHeads[headNumber].load(ACQUIRE);
+        return writtenHead.load(ACQUIRE) - readHeads[headNumber].load(ACQUIRE);
     }
 
-    size_t availableToWrite() const { return buffer.availableToWrite(); }
-    bool empty() const { return buffer.empty(); }
-    bool full() const { return buffer.full(); }
+    size_t availableToWrite() const {
+        return cap - (writeHead.load(ACQUIRE) - readHead.load(ACQUIRE));
+    }
+
+    bool empty() const { return writtenHead.load(ACQUIRE) == readHead.load(ACQUIRE); }
+    bool full() const { return availableToWrite() == 0; }
 
     // Discard all readable items across all consumers. Must not be called
     // concurrently with any other operation on this buffer. Ack counters
     // do not need explicit reset — the generation-based mechanism will
     // handle reinitialization when consumers next read.
     void clear() {
-        size_t wth = buffer.writtenHead.load(RELAXED);
+        size_t wth = writtenHead.load(RELAXED);
         for (size_t c = 0; c < consumerCount; c++) {
             readHeads[c].store(wth, RELAXED);
         }
-        buffer.readHead.store(wth, RELAXED);
+        readHead.store(wth, RELAXED);
     }
 };
 

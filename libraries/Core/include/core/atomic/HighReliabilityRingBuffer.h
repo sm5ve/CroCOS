@@ -4,7 +4,7 @@
 #include <core/atomic/RingBuffer.h>
 #include <core/atomic.h>
 
-// Wrapper around SimpleMPMCRingBuffer that provides guaranteed eventual delivery
+// Wrapper around MPMCRingBuffer that provides guaranteed eventual delivery
 // for reads by maintaining a separate logical count of available items.
 //
 // Problem: under ScanOnComplete=true, writers increment writeHead, write data,
