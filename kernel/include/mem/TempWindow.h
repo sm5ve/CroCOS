@@ -62,10 +62,13 @@ struct TempWindow {
     ~TempWindow() {
         // Clear the table directly (it lives in the kernel image, always accessible).
         for (size_t i = 0; i < arch::pageTableDescriptor.entryCount[pageTableLevelForKMemRegion()]; i++) {
+            constexpr virt_addr zoneBase = getKernelMemRegionStart(TEMPORARY_AND_PAGE_TABLE_ZONE);
+            if (detail::tempWindowTable[i].isPresent()) {
+                arch::invlpg(zoneBase + (i + 1) * arch::smallPageSize);
+            }
             detail::tempWindowTable[i] = {};
         }
         getPageTableEntryForZone(TEMPORARY_AND_PAGE_TABLE_ZONE) = {};
-        arch::flushTLB();
     }
 
     TempWindow(const TempWindow&) = delete;
@@ -77,7 +80,7 @@ struct TempWindow {
         // supportsRecursivePageTables guarantees all subtable encodings match this leaf encoding.
         using LeafEntry = arch::PTE<arch::pageTableDescriptor.LEVEL_COUNT - 1>;
         const phys_addr target{physBase.value + i * arch::smallPageSize};
-        const virt_addr zoneBase = getKernelMemRegionStart(TEMPORARY_AND_PAGE_TABLE_ZONE);
+        constexpr virt_addr zoneBase = getKernelMemRegionStart(TEMPORARY_AND_PAGE_TABLE_ZONE);
 
         auto expected = LeafEntry::leafEntry(target);
         expected.markPresent();
