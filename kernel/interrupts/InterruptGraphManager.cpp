@@ -174,21 +174,24 @@ namespace kernel::interrupts {
             assert(source.occupied() && target.occupied(), "Must add interrupt domains before registering a connector between them");
             assert(sourceEmitter, "Connector source must be an interrupt emitter");
             assert(targetReceiver, "Connector target must be an interrupt receiver");
-            builder.addEdge(*source, *target, move(connector));
-            isGraphDirty = true;
-            bool wasSuccessful = true;
+            // Validate all pins before mutating any state — partial registration is not allowed.
             for (size_t i = 0; i < sourceEmitter -> getEmitterCount(); i++) {
                 auto targetIndex = connector -> emitterToReceiver(i);
                 if (!targetIndex) {continue;}
                 auto targetLabel = managed::RoutingNodeLabel(connector -> getTarget(), *targetIndex);
                 if (getExclusiveConnectors().contains(targetLabel)) {
-                    wasSuccessful = false;
-                    continue;
+                    return false;
                 }
+            }
+            for (size_t i = 0; i < sourceEmitter -> getEmitterCount(); i++) {
+                auto targetIndex = connector -> emitterToReceiver(i);
+                if (!targetIndex) {continue;}
+                auto targetLabel = managed::RoutingNodeLabel(connector -> getTarget(), *targetIndex);
                 getExclusiveConnectors().insert(targetLabel, connector);
             }
-
-            return wasSuccessful;
+            builder.addEdge(*source, *target, move(connector));
+            isGraphDirty = true;
+            return true;
         }
     }
 
@@ -196,8 +199,10 @@ namespace kernel::interrupts {
         size_t RoutingNodeLabel::hash() const {
             const size_t domainHash = DefaultHasher<SharedPtr<platform::InterruptDomain>>{}(this -> domain());
             const size_t indexHash = this -> index();
-
-            return domainHash ^ (indexHash << 1);
+            // Two independent multiplicative steps so that small index values don't cluster
+            // near the domain pointer hash (XOR-shifting a small value would only perturb a
+            // single low-order bit).
+            return domainHash * 6364136223846793005ULL + indexHash * 2654435761ULL;
         }
 
         SharedPtr<RoutingGraphBuilder> createRoutingGraphBuilder() {

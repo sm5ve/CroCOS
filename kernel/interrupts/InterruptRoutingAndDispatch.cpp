@@ -93,6 +93,7 @@ namespace kernel::interrupts::managed {
         for (const auto v : routingGraph.vertices()) {
             const auto& label = routingGraph.getVertexLabel(v);
             if (!label.domain() -> instanceof(TypeID_v<platform::InterruptReceiver>)) {
+                assert(annotation[v].occupied(), "Emitter vertex has no vector assignment — routing policy left a source unrouted");
                 const auto vectorNumber = *annotation[v];
                 //klog << "Mapping " << label.domain() -> type_name() << " emitter " << label.index() << " -> " << vectorNumber << "\n";
                 if (!handlersByVector[vectorNumber]) {
@@ -295,6 +296,13 @@ namespace kernel::interrupts::managed {
         auto& policy = getRoutingPolicy();
         const auto routingGraph = policy.buildRoutingGraph(*createRoutingGraphBuilder());
         {
+            // TODO(SMP): InterruptDisabler only masks interrupts on the calling CPU.
+            // Once APs are running, other CPUs can be mid-dispatch while we reset and
+            // repopulate handlersByVector and eoiBehaviorTable here.  The correct fix
+            // is to build replacement tables to a separate allocation, then swap the
+            // live pointer atomically (RCU-style), keeping the old tables alive until
+            // all CPUs have quiesced.  This is safe today only because updateRouting()
+            // is called before any APs are brought up.
             arch::InterruptDisabler disabler;
             configureRoutableDomains(routingGraph);
             auto finalVectorNumbers = computeFinalVectorNumbers(routingGraph);

@@ -15,6 +15,10 @@ namespace kernel::interrupts::managed {
     FreelyRoutableDomainGreedyRouter::FreelyRoutableDomainGreedyRouter(RoutingGraphBuilder &b, SharedPtr<platform::InterruptDomain> &d, DomainReceiverLoadMap& l) : builder(b), domain(d), loads(l),
     comparator(loads), heaps{DomainReceiverHeap(comparator), DomainReceiverHeap(comparator), DomainReceiverHeap(comparator)}{
         assert(domain -> instanceof(TypeID_v<platform::FreeRoutableDomain>), "Can't construct a FreelyRoutableDomainGreedyRouter with a domain that isn't freely routable");
+        // Invariant: for a FreeRoutableDomain, every receiver index has the same set of
+        // valid destinations (that is the defining property of being freely routable).
+        // We therefore seed the heaps from index 0 only; route() selects from the same
+        // heap for all other receiver indices.
         auto nodeLabel = RoutingNodeLabel(domain, 0);
         auto node = b.getVertexByLabel(nodeLabel);
         assert(node.occupied(), "Node not found");
