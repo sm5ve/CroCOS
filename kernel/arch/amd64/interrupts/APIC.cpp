@@ -45,7 +45,7 @@ namespace arch::amd64::interrupts{
     }
 
     void IOAPIC::setActivationTypeByGSI(const uint32_t gsi, const kernel::interrupts::InterruptLineActivationType type) {
-        setActivationType(gsi + gsi_base, type);
+        setActivationType(gsi - gsi_base, type);
     }
 
     void IOAPIC::setActivationType(const size_t receiver, const kernel::interrupts::InterruptLineActivationType type) {
@@ -84,11 +84,11 @@ namespace arch::amd64::interrupts{
         regWrite(getRegStartForLineIndex(gsi - gsi_base), regVal);
     }
 
-    size_t IOAPIC::getReceiverCount(){
+    size_t IOAPIC::getReceiverCount() const {
         return lineCount;
     }
 
-    size_t IOAPIC::getEmitterCount(){
+    size_t IOAPIC::getEmitterCount() const {
         //From the OSDev wiki: allowed values for interrupt vectors are 0x10 to 0xFE
         return (INTERRUPT_VECTOR_COUNT - 2) - IOAPIC_VECTOR_MAPPING_BASE + 1ul;
     }
@@ -132,7 +132,7 @@ namespace arch::amd64::interrupts{
         }
     };
 
-    IRQDomain::IRQDomain(size_t mapping[16]){
+    IRQDomain::IRQDomain(size_t mapping[ISA_IRQ_COUNT]){
         memcpy(surjectiveMapping, mapping, sizeof(surjectiveMapping));
         maxMapping = 0;
         for (auto i : surjectiveMapping) {
@@ -140,16 +140,16 @@ namespace arch::amd64::interrupts{
         }
     }
 
-    size_t IRQDomain::getEmitterCount() {
+    size_t IRQDomain::getEmitterCount() const {
         return maxMapping + 1;
     }
 
-    size_t IRQDomain::getReceiverCount() {
-        return 16;
+    size_t IRQDomain::getReceiverCount() const {
+        return ISA_IRQ_COUNT;
     }
 
     size_t IRQDomain::getEmitterFor(size_t receiver) const{
-        assert(receiver < 16, "receiver out of range");
+        assert(receiver < ISA_IRQ_COUNT, "receiver out of range");
         return surjectiveMapping[receiver];
     }
 
@@ -188,9 +188,7 @@ namespace arch::amd64::interrupts{
             ioapicsByGSI.insert(ioapic);
             kernel::interrupts::topology::registerDomain(ioapic);
 
-            auto apicConnector = make_shared<AffineConnector>(ioapic,
-            getLAPICDomain(), IOAPIC_VECTOR_MAPPING_BASE, 0, ioapic -> getEmitterCount());
-            kernel::interrupts::topology::registerConnector(apicConnector);
+            kernel::interrupts::topology::connectAllOutputs(ioapic, getLAPICDomain(), IOAPIC_VECTOR_MAPPING_BASE);
         }
     }
 
@@ -213,7 +211,7 @@ namespace arch::amd64::interrupts{
     }
 
     SharedPtr<IOAPIC> addIRQDomainConectorMapping(Optional<size_t>* irqToEmitterMap, size_t& emitterMax, HashMap<SharedPtr<IOAPIC>, SharedPtr<Bimap<size_t, size_t>>>& connectorMapsByIOAPIC, uint8_t irqSource, uint32_t gsi) {
-        assert(irqSource < 16, "irqSource out of range");
+        assert(irqSource < ISA_IRQ_COUNT, "irqSource out of range");
 
         auto ioapic = getIOAPICForGSI(gsi);
         assert(ioapic, "No IOAPIC for GSI");
@@ -240,7 +238,7 @@ namespace arch::amd64::interrupts{
     SharedPtr<IRQDomain> irqDomain;
 
     void createIRQDomainConnectorsAndConfigureIOAPICActivationType(acpi::MADT& madt) {
-        Optional<size_t> irqToEmitterMap[16];
+        Optional<size_t> irqToEmitterMap[ISA_IRQ_COUNT];
         size_t emitterMax = 0;
         //maps IRQDomain emitter index to IOAPIC line (so gsi - gsi_base)
         HashMap<SharedPtr<IOAPIC>, SharedPtr<Bimap<size_t, size_t>>> connectorMapsByIOAPIC;
@@ -259,14 +257,14 @@ namespace arch::amd64::interrupts{
             ioapic -> setActivationTypeByGSI(sourceOverride.gsi, getActivationTypeFromMADTFlags(sourceOverride.flags));
             mappedIRQs |= 1u << sourceOverride.irqSource;
         }
-        for (uint32_t i = 0; i < 16; i++) {
+        for (uint32_t i = 0; i < ISA_IRQ_COUNT; i++) {
             if (mappedIRQs & (1u << i)) {
                 continue;
             }
             addIRQDomainConectorMapping(irqToEmitterMap, emitterMax, connectorMapsByIOAPIC, static_cast<uint8_t>(i), i);
         }
-        size_t finalizedEmitterMap[16];
-        for (auto i = 0; i < 16; i++) {
+        size_t finalizedEmitterMap[ISA_IRQ_COUNT];
+        for (size_t i = 0; i < ISA_IRQ_COUNT; i++) {
             assert(irqToEmitterMap[i].occupied(), "irqToEmitterMap[i] not occupied");
             finalizedEmitterMap[i] = *irqToEmitterMap[i];
         }
@@ -311,11 +309,11 @@ namespace arch::amd64::interrupts{
         return mmio_window[offset/sizeof(uint32_t)];
     }
 
-    size_t LAPIC::getEmitterCount() {
+    size_t LAPIC::getEmitterCount() const {
         return CPU_INTERRUPT_COUNT;
     }
 
-    size_t LAPIC::getReceiverCount() {
+    size_t LAPIC::getReceiverCount() const {
         return CPU_INTERRUPT_COUNT;
     }
 
@@ -393,8 +391,7 @@ namespace arch::amd64::interrupts{
 
 
 
-    void LAPIC::issueEOI(InterruptFrame &iframe) {
-        (void)iframe;
+    void LAPIC::issueEOI() {
         reg(LAPIC_EOI_REGISTER) = 0;
     }
 
@@ -419,7 +416,7 @@ namespace arch::amd64::interrupts{
 
     CRClass(SpuriousInterruptDomain, public InterruptDomain, public InterruptEmitter) {
     public:
-        size_t getEmitterCount() override {
+        size_t getEmitterCount() const override {
             return 1;
         }
     };
@@ -428,8 +425,6 @@ namespace arch::amd64::interrupts{
     constexpr uint32_t LVT_OFFSETS[MAX_LVT_SIZE] = {0x2f0, 0x320, 0x330, 0x340, 0x350, 0x360, 0x370};
     constexpr uint32_t LAPIC_TIMER_LVT_ENTRY = 0x320;
     constexpr uint32_t LAPIC_TIMER_MODE_OFFSET = 17;
-
-    constexpr uint32_t LAPIC_EOI_REG = 0xB0;
 
     enum class LAPICTimerMode : uint32_t {
         OneShot = 0,
@@ -445,21 +440,23 @@ namespace arch::amd64::interrupts{
     SharedPtr<LAPICLocalDeviceRoutingDomain> localDeviceRouter;
 
     using namespace kernel::interrupts;
+    using namespace kernel::interrupts::platform;
+    using namespace kernel::interrupts::topology;
 
-    CRClass(LAPICLocalDeviceRoutingDomain, public FreeRoutableDomain, public InterruptDomain, public EOIDomain, public ConfigurableActivationTypeDomain) {
+    CRClass(LAPICLocalDeviceRoutingDomain, public FreeRoutableDomain, public InterruptDomain, public EOIDomain, public MaskableDomain, public ConfigurableActivationTypeDomain) {
         LAPIC& lapic;
         public:
         LAPICLocalDeviceRoutingDomain(LAPIC& l) : lapic(l) {
             for (size_t i = 0; i < MAX_LVT_SIZE; i++) {
-                maskInterrupt(i, true);
+                setReceiverMask(i, true);
             }
         }
 
-        size_t getEmitterCount() override {
+        size_t getEmitterCount() const override {
             return CPU_INTERRUPT_COUNT;
         }
 
-        size_t getReceiverCount() override {
+        size_t getReceiverCount() const override {
             //Not all processors will support all 7 LVT entries... but anything modern should.
             //We'll expose them all for now and refine this if needed.
             return MAX_LVT_SIZE;
@@ -473,14 +470,18 @@ namespace arch::amd64::interrupts{
             return true;
         }
 
-        void issueEOI(InterruptFrame &iframe) override {
-            (void)iframe;
-            lapic.reg(LAPIC_EOI_REG) = 0;
+        void issueEOI() override {
+            lapic.reg(LAPIC_EOI_REGISTER) = 0;
         }
 
-        void maskInterrupt(size_t index, bool shouldMask = true) {
-            assert(index < MAX_LVT_SIZE, "index out of range");
-            auto& reg = lapic.reg(LVT_OFFSETS[index]);
+        [[nodiscard]] bool isReceiverMasked(size_t receiver) const override {
+            assert(receiver < MAX_LVT_SIZE, "receiver out of range");
+            return (lapic.reg(LVT_OFFSETS[receiver]) >> 16) & 1u;
+        }
+
+        void setReceiverMask(size_t receiver, bool shouldMask) override {
+            assert(receiver < MAX_LVT_SIZE, "receiver out of range");
+            auto& reg = lapic.reg(LVT_OFFSETS[receiver]);
             if (shouldMask) {
                 reg |= 1u << 16;
             }
@@ -505,7 +506,7 @@ namespace arch::amd64::interrupts{
 
     CRClass(LAPICLocalDeviceEmitters, public InterruptDomain, public InterruptEmitter) {
         public:
-        size_t getEmitterCount() override {
+        size_t getEmitterCount() const override {
             return MAX_LVT_SIZE;
         }
 
@@ -550,7 +551,7 @@ namespace arch::amd64::interrupts{
         void ensureDisarmed(const bool status = true) {
             if (status != disarmed) {
                 disarmed = status;
-                localDeviceRouter -> maskInterrupt(1, status);
+                localDeviceRouter -> setReceiverMask(1, status);
             }
         }
     public:
@@ -616,20 +617,16 @@ namespace arch::amd64::interrupts{
         auto lapicBasePhysical = getLAPICBase();
         lapicDomain = make_shared<LAPIC>(mm::phys_addr(lapicBasePhysical));
         topology::registerDomain(lapicDomain);
-        auto lapicConnector = make_shared<AffineConnector>(lapicDomain, getCPUInterruptVectors(), 0, 0, CPU_INTERRUPT_COUNT);
-        topology::registerConnector(lapicConnector);
+        topology::connectAllOutputs(lapicDomain, getCPUInterruptVectors());
         spuriousInterruptDomain = make_shared<SpuriousInterruptDomain>();
         topology::registerDomain(spuriousInterruptDomain);
-        auto spuriousConnector = make_shared<AffineConnector>(spuriousInterruptDomain, getCPUInterruptVectors(), LAPIC_SPURIOUS_INTERRUPT_VECTOR, 0, 1);
-        topology::registerExclusiveConnector(spuriousConnector);
+        topology::connectSingleOutputExclusive(spuriousInterruptDomain, getCPUInterruptVectors(), LAPIC_SPURIOUS_INTERRUPT_VECTOR);
         localDeviceEmitters = make_shared<LAPICLocalDeviceEmitters>();
         localDeviceRouter = make_shared<LAPICLocalDeviceRoutingDomain>(*lapicDomain);
         topology::registerDomain(localDeviceEmitters);
         topology::registerDomain(localDeviceRouter);
-        auto localDeviceEmitterConnector = make_shared<AffineConnector>(localDeviceEmitters, localDeviceRouter, 0, 0, MAX_LVT_SIZE);
-        topology::registerConnector(localDeviceEmitterConnector);
-        auto localDeviceRouterConnector = make_shared<AffineConnector>(localDeviceRouter, getCPUInterruptVectors(), 0, 0, CPU_INTERRUPT_COUNT);
-        topology::registerConnector(localDeviceRouterConnector);
+        topology::connectAllOutputs(localDeviceEmitters, localDeviceRouter);
+        topology::connectAllOutputs(localDeviceRouter, getCPUInterruptVectors());
         createIOAPICStructures(madt);
         createIRQDomainConnectorsAndConfigureIOAPICActivationType(madt);
         for (const auto& ioapic : ioapicsByID.values()) {

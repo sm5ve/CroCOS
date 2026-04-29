@@ -59,6 +59,7 @@ namespace kernel::interrupts::managed {
     }
 
     void configureRoutableDomains(const RoutingGraph& routingGraph) {
+        auto& topologyGraph = *topology::getTopologyGraph();
         for (const auto edge : routingGraph.edges()) {
             const auto& sourceLabel = routingGraph.getVertexLabel(routingGraph.getSource(edge));
             const auto& targetLabel = routingGraph.getVertexLabel(routingGraph.getTarget(edge));
@@ -66,18 +67,14 @@ namespace kernel::interrupts::managed {
             auto targetDomain = targetLabel.domain();
 
             if (const auto routable = crocos_dynamic_cast<platform::RoutableDomain>(sourceDomain)) {
-                auto& topologyGraph = *topology::getTopologyGraph();
                 auto sourceTopVertex = topologyGraph.getVertexByLabel(sourceDomain);
                 auto targetTopVertex = topologyGraph.getVertexByLabel(targetDomain);
                 auto topEdge = topologyGraph.findEdge(*sourceTopVertex, *targetTopVertex);
-                //not horrifically efficient to keep looking this up, but
-                //most domains should only have one connector coming out of them
-                //and so this should basically be O(1) in practice
                 const auto connector = topologyGraph.getEdgeLabel(*topEdge);
 
-                auto routedEmitterIndex = connector -> fromInput(targetLabel.index());
+                auto routedEmitterIndex = connector->fromInput(targetLabel.index());
                 assert(routedEmitterIndex, "Emitter index must be valid");
-                routable -> routeInterrupt(sourceLabel.index(), *routedEmitterIndex);
+                routable->routeInterrupt(sourceLabel.index(), *routedEmitterIndex);
             }
         }
     }
@@ -138,11 +135,6 @@ namespace kernel::interrupts::managed {
                 if (!registeredHandlers.contains(sourceLabel)) {
                     registeredHandlers.insert(sourceLabel, SharedPtr<InterruptHandler>());
                 }
-                const size_t vectorNumber = *finalVectorNumber[source];
-                if (!handlersByVector[vectorNumber]) {
-                    handlersByVector[vectorNumber] = make_unique<InterruptHandlerListForVector>();
-                }
-                handlersByVector[vectorNumber] -> push(registeredHandlers[sourceLabel]);
             }
         }
 
@@ -241,7 +233,6 @@ namespace kernel::interrupts::managed {
             }
             sortedInterruptSources.pop();
         }
-        (void)routingGraph;
         if (eoiDomains.size() == 0) {
             return {};
         }
@@ -316,24 +307,12 @@ namespace kernel::interrupts::managed {
     }
 
     void dispatchInterrupt(arch::InterruptFrame& frame) {
-        if (frame.vector_index == 14) {
-            void* faultingAccess;
-            asm volatile("mov %%cr2, %0" : "=r"(faultingAccess));
-            klog() << "Pagefault at " << reinterpret_cast<void*>(frame.rip) << " accessing " << faultingAccess <<"\n";
-            print_stacktrace(&frame.rbp);
-            asm volatile("outw %0, %1" ::"a"((uint16_t)0x2000), "Nd"((uint16_t)0x604));
-        }
-        if (frame.vector_index < 32) {
-            klog() << "Unhandled exception " << frame.vector_index << " at IP " << (void*)frame.rip << " on processor " << arch::getCurrentProcessorID() << "\n";
-            print_stacktrace(&frame.rbp);
-            asm volatile("outw %0, %1" ::"a"((uint16_t)0x2000), "Nd"((uint16_t)0x604));
-        }
         auto& eoiBehavior = eoiBehaviorTable[frame.vector_index];
         if (eoiBehavior.triggerType == RoutingNodeTriggerType::TRIGGER_EDGE || eoiBehavior.triggerType == RoutingNodeTriggerType::TRIGGER_UNDETERMINED) {
             if (eoiBehavior.chain) {
                 auto& eoiChain = *(eoiBehavior.chain);
                 for (auto d : eoiChain.sortedDomains) {
-                    d -> issueEOI(frame);
+                    d -> issueEOI();
                 }
             }
         }

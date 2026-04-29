@@ -257,7 +257,7 @@ namespace arch::amd64::timers{
     using namespace kernel::interrupts;
     CRClass(HPETComparatorSourceDomain, public platform::InterruptDomain, public platform::InterruptEmitter) {
     public:
-        size_t getEmitterCount() override {
+        size_t getEmitterCount() const override {
             return comparatorBimap.size();
         }
     };
@@ -269,11 +269,11 @@ namespace arch::amd64::timers{
 
         }
 
-        size_t getEmitterCount() override {
+        size_t getEmitterCount() const override {
             return ioapicBimap.size();
         }
 
-        size_t getReceiverCount() override {
+        size_t getReceiverCount() const override {
             return comparatorBimap.size();
         }
 
@@ -489,11 +489,10 @@ namespace arch::amd64::timers{
         auto routingDomain = make_shared<HPETRoutingDomain>(regs);
         comparatorSourceDomain = make_shared<HPETComparatorSourceDomain>();
         auto ioapicConnector = make_shared<HPETConnector>(routingDomain, firstIOAPIC);
-        auto comparatorConnector = make_shared<platform::AffineConnector>(comparatorSourceDomain, routingDomain, 0, 0, comparatorBimap.size());
         topology::registerDomain(routingDomain);
         topology::registerDomain(comparatorSourceDomain);
         topology::registerConnector(ioapicConnector);
-        topology::registerConnector(comparatorConnector);
+        topology::connectAllOutputs(comparatorSourceDomain, routingDomain);
     }
 
     void registerHPETEventSources(HPETRegisters& regs) {

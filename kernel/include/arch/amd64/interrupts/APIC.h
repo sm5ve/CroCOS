@@ -11,8 +11,14 @@
 #include <mmio/Register.h>
 
 namespace arch::amd64::interrupts{
-    using namespace kernel::interrupts::platform;
-    using namespace kernel::interrupts;
+    using kernel::interrupts::InterruptLineActivationType;
+    using kernel::interrupts::platform::InterruptDomain;
+    using kernel::interrupts::platform::FreeRoutableDomain;
+    using kernel::interrupts::platform::MaskableDomain;
+    using kernel::interrupts::platform::ConfigurableActivationTypeDomain;
+    using kernel::interrupts::platform::FixedRoutingDomain;
+    using kernel::interrupts::platform::EOIDomain;
+
     CRClass(IOAPIC, public InterruptDomain, public FreeRoutableDomain, public MaskableDomain,
         public ConfigurableActivationTypeDomain){
         uint8_t id;
@@ -27,8 +33,8 @@ namespace arch::amd64::interrupts{
         ~IOAPIC() override;
         void setActivationTypeByGSI(uint32_t gsi, InterruptLineActivationType type);
         void setNonmaskable(uint32_t gsi, bool nonmaskable = true);
-        size_t getReceiverCount() override;
-        size_t getEmitterCount() override;
+        [[nodiscard]] size_t getReceiverCount() const override;
+        [[nodiscard]] size_t getEmitterCount() const override;
         bool routeInterrupt(size_t fromReceiver, size_t toEmitter) override;
         [[nodiscard]] bool isReceiverMasked(size_t receiver) const override;
         void setReceiverMask(size_t receiver, bool shouldMask) override;
@@ -68,9 +74,9 @@ namespace arch::amd64::interrupts{
         LAPIC(mm::phys_addr paddr);
         ~LAPIC() override;
         [[nodiscard]] size_t getEmitterFor(size_t receiver) const override;
-        void issueEOI(arch::InterruptFrame& iframe) override;
-        size_t getReceiverCount() override;
-        size_t getEmitterCount() override;
+        void issueEOI() override;
+        [[nodiscard]] size_t getReceiverCount() const override;
+        [[nodiscard]] size_t getEmitterCount() const override;
         uint32_t getID();
         bool issueIPI(IPIRequest request);
         void issueIPISync(IPIRequest request);

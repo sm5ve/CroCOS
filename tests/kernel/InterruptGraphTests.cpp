@@ -24,7 +24,7 @@ private:
     size_t emitterCount;
 public:
     MockEmitterDomain(size_t count) : emitterCount(count) {}
-    size_t getEmitterCount() override { return emitterCount; }
+    size_t getEmitterCount() const override { return emitterCount; }
 };
 
 CRClass(MockReceiverDomain, public platform::InterruptDomain, public platform::InterruptReceiver) {
@@ -32,7 +32,7 @@ private:
     size_t receiverCount;
 public:
     MockReceiverDomain(size_t count) : receiverCount(count) {}
-    size_t getReceiverCount() override { return receiverCount; }
+    size_t getReceiverCount() const override { return receiverCount; }
 };
 
 CRClass(MockFreeRoutableDomain, public platform::InterruptDomain, public platform::FreeRoutableDomain) {
@@ -43,8 +43,8 @@ public:
     MockFreeRoutableDomain(size_t receivers, size_t emitters) 
         : receiverCount(receivers), emitterCount(emitters) {}
     
-    size_t getReceiverCount() override { return receiverCount; }
-    size_t getEmitterCount() override { return emitterCount; }
+    size_t getReceiverCount() const override { return receiverCount; }
+    size_t getEmitterCount() const override { return emitterCount; }
     
     bool routeInterrupt(size_t, size_t) override {
         return true; // Simple stub
@@ -60,8 +60,8 @@ public:
     MockContextIndependentRoutableDomain(size_t receivers, size_t emitters) 
         : receiverCount(receivers), emitterCount(emitters) {}
     
-    size_t getReceiverCount() override { return receiverCount; }
-    size_t getEmitterCount() override { return emitterCount; }
+    size_t getReceiverCount() const override { return receiverCount; }
+    size_t getEmitterCount() const override { return emitterCount; }
     
     bool routeInterrupt(size_t fromReceiver, size_t toEmitter) override {
         return isRoutingAllowed(fromReceiver, toEmitter);
@@ -88,8 +88,8 @@ public:
     
     void setAllowAllForTesting(bool allow) { allowAllForTesting = allow; }
     
-    size_t getReceiverCount() override { return receiverCount; }
-    size_t getEmitterCount() override { return emitterCount; }
+    size_t getReceiverCount() const override { return receiverCount; }
+    size_t getEmitterCount() const override { return emitterCount; }
     
     bool routeInterrupt(size_t, size_t) override {
         return true; // Simple stub
@@ -126,8 +126,8 @@ public:
         }
     }
     
-    size_t getReceiverCount() override { return receiverCount; }
-    size_t getEmitterCount() override { return emitterCount; }
+    size_t getReceiverCount() const override { return receiverCount; }
+    size_t getEmitterCount() const override { return emitterCount; }
     
     size_t getEmitterFor(size_t receiver) const override {
         if (receiver >= receiverCount) {

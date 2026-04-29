@@ -11,22 +11,30 @@
 #include <core/ds/SmartPointer.h>
 
 namespace arch::amd64::interrupts{
-    using namespace kernel::interrupts::platform;
+    using kernel::interrupts::platform::InterruptDomain;
+    using kernel::interrupts::platform::InterruptEmitter;
+    using kernel::interrupts::platform::FixedRoutingDomain;
+    using kernel::interrupts::platform::DomainConnector;
+    using kernel::interrupts::platform::DomainInputIndex;
+    using kernel::interrupts::platform::DomainOutputIndex;
+
+    constexpr size_t ISA_IRQ_COUNT = 16;
+
     CRClass(IRQDomain, public InterruptDomain, public FixedRoutingDomain){
-        size_t surjectiveMapping[16];
+        size_t surjectiveMapping[ISA_IRQ_COUNT];
         size_t maxMapping;
     public:
-        IRQDomain(size_t mapping[16]);
-        size_t getReceiverCount() override;
-        size_t getEmitterCount() override;
-        size_t getEmitterFor(size_t receiver) const override;
+        IRQDomain(size_t mapping[ISA_IRQ_COUNT]);
+        [[nodiscard]] size_t getReceiverCount() const override;
+        [[nodiscard]] size_t getEmitterCount() const override;
+        [[nodiscard]] size_t getEmitterFor(size_t receiver) const override;
     };
 
     CRClass(ExceptionVectorDomain, public InterruptDomain, public InterruptEmitter){
         size_t evc;
     public:
         ExceptionVectorDomain(size_t exceptionVectorCount) : evc(exceptionVectorCount) {}
-        size_t getEmitterCount() override { return evc; }
+        [[nodiscard]] size_t getEmitterCount() const override { return evc; }
     };
 
     class IRQToIOAPICConnector : public DomainConnector{

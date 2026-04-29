@@ -121,6 +121,50 @@ namespace kernel::interrupts {
         }
 #endif
 
+        static SharedPtr<platform::AffineConnector> makeFullAffineConnector(
+            SharedPtr<platform::InterruptDomain> src,
+            SharedPtr<platform::InterruptDomain> tgt,
+            size_t targetOffset)
+        {
+            const auto emitter = crocos_dynamic_cast<platform::InterruptEmitter>(src);
+            assert(emitter, "connectAllOutputs: source must be an InterruptEmitter");
+            return make_shared<platform::AffineConnector>(src, tgt, targetOffset, 0, emitter->getEmitterCount());
+        }
+
+        void connectAllOutputs(SharedPtr<platform::InterruptDomain> src,
+                               SharedPtr<platform::InterruptDomain> tgt,
+                               size_t targetOffset)
+        {
+            registerConnector(makeFullAffineConnector(move(src), move(tgt), targetOffset));
+        }
+
+        bool connectAllOutputsExclusive(SharedPtr<platform::InterruptDomain> src,
+                                        SharedPtr<platform::InterruptDomain> tgt,
+                                        size_t targetOffset)
+        {
+            return registerExclusiveConnector(makeFullAffineConnector(move(src), move(tgt), targetOffset));
+        }
+
+        void connectSingleOutput(SharedPtr<platform::InterruptDomain> src,
+                                 SharedPtr<platform::InterruptDomain> tgt,
+                                 size_t targetInput)
+        {
+            const auto emitter = crocos_dynamic_cast<platform::InterruptEmitter>(src);
+            assert(emitter && emitter->getEmitterCount() == 1,
+                   "connectSingleOutput: source must have exactly one emitter");
+            registerConnector(make_shared<platform::AffineConnector>(src, tgt, targetInput, 0, 1));
+        }
+
+        bool connectSingleOutputExclusive(SharedPtr<platform::InterruptDomain> src,
+                                          SharedPtr<platform::InterruptDomain> tgt,
+                                          size_t targetInput)
+        {
+            const auto emitter = crocos_dynamic_cast<platform::InterruptEmitter>(src);
+            assert(emitter && emitter->getEmitterCount() == 1,
+                   "connectSingleOutputExclusive: source must have exactly one emitter");
+            return registerExclusiveConnector(make_shared<platform::AffineConnector>(src, tgt, targetInput, 0, 1));
+        }
+
         bool registerExclusiveConnector(SharedPtr<platform::DomainConnector> connector) {
             auto& builder = getBuilder();
             auto source = builder.getVertexByLabel(connector -> getSource());
@@ -660,6 +704,7 @@ namespace kernel::interrupts {
         }
 
         Optional<DomainOutputIndex> AffineConnector::fromInput(DomainInputIndex index) const {
+            if (index < offset) return {};
             auto toReturn = index - offset;
             if (toReturn < start) return {};
             if (toReturn >= start + width) return {};
@@ -668,7 +713,7 @@ namespace kernel::interrupts {
 
         CPUInterruptVectorFile::CPUInterruptVectorFile(size_t w) : width(w) {}
 
-        size_t CPUInterruptVectorFile::getReceiverCount() {
+        size_t CPUInterruptVectorFile::getReceiverCount() const {
             return width;
         }
 

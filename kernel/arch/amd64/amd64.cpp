@@ -111,26 +111,42 @@ namespace arch::amd64{
         return true;
     }
 
-    void temporaryPageFaultHandler(InterruptFrame& frame) {
-        klog() << "Page fault at " << reinterpret_cast<void*>(frame.rip) << "\n";
+    void pageFaultHandler(InterruptFrame& frame) {
+        void* faultingAccess;
+        asm volatile("mov %%cr2, %0" : "=r"(faultingAccess));
+        klog() << "Pagefault at " << reinterpret_cast<void*>(frame.rip) << " accessing " << faultingAccess << "\n";
         print_stacktrace(&frame.rbp);
         asm volatile("outw %0, %1" ::"a"((uint16_t)0x2000), "Nd"((uint16_t)0x604));
+        asm volatile("cli; hlt");
+        __builtin_unreachable();
+    }
+
+    void unhandledExceptionHandler(InterruptFrame& frame) {
+        klog() << "Unhandled exception " << frame.vector_index << " at IP " << (void*)frame.rip << " on processor " << getCurrentProcessorID() << "\n";
+        print_stacktrace(&frame.rbp);
+        asm volatile("outw %0, %1" ::"a"((uint16_t)0x2000), "Nd"((uint16_t)0x604));
+        asm volatile("cli; hlt");
+        __builtin_unreachable();
     }
 
     bool setupInterruptControllers() {
         auto& madt = kernel::acpi::the<acpi::MADT>();
         interrupts::disableLegacyPIC();
-        interrupts::platform::setupCPUInterruptVectorFile(INTERRUPT_VECTOR_COUNT);
+        kernel::interrupts::platform::setupCPUInterruptVectorFile(INTERRUPT_VECTOR_COUNT);
         interrupts::setupAPICs(madt);
         const auto exceptionVectors = make_shared<interrupts::ExceptionVectorDomain>(INTERRUPT_VECTOR_RESERVE_SIZE);
-        interrupts::topology::registerDomain(exceptionVectors);
-        const auto exceptionVectorConnector =
-            make_shared<interrupts::platform::AffineConnector>(exceptionVectors,
-            interrupts::platform::getCPUInterruptVectors(), INTERRUPT_VECTOR_RESERVE_START, 0, INTERRUPT_VECTOR_RESERVE_SIZE);
-        interrupts::topology::registerExclusiveConnector(exceptionVectorConnector);
+        kernel::interrupts::topology::registerDomain(exceptionVectors);
+        kernel::interrupts::topology::connectAllOutputsExclusive(exceptionVectors,
+            kernel::interrupts::platform::getCPUInterruptVectors(), INTERRUPT_VECTOR_RESERVE_START);
 
-        using namespace interrupts::managed;
-        registerHandler(InterruptSourceHandle(exceptionVectors, 14), temporaryPageFaultHandler);
+        using namespace kernel::interrupts::managed;
+        for (size_t i = 0; i < INTERRUPT_VECTOR_RESERVE_SIZE; i++) {
+            if (i == 14) {
+                registerHandler(InterruptSourceHandle(exceptionVectors, i), pageFaultHandler);
+            } else {
+                registerHandler(InterruptSourceHandle(exceptionVectors, i), unhandledExceptionHandler);
+            }
+        }
 
         return true;
     }

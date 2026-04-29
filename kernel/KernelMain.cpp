@@ -5,16 +5,17 @@
 #include <core/Object.h>
 #include <core/algo/GraphAlgorithms.h>
 #include <interrupts/interrupts.h>
-#include <liballoc/InternalAllocatorDebug.h>
 #include <timing/timing.h>
 #include <arch/amd64/smp.h>
 #include <init.h>
 #include <arch.h>
 
+// NOLINTBEGIN
 extern "C" void (*__init_array_start[])(void) __attribute__((weak));
 extern "C" void (*__init_array_end[])(void) __attribute__((weak));
 extern "C" uint32_t __bss_virt_start;
 extern "C" uint32_t __bss_virt_end;
+// NOLINTEND
 
 namespace kernel{
     arch::SerialPrintStream EarlyBootStream;

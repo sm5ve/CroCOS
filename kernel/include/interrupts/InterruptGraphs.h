@@ -52,12 +52,12 @@ namespace kernel::interrupts {
       //Does it always make sense to index receivers and emitters from 0? Should it always be contiguous?
       CRClass(InterruptReceiver) {
       public:
-         virtual size_t getReceiverCount() = 0;
+         virtual size_t getReceiverCount() const = 0;
       };
 
       CRClass(InterruptEmitter) {
       public:
-         virtual size_t getEmitterCount() = 0;
+         virtual size_t getEmitterCount() const = 0;
       };
 
       CRClass(RoutableDomain, public InterruptReceiver, public InterruptEmitter) {
@@ -93,14 +93,14 @@ namespace kernel::interrupts {
 
       CRClass(EOIDomain) {
       public:
-         virtual void issueEOI(arch::InterruptFrame& iframe) = 0;
+         virtual void issueEOI() = 0;
       };
 
       CRClass(CPUInterruptVectorFile, public InterruptDomain, public InterruptReceiver) {
          size_t width;
       public:
          CPUInterruptVectorFile(size_t width);
-         [[nodiscard]] virtual size_t getReceiverCount() override;
+         [[nodiscard]] size_t getReceiverCount() const override;
       };
 
       using DomainInputIndex = size_t;
@@ -139,6 +139,24 @@ namespace kernel::interrupts {
       void registerDomain(SharedPtr<platform::InterruptDomain> domain);
       void registerConnector(SharedPtr<platform::DomainConnector> connector);
       bool registerExclusiveConnector(SharedPtr<platform::DomainConnector> connector);
+
+      // Ergonomic helpers — connect all emitter outputs of src to a contiguous range of
+      // receiver inputs on tgt starting at targetOffset (default 0).
+      void connectAllOutputs(SharedPtr<platform::InterruptDomain> src,
+                             SharedPtr<platform::InterruptDomain> tgt,
+                             size_t targetOffset = 0);
+      bool connectAllOutputsExclusive(SharedPtr<platform::InterruptDomain> src,
+                                      SharedPtr<platform::InterruptDomain> tgt,
+                                      size_t targetOffset = 0);
+
+      // Ergonomic helpers — connect the single emitter output of src to targetInput on tgt.
+      // Asserts that src has exactly one emitter.
+      void connectSingleOutput(SharedPtr<platform::InterruptDomain> src,
+                               SharedPtr<platform::InterruptDomain> tgt,
+                               size_t targetInput);
+      bool connectSingleOutputExclusive(SharedPtr<platform::InterruptDomain> src,
+                                        SharedPtr<platform::InterruptDomain> tgt,
+                                        size_t targetInput);
       
       using TopologyVertexLabel = GraphProperties::LabeledVertex<SharedPtr<platform::InterruptDomain>>;
       using TopologyEdgeLabel = GraphProperties::LabeledEdge<SharedPtr<platform::DomainConnector>>;
@@ -159,6 +177,11 @@ namespace kernel::interrupts {
    namespace managed {
       enum class NodeType { Device, Input };
       struct RoutingConstraint;
+
+      // A vertex label in the routing graph. The meaning of index() is dual:
+      //   - NodeType::Input  (domain implements InterruptReceiver): index() is the receiver index.
+      //   - NodeType::Device (domain is a pure emitter):            index() is the emitter index.
+      // Always check getType() before interpreting index() in context-sensitive code.
       class RoutingNodeLabel{
       private:
          friend struct RoutingConstraint;
@@ -314,6 +337,10 @@ namespace kernel::interrupts {
    }
 
    namespace platform {
+      // Reserved for future use: a routable domain whose valid routes depend on the current
+      // state of the routing graph being built (e.g. per-CPU affinity steering). No concrete
+      // implementation exists yet; the constraint engine already checks for this type in
+      // isEdgeAllowedImpl so that adding an implementation requires no framework changes.
       CRClass(ContextDependentRoutableDomain, public RoutableDomain) {
          public:
          [[nodiscard]] virtual bool isRoutingAllowed(size_t fromReceiver, size_t toEmitter, const GraphBuilderBase<managed::RoutingGraph>& builder) const = 0;
