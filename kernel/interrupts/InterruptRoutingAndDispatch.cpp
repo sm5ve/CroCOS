@@ -72,7 +72,7 @@ namespace kernel::interrupts::managed {
                 auto topEdge = topologyGraph.findEdge(*sourceTopVertex, *targetTopVertex);
                 const auto connector = topologyGraph.getEdgeLabel(*topEdge);
 
-                auto routedEmitterIndex = connector->fromInput(targetLabel.index());
+                auto routedEmitterIndex = connector->receiverToEmitter(targetLabel.index());
                 assert(routedEmitterIndex, "Emitter index must be valid");
                 routable->routeInterrupt(sourceLabel.index(), *routedEmitterIndex);
             }

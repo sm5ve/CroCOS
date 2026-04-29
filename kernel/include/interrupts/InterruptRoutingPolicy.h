@@ -5,7 +5,7 @@
 #ifndef CROCOS_INTERRUPTROUTINGPOLICY_H
 #define CROCOS_INTERRUPTROUTINGPOLICY_H
 
-#include <interrupts/InterruptGraphs.h>
+#include <interrupts/InterruptRoutingGraph.h>
 #include <core/ds/Heap.h>
 
 namespace kernel::interrupts::managed{

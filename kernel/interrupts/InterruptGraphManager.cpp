@@ -178,7 +178,7 @@ namespace kernel::interrupts {
             isGraphDirty = true;
             bool wasSuccessful = true;
             for (size_t i = 0; i < sourceEmitter -> getEmitterCount(); i++) {
-                auto targetIndex = connector -> fromOutput(i);
+                auto targetIndex = connector -> emitterToReceiver(i);
                 if (!targetIndex) {continue;}
                 auto targetLabel = managed::RoutingNodeLabel(connector -> getTarget(), *targetIndex);
                 if (getExclusiveConnectors().contains(targetLabel)) {
@@ -273,7 +273,7 @@ namespace kernel::interrupts {
                         const auto connector = topologyGraph -> getEdgeLabel(outgoingEdge);
                         for (size_t sourceIndex = 0; sourceIndex < fixedDomain -> getReceiverCount(); sourceIndex++) {
                             const auto emitterIndex = fixedDomain -> getEmitterFor(sourceIndex);
-                            if (const auto targetIndex = connector -> fromOutput(emitterIndex)) {
+                            if (const auto targetIndex = connector -> emitterToReceiver(emitterIndex)) {
                                 auto targetLabel = RoutingNodeLabel(targetDomain, *targetIndex);
                                 auto sourceLabel = RoutingNodeLabel(domain, sourceIndex);
                                 auto sourceBuilderVertex = out -> getVertexByLabel(sourceLabel);
@@ -293,7 +293,7 @@ namespace kernel::interrupts {
                         const auto targetDomain = topologyGraph -> getVertexLabel(targetVertex);
                         const auto connector = topologyGraph -> getEdgeLabel(outgoingEdge);
                         for (size_t sourceIndex = 0; sourceIndex < emitter -> getEmitterCount(); sourceIndex++) {
-                            if (auto targetIndex = connector -> fromOutput(sourceIndex)) {
+                            if (auto targetIndex = connector -> emitterToReceiver(sourceIndex)) {
                                 auto targetLabel = RoutingNodeLabel(targetDomain, *targetIndex);
                                 auto sourceLabel = RoutingNodeLabel(domain, sourceIndex);
                                 auto sourceBuilderVertex = out -> getVertexByLabel(sourceLabel);
@@ -305,6 +305,64 @@ namespace kernel::interrupts {
                 }
             }
             return out;
+        }
+
+        // Returns false if source→target is prohibited by trigger-type constraints.
+        // sourceIsReceiver: whether the source node is an InterruptReceiver (not a pure device emitter).
+        // Devices (pure emitters) with UNDETERMINED type may connect to level-triggered targets;
+        // receivers must match level with level, and level cannot connect toward edge.
+        static bool areTriggerTypesCompatible(
+            RoutingNodeTriggerType sourceType,
+            RoutingNodeTriggerType targetType,
+            bool sourceIsReceiver)
+        {
+            if (targetType == RoutingNodeTriggerType::TRIGGER_LEVEL) {
+                if (sourceType != RoutingNodeTriggerType::TRIGGER_LEVEL && sourceIsReceiver) {
+                    return false;
+                }
+            }
+            if (targetType == RoutingNodeTriggerType::TRIGGER_EDGE) {
+                if (sourceType == RoutingNodeTriggerType::TRIGGER_LEVEL) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        // Checks whether a routable source domain is allowed to connect receiver sourceIndex
+        // to the given target node, considering ownership restrictions and per-subtype routing rules.
+        // Precondition: the topology edge exists and connector->receiverToEmitter(targetIndex) == emitterIndex.
+        static bool checkSubtypeRouting(
+            const RoutingConstraint::Builder& graph,
+            RoutingConstraint::VertexHandle target,
+            SharedPtr<platform::InterruptEmitter> emitter,
+            SharedPtr<platform::InterruptDomain> sourceDomain,
+            size_t sourceIndex, size_t emitterIndex,
+            const platform::DomainConnector& connector,
+            size_t targetIndex,
+            RoutingGraphBuilder& routingBuilder)
+        {
+            if (emitter -> instanceof(TypeID_v<platform::RoutableDomain>)) {
+                auto owner = routingBuilder.getEffectiveOwner(target);
+                if (owner.occupied() && *owner != sourceDomain) {
+                    return false;
+                }
+            }
+            if (emitter -> instanceof(TypeID_v<platform::FreeRoutableDomain>)) {
+                return true;
+            }
+            if (const auto ci = crocos_dynamic_cast<platform::ContextIndependentRoutableDomain>(emitter)) {
+                return ci -> isRoutingAllowed(sourceIndex, emitterIndex);
+            }
+            if (const auto cd = crocos_dynamic_cast<platform::ContextDependentRoutableDomain>(emitter)) {
+                return cd -> isRoutingAllowed(sourceIndex, emitterIndex, graph);
+            }
+            if (const auto fixed = crocos_dynamic_cast<platform::FixedRoutingDomain>(emitter)) {
+                auto expectedTarget = connector.emitterToReceiver(fixed -> getEmitterFor(sourceIndex));
+                if (!expectedTarget) return false;
+                return *expectedTarget == targetIndex;
+            }
+            assertUnimplemented("Interrupt domain is both receiver and emitter, but not of a known subtype");
         }
 
         bool RoutingConstraint::isEdgeAllowedImpl(const Builder &graph, const VertexHandle source, const VertexHandle target, bool checkTriggerType) {
@@ -321,64 +379,32 @@ namespace kernel::interrupts {
             const auto targetDomain = graph.getVertexLabel(target) -> domain();
             const auto targetIndex = graph.getVertexLabel(target) -> index();
 
-            const auto sourceActivationType = mutableRoutingBuilder.getConnectedComponentTriggerType(source);
-            const auto targetActivationType = mutableRoutingBuilder.getConnectedComponentTriggerType(target);
-            //Allowed connections are LEVEL -> LEVEL, LEVEL -> UNDETERMINED, and any mix of EDGE and UNDETERMINED
             if (checkTriggerType) {
-                if (targetActivationType == RoutingNodeTriggerType::TRIGGER_LEVEL) {
-                    //Except we do allow connecting an undetermined device to a level-triggered source
-                    //We then conclude the device wants level-triggered interrupts and mark it as such.
-                    if (sourceActivationType != RoutingNodeTriggerType::TRIGGER_LEVEL && sourceDomain -> instanceof(TypeID_v<platform::InterruptReceiver>)) {
-                        return false;
-                    }
-                }
-                if (targetActivationType == RoutingNodeTriggerType::TRIGGER_EDGE) {
-                    if (sourceActivationType == RoutingNodeTriggerType::TRIGGER_LEVEL){
-                        return false;
-                    }
+                const auto sourceActivationType = mutableRoutingBuilder.getConnectedComponentTriggerType(source);
+                const auto targetActivationType = mutableRoutingBuilder.getConnectedComponentTriggerType(target);
+                if (!areTriggerTypesCompatible(sourceActivationType, targetActivationType,
+                        sourceDomain -> instanceof(TypeID_v<platform::InterruptReceiver>))) {
+                    return false;
                 }
             }
-            //This will only ever be called if we already know the topology graph is preconstructed from createRoutingGraphBuilder
-            //so it is safe to dereference
-            const auto& topologyGraph = *topology::getTopologyGraph();
 
+            // Safe to dereference: topology graph is always built before isEdgeAllowedImpl is called.
+            const auto& topologyGraph = *topology::getTopologyGraph();
             auto sourceTopologyVertex = topologyGraph.getVertexByLabel(sourceDomain);
             auto targetTopologyVertex = topologyGraph.getVertexByLabel(targetDomain);
-
             assert(sourceTopologyVertex.occupied() && targetTopologyVertex.occupied(), "Must have a topology vertex for each domain");
+
             if (const auto edge = topologyGraph.findEdge(*sourceTopologyVertex, *targetTopologyVertex)) {
                 const auto connector = topologyGraph.getEdgeLabel(*edge);
-                const auto targetLabel = graph.getVertexLabel(target);
-                if (auto emitterIndex = connector->fromInput(targetIndex)) {
+                if (auto emitterIndex = connector -> receiverToEmitter(targetIndex)) {
                     const auto emitter = crocos_dynamic_cast<platform::InterruptEmitter>(sourceDomain);
                     if (!emitter) return false;
                     assert(*emitterIndex < (emitter -> getEmitterCount()), "Emitter index out of bounds");
                     if (sourceType == NodeType::Device) {
                         assert(!(emitter -> instanceof(TypeID_v<platform::InterruptReceiver>)), "Source type improperly set");
-                        return (connector -> fromOutput(sourceIndex).occupied()) && (*connector -> fromOutput(sourceIndex) == targetIndex);
+                        return (connector -> emitterToReceiver(sourceIndex).occupied()) && (*connector -> emitterToReceiver(sourceIndex) == targetIndex);
                     }
-                    //For routable domains of any sort, we need to check for compatibility with ownership restrictions.
-                    if (emitter -> instanceof(TypeID_v<platform::RoutableDomain>)) {
-                        auto owner = mutableRoutingBuilder.getEffectiveOwner(target);
-                        if (owner.occupied() && *owner != sourceDomain) {
-                            return false;
-                        }
-                    }
-                    if (emitter -> instanceof(TypeID_v<platform::FreeRoutableDomain>)) {
-                        return true;
-                    }
-                    if (const auto routableDomain = crocos_dynamic_cast<platform::ContextIndependentRoutableDomain>(emitter)) {
-                        return routableDomain -> isRoutingAllowed(sourceIndex, *emitterIndex);
-                    }
-                    if (const auto routableDomain = crocos_dynamic_cast<platform::ContextDependentRoutableDomain>(emitter)) {
-                        return routableDomain -> isRoutingAllowed(sourceIndex, *emitterIndex, graph);
-                    }
-                    if (const auto fixedDomain = crocos_dynamic_cast<platform::FixedRoutingDomain>(emitter)) {
-                        auto expectedTarget = connector -> fromOutput(fixedDomain -> getEmitterFor(sourceIndex));
-                        if (!expectedTarget) return false;
-                        return *expectedTarget == targetIndex;
-                    }
-                    assertUnimplemented("Interrupt domain is both receiver and emitter, but not of a known subtype");
+                    return checkSubtypeRouting(graph, target, emitter, sourceDomain, sourceIndex, *emitterIndex, *connector, targetIndex, mutableRoutingBuilder);
                 }
             }
             return false;
@@ -697,13 +723,13 @@ namespace kernel::interrupts {
             assert(start + width <= emitter -> getEmitterCount(), "Connector too wide");
         }
 
-        Optional<DomainInputIndex> AffineConnector::fromOutput(DomainOutputIndex index) const {
+        Optional<DomainInputIndex> AffineConnector::emitterToReceiver(DomainOutputIndex index) const {
             if (index < start) return {};
             if (index >= start + width) return {};
             return index + offset;
         }
 
-        Optional<DomainOutputIndex> AffineConnector::fromInput(DomainInputIndex index) const {
+        Optional<DomainOutputIndex> AffineConnector::receiverToEmitter(DomainInputIndex index) const {
             if (index < offset) return {};
             auto toReturn = index - offset;
             if (toReturn < start) return {};

@@ -72,6 +72,24 @@ namespace kernel::interrupts::managed {
         return out;
     }
 
+    // Single topological-order pass over all interrupt domains. For each domain in order
+    // (sources first), the pass does three things:
+    //
+    //   Phase A — Load initialization: pure emitters start with load 1 per output, representing
+    //             one interrupt source that needs a path to the CPU.
+    //
+    //   Phase B — Load propagation for pre-wired edges: fixed-routing and pure-device edges
+    //             were pre-populated by createRoutingGraphBuilder(). They are sorted into
+    //             `preexistingEdges` (a stack ordered by domain topological position, closest
+    //             to sources on top) so that each domain's fixed edges are drained exactly when
+    //             that domain is processed. Load from the source accumulates on the target,
+    //             giving downstream domains an accurate view of how many interrupts they carry.
+    //
+    //   Phase C — Greedy routing: once loads are known, freely routable domains use
+    //             FreelyRoutableDomainGreedyRouter (trigger-type-aware min-heap per trigger class).
+    //             Non-free RoutableDomains use a simple linear scan for the least-loaded target.
+    //             Note: the non-free path does not yet apply trigger-type-aware heap selection;
+    //             it should eventually use the same strategy as the free path.
     RoutingGraph GreedyRoutingPolicy::buildRoutingGraph(RoutingGraphBuilder& builder) {
         const auto topologyGraph = *topology::getTopologyGraph();
         const auto topologyDomains = algorithm::graph::topologicalSort(topologyGraph);
@@ -83,6 +101,9 @@ namespace kernel::interrupts::managed {
 
         DomainReceiverLoadMap receiverLoads;
 
+        // Pre-sort fixed/device edges so Phase B can drain them in topological order.
+        // Sorted descending by domain position so `top()` always yields the edge whose
+        // source domain comes earliest in topological order (processed next).
         auto preexistingEdges = Vector<RoutingGraphBuilder::EdgeHandle>(builder.currentEdges());
         preexistingEdges.sort([&](const RoutingGraphBuilder::EdgeHandle& a, const RoutingGraphBuilder::EdgeHandle& b) {
             auto la = builder.getVertexLabel(builder.getEdgeSource(a));
@@ -95,52 +116,43 @@ namespace kernel::interrupts::managed {
 
         for (auto vertex : topologyDomains) {
             auto domain = topologyGraph.getVertexLabel(vertex);
-            //If the domain is a pure emitter, initialize all loads to 1
+
+            // Phase A: initialize load for pure emitters (interrupt sources).
             if (!domain -> instanceof(TypeID_v<platform::InterruptReceiver>)) {
                 assert(domain -> instanceof(TypeID_v<platform::InterruptEmitter>), "Interrupt domain must be at least receiver or emitter");
                 auto emitter = crocos_dynamic_cast<platform::InterruptEmitter>(domain);
                 for (size_t i = 0; i < emitter -> getEmitterCount(); i++) {
-                    auto label = RoutingNodeLabel(domain, i);
-                    receiverLoads.insert(label, 1);
+                    receiverLoads.insert(RoutingNodeLabel(domain, i), 1);
                 }
             }
-            //If there are preexisting edges coming from this domain, propagate the loads forwards
+
+            // Phase B: propagate loads through pre-wired edges from this domain.
             while (preexistingEdges.size() > 0 && builder.getVertexLabel(builder.getEdgeSource(*preexistingEdges.top())) -> domain() == domain) {
                 auto sourceLabel = builder.getVertexLabel(builder.getEdgeSource(*preexistingEdges.top()));
                 auto targetLabel = builder.getVertexLabel(builder.getEdgeTarget(*preexistingEdges.top()));
-                auto sourceLoad = receiverLoads[*sourceLabel];
-                //if receiverLoads[*targetLabel] does not exist, it is automatically initialized to 0
-                receiverLoads[*targetLabel] += sourceLoad;
+                receiverLoads[*targetLabel] += receiverLoads[*sourceLabel];
                 preexistingEdges.pop();
             }
-            //If 'domain' is freely routable, then all interrupt receivers can be mapped
-            //to any possible output, so we can just keep one global list of possible receivers to map to
+
+            // Phase C: route freely routable domains using the trigger-type-aware greedy router,
+            // and non-free routable domains using a simple least-loaded scan.
             if (domain -> instanceof(TypeID_v<platform::FreeRoutableDomain>)) {
                 auto greedyFreeRouter = FreelyRoutableDomainGreedyRouter(builder, domain, receiverLoads);
                 assert(greedyFreeRouter.routeAll(), "Failed to route all receivers for freely routable domain");
             }
-            //Otherwise, we have no hope of doing anything clever - we've gotta brute force it :(
             else if (domain -> instanceof(TypeID_v<platform::RoutableDomain>)) {
                 auto receiver = crocos_dynamic_cast<platform::InterruptReceiver>(domain);
                 for (size_t i = 0; i < receiver -> getReceiverCount(); i++) {
                     auto label = RoutingNodeLabel(domain, i);
-                    //Skip routing receivers that aren't eventually connected to any devices.
-                    if (receiverLoads[label] == 0) continue;
+                    if (receiverLoads[label] == 0) continue; // not connected to any source
                     auto sourceNode = *builder.getVertexByLabel(label);
                     Optional<RoutingGraphBuilder::VertexHandle> bestCandidate;
                     size_t bestLoad = 0;
-                    //TODO ensure compatible activation types
                     for (auto dest : builder.getValidEdgesFrom(sourceNode)) {
-                        if (!bestCandidate.occupied()) {
+                        auto destLoad = receiverLoads[*builder.getVertexLabel(dest)];
+                        if (!bestCandidate.occupied() || destLoad < bestLoad) {
                             bestCandidate = dest;
-                            bestLoad = receiverLoads[*builder.getVertexLabel(dest)];
-                        }
-                        else {
-                            auto destLoad = receiverLoads[*builder.getVertexLabel(dest)];
-                            if (destLoad < bestLoad) {
-                                bestCandidate = dest;
-                                bestLoad = destLoad;
-                            }
+                            bestLoad = destLoad;
                         }
                     }
                     if (!bestCandidate.occupied()) {

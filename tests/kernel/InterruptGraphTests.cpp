@@ -8,7 +8,7 @@
 #include <TestHarness.h>
 #include <cstdlib>
 
-#include <interrupts/InterruptGraphs.h>
+#include <interrupts/InterruptRoutingGraph.h>
 #include <core/ds/Vector.h>
 #include <core/ds/SmartPointer.h>
 
@@ -143,11 +143,11 @@ public:
     MockSimpleConnector(SharedPtr<platform::InterruptDomain> src, SharedPtr<platform::InterruptDomain> tgt)
         : DomainConnector(src, tgt) {}
     
-    Optional<platform::DomainInputIndex> fromOutput(platform::DomainOutputIndex output) const override {
+    Optional<platform::DomainInputIndex> emitterToReceiver(platform::DomainOutputIndex output) const override {
         return Optional<platform::DomainInputIndex>(output);
     }
     
-    Optional<platform::DomainOutputIndex> fromInput(platform::DomainInputIndex input) const override {
+    Optional<platform::DomainOutputIndex> receiverToEmitter(platform::DomainInputIndex input) const override {
         return Optional<platform::DomainOutputIndex>(input);
     }
 };
@@ -175,14 +175,14 @@ public:
         inputToOutput[input] = output;
     }
     
-    Optional<platform::DomainInputIndex> fromOutput(platform::DomainOutputIndex output) const override {
+    Optional<platform::DomainInputIndex> emitterToReceiver(platform::DomainOutputIndex output) const override {
         if (output < outputToInput.size()) {
             return outputToInput[output];
         }
         return Optional<platform::DomainInputIndex>();
     }
     
-    Optional<platform::DomainOutputIndex> fromInput(platform::DomainInputIndex input) const override {
+    Optional<platform::DomainOutputIndex> receiverToEmitter(platform::DomainInputIndex input) const override {
         if (input < inputToOutput.size()) {
             return inputToOutput[input];
         }

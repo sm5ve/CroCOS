@@ -7,7 +7,8 @@
 
 #include <stdint.h>
 
-#include <interrupts/InterruptGraphs.h>
+#include <interrupts/InterruptDomains.h>
+#include <interrupts/InterruptRoutingGraph.h>
 #include <interrupts/InterruptRoutingPolicy.h>
 
 #include <arch.h>

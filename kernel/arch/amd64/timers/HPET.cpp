@@ -301,11 +301,11 @@ namespace arch::amd64::timers{
         HPETConnector(SharedPtr<platform::InterruptDomain> src, SharedPtr<platform::InterruptDomain> tgt) : platform::DomainConnector(move(src), move(tgt)) {}
         HPETConnector(const HPETConnector&) = default;
 
-        Optional<platform::DomainInputIndex> fromOutput(platform::DomainOutputIndex output) const override {
+        Optional<platform::DomainInputIndex> emitterToReceiver(platform::DomainOutputIndex output) const override {
             return ioapicBimap.valueForIndex(static_cast<uint8_t>(output));
         }
 
-        Optional<platform::DomainOutputIndex> fromInput(platform::DomainInputIndex input) const override {
+        Optional<platform::DomainOutputIndex> receiverToEmitter(platform::DomainInputIndex input) const override {
             auto out = ioapicBimap.indexForValue(static_cast<uint8_t>(input));
             return out ? Optional<platform::DomainOutputIndex>(*out) : Optional<platform::DomainOutputIndex>{};
         }

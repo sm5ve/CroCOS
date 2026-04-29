@@ -156,14 +156,14 @@ namespace arch::amd64::interrupts{
     IRQToIOAPICConnector::IRQToIOAPICConnector(SharedPtr<IRQDomain> irqDomain, SharedPtr<InterruptDomain> ioapic, Bimap<size_t, size_t> &&map) :
     DomainConnector(static_pointer_cast<InterruptDomain>(move(irqDomain)), move(ioapic)), irqToAPICLineMap(move(map)){}
 
-    Optional<DomainInputIndex> IRQToIOAPICConnector::fromOutput(DomainOutputIndex index) const {
+    Optional<DomainInputIndex> IRQToIOAPICConnector::emitterToReceiver(DomainOutputIndex index) const {
         if (irqToAPICLineMap.contains(index)) {
             return irqToAPICLineMap.at(index);
         }
         return {};
     }
 
-    Optional<DomainOutputIndex> IRQToIOAPICConnector::fromInput(DomainInputIndex index) const {
+    Optional<DomainOutputIndex> IRQToIOAPICConnector::receiverToEmitter(DomainInputIndex index) const {
         if (irqToAPICLineMap.containsRight(index)) {
             return irqToAPICLineMap.atRight(index);
         }

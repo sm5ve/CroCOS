@@ -41,8 +41,8 @@ namespace arch::amd64::interrupts{
         Bimap<size_t, size_t> irqToAPICLineMap;
     public:
         IRQToIOAPICConnector(SharedPtr<IRQDomain> irqDomain, SharedPtr<InterruptDomain> ioapic, Bimap<size_t, size_t>&& map);
-        Optional<DomainInputIndex> fromOutput(DomainOutputIndex) const override;
-        Optional<DomainOutputIndex> fromInput(DomainInputIndex) const override;
+        Optional<DomainInputIndex> emitterToReceiver(DomainOutputIndex) const override;
+        Optional<DomainOutputIndex> receiverToEmitter(DomainInputIndex) const override;
     };
 
     SharedPtr<IRQDomain> getIRQDomain();
