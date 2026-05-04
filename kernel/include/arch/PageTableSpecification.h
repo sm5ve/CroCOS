@@ -6,12 +6,17 @@
 #define CROCOS_PAGETABLESPECIFICATION_H
 
 #include <core/utility.h>
+#include <core/Flags.h>
 #include <assert.h>
 #include <kernel.h>
 #include <core/math.h>
 #include <mem/MemTypes.h>
 
 #define PARANOID_PAGING_ASSERTIONS
+
+// Forward-declared so is_flags_enum can be specialized before Flags<PageEntryFlag> is used.
+namespace arch { enum class PageEntryFlag : uint8_t; }
+template<> struct is_flags_enum<arch::PageEntryFlag> { static constexpr bool value = true; };
 
 namespace arch{
     using PageTableEntryBit = size_t;
@@ -26,6 +31,7 @@ namespace arch{
             PageTableEntryBit global;
             PageTableEntryBit accessed;
             PageTableEntryBit dirty;
+            PageTableEntryBit cacheDisable;  // PCD / page-level cache-disable
 
             bool writeableOnOne;
             bool executeOnOne;
@@ -151,6 +157,14 @@ namespace arch{
         }
     }
 
+    enum class PageEntryFlag : uint8_t {
+        Write          = 1 << 0,
+        NoExecute      = 1 << 1,
+        Global         = 1 << 2,
+        UserAccessible = 1 << 3,
+        CacheDisable   = 1 << 4,
+    };
+
     template <PageTableLevelDescriptor encoding>
     struct PageTableEntry {
         static_assert(isPTESizeValid(encoding.entryWidth));
@@ -213,7 +227,7 @@ namespace arch{
             return hasDirtyBit(isLeafEntry());
         }
 
-        [[nodiscard]] constexpr static PageTableEntry subtableEntry(kernel::mm::phys_addr addr) requires (encoding.canBeSubtable){
+        [[nodiscard]] constexpr static PageTableEntry subtableEntry(kernel::mm::phys_addr addr, Flags<PageEntryFlag> flags = {}) requires (encoding.canBeSubtable){
             //Ensure the address is properly aligned
 #ifdef PARANOID_PAGING_ASSERTIONS
             assert((addr.value & (~encoding.subtableEncoding.physAddrMask())) == 0, "");
@@ -224,10 +238,12 @@ namespace arch{
                 out |= subtableBit;
             }
             out |= 1ULL << encoding.present;
-            return {out};
+            PageTableEntry entry{out};
+            entry.setFlags(flags);
+            return entry;
         }
 
-        [[nodiscard]] constexpr static PageTableEntry leafEntry(kernel::mm::phys_addr addr) requires (encoding.canBeLeaf){
+        [[nodiscard]] constexpr static PageTableEntry leafEntry(kernel::mm::phys_addr addr, Flags<PageEntryFlag> flags = {}) requires (encoding.canBeLeaf){
             //Ensure the address is properly aligned
 #ifdef PARANOID_PAGING_ASSERTIONS
             assert((addr.value & (~encoding.leafEncoding.physAddrMask())) == 0, "");
@@ -239,7 +255,9 @@ namespace arch{
                 out |= subtableBit;
             }
             out |= 1ULL << encoding.present;
-            return {out};
+            PageTableEntry entry{out};
+            entry.setFlags(flags);
+            return entry;
         }
 
         [[nodiscard]] constexpr bool isLeafEntry() const {
@@ -344,6 +362,62 @@ namespace arch{
 
         void clearAccessedFlag() {
             setAccessedFlag(false);
+        }
+
+        void enableUserAccessible(const bool enabled = true) {
+            const PageTableEntryBit uaBit = encoding.getEncoding(isLeafEntry()).properties.userAccessible;
+#ifdef PARANOID_PAGING_ASSERTIONS
+            assert(hasUserAccessibleBit(), "Cannot set user accessible on this entry");
+#endif
+            DataType bit = (1ULL << uaBit);
+            DataType newData = data & (~bit);
+            if (enabled) {
+                newData |= bit;
+            }
+            data = newData;
+        }
+
+        void setFlags(Flags<PageEntryFlag> flags) {
+            const auto& enc = encoding.getEncoding(isLeafEntry());
+            // Mask shift amount to avoid compile-time overflow; BIT_NOT_PRESENT guard prevents execution.
+            auto apply = [&](PageTableEntryBit bitPos, bool setOnOne, bool value) {
+                if (bitPos == BIT_NOT_PRESENT) return;
+                DataType bit = DataType{1} << (bitPos & (sizeof(DataType) * 8 - 1));
+                DataType newData = data & ~bit;
+                if (setOnOne == value) newData |= bit;
+                data = newData;
+            };
+            if (flags.has(PageEntryFlag::Write))
+                apply(enc.properties.writable, enc.properties.writeableOnOne, true);
+            if (flags.has(PageEntryFlag::NoExecute))
+                apply(enc.properties.executable, enc.properties.executeOnOne, false);
+            if (flags.has(PageEntryFlag::Global))
+                apply(enc.properties.global, enc.properties.globalOnOne, true);
+            if (flags.has(PageEntryFlag::UserAccessible))
+                apply(enc.properties.userAccessible, true, true);
+            if (flags.has(PageEntryFlag::CacheDisable))
+                apply(enc.properties.cacheDisable, true, true);
+        }
+
+        void unsetFlags(Flags<PageEntryFlag> flags) {
+            const auto& enc = encoding.getEncoding(isLeafEntry());
+            auto apply = [&](PageTableEntryBit bitPos, bool setOnOne, bool value) {
+                if (bitPos == BIT_NOT_PRESENT) return;
+                DataType bit = DataType{1} << (bitPos & (sizeof(DataType) * 8 - 1));
+                DataType newData = data & ~bit;
+                if (setOnOne == value) newData |= bit;
+                data = newData;
+            };
+            if (flags.has(PageEntryFlag::Write))
+                apply(enc.properties.writable, enc.properties.writeableOnOne, false);
+            if (flags.has(PageEntryFlag::NoExecute))  // unset NoExecute → enable execute
+                apply(enc.properties.executable, enc.properties.executeOnOne, true);
+            if (flags.has(PageEntryFlag::Global))
+                apply(enc.properties.global, enc.properties.globalOnOne, false);
+            if (flags.has(PageEntryFlag::UserAccessible))
+                apply(enc.properties.userAccessible, true, false);
+            if (flags.has(PageEntryFlag::CacheDisable))
+                apply(enc.properties.cacheDisable, true, false);
         }
 
         [[nodiscard]] constexpr bool isPresent() const {

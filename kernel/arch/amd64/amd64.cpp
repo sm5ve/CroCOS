@@ -121,6 +121,13 @@ namespace arch::amd64{
         __builtin_unreachable();
     }
 
+    bool enableNXBit() {
+        constexpr uint32_t IA32_EFER_MSR = 0xC0000080;
+        uint64_t efer = rdmsr(IA32_EFER_MSR);
+        wrmsr(IA32_EFER_MSR, efer | (1ULL << 11));
+        return true;
+    }
+
     void unhandledExceptionHandler(InterruptFrame& frame) {
         klog() << "Unhandled exception " << frame.vector_index << " at IP " << (void*)frame.rip << " on processor " << getCurrentProcessorID() << "\n";
         print_stacktrace(&frame.rbp);
@@ -193,11 +200,6 @@ namespace arch::amd64{
         const auto mbootMmapBase = early_boot_phys_to_virt(mm::phys_addr(mbootInfo -> mmap_ptr)).as_ptr<mboot_mmap_entry>();
         return {MultibootMMapIterator(mbootMmapBase),
                 MultibootMMapIterator(mbootMmapBase + mbootInfo -> mmap_len)};
-    }
-
-    bool initPageTableManager() {
-        PageTableManager::init(processorCount());
-        return true;
     }
 
     size_t debugEarlyBootCPUID() {

@@ -16,7 +16,6 @@ set(KERNEL_SRC
         mm/kmalloc.cpp
         acpi/ACPIFixedTables.cpp
         mm/MemoryManager.cpp
-        arch/amd64/PageTableManager.cpp
         timing/TimerQueues.cpp
         timing/ClockManager.cpp
         arch/amd64/interrupts/LegacyPIC.cpp
@@ -126,6 +125,6 @@ target_link_libraries(Kernel PRIVATE CoreKernel AllocKernel MMIOKernel gcc)
 
 add_custom_command(TARGET Kernel POST_BUILD
         COMMAND ${CMAKE_OBJCOPY} --only-keep-debug $<TARGET_FILE:Kernel> $<TARGET_FILE:Kernel>.debug
-        COMMAND ${CMAKE_OBJCOPY} --strip-debug --add-gnu-debuglink=$<TARGET_FILE:Kernel>.debug $<TARGET_FILE:Kernel>
+        COMMAND ${CMAKE_OBJCOPY} --strip-all --add-gnu-debuglink=$<TARGET_FILE:Kernel>.debug $<TARGET_FILE:Kernel>
         COMMENT "Stripping symbols and creating debug file with build ID"
 )

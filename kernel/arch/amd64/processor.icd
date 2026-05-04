@@ -6,6 +6,14 @@ per_cpu = true
 phase = "processor_early"
 routine = "arch::amd64::initGDT"
 
+[NX]
+
+name = "Enable NX Bit"
+required = true
+per_cpu = true
+phase = "processor_early"
+routine = "arch::amd64::enableNXBit"
+
 [FSGS]
 
 name = "FS/GS Base"

@@ -21,6 +21,7 @@
 #endif
 
 #include <arch/memmap.h>
+#include <arch/PTEMetadataEntry.h>
 
 #ifdef ARCH_AMD64
 #define SUPPORTS_SPINLOCK_DEADLOCK_DETECTION
@@ -66,6 +67,8 @@ namespace arch{
 #ifndef CROCOS_TESTING
     template <size_t level>
     using PTE = PageTableEntry<pageTableDescriptor.levels[level]>;
+    template <size_t level>
+    using PTEMetadata = PTEMetadataEntry<pageTableDescriptor.levels[level]>;
     template <size_t level>
     struct PageTable{
         PTE<level> data alignas(sizeof(PTE<level>) * pageTableDescriptor.entryCount[level]) [pageTableDescriptor.entryCount[level]];

@@ -4,6 +4,7 @@
 #include <acpi.h>
 #include <timing/timing.h>
 #include <arch/amd64/timers/HPET.h>
+#include <mem/VMSubstrate.h>
 #include <core/FrequencyData.h>
 #include <arch/amd64/interrupts/APIC.h>
 #include <timing/Clock.h>
@@ -194,7 +195,7 @@ namespace arch::amd64::timers{
     HPETRegisters& mapHPET(acpi::HPET& hpetTable) {
         assert(hpetTable.hpetBaseAddress.addressSpaceID == acpi::GASAddressSpaceID::SYSTEM_MEMORY, "We expect the HPET to be mapped to system memory.");
         auto hpetBaseAddress = (void*)hpetTable.hpetBaseAddress.address;
-        const auto mappedBase = PageTableManager::temporaryHackMapMMIOPage(mm::phys_addr(hpetBaseAddress));
+        const auto mappedBase = kernel::mm::VMSubstrate::mapMMIOPage(mm::phys_addr(hpetBaseAddress));
         return *static_cast<HPETRegisters*>(mappedBase);
     }
 

@@ -6,9 +6,13 @@
 #define CROCOS_VMSUBSTRATE_H
 
 #include <stddef.h>
+#include <mem/MemTypes.h>
 
 namespace kernel::mm::VMSubstrate {
     bool init();
+
+    // Returns the base virtual address of the arena at the given index.
+    virt_addr arenaVirtualBase(size_t index);
     void* allocPage();
     void freePage(void*);
 
@@ -16,6 +20,10 @@ namespace kernel::mm::VMSubstrate {
 
     void* vmsmalloc(size_t size);
     void vmsfree(void*);
+
+    // Maps a physical MMIO page into the current CPU's arena with cache-disable semantics.
+    // paddr must be page-aligned.  The returned virtual address is permanently mapped.
+    void* mapMMIOPage(phys_addr paddr);
 
     template <typename T>
     struct SafePtr {

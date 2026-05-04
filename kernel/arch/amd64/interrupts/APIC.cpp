@@ -4,6 +4,7 @@
 #include <timing/timing.h>
 #include <arch/amd64/interrupts/APIC.h>
 #include <arch/amd64/amd64.h>
+#include <mem/VMSubstrate.h>
 #include <arch/amd64/smp.h>
 #include <core/ds/Trees.h>
 #include <arch/amd64/interrupts/AuxiliaryDomains.h>
@@ -178,7 +179,7 @@ namespace arch::amd64::interrupts{
     void createIOAPICStructures(acpi::MADT& madt) {
         for (const auto ioapicEntry : madt.entries<acpi::MADT_IOAPIC_Entry>()) {
             uintptr_t base = ioapicEntry.ioapicAddress;
-            auto* mmio_window = PageTableManager::temporaryHackMapMMIOPage(mm::phys_addr(base));
+            auto* mmio_window = kernel::mm::VMSubstrate::mapMMIOPage(mm::phys_addr(base));
             auto gsiBase = ioapicEntry.gsiBase;
             auto ioapic = make_shared<IOAPIC>(ioapicEntry.ioapicID, mmio_window, gsiBase);
             if (!firstIOAPIC || firstIOAPIC -> getGSIBase() > gsiBase) {
@@ -300,7 +301,7 @@ namespace arch::amd64::interrupts{
     constexpr uint32_t LAPIC_EOI_REGISTER = 0xB0;
 
     LAPIC::LAPIC(mm::phys_addr paddr) {
-        auto mmio = PageTableManager::temporaryHackMapMMIOPage(paddr);
+        auto mmio = kernel::mm::VMSubstrate::mapMMIOPage(paddr);
         mmio_window = static_cast<Register<uint32_t>*>(mmio);
         reg(LAPIC_SPURIOUS_INTERRUPT_VECTOR_REGISTER) = (0x100u | LAPIC_SPURIOUS_INTERRUPT_VECTOR);
     }

@@ -115,93 +115,6 @@ namespace arch::amd64 {
         asm volatile("mfence" ::: "memory");
     }
 
-    namespace PageTableManager{
-        struct CompositeHandle{
-            uint64_t value;
-        };
-
-        struct PartialHandle{
-            uint64_t value;
-        };
-
-        const uint64_t partialPageStructureAlignment = (1ul << 39);
-        const uint32_t pcidMax = (1 << 12);
-
-        void init(size_t processorCount);
-
-        PartialHandle makePartialPageStructure(mm::virt_addr base, size_t size);
-        CompositeHandle makeCompositePageStructure(uint32_t pcid);
-        void destroyPartialPageStructure(PartialHandle);
-        void destroyCompositePageStructure(CompositeHandle);
-
-        [[nodiscard]]
-        mm::phys_addr resolveVirtualAddress(PartialHandle, mm::virt_addr);
-        [[nodiscard]]
-        mm::phys_addr resolveVirtualAddress(CompositeHandle, mm::virt_addr);
-
-        //Only VirtualAddressZones should be modifying their mappings, so we only expose methods to modify mappings
-        //using the PartialHandle
-        void mapAddress(PartialHandle, mm::phys_addr, mm::virt_addr, mm::PageSize,
-                        mm::PageMappingPermissions permissions,
-                        mm::PageMappingCacheType cacheType = mm::PageMappingCacheType::FULLY_CACHED);
-        void unmapAddress(PartialHandle, mm::virt_addr);
-
-        //Only supports mapping pages of the same size. For mixed-size mappings, call this function multiple times
-        //on the relevant subsets. In particular, the 0th entry in the vector will be mapped at the base address,
-        //then the 1st at (base address + page size), and so on
-        void mapAddresses(PartialHandle, Vector<mm::phys_addr>&, mm::virt_addr base, mm::PageSize,
-                          mm::PageMappingPermissions permissions,
-                          mm::PageMappingCacheType cacheType = mm::PageMappingCacheType::FULLY_CACHED);
-        void unmapAddresses(PartialHandle handle, mm::virt_addr base, size_t rangeSize);
-
-        void addStructureToComposite(CompositeHandle, PartialHandle);
-        void removeStructureFromComposite(CompositeHandle, PartialHandle);
-
-        bool isPagePresent(PartialHandle handle, mm::virt_addr addr);
-        bool isPagePresent(CompositeHandle handle, mm::virt_addr addr);
-        bool wasPageAccessed(PartialHandle handle, mm::virt_addr addr);
-        bool wasPageAccessed(CompositeHandle handle, mm::virt_addr addr);
-        mm::PageSize getPageSize(PartialHandle handle, mm::virt_addr addr);
-        mm::PageSize getPageSize(CompositeHandle handle, mm::virt_addr addr);
-        mm::PageMappingPermissions getPagePermissions(PartialHandle handle, mm::virt_addr addr);
-        mm::PageMappingPermissions getPagePermissions(CompositeHandle handle, mm::virt_addr addr);
-        mm::PageMappingCacheType getPageCachingPolicy(PartialHandle handle, mm::virt_addr addr);
-        mm::PageMappingCacheType getPageCachingPolicy(CompositeHandle handle, mm::virt_addr addr);
-
-        //Only VirtualAddressZones should be modifying their mappings, so we only expose methods to modify mappings
-        //using the PartialHandle
-        void resetAccessFlag(PartialHandle handle, mm::virt_addr addr);
-        void setAccessFlag(PartialHandle handle, mm::virt_addr addr);
-        void setPagePermissions(PartialHandle handle, mm::virt_addr addr, mm::PageMappingPermissions);
-        void setPageCachingPolicy(PartialHandle handle, mm::virt_addr addr, mm::PageMappingCacheType);
-        void setPagePermissions(PartialHandle handle, mm::virt_addr base, size_t rangeSize, mm::PageMappingPermissions);
-        void setPageCachingPolicy(PartialHandle handle, mm::virt_addr base, size_t rangeSize, mm::PageMappingCacheType);
-
-        //Installs the page structure in the current running processor
-        void installPageStructure(CompositeHandle handle);
-        CompositeHandle getCurrentPageStructure();
-
-        //Changes the flush planner for the current running processor only
-        void pushFlushPlanner(mm::FlushPlanner& planner);
-        void popFlushPlanner();
-
-        //Exposing various ways of flushing the TLB with differing degrees of granularity
-        void invltlb(bool flushGlobalTlb);
-        void invlpg(mm::virt_addr addr);
-        void invlpcid(uint32_t pcid);
-
-        //Runs processor-local cleanup on the overflow pool. May perform page flushes, so this is not necessarily
-        //a cheap operation
-        void processOverflowPool();
-        //Preallocate some page tables if necessary - potentially expensive operation.
-        void topUpReservePool();
-
-        void runSillyTest();
-
-        //EVIL HACK (Okay it's not that evil, but it's inefficient and we should use a more proper mapping mechanism)
-        void* temporaryHackMapMMIOPage(mm::phys_addr paddr);
-    }
-
     namespace interrupts{
         struct InterruptFrame {
             // General-purpose registers, manually pushed by the stub
@@ -243,6 +156,7 @@ namespace arch::amd64 {
         .global = 8,
         .accessed = 5,
         .dirty = 6,
+        .cacheDisable = 4,
         .writeableOnOne = true,
         .executeOnOne = false,
         .globalOnOne = true
@@ -255,6 +169,7 @@ namespace arch::amd64 {
         .global = BIT_NOT_PRESENT,
         .accessed = 5,
         .dirty = BIT_NOT_PRESENT,
+        .cacheDisable = 4,
         .writeableOnOne = true,
         .executeOnOne = false,
         .globalOnOne = true,
