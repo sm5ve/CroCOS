@@ -458,13 +458,17 @@ namespace kernel::mm::VMSubstrate {
     public:
         void* allocPage() {
             bool ignored = false;
-            return allocFromLevel<pageTableLevelForKMemRegion()>(root(), ignored);
+            const auto out = allocFromLevel<pageTableLevelForKMemRegion()>(root(), ignored);
+            arch::invlpg(virt_addr(out));
+            return out;
         }
 
         void* mapMMIOPage(phys_addr paddr) {
             assert(paddr.value % arch::smallPageSize == 0, "Misaligned MMIO physical address");
             bool ignored = false;
-            return allocFromLevel<pageTableLevelForKMemRegion()>(root(), ignored, paddr);
+            const auto out = allocFromLevel<pageTableLevelForKMemRegion()>(root(), ignored, paddr);
+            arch::invlpg(virt_addr(out));
+            return out;
         }
 
         void freePage(void* ptr) {
