@@ -13,6 +13,9 @@
 #include <core/atomic/HighReliabilityRingBuffer.h>
 #include <mem/NUMA.h>
 #include <core/atomic/AtomicBitPool.h>
+#include <core/atomic/SplitBitmap.h>
+#include <liballoc/OccupancyTransition.h>
+#include <liballoc/Slab.h>
 
 #include <mem/mm.h>
 #include <core/Flags.h>
@@ -45,41 +48,27 @@ using PageAllocationCallback = FunctionRef<void(PageRef)>;
 
 // ==================== Occupancy Transition ====================
 
-enum class OccupancyState : uint8_t { Empty, Partial, Full };
-
-struct OccupancyTransition {
-    OccupancyState before;
-    OccupancyState after;
-
-    [[nodiscard]] bool becameFull()      const { return before != OccupancyState::Full  && after == OccupancyState::Full; }
-    [[nodiscard]] bool becameEmpty()     const { return before != OccupancyState::Empty && after == OccupancyState::Empty; }
-    [[nodiscard]] bool becameAvailable() const { return before == OccupancyState::Full  && after != OccupancyState::Full; }
-};
+// The canonical types live in LibAlloc (libraries/LibAlloc/include/liballoc/OccupancyTransition.h);
+// keep the unqualified names here so existing call sites compile unchanged.
+using OccupancyState      = Core::OccupancyState;
+using OccupancyTransition = Core::OccupancyTransition;
 
 // ==================== Small Page Allocator ====================
 
 class SmallPageAllocator {
     friend class BigPageMetadata;
-    using SmallPageIndex = SmallestUInt_t<log2ceil(kernel::mm::PageAllocator::smallPagesPerBigPage)>;
-    using SmallPageCount = SmallestUInt_t<log2ceil(kernel::mm::PageAllocator::smallPagesPerBigPage + 1)>;
-    constexpr static size_t bitmapWordCount = kernel::mm::PageAllocator::smallPagesPerBigPage / (8 * sizeof(uint64_t));
+    using Bookkeeper = LibAlloc::SlabBookkeeper<kernel::mm::PageAllocator::smallPagesPerBigPage>;
+    using SmallPageIndex = Bookkeeper::SlotIndexType;
 
-    // bit=1: page is available for the current alloc CPU to hand out.
-    // Non-atomic: only ever touched by the one CPU that currently owns this big page
-    // for allocation (either a LocalPool CPU or a single NUMAPool allocating thread).
-    alignas(64) uint64_t allocBitmap[bitmapWordCount];
-    // bit=1: page has been freed by any CPU and is waiting to be picked up.
-    // Atomic: written concurrently by any freeing CPU; drained exclusively by the alloc CPU.
-    alignas(64) Atomic<uint64_t> freeBitmap[bitmapWordCount]{};
+    // Slot occupancy is delegated to the bookkeeper (SplitBitmap +
+    // allocated/reserved counts + transition reporting). This allocator
+    // only owns the address translation between slot indices and
+    // physical addresses within the big page at baseAddr.
+    Bookkeeper bookkeeper;
 
     kernel::mm::phys_addr baseAddr;
-    SmallPageCount reservedCount = 0;
-    Atomic<SmallPageCount> allocatedCount = 0;
-    // First allocBitmap word index that might be non-zero. Non-atomic: alloc CPU only.
-    uint8_t allocHint = 0;
 
     [[nodiscard]] kernel::mm::phys_addr fromPageIndex(SmallPageIndex index) const;
-    [[nodiscard]] static OccupancyState stateFromCount(size_t count, size_t maxAlloc);
     // Flush any remaining allocBitmap pages into freeBitmap before handing this
     // big page back to the NUMAPool, so the next alloc CPU finds them in freeBitmap.
     void flushAllocBitmap();
@@ -92,22 +81,25 @@ public:
     void free(PageRef* pages, size_t count, OccupancyTransition& transition);
     size_t alloc(PageAllocationCallback cb, size_t count) { OccupancyTransition t; return alloc(cb, count, t); }
     void free(PageRef* pages, size_t count) { OccupancyTransition t; free(pages, count, t); }
-    [[nodiscard]] bool isFull() const;
-    [[nodiscard]] bool isEmpty() const;
-    [[nodiscard]] bool hasReservedPages() const { return reservedCount > 0; }
-    [[nodiscard]] size_t freePageCount() const;
+    [[nodiscard]] bool isFull() const { return bookkeeper.isFull(); }
+    [[nodiscard]] bool isEmpty() const { return bookkeeper.isEmpty(); }
+    [[nodiscard]] bool hasReservedPages() const { return bookkeeper.hasReservedSlots(); }
+    [[nodiscard]] size_t freePageCount() const { return bookkeeper.freeSlotCount(); }
     void freeAll();
     void allocAll();
     void reservePage(kernel::mm::phys_addr addr);
 
 #ifdef CROCOS_TESTING
-    [[nodiscard]] size_t getAllocatedCount() const { return static_cast<size_t>(allocatedCount.load(RELAXED)); }
-    [[nodiscard]] size_t getReservedCount()  const { return reservedCount; }
+    [[nodiscard]] size_t getAllocatedCount() const { return bookkeeper.allocatedSlotCount(); }
+    [[nodiscard]] size_t getReservedCount()  const { return bookkeeper.reservedSlotCount(); }
     // Count of pages currently in allocBitmap or freeBitmap (i.e. free and not reserved).
     // Safe to call only in quiescent (single-threaded) state.
-    [[nodiscard]] size_t getBitmapPopcount() const;
+    [[nodiscard]] size_t getBitmapPopcount() const { return bookkeeper.bitmapAvailableCount(); }
     // Invariant: bitmapPopcount + allocatedCount + reservedCount == smallPagesPerBigPage.
-    [[nodiscard]] bool   checkInvariants()   const;
+    [[nodiscard]] bool   checkInvariants()   const {
+        return getBitmapPopcount() + getAllocatedCount() + getReservedCount()
+               == kernel::mm::PageAllocator::smallPagesPerBigPage;
+    }
 #endif
 };
 

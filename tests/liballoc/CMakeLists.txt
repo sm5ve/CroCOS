@@ -11,10 +11,12 @@ add_library(LibAllocTests STATIC)
 
 target_sources(LibAllocTests PRIVATE
         InternalAllocTest.cpp
+        SlabTest.cpp
 )
 
 # Add the TestHarness from parent directory
 target_include_directories(LibAllocTests PUBLIC
+    ..
     ../harness
     ../../libraries/LibAlloc/include
     ../../libraries/Core/include

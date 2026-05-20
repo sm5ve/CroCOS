@@ -21,6 +21,7 @@ target_include_directories(KernelTests PUBLIC
     ../harness
     ../../kernel/include
     ../../libraries/Core/include
+    ../../libraries/LibAlloc/include
 )
 
 # Add kernel source files that we're testing

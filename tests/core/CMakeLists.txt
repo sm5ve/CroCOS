@@ -25,6 +25,7 @@ target_sources(CoreTests PRIVATE
     LinkedListTests.cpp
     AtomicLinkedListTest.cpp
     AtomicBitPoolTest.cpp
+    SplitBitmapTest.cpp
     #AtomicBitPoolGlobalLockMock.cpp
     #AtomicBitPoolConcurrentLinkedList.cpp
 )

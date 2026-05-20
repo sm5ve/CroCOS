@@ -7,8 +7,8 @@
 #include <arch.h>
 
 #include <kmemlayout.h>
+#include <core/atomic/SplitBitmap.h>
 
-#include "arch.h"
 #include "mem/TempWindow.h"
 
 namespace VMSubstrateHelper {
@@ -195,35 +195,40 @@ namespace VMSubstrateHelper {
     }
 
     // ────────────────────────────────────────────────────────────────────────
+    // Each leaf is a single-word split bitmap whose alloc/free arrays live at
+    // distinct offsets in the occupancy buffer. The view is a stack-local
+    // pair of pointers — no per-leaf storage object exists.
+    // ────────────────────────────────────────────────────────────────────────
+
+    using LeafBitmapView = Core::SplitBitmap<1, Core::ExternalSplitBitmapStorage<1>, false>;
+
+    [[nodiscard]] inline LeafBitmapView leafBitmapView(kernel::mm::virt_addr arenaBase, size_t T) {
+        return LeafBitmapView(&leafAllocBitmap(arenaBase, T), &leafFreeBitmap(arenaBase, T));
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
     // Leaf-bit operations.
     // ────────────────────────────────────────────────────────────────────────
 
     struct LeafClaimResult { int bit; bool becameFull; };  // bit == -1 when leaf is full
 
-    // Claim a free bit from leafAllocBitmap[T].
-    // Pass 0: scan allocBitmap (no atomics).
-    // Pass 1: drain leafFreeBitmap → leafAllocBitmap (ACQ_REL exchange), then scan again.
-    // freeWordCount is not touched during drain.
-    // When allocBitmap goes nonzero→0: fetch_sub freeWordCount; becameFull iff it was 1.
+    // Claim a free bit from this leaf. SplitBitmap handles the alloc-side scan
+    // and the drain-and-retry; this wrapper layers the radix-specific
+    // freeWordCount decrement + "leaf became full" detection on top.
     [[nodiscard]] inline LeafClaimResult claimLeafBit(kernel::mm::virt_addr arenaBase, size_t T) {
-        for (int pass = 0; pass < 2; pass++) {
-            if (pass == 1) {
-                const uint64_t freed = leafFreeBitmap(arenaBase, T).exchange(0, ACQ_REL);
-                if (!freed) return {-1, false};
-                leafAllocBitmap(arenaBase, T) |= freed;
-            }
-            uint64_t& alloc = leafAllocBitmap(arenaBase, T);
-            if (!alloc) continue;
-            const int bit = __builtin_ctzll(alloc);
-            alloc &= alloc - 1;
-            bool becameFull = false;
-            if (!alloc) {
-                const uint8_t prev = leafFreeWordCount(arenaBase, T).fetch_sub(1, ACQ_REL);
-                becameFull = (prev == 1);
-            }
-            return {bit, becameFull};
+        auto bm = leafBitmapView(arenaBase, T);
+        int bit = bm.tryClaimBitNoDrain();
+        if (bit < 0) {
+            if (!bm.drainFreeIntoAlloc()) return {-1, false};
+            bit = bm.tryClaimBitNoDrain();
+            if (bit < 0) return {-1, false};
         }
-        return {-1, false};
+        bool becameFull = false;
+        if (bm.allocSideEmpty()) {
+            const uint8_t prev = leafFreeWordCount(arenaBase, T).fetch_sub(1, ACQ_REL);
+            becameFull = (prev == 1);
+        }
+        return {bit, becameFull};
     }
 
     inline void propagateEdge(kernel::mm::virt_addr arenaBase, size_t leafIdx, bool isAvailableEdge) {
@@ -252,15 +257,14 @@ namespace VMSubstrateHelper {
 
     // Permanently mark a slot as occupied. Used during arena init to reserve
     // VAs that are not allocatable (root[0] self-ref shadow region; dirty
-    // pages and occupancy-buffer pages). Single-threaded init context;
-    // RELAXED memory order. Propagates "leaf full" up the radix tree if the
-    // leaf transitions to fully reserved.
+    // pages and occupancy-buffer pages). Single-threaded init context.
+    // Propagates "leaf full" up the radix tree if the leaf transitions to
+    // fully reserved.
     inline void reserveLeafBit(kernel::mm::virt_addr arenaBase, size_t T, size_t bit) {
-        const uint64_t mask = uint64_t{1} << bit;
-        uint64_t& alloc = leafAllocBitmap(arenaBase, T);
-        const uint64_t prevAlloc = alloc;
-        alloc &= ~mask;
-        if (prevAlloc && !alloc) {
+        auto bm = leafBitmapView(arenaBase, T);
+        const bool wasNonEmpty = !bm.allocSideEmpty();
+        bm.reserveBit(bit);
+        if (wasNonEmpty && bm.allocSideEmpty()) {
             const uint8_t prevCount = leafFreeWordCount(arenaBase, T).fetch_sub(1, RELAXED);
             if (prevCount == 1)
                 propagateEdge(arenaBase, T, false);
@@ -353,10 +357,8 @@ namespace VMSubstrateHelper {
     inline void seedAvailableState(kernel::mm::virt_addr arenaBase) {
         const auto base = occupancyBufferBase(arenaBase).value;
 
-        memset(reinterpret_cast<void*>(base + kLeafAllocBitmapOffset),
-               0xFF, kLeafAllocBitmapBytes);
-        memset(reinterpret_cast<void*>(base + kLeafFreeBitmapOffset),
-               0x00, kLeafFreeBitmapBytes);
+        for (size_t T = 0; T < kLeafBitmapCount; T++)
+            leafBitmapView(arenaBase, T).seedAllAvailable();
         memset(reinterpret_cast<void*>(base + kLeafFreeWordCountOffset),
                0x01, kLeafFreeWordCountBytes);
 
@@ -641,11 +643,10 @@ namespace kernel::mm::VMSubstrate {
         const size_t offsetPages = (va.value - arenaBase.value) / arch::smallPageSize;
         const size_t T   = offsetPages / VMSubstrateHelper::kBranchFactor;
         const size_t bit = offsetPages % VMSubstrateHelper::kBranchFactor;
-        const uint64_t mask = uint64_t{1} << bit;
 
-        const uint64_t prev =
-            VMSubstrateHelper::leafFreeBitmap(arenaBase, T).fetch_or(mask, ACQ_REL);
-        if (prev == 0) {
+        auto bm = VMSubstrateHelper::leafBitmapView(arenaBase, T);
+        const auto result = bm.releaseBit(bit);
+        if (result.wordWasZero) {
             const uint8_t prevCount =
                 VMSubstrateHelper::leafFreeWordCount(arenaBase, T).fetch_add(1, ACQ_REL);
             if (prevCount == 0)
