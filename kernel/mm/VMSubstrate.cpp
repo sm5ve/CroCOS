@@ -110,6 +110,19 @@ namespace VMSubstrateHelper {
     constexpr size_t kOccupancyBufferSize =
         kOccupancyBufferPages * arch::smallPageSize;
 
+    // The leaf alloc/free bitmap pages are lazily backed on first allocator
+    // touch; only freeWordCount + interior live at the tail and are mapped
+    // eagerly at arena creation. Requires alloc/free regions to be a whole
+    // number of pages so their boundary is page-aligned.
+    static_assert(kLeafAllocBitmapBytes % arch::smallPageSize == 0,
+        "leaf alloc bitmap must be a whole number of pages for lazy-mapping");
+    static_assert(kLeafFreeBitmapBytes  % arch::smallPageSize == 0,
+        "leaf free bitmap must be a whole number of pages for lazy-mapping");
+    constexpr size_t kAlwaysMappedOccupancyPageStart =
+        kLeafFreeWordCountOffset / arch::smallPageSize;
+    constexpr size_t kAlwaysMappedOccupancyPageCount =
+        kOccupancyBufferPages - kAlwaysMappedOccupancyPageStart;
+
     // VA span of one entry at the arena root level (= 2 MiB on AMD64; the
     // start of root[1]'s data range).
     constexpr size_t kSelfRefSize =
@@ -210,12 +223,20 @@ namespace VMSubstrateHelper {
     // Leaf-bit operations.
     // ────────────────────────────────────────────────────────────────────────
 
+    // Lazy-back the alloc + free bitmap pages covering leaf T (defined below,
+    // after the self-ref arithmetic it depends on).
+    inline void ensureLeafBitmapPageMapped(kernel::mm::virt_addr arenaBase,
+                                           size_t T,
+                                           arch::ProcessorID cpu);
+
     struct LeafClaimResult { int bit; bool becameFull; };  // bit == -1 when leaf is full
 
     // Claim a free bit from this leaf. SplitBitmap handles the alloc-side scan
     // and the drain-and-retry; this wrapper layers the radix-specific
     // freeWordCount decrement + "leaf became full" detection on top.
-    [[nodiscard]] inline LeafClaimResult claimLeafBit(kernel::mm::virt_addr arenaBase, size_t T) {
+    [[nodiscard]] inline LeafClaimResult claimLeafBit(kernel::mm::virt_addr arenaBase, size_t T,
+                                                      arch::ProcessorID cpu) {
+        ensureLeafBitmapPageMapped(arenaBase, T, cpu);
         auto bm = leafBitmapView(arenaBase, T);
         int bit = bm.tryClaimBitNoDrain();
         if (bit < 0) {
@@ -260,7 +281,9 @@ namespace VMSubstrateHelper {
     // pages and occupancy-buffer pages). Single-threaded init context.
     // Propagates "leaf full" up the radix tree if the leaf transitions to
     // fully reserved.
-    inline void reserveLeafBit(kernel::mm::virt_addr arenaBase, size_t T, size_t bit) {
+    inline void reserveLeafBit(kernel::mm::virt_addr arenaBase, size_t T, size_t bit,
+                               arch::ProcessorID cpu) {
+        ensureLeafBitmapPageMapped(arenaBase, T, cpu);
         auto bm = leafBitmapView(arenaBase, T);
         const bool wasNonEmpty = !bm.allocSideEmpty();
         bm.reserveBit(bit);
@@ -323,6 +346,47 @@ namespace VMSubstrateHelper {
     }
 
     // ────────────────────────────────────────────────────────────────────────
+    // Lazy backing of leaf alloc/free bitmap pages. Each call ensures the
+    // two occupancy-buffer pages (alloc-side, free-side) covering leaf T are
+    // physically backed; if absent, allocates a phys page, installs the leaf
+    // PTE through the self-ref, and initializes the page to match
+    // SplitBitmap's "all available" representation (alloc=~0, free=0).
+    //
+    // Called only from the allocator path (claim/reserveLeafBit) — the
+    // single-allocator-per-arena invariant means no concurrent installer for
+    // these PTEs. Freers never touch unmapped bitmap pages: a freed bit was
+    // previously allocated, and the allocator must have mapped its page
+    // before handing the bit out.
+    // ────────────────────────────────────────────────────────────────────────
+
+    inline void ensureLeafBitmapPageMapped(kernel::mm::virt_addr arenaBase, size_t T,
+                                           arch::ProcessorID cpu) {
+        using Flag = arch::PageEntryFlag;
+        constexpr auto kFlags = Flag::Write | Flag::Global | Flag::NoExecute;
+        constexpr size_t kLeavesPerPage = arch::smallPageSize / sizeof(uint64_t);
+
+        const size_t pageOffsetInHalf = (T / kLeavesPerPage) * arch::smallPageSize;
+        const auto bufBase = occupancyBufferBase(arenaBase);
+
+        const struct { size_t offset; uint8_t fill; } halves[2] = {
+            {kLeafAllocBitmapOffset, 0xFF},
+            {kLeafFreeBitmapOffset,  0x00},
+        };
+
+        for (const auto& h : halves) {
+            const kernel::mm::virt_addr pageVA{bufBase.value + h.offset + pageOffsetInHalf};
+            auto& pte = *reinterpret_cast<arch::PTE<leafLevel>*>(
+                leafPTEAddrFor(arenaBase, pageVA).value);
+            if (pte.isPresent()) continue;
+
+            const kernel::mm::phys_addr phys = kernel::mm::PageAllocator::allocateSmallPage(cpu);
+            pte = arch::PTE<leafLevel>::leafEntry(phys, kFlags);
+            arch::invlpg(pageVA);
+            memset(reinterpret_cast<void*>(pageVA.value), h.fill, arch::smallPageSize);
+        }
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
     // Set the dirty bit for every CPU other than the current one for the
     // small page at `va`. Subsequent SafePtr<T> dereferences on those CPUs
     // call ensureTLBEntryFresh, which sees the bit, invlpgs the VA, and
@@ -357,8 +421,10 @@ namespace VMSubstrateHelper {
     inline void seedAvailableState(kernel::mm::virt_addr arenaBase) {
         const auto base = occupancyBufferBase(arenaBase).value;
 
-        for (size_t T = 0; T < kLeafBitmapCount; T++)
-            leafBitmapView(arenaBase, T).seedAllAvailable();
+        // Leaf alloc/free bitmaps are not pre-seeded — those pages are lazy-
+        // backed on first allocator touch by ensureLeafBitmapPageMapped, which
+        // initializes them to the same all-available state seedAllAvailable
+        // would produce (alloc=0xFF fill, free=0x00 fill).
         memset(reinterpret_cast<void*>(base + kLeafFreeWordCountOffset),
                0x01, kLeafFreeWordCountBytes);
 
@@ -383,20 +449,20 @@ namespace VMSubstrateHelper {
     //       the dead zone past them); and
     //   (b) the dirty-bitmap pages and occupancy-buffer pages at the head of
     //       root[1]'s data range.
-    inline void reserveBootBits(kernel::mm::virt_addr arenaBase) {
+    inline void reserveBootBits(kernel::mm::virt_addr arenaBase, arch::ProcessorID cpu) {
         constexpr size_t selfRefBitmaps =
             kSelfRefSize / (kBranchFactor * arch::smallPageSize);
 
         // (a) Self-ref shadow region.
         for (size_t T = 0; T < selfRefBitmaps; T++)
             for (size_t bit = 0; bit < kBranchFactor; bit++)
-                reserveLeafBit(arenaBase, T, bit);
+                reserveLeafBit(arenaBase, T, bit, cpu);
 
         // (b) Dirty + occupancy-buffer pages at the head of root[1]'s data range.
         constexpr size_t T = selfRefBitmaps;
         const size_t D = LeafPageTableWrapper::dirtyWordCount();
         for (size_t bit = 0; bit < D + kOccupancyBufferPages; bit++)
-            reserveLeafBit(arenaBase, T, bit);
+            reserveLeafBit(arenaBase, T, bit, cpu);
     }
 
     // ────────────────────────────────────────────────────────────────────────
@@ -472,7 +538,7 @@ namespace VMSubstrateHelper {
                     ((va.value - arenaBase.value) / arch::bigPageSize)
                     * (arch::bigPageSize / (kBranchFactor * arch::smallPageSize));
                 for (size_t bit = 0; bit < D; bit++)
-                    reserveLeafBit(arenaBase, T_first, bit);
+                    reserveLeafBit(arenaBase, T_first, bit, cpu);
             }
         }
 
@@ -517,8 +583,12 @@ namespace kernel::mm::VMSubstrate {
                 const phys_addr dirtyPhys = PageAllocator::allocateSmallPage(cpu);
                 pageTablePtr->table[dw] = arch::PTE<level>::leafEntry(dirtyPhys, kFlags);
             }
-            for (size_t i = 0; i < VMSubstrateHelper::kOccupancyBufferPages; i++) {
-                pageTablePtr->table[D + i] =
+            // Only the always-mapped tail of the occupancy buffer
+            // (freeWordCount + interior bitmaps) is installed eagerly. The
+            // leaf alloc/free bitmap pages are lazy-backed on first touch by
+            // ensureLeafBitmapPageMapped.
+            for (size_t i = 0; i < VMSubstrateHelper::kAlwaysMappedOccupancyPageCount; i++) {
+                pageTablePtr->table[D + VMSubstrateHelper::kAlwaysMappedOccupancyPageStart + i] =
                     arch::PTE<level>::leafEntry(occBufPhys[i], kFlags);
             }
         } else {
@@ -572,7 +642,7 @@ namespace kernel::mm::VMSubstrate {
             VMSubstrateHelper::ensureSubtableInstalled<pageTableLevelForKMemRegion()>(
                 arenaBase, probeVA, cpu);
 
-            const auto [bit, becameFull] = VMSubstrateHelper::claimLeafBit(arenaBase, T);
+            const auto [bit, becameFull] = VMSubstrateHelper::claimLeafBit(arenaBase, T, cpu);
             if (bit < 0) continue;
             if (becameFull) VMSubstrateHelper::propagateEdge(arenaBase, T, false);
 
@@ -657,13 +727,15 @@ namespace kernel::mm::VMSubstrate {
     void* createArena(arch::ProcessorID cpu) {
         LockGuard arenaGuard(arenaCreationLock);
 
-        // 1. Allocate the occupancy-buffer's physical pages.
-        phys_addr occBufPhys[VMSubstrateHelper::kOccupancyBufferPages];
-        for (size_t i = 0; i < VMSubstrateHelper::kOccupancyBufferPages; i++)
+        // 1. Allocate the always-mapped tail of the occupancy buffer
+        //    (freeWordCount + interior). Leaf alloc/free bitmap pages are
+        //    deferred until first touch by ensureLeafBitmapPageMapped.
+        phys_addr occBufPhys[VMSubstrateHelper::kAlwaysMappedOccupancyPageCount];
+        for (size_t i = 0; i < VMSubstrateHelper::kAlwaysMappedOccupancyPageCount; i++)
             occBufPhys[i] = PageAllocator::allocateSmallPage(cpu);
 
         // 2. Build the HW chain. The leaf level installs both the per-CPU
-        //    dirty-bitmap pages and the occupancy-buffer pages.
+        //    dirty-bitmap pages and the always-mapped occupancy-buffer pages.
         const phys_addr topAddr =
             initializeArenaChain<pageTableLevelForKMemRegion()>(cpu, occBufPhys);
 
@@ -678,15 +750,16 @@ namespace kernel::mm::VMSubstrate {
         // 4. The arena's VAs were unmapped before step 3; flush any negative
         //    TLB entries on this CPU for the buffer pages we're about to
         //    write through.
-        for (size_t i = 0; i < VMSubstrateHelper::kOccupancyBufferPages; i++)
+        for (size_t i = 0; i < VMSubstrateHelper::kAlwaysMappedOccupancyPageCount; i++)
             arch::invlpg(VMSubstrateHelper::occupancyBufferBase(arenaBase)
-                         + i * arch::smallPageSize);
+                         + (VMSubstrateHelper::kAlwaysMappedOccupancyPageStart + i)
+                           * arch::smallPageSize);
 
         // 5. Seed the radix tree to "everything available".
         VMSubstrateHelper::seedAvailableState(arenaBase);
 
         // 6. Reserve the bits for non-allocatable VAs (self-ref shadow + dirty + buffer).
-        VMSubstrateHelper::reserveBootBits(arenaBase);
+        VMSubstrateHelper::reserveBootBits(arenaBase, cpu);
 
         return reinterpret_cast<void*>(arenaBase.value);
     }
