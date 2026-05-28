@@ -46,6 +46,10 @@
 
 #include "VMSubstrateSlab.h"
 
+#ifdef CROCOS_VMSMALLOC_TEST_HARNESS
+#include <DebugIntrospection.h>   // Phase 8 — test-only accessors (test include path)
+#endif
+
 namespace kernel::mm::vmsmalloc {
 
 namespace {
@@ -621,5 +625,34 @@ void vmsfree(void* p) {
         }
     }
 }
+
+#ifdef CROCOS_VMSMALLOC_TEST_HARNESS
+// Phase 8 introspection (P8-DEC-005). Defined here so they can read this TU's
+// anonymous-namespace state and the per-CPU magazines; gated out of the kernel
+// build. Snapshots assume a quiescent system (single thread, or post-join).
+namespace test {
+    using namespace kernel::mm::vmsmalloc;
+
+    MagazineSnapshot magazineSnapshot(size_t c) {
+        Magazine& m = kernel::cpuLocal().magazines[c];
+        return { m.head, m.depth };
+    }
+    PartialStackSnapshot partialStackSnapshot(numa::DomainID d, size_t c) {
+        PartialStack* s = partialFor(d, c);
+        auto pk = s->peek();
+        return { pk.head, pk.depth, s->empty() };
+    }
+    TuningSnapshot tuningSnapshot(numa::DomainID d, size_t c) {
+        PartialStack* s = partialFor(d, c);
+        MagazineTuning& t = tuningFor(d)[c];
+        return { s->getMaxChainLength(),
+                 t.overflowCount.load(RELAXED),
+                 t.starvationCount.load(RELAXED) };
+    }
+    void setMaxChainLength(numa::DomainID d, size_t c, uint32_t k) {
+        partialFor(d, c)->setMaxChainLength(k);
+    }
+}
+#endif // CROCOS_VMSMALLOC_TEST_HARNESS
 
 }  // namespace kernel::mm::VMSubstrate

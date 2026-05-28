@@ -138,6 +138,9 @@ if(NOT APPLE)
     )
 endif()
 
+# vmsmalloc Phase 8 — standalone integration harness (own runner binaries).
+add_subdirectory(vmsmalloc)
+
 # Add a custom target to run kernel tests
 add_custom_target(run_kernel_tests
     COMMAND KernelTestRunner
