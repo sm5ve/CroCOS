@@ -116,6 +116,22 @@ namespace CroCOSTest {
             } \
         } while(0)
 
+    // Negative-test macro: expect that `expr` triggers an `assert(...)` from the
+    // code under test. The kernel/Core `assert` macro is mapped to throw
+    // CroCOSTest::AssertionFailure in test mode (libraries/Core/include/assert.h
+    // under CORE_LIBRARY_TESTING). If `expr` runs to completion without
+    // throwing, the test fails.
+    #define EXPECT_ASSERT_FAILURE(expr) \
+        do { \
+            bool _crocos_assert_caught = false; \
+            try { (void)(expr); } \
+            catch (const CroCOSTest::AssertionFailure&) { _crocos_assert_caught = true; } \
+            if (!_crocos_assert_caught) { \
+                throw CroCOSTest::AssertionFailure( \
+                    "Expected assertion failure from: " #expr); \
+            } \
+        } while(0)
+
     // Test information structure stored in custom section
     struct TestInfo {
         const char* name;

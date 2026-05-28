@@ -16,9 +16,10 @@
 //     and a compile-time slot size. Returns void* on alloc, takes void*
 //     on free. The buffer is caller-owned.
 //
-// SlotCount must be a positive multiple of 64 (the underlying SplitBitmap
-// works in whole 64-bit words). Storage defaults to inline; pass
-// Core::ExternalSplitBitmapStorage to use caller-managed bitmap memory.
+// SlotCount may be any positive value (the underlying SplitBitmap works in
+// whole 64-bit words; the bookkeeper rounds up via ceiling division and
+// masks the tail bits as occupied at seed time). Storage defaults to inline;
+// pass Core::ExternalSplitBitmapStorage to use caller-managed bitmap memory.
 //
 
 #ifndef CROCOS_LIBALLOC_SLAB_H
@@ -36,22 +37,35 @@
 
 namespace LibAlloc {
 
+// DEC-011 (vmsmalloc): SlotCount may be any positive value; tail bits in
+// [SlotCount, kWordCount * 64) are masked-occupied at init via
+// seedAllAvailable(SlotCount).
 template <size_t SlotCount,
-          typename Storage = Core::InlineSplitBitmapStorage<SlotCount / 64>,
-          bool UseHint = ((SlotCount / 64) > 1)>
+          typename Storage = Core::InlineSplitBitmapStorage<(SlotCount + 63) / 64>,
+          bool UseHint = (((SlotCount + 63) / 64) > 1)>
 class SlabBookkeeper {
-    static_assert(SlotCount > 0 && (SlotCount % 64) == 0,
-                  "SlabBookkeeper SlotCount must be a positive multiple of 64");
+    static_assert(SlotCount > 0, "SlabBookkeeper SlotCount must be positive");
 
-    static constexpr size_t kWordCount = SlotCount / 64;
+    static constexpr size_t kWordCount = (SlotCount + 63) / 64;
     using Bitmap = Core::SplitBitmap<kWordCount, Storage, UseHint>;
 
 public:
-    using SlotIndexType = SmallestUInt_t<log2ceil(SlotCount)>;
+    // Both typedefs use log2ceil(SlotCount + 1) to dodge log2ceil(1)'s UB
+    // (it chains through log2floor(0) → __builtin_clz(0), which fails to
+    // constant-fold). For SlotCount in {64, 128, 512, ...} this yields the
+    // same type as the older log2ceil(SlotCount) formula did for
+    // SlotIndexType.
+    using SlotIndexType = SmallestUInt_t<log2ceil(SlotCount + 1)>;
     using SlotCountType = SmallestUInt_t<log2ceil(SlotCount + 1)>;
 
     static constexpr size_t kSlotCount = SlotCount;
     static constexpr size_t kBitmapWordCount = kWordCount;
+
+    // Number of tail bits in [SlotCount, kWordCount * 64) that the seeder
+    // masks-occupied so the bitmap's storage granularity does not leak
+    // through `allocSlot`. Folds to 0 for any SlotCount % 64 == 0.
+    static constexpr SlotCountType kTailBits =
+        static_cast<SlotCountType>(kWordCount * 64 - SlotCount);
 
     // Default ctor only sensible for inline storage. Both halves of the
     // bitmap are left in their underlying SplitBitmap-default state
@@ -64,20 +78,47 @@ public:
     constexpr SlabBookkeeper(uint64_t* allocPtr, Atomic<uint64_t>* freePtr)
         : bitmap(allocPtr, freePtr) {}
 
-    void seedAllAvailable() {
+    // Seeds the bitmap to "all available" and reserves the tail bits in
+    // [usableCount, kWordCount * 64). After this, allocSlot only ever
+    // returns indices in [0, usableCount). `usableCount` must not exceed
+    // SlotCount.
+    void seedAllAvailable(size_t usableCount) {
+        assert(usableCount <= SlotCount,
+               "SlabBookkeeper::seedAllAvailable: usableCount exceeds SlotCount");
         bitmap.seedAllAvailable();
         allocatedCount.store(0, RELEASE);
+        // The reserveSlot loop must run AFTER the allocatedCount.store(0),
+        // because reserveSlot asserts allocatedCount == 0.
+        for (size_t i = usableCount; i < kWordCount * 64; i++) {
+            reserveSlot(i);
+        }
     }
+
+    // No-arg form: every bit in [0, SlotCount) is initially available; tail
+    // bits in [SlotCount, kWordCount * 64) (if any) are masked-occupied.
+    // For SlotCount % 64 == 0 the tail-bit loop body is empty and
+    // reservedCount stays at 0 — bit-identical to pre-DEC-011 behavior.
+    void seedAllAvailable() { seedAllAvailable(SlotCount); }
 
     void seedAllUsed() {
         bitmap.seedAllUsed();
-        allocatedCount.store(static_cast<SlotCountType>(SlotCount - reservedCount), RELEASE);
+        // "All used" means every bit not reserved is allocated. The bitmap
+        // spans kWordCount * 64 bits total; reservedCount counts everything
+        // permanently out of circulation (tail bits + caller reservations).
+        allocatedCount.store(
+            static_cast<SlotCountType>(kWordCount * 64 - reservedCount), RELEASE);
     }
 
     // Owner-only single-slot claim. Returns the claimed slot index, or
     // -1 if the slab is exhausted. Always updates `transition`.
+    //
+    // Atomic ordering on `allocatedCount` is at least acquire-on-read /
+    // release-on-write (ACQ_REL on the fetch_add below). Required by
+    // vmsmalloc (parent spec DEC-039 / DEC-042 #4): downgrading to RELAXED
+    // breaks the pre-read race-freedom argument for becameFull on
+    // ARMv8/RISC-V.
     [[nodiscard]] int allocSlot(Core::OccupancyTransition& transition) {
-        const size_t maxAlloc = SlotCount - reservedCount;
+        const size_t maxAlloc = kWordCount * 64 - reservedCount;
         int bit = bitmap.tryClaimBitNoDrain();
         if (bit < 0) {
             if (bitmap.drainFreeIntoAlloc()) {
@@ -100,11 +141,15 @@ public:
     // with the slot index. Returns the count actually claimed (may be
     // less than `count` if the slab is exhausted). Always updates
     // `transition` to span the whole batch.
+    //
+    // Atomic ordering on `allocatedCount` is at least acquire-on-read /
+    // release-on-write (ACQ_REL on the fetch_add below). See allocSlot's
+    // ordering note — same vmsmalloc DEC-039 / DEC-042 #4 contract.
     size_t allocSlots(size_t count,
                       FunctionRef<void(size_t)> cb,
                       Core::OccupancyTransition& transition) {
         size_t allocated = 0;
-        const size_t maxAlloc = SlotCount - reservedCount;
+        const size_t maxAlloc = kWordCount * 64 - reservedCount;
         while (allocated < count) {
             int bit = bitmap.tryClaimBitNoDrain();
             if (bit < 0) {
@@ -123,8 +168,12 @@ public:
     }
 
     // Multi-CPU safe single-slot release.
+    //
+    // Atomic ordering on `allocatedCount` is at least acquire-on-read /
+    // release-on-write (ACQ_REL on the fetch_sub below). See allocSlot's
+    // ordering note — same vmsmalloc DEC-039 / DEC-042 #4 contract.
     void freeSlot(size_t slot, Core::OccupancyTransition& transition) {
-        const size_t maxAlloc = SlotCount - reservedCount;
+        const size_t maxAlloc = kWordCount * 64 - reservedCount;
         bitmap.releaseBit(slot);
         const size_t prev = static_cast<size_t>(allocatedCount.fetch_sub(1, ACQ_REL));
         transition.before = stateFromCount(prev, maxAlloc);
@@ -135,10 +184,14 @@ public:
     // slots to release; `releasedCount` is the total number of bits set
     // across all words. The caller is responsible for coalescing — this
     // mirrors Core::SplitBitmap::releaseBitsBulk's contract.
+    //
+    // Atomic ordering on `allocatedCount` is at least acquire-on-read /
+    // release-on-write (ACQ_REL on the fetch_sub below). See allocSlot's
+    // ordering note — same vmsmalloc DEC-039 / DEC-042 #4 contract.
     void freeSlotsBulk(const uint64_t pending[kWordCount],
                        size_t releasedCount,
                        Core::OccupancyTransition& transition) {
-        const size_t maxAlloc = SlotCount - reservedCount;
+        const size_t maxAlloc = kWordCount * 64 - reservedCount;
         bitmap.releaseBitsBulk(pending);
         const size_t prev = static_cast<size_t>(allocatedCount.fetch_sub(
                 static_cast<SlotCountType>(releasedCount), ACQ_REL));
@@ -164,12 +217,21 @@ public:
     [[nodiscard]] bool isSlotFree(size_t slot) const { return bitmap.isBitAvailable(slot); }
 
     [[nodiscard]] bool isFull() const {
+        // Usable-slot denominator is kWordCount*64 - reservedCount: tail bits
+        // and caller reservations both come out of the bitmap's full width.
+        // For SlotCount % 64 == 0 (kTailBits == 0) this collapses to
+        // SlotCount - reservedCount — bit-identical to pre-DEC-011 behavior.
         return allocatedCount.load(ACQUIRE)
-               == static_cast<SlotCountType>(SlotCount - reservedCount);
+               == static_cast<SlotCountType>(kWordCount * 64 - reservedCount);
     }
 
+    // "Empty" means no live allocations beyond the structural tail-bit
+    // reservation. For SlotCount % 64 == 0, kTailBits == 0 and this is
+    // identical to pre-DEC-011 behavior. Caller-requested reserveSlot calls
+    // grow reservedCount past kTailBits, and isEmpty() then correctly
+    // returns false until those caller reservations are released.
     [[nodiscard]] bool isEmpty() const {
-        return allocatedCount.load(ACQUIRE) == 0 && reservedCount == 0;
+        return allocatedCount.load(ACQUIRE) == 0 && reservedCount == kTailBits;
     }
 
     [[nodiscard]] bool hasReservedSlots() const { return reservedCount > 0; }
@@ -183,7 +245,7 @@ public:
     }
 
     [[nodiscard]] size_t freeSlotCount() const {
-        return (SlotCount - static_cast<size_t>(reservedCount))
+        return (kWordCount * 64 - static_cast<size_t>(reservedCount))
                - static_cast<size_t>(allocatedCount.load(ACQUIRE));
     }
 
@@ -205,8 +267,8 @@ private:
 
 template <size_t SlotCount,
           size_t SlotSize,
-          typename Storage = Core::InlineSplitBitmapStorage<SlotCount / 64>,
-          bool UseHint = ((SlotCount / 64) > 1)>
+          typename Storage = Core::InlineSplitBitmapStorage<(SlotCount + 63) / 64>,
+          bool UseHint = (((SlotCount + 63) / 64) > 1)>
 class Slab {
 public:
     using Bookkeeper = SlabBookkeeper<SlotCount, Storage, UseHint>;

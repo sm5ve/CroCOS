@@ -6,12 +6,13 @@
 
 cmake_minimum_required(VERSION 3.20)
 
-# Create the kernel test library 
+# Create the kernel test library
 add_library(LibAllocTests STATIC)
 
 target_sources(LibAllocTests PRIVATE
         InternalAllocTest.cpp
         SlabTest.cpp
+        SlabConcurrentTest.cpp
 )
 
 # Add the TestHarness from parent directory
@@ -114,10 +115,103 @@ if(NOT APPLE)
     )
 endif()
 
+# ============================================================
+# TSan-instrumented parallel runner (Phase-1 release gate for ARMv8
+# weak-memory correctness — vmsmalloc spec DEC-042 #4).
+#
+# TSan and ASan are mutually exclusive at link time, so we build a sibling
+# library + runner pair instead of toggling flags on the ASan target.
+# ============================================================
+
+add_library(LibAllocTestsTSan STATIC)
+
+target_sources(LibAllocTestsTSan PRIVATE
+        InternalAllocTest.cpp
+        SlabTest.cpp
+        SlabConcurrentTest.cpp
+)
+
+target_include_directories(LibAllocTestsTSan PUBLIC
+    ..
+    ../harness
+    ../../libraries/LibAlloc/include
+    ../../libraries/Core/include
+)
+
+target_sources(LibAllocTestsTSan PRIVATE
+    ../../libraries/LibAlloc/InternalAllocator.cpp
+    ../../libraries/LibAlloc/backends/UnitTests.cpp
+    ../../libraries/LibAlloc/SlabAllocator.cpp
+)
+
+target_compile_options(LibAllocTestsTSan PRIVATE
+    -std=c++2c
+    -fexceptions
+    -Wall
+    -Wextra
+    -Wno-c++26-extensions
+    -DCROCOS_TESTING
+    -DCORE_LIBRARY_TESTING
+    -O1
+    -g
+    -fsanitize=thread
+)
+
+# Same objcopy-based renaming pass the ASan library uses, so the
+# malloc/operator-new shims in test.h don't collide at link time.
+add_custom_command(TARGET LibAllocTestsTSan PRE_LINK
+    COMMENT "Instrumenting liballoc TSan test object files for memory tracking before linking"
+    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/../instrument_objects.sh ${CMAKE_CURRENT_BINARY_DIR} LibAllocTestsTSan
+)
+
+add_executable(LibAllocTestRunnerTSan)
+
+target_sources(LibAllocTestRunnerTSan PRIVATE
+    ../TestMain.cpp
+)
+
+target_link_libraries(LibAllocTestRunnerTSan PRIVATE
+    LibAllocTestsTSan
+    TestHarness
+)
+
+target_include_directories(LibAllocTestRunnerTSan PRIVATE
+    ..
+    ../harness
+)
+
+target_compile_options(LibAllocTestRunnerTSan PRIVATE
+    -std=c++2c
+    -fexceptions
+    -Wall
+    -Wextra
+    -DCORE_KERNEL_TESTING
+    -DCORE_LIBRARY_TESTING
+    -O1
+    -g
+    -fsanitize=thread
+)
+
+target_link_options(LibAllocTestRunnerTSan PRIVATE -fsanitize=thread)
+
+if(APPLE)
+    target_link_options(LibAllocTestRunnerTSan PRIVATE
+        -Wl,-force_load,$<TARGET_FILE:LibAllocTestsTSan>
+    )
+    target_link_options(LibAllocTestRunnerTSan PRIVATE
+            -Wl,-undefined,dynamic_lookup
+    )
+else()
+    target_link_options(LibAllocTestRunnerTSan PRIVATE
+        -Wl,--keep-section=.crocos_unit_tests
+    )
+endif()
+
 # Add a custom target to run kernel tests
 add_custom_target(run_liballoc_tests
     COMMAND LibAllocTestRunner
-    DEPENDS LibAllocTestRunner
+    COMMAND LibAllocTestRunnerTSan
+    DEPENDS LibAllocTestRunner LibAllocTestRunnerTSan
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-    COMMENT "Running CroCOS LibAlloc unit tests"
+    COMMENT "Running CroCOS LibAlloc unit tests (ASan + TSan)"
 )
