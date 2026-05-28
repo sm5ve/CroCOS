@@ -38,6 +38,7 @@
 #include <core/atomic.h>
 #include <core/atomic/TreiberStack.h>
 #include <core/math.h>
+#include <core/mem.h>
 #include <core/utility.h>
 #include <liballoc/OccupancyTransition.h>
 #include <mem/NUMA.h>
@@ -201,6 +202,11 @@ static_assert(kNumSizeClasses == 8,
 inline uint8_t* slotZeroAddr(SlabDescriptorBase* d, size_t c) {
     return reinterpret_cast<uint8_t*>(d) + slot0Offset(c);
 }
+// Convenience overload reading the descriptor's own class (the freer path
+// recovers `desc` from the page base and does not carry `c` separately).
+inline uint8_t* slotZeroAddr(SlabDescriptorBase* d) {
+    return slotZeroAddr(d, d->sizeClass);
+}
 
 // ─── Slow-path slab creation (DEC-018 / DEC-044 / P5-DEC-006) ──────────────
 SlabDescriptorBase* createFreshSlab(arch::ProcessorID i, size_t c) {
@@ -241,6 +247,50 @@ SlabDescriptorBase* createFreshSlab(arch::ProcessorID i, size_t c) {
     return base;
 }
 
+// ─── Phase 6 freer-side publish helpers (P6-DEC-003) ───────────────────────
+
+// Recover a slot index from a slab-backed pointer. Caller has validated p is
+// within the slab's data range and slot-aligned.
+inline size_t slotIndexOf(void* p, SlabDescriptorBase* desc) {
+    const uintptr_t off = reinterpret_cast<uintptr_t>(p)
+                        - reinterpret_cast<uintptr_t>(slotZeroAddr(desc));
+    return off / slotSize(desc);
+}
+
+// Cross-domain publish (DEC-019 gate, P6-DEC-002 / user direction 2026-05-27).
+// Phase-4 push(element) may extend the home-domain top chain (if below
+// maxChainLength) or start a new singleton — favoring shared-stack
+// amortization over an always-singleton publish.
+inline void crossDomainPublish(SlabDescriptorBase* desc) {
+    partialFor(desc->numaDomain, desc->sizeClass)->push(*desc);
+}
+
+// Same-domain publish (DEC-034). Prepend desc to the local magazine (CPU-
+// private; no atomics on m.head / m.depth per DEC-014/030); when the depth
+// reaches the stack's maxChainLength, flush the whole chain to the shared
+// stack via pushChain.
+inline void sameDomainPublishAndMaybeFlush(arch::ProcessorID i,
+                                           SlabDescriptorBase* desc) {
+    const size_t c = desc->sizeClass;
+    Magazine& m = kernel::cpuLocal().magazines[c];  // P7-DEC-010
+    // Extend at head. chainNext is Atomic for C++ data-race freedom (DEC-042
+    // #3); RELAXED compiles to a plain store on AMD64/ARMv8.
+    desc->chainNext.store(m.head, RELAXED);
+    m.head = desc;
+    m.depth++;
+
+    PartialStack* stack = partialFor(numa::numaPolicy().homeDomain(i), c);
+    if (m.depth >= stack->getMaxChainLength()) {
+        // DEC-034 flush. Set chainDepth on the new head immediately before
+        // pushChain (Phase-4 caller invariant); the publishing RELEASE-CAS
+        // propagates all prior chain-element writes (DEC-042 #1).
+        m.head->chainDepth = m.depth;
+        stack->pushChain(*m.head, m.depth);
+        m.head  = nullptr;
+        m.depth = 0;
+    }
+}
+
 }  // namespace
 
 // ─── Phase-3 init hooks (declared in VMSubstrateSlab.h) ────────────────────
@@ -271,56 +321,101 @@ void vmsmallocBootSmoke() {
     const arch::ProcessorID i = arch::getCurrentProcessorID();
     const numa::DomainID localDomain = numa::numaPolicy().homeDomain(i);
 
-    // One allocation per slab-backed class: alignment (DEC-001), magic, the
-    // magazine head becoming non-null, and the starvation counter advancing
-    // exactly once (the shared stack starts empty, so the first allocation per
-    // class takes the fresh-slab slow path).
-    for (size_t c = 0; c < kNumSizeClasses; c++) {
-        const uint32_t starvBefore =
-            tuningFor(localDomain)[c].starvationCount.load(RELAXED);
+    // ── Phase 6: same-domain becameAvailable publish + flush (class 7) ──
+    //
+    // Run first, while every magazine and shared stack is pristine. Class 7
+    // (512 B) has the fewest slots per slab, so filling K slabs to Full is
+    // cheap. Fill K = maxChainLength slabs (each becameFull pop empties the
+    // magazine as we go), then free one slot per slab: each free drives a
+    // Full→Partial transition (becameAvailable) that prepends the slab to the
+    // magazine, and the K-th free trips the flush to the shared stack.
+    {
+        const size_t   c    = kNumSizeClasses - 1;        // 512 B
+        const size_t   n    = slotCount(c);
+        Magazine&      m    = kernel::cpuLocal().magazines[c];
+        const uint32_t kmax = partialFor(localDomain, c)->getMaxChainLength();
+        assert(kmax >= 2 && kmax <= kMaxK, "vmsmalloc smoke: unexpected maxChainLength");
 
-        void* p = VMSubstrate::vmsmalloc(slotSize(c));
-        const uintptr_t pa = reinterpret_cast<uintptr_t>(p);
+        void* firstSlotOfSlab[kMaxK];
+        for (uint32_t s = 0; s < kmax; s++) {
+            for (size_t k = 0; k < n; k++) {
+                void* p = VMSubstrate::vmsmalloc(slotSize(c));
+                if (k == 0) {
+                    firstSlotOfSlab[s] = p;
+                    assert((reinterpret_cast<uintptr_t>(p) & (slotAlignment(c) - 1)) == 0,
+                           "vmsmalloc smoke: slot misaligned, class 7");
+                    SlabDescriptorBase* d = reinterpret_cast<SlabDescriptorBase*>(
+                        reinterpret_cast<uintptr_t>(p) & ~(arch::smallPageSize - 1));
+                    assert(d->magic == kSlabDescriptorMagic,
+                           "vmsmalloc smoke: bad descriptor magic, class 7");
+                }
+            }
+        }
+        // Every filled slab became Full and was popped off the magazine.
+        assert(m.depth == 0 && m.head == nullptr,
+               "vmsmalloc smoke: magazine should be empty after filling slabs to Full");
 
-        assert((pa & (slotAlignment(c) - 1)) == 0,
+        for (uint32_t s = 0; s < kmax; s++) {
+            VMSubstrate::vmsfree(firstSlotOfSlab[s]);  // Full→Partial → publish
+            if (s + 1 < kmax) {
+                assert(m.depth == s + 1 && m.head == reinterpret_cast<SlabDescriptorBase*>(
+                           reinterpret_cast<uintptr_t>(firstSlotOfSlab[s]) & ~(arch::smallPageSize - 1)),
+                       "vmsmalloc smoke: becameAvailable publish did not extend the magazine");
+            }
+        }
+        // The K-th publish tripped the flush: magazine empty, chain on the stack.
+        assert(m.depth == 0 && m.head == nullptr,
+               "vmsmalloc smoke: magazine should be empty after flush");
+        assert(!partialFor(localDomain, c)->empty(),
+               "vmsmalloc smoke: shared stack should hold the flushed chain");
+        klog() << "vmsmalloc smoke: same-domain publish+flush OK (class "
+               << static_cast<uint64_t>(c) << ", K=" << static_cast<uint64_t>(kmax) << ")\n";
+    }
+
+    // ── P6-DEC-006: fill-to-Full → free → realloc, per class (classes 0..6) ──
+    //
+    // P6-DEC-006's intent is the becameAvailable reuse path: a Full→Partial
+    // transition publishes the slab back to the magazine, and the next alloc
+    // hands back the freed slot. (The decision's "same slot" only holds via
+    // this path — Phase 1's SplitBitmap parks a freed bit in the free half and
+    // reclaims it only when the alloc half is exhausted, i.e. the slab was
+    // Full; a naive single alloc/free/alloc would hand out the next sequential
+    // slot instead.) So fill the slab to capacity, free one slot, and confirm
+    // the realloc reuses exactly that slot.
+    for (size_t c = 0; c < kNumSizeClasses - 1; c++) {
+        const size_t n = slotCount(c);
+        void* last = nullptr;
+        for (size_t k = 0; k < n; k++) {
+            last = VMSubstrate::vmsmalloc(slotSize(c));  // fill to Full
+        }
+        assert((reinterpret_cast<uintptr_t>(last) & (slotAlignment(c) - 1)) == 0,
                "vmsmalloc smoke: slot misaligned for class ", static_cast<uint64_t>(c));
+        // The Full slab was popped off the magazine by the becameFull pop.
         Magazine& m = kernel::cpuLocal().magazines[c];
-        assert(m.head != nullptr,
-               "vmsmalloc smoke: magazine head null after first alloc, class ",
-               static_cast<uint64_t>(c));
-        assert(m.head->magic == kSlabDescriptorMagic,
-               "vmsmalloc smoke: bad descriptor magic, class ", static_cast<uint64_t>(c));
-        const uint32_t starvAfter =
-            tuningFor(localDomain)[c].starvationCount.load(RELAXED);
-        assert(starvAfter == starvBefore + 1,
-               "vmsmalloc smoke: starvationCount must advance once on first alloc, class ",
+        assert(m.depth == 0 && m.head == nullptr,
+               "vmsmalloc smoke: magazine should be empty after filling slab, class ",
                static_cast<uint64_t>(c));
 
+        VMSubstrate::vmsfree(last);  // Full→Partial → becameAvailable → publish
+        assert(m.depth == 1 && m.head != nullptr && m.head->magic == kSlabDescriptorMagic,
+               "vmsmalloc smoke: becameAvailable did not publish to the magazine, class ",
+               static_cast<uint64_t>(c));
+
+        void* p2 = VMSubstrate::vmsmalloc(slotSize(c));  // drains free half → same slot
+        assert(p2 == last,
+               "vmsmalloc smoke: becameAvailable realloc did not reuse the freed slot, class ",
+               static_cast<uint64_t>(c));
         klog() << "vmsmalloc smoke: class " << static_cast<uint64_t>(c)
                << " size " << static_cast<uint64_t>(slotSize(c))
-               << " -> " << p << "\n";
+               << " fill/free/reuse OK -> " << p2 << "\n";
     }
 
-    // Two successive class-0 (8 B) allocations land consecutive slots in the
-    // same slab (in-magazine reuse): the second is exactly slotSize bytes past
-    // the first.
-    void* a = VMSubstrate::vmsmalloc(8);
-    void* b = VMSubstrate::vmsmalloc(8);
-    assert(reinterpret_cast<uintptr_t>(b) == reinterpret_cast<uintptr_t>(a) + 8,
-           "vmsmalloc smoke: consecutive 8 B allocations not adjacent");
-    klog() << "vmsmalloc smoke: class 0 reuse " << a << " then " << b << "\n";
-
-    // Whole-page bypass classes (DEC-029): page-aligned, no slab descriptor.
-    // A plain array (not a braced-init list) avoids std::initializer_list,
-    // which the freestanding build does not provide.
-    const size_t bypassSizes[] = { size_t{513}, size_t{1024}, size_t{2048}, size_t{4096} };
-    for (size_t size : bypassSizes) {
-        void* p = VMSubstrate::vmsmalloc(size);
-        assert((reinterpret_cast<uintptr_t>(p) & (arch::smallPageSize - 1)) == 0,
-               "vmsmalloc smoke: whole-page bypass not page-aligned");
-        klog() << "vmsmalloc smoke: bypass size " << static_cast<uint64_t>(size)
-               << " -> " << p << "\n";
-    }
+    // ── DEC-029 whole-page alloc/free cycle ──
+    void* w = VMSubstrate::vmsmalloc(1024);  // above largest slab class (512)
+    assert((reinterpret_cast<uintptr_t>(w) & (arch::smallPageSize - 1)) == 0,
+           "vmsmalloc smoke: whole-page bypass not page-aligned");
+    VMSubstrate::vmsfree(w);
+    klog() << "vmsmalloc smoke: DEC-029 whole-page cycle OK " << w << "\n";
 }
 
 }  // namespace kernel::mm::vmsmalloc
@@ -411,6 +506,83 @@ void* vmsmalloc(size_t size) {
         // No ensureTLBEntryFresh — allocPage already invalidated this CPU's
         // TLB entry for the page (DEC-046).
         continue;  // retry fast path
+    }
+}
+
+void vmsfree(void* p) {
+    using namespace kernel::mm::vmsmalloc;
+
+    // Phase 7 adds the DEC-023 nullptr assert and the DEC-014 IRQ/NMI/#GP/#MC
+    // context assert at entry. Phase 6 carries the DEC-026 validation chain;
+    // each step depends on its predecessors, so the source order is
+    // load-bearing (DEC-026 amended) — do not reorder.
+
+    const uintptr_t pa = reinterpret_cast<uintptr_t>(p);
+
+    // DEC-026 range check — BEFORE the freshness call, so an arbitrary VA never
+    // reaches ensureTLBEntryFresh.
+    assert(pa >= vmsBase && pa < vmsBase + vmsSize,
+           "vmsfree: pointer outside VMSubstrate range");
+
+    // DEC-029 whole-page bypass — BEFORE the freshness call, so a bad but
+    // page-aligned pointer in an unpopulated arena doesn't fault inside
+    // ensureTLBEntryFresh. Whole-page frees read no descriptor.
+    if ((pa & (arch::smallPageSize - 1)) == 0) {
+        VMSubstrate::freePage(p);  // freePage asserts on its own validation
+        return;
+    }
+
+    // DEC-016/DEC-026: freer-side first-touch freshness before any read of
+    // *desc. Every subsequent descriptor read is through a fresh TLB mapping.
+    VMSubstrate::ensureTLBEntryFresh(p);
+
+    SlabDescriptorBase* desc = reinterpret_cast<SlabDescriptorBase*>(
+        pa & ~(arch::smallPageSize - 1));
+
+    // DEC-013/DEC-044 magic check — guards the slot-range arithmetic against
+    // non-slab pages.
+    assert(desc->magic == kSlabDescriptorMagic,
+           "vmsfree: descriptor magic mismatch (not a slab page)");
+
+    // ITEM-048 slot-range bounds. The lower bound rejects pointers inside the
+    // descriptor region, which would otherwise pass the modulo via
+    // two's-complement underflow; the upper bound rejects past-the-end.
+    const uintptr_t slot0 = reinterpret_cast<uintptr_t>(slotZeroAddr(desc));
+    const size_t    ss    = slotSize(desc);
+    const size_t    nslot = slotCount(desc);
+    assert(pa >= slot0, "vmsfree: pointer inside slab descriptor region");
+    assert(pa < slot0 + ss * nslot, "vmsfree: pointer past slab data region");
+
+    // DEC-013 modulo check.
+    const uintptr_t off = pa - slot0;
+    assert(off % ss == 0, "vmsfree: misaligned slot pointer");
+    const size_t slotIdx = off / ss;
+
+    // DEC-024 debug-only poison — BEFORE freeSlot, so the slot is still
+    // allocated (from the bookkeeper's view) while we scribble it, with no
+    // concurrent reallocation possible. 0xCC is the int3 trip-wire.
+#ifdef DEBUG_BUILD
+    memset(p, 0xCC, ss);
+#endif
+
+    // DEC-026 bookkeeper free (8-way dispatch on sizeClass — P5-DEC-001 sibling).
+    Core::OccupancyTransition transition{};
+    dispatchOnClass(desc->sizeClass, desc, [&](auto* concrete) {
+        concrete->bookkeeper.freeSlot(slotIdx, transition);
+        return 0;  // dispatchOnClass deduces a common return type across cases
+    });
+
+    // DEC-019/DEC-034 conditional publish on Full→Partial. P6-DEC-005: read
+    // numaDomain only here, on the publishing branch.
+    if (transition.becameAvailable()) {
+        const numa::DomainID home = desc->numaDomain;  // DEC-018, set at creation
+        const arch::ProcessorID i = arch::getCurrentProcessorID();
+        const numa::DomainID localDomain = numa::numaPolicy().homeDomain(i);
+        if (home == localDomain) {
+            sameDomainPublishAndMaybeFlush(i, desc);   // DEC-034
+        } else {
+            crossDomainPublish(desc);                  // DEC-019 gate, P6-DEC-002
+        }
     }
 }
 
