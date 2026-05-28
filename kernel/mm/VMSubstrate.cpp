@@ -6,8 +6,10 @@
 #include <mem/mm.h>
 #include <arch.h>
 
+#include <arch/CpuLocalBase.h>
 #include <kmemlayout.h>
 #include <core/atomic/SplitBitmap.h>
+#include <CpuLocal.h>
 
 #include "mem/TempWindow.h"
 
@@ -171,11 +173,13 @@ namespace VMSubstrateHelper {
     static_assert(kArenaPageCount % kBranchFactor == 0,
         "kArenaPageCount must be a multiple of kBranchFactor");
 
-    // Worst-case dirty + buffer reservation must fit in one leaf bitmap (the
-    // first leaf covering root[1]'s data range receives all of them).
+    // Worst-case dirty + occupancy + CpuLocal-page reservation must fit in
+    // one leaf bitmap (the first leaf covering root[1]'s data range receives
+    // all of them). CpuLocal-page reservation added per vmsmalloc Phase 3.
     static_assert(((arch::MAX_PROCESSOR_COUNT + 63) / 64) + kOccupancyBufferPages
+                  + kernel::kCpuLocalPages
                   <= kBranchFactor,
-        "dirty bitmap + occupancy buffer overflow leaf bitmap's bit count");
+        "dirty bitmap + occupancy buffer + CpuLocal page overflow leaf bitmap's bit count");
 
     // ────────────────────────────────────────────────────────────────────────
     // Buffer accessors. Require the arena's VA to be live.
@@ -186,8 +190,15 @@ namespace VMSubstrateHelper {
                          + LeafPageTableWrapper::dirtyWordCount() * arch::smallPageSize;
     }
 
-    [[nodiscard]] inline kernel::mm::virt_addr allocatableBase(kernel::mm::virt_addr arenaBase) {
+    // CpuLocal page (vmsmalloc Phase 3): sits between the occupancy buffer
+    // and the allocatable region. Hosts the kernel::CpuLocal struct
+    // (introduced by Phase 4.5; size in bytes pinned by cpu_local.h).
+    [[nodiscard]] inline kernel::mm::virt_addr cpuLocalPageBase(kernel::mm::virt_addr arenaBase) {
         return occupancyBufferBase(arenaBase) + kOccupancyBufferSize;
+    }
+
+    [[nodiscard]] inline kernel::mm::virt_addr allocatableBase(kernel::mm::virt_addr arenaBase) {
+        return cpuLocalPageBase(arenaBase) + kernel::kCpuLocalBytes;
     }
 
     [[nodiscard]] inline uint64_t& leafAllocBitmap(kernel::mm::virt_addr arenaBase, size_t T) {
@@ -458,10 +469,13 @@ namespace VMSubstrateHelper {
             for (size_t bit = 0; bit < kBranchFactor; bit++)
                 reserveLeafBit(arenaBase, T, bit, cpu);
 
-        // (b) Dirty + occupancy-buffer pages at the head of root[1]'s data range.
+        // (b) Dirty + occupancy-buffer + CpuLocal pages at the head of
+        // root[1]'s data range. CpuLocal-page reservation added per
+        // vmsmalloc Phase 3 — the page itself is allocated and mapped by
+        // createArena after the radix tree is live.
         constexpr size_t T = selfRefBitmaps;
         const size_t D = LeafPageTableWrapper::dirtyWordCount();
-        for (size_t bit = 0; bit < D + kOccupancyBufferPages; bit++)
+        for (size_t bit = 0; bit < D + kOccupancyBufferPages + kernel::kCpuLocalPages; bit++)
             reserveLeafBit(arenaBase, T, bit, cpu);
     }
 
@@ -547,6 +561,62 @@ namespace VMSubstrateHelper {
         }
     }
 
+    // ────────────────────────────────────────────────────────────────────────
+    // Thin variant of ensureSubtableInstalled for the static-buffer slot
+    // (vmsmalloc Phase 3, P3-DEC-003). The slot has neither a radix tree nor
+    // per-CPU dirty-bitmap pages — its mappings are install-once, init-time,
+    // single-threaded — so the dirty-page allocation + reserveLeafBit pass
+    // at the leaf-PT-fresh-install step is omitted.
+    //
+    // `slotBase` is the static-buffer slot's base VA (arenaVirtualBase(N)).
+    // `va` is the buffer-page VA the leaf PTE will eventually map.
+    // `cpu` is the placement hint for the subtable allocation itself.
+    // ────────────────────────────────────────────────────────────────────────
+    template <size_t level>
+    inline void ensureStaticBufferSubtable(kernel::mm::virt_addr slotBase,
+                                           kernel::mm::virt_addr va,
+                                           arch::ProcessorID cpu)
+        requires (level >= kernel::mm::pageTableLevelForKMemRegion())
+              && (level <  leafLevel)
+    {
+        using Flag = arch::PageEntryFlag;
+        constexpr auto kFlags = Flag::Write | Flag::Global | Flag::NoExecute;
+
+        constexpr size_t depthFromLeaf = leafLevel - level;
+        constexpr size_t parentDivisor = []() {
+            size_t d = 1;
+            for (size_t i = 0; i <= depthFromLeaf; i++) d *= kEntryCount;
+            return d;
+        }();
+        constexpr size_t childDivisor = parentDivisor / kEntryCount;
+
+        const uint64_t parentEntryAddr =
+            ((va.value - slotBase.value) / parentDivisor & ~7ul) + slotBase.value;
+        auto& parentEntry = *reinterpret_cast<arch::PTE<level>*>(parentEntryAddr);
+
+        if (!parentEntry.isPresent()) {
+            const kernel::mm::phys_addr physAddr =
+                kernel::mm::PageAllocator::allocateSmallPage(cpu);
+            parentEntry = arch::PTE<level>::subtableEntry(physAddr, kFlags);
+
+            const uint64_t childEntryAddr =
+                (va.value - slotBase.value) / childDivisor + slotBase.value;
+            const auto childTableAddr = kernel::mm::virt_addr{
+                roundDownToNearestMultiple(childEntryAddr, arch::smallPageSize)
+            };
+
+            arch::invlpg(childTableAddr);
+            new (reinterpret_cast<PageTableWrapper<level + 1>*>(childTableAddr.value))
+                PageTableWrapper<level + 1>();
+            // Intentional: no dirty-page allocation, no reserveLeafBit. The
+            // static-buffer slot has no radix tree or per-CPU dirty bitmap.
+        }
+
+        if constexpr (level + 1 < leafLevel) {
+            ensureStaticBufferSubtable<level + 1>(slotBase, va, cpu);
+        }
+    }
+
 } // VMSubstrateHelper
 
 namespace kernel::mm::VMSubstrate {
@@ -555,6 +625,21 @@ namespace kernel::mm::VMSubstrate {
 
     Atomic<size_t> freeArenaIndex = 0;
     WITH_GLOBAL_CONSTRUCTOR(Spinlock, arenaCreationLock);
+
+    // ────────────────────────────────────────────────────────────────────────
+    // vmsmalloc Phase 3 — static-buffer slot state.
+    //
+    // The static-buffer region lives in one arena-equivalent VA slot
+    // (claimed at the end of VMSubstrate::init). It has no occupancy buffer,
+    // no radix tree, no dirty bitmap — just a self-ref root page table for
+    // leaf-PTE-install math and a bump pointer for the next free buffer VA.
+    //
+    // All access is single-threaded init-only — the bump pointer is plain.
+    // ────────────────────────────────────────────────────────────────────────
+
+    static virt_addr staticBufferSlotBase{uint64_t{0}};
+    static virt_addr staticBufferNextVA{uint64_t{0}};
+    static virt_addr staticBufferSlotEnd{uint64_t{0}};
 
     // Construct one hardware page table page at the given level. For the
     // arena root: writes a self-reference at slot 0 and the chain pointer at
@@ -758,10 +843,125 @@ namespace kernel::mm::VMSubstrate {
         // 5. Seed the radix tree to "everything available".
         VMSubstrateHelper::seedAvailableState(arenaBase);
 
-        // 6. Reserve the bits for non-allocatable VAs (self-ref shadow + dirty + buffer).
+        // 6. Reserve the bits for non-allocatable VAs (self-ref shadow + dirty + buffer + CpuLocal).
         VMSubstrateHelper::reserveBootBits(arenaBase, cpu);
 
+        // 7. Allocate and map the CpuLocal page(s) (vmsmalloc Phase 3).
+        //    Pinned, init-only — placed on the arena owner's NUMA domain.
+        //    Zero-fill so consumers (kernel::CpuLocal struct, Phase 5
+        //    vmsmalloc magazines) start from a known state.
+        using Flag = arch::PageEntryFlag;
+        constexpr auto kLeafFlags = Flag::Write | Flag::Global | Flag::NoExecute;
+        for (size_t i = 0; i < kernel::kCpuLocalPages; i++) {
+            const virt_addr cpuLocalVA =
+                VMSubstrateHelper::cpuLocalPageBase(arenaBase) + i * arch::smallPageSize;
+            const phys_addr cpuLocalPhys = PageAllocator::allocateSmallPage(cpu);
+            auto& pte = *reinterpret_cast<arch::PTE<VMSubstrateHelper::leafLevel>*>(
+                VMSubstrateHelper::leafPTEAddrFor(arenaBase, cpuLocalVA).value);
+            pte = arch::PTE<VMSubstrateHelper::leafLevel>::leafEntry(cpuLocalPhys, kLeafFlags);
+            arch::invlpg(cpuLocalVA);
+            memset(reinterpret_cast<void*>(cpuLocalVA.value), 0, arch::smallPageSize);
+        }
+
+        // 8. Write the CpuLocal struct's logicalID (Phase 4.5). The struct's
+        //    other fields stay zero from step 7; the BSP wires up its own
+        //    GSBase at the tail of init() and APs do so in their ap_routine.
+        auto* cpuLocalPtr = reinterpret_cast<kernel::CpuLocal*>(
+            VMSubstrateHelper::cpuLocalPageBase(arenaBase).value);
+        cpuLocalPtr->logicalID = cpu;
+
         return reinterpret_cast<void*>(arenaBase.value);
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // vmsmalloc Phase 3 — static-buffer slot setup.
+    //
+    // Allocates an arena-root PD-level page table, installs self-ref at slot
+    // 0 (so the leaf-PTE-install math via the self-ref shadow works the same
+    // as for a regular arena), and publishes the slot via the next free
+    // vmmArenaTable index. Initializes the bump-pointer state.
+    //
+    // The slot's allocatable region starts at `slotBase + kSelfRefSize` —
+    // exactly where a regular arena's allocatable region would start, if
+    // a regular arena had no dirty / occupancy / CpuLocal reservation.
+    // ────────────────────────────────────────────────────────────────────────
+
+    static void initializeStaticBufferSlot() {
+        LockGuard guard(arenaCreationLock);
+
+        using Flag = arch::PageEntryFlag;
+        constexpr auto kSubtableFlags = Flag::Write | Flag::Global | Flag::NoExecute;
+        constexpr size_t kRootLevel = pageTableLevelForKMemRegion();
+
+        // Allocate the slot's arena root (PD-level on AMD64).
+        const arch::ProcessorID cpu = arch::getCurrentProcessorID();
+        const phys_addr rootPhys = PageAllocator::allocateSmallPage(cpu);
+        {
+            TempWindow<VMSubstrateHelper::PageTableWrapper<kRootLevel>> window(rootPhys);
+            auto* rootPtr = new (&*window) VMSubstrateHelper::PageTableWrapper<kRootLevel>();
+            // Self-ref at slot 0 — enables the leaf-PTE-install math via
+            // the self-ref shadow region (offset 0..kSelfRefSize in the slot).
+            rootPtr->table[0] =
+                arch::PTE<kRootLevel>::subtableEntry(rootPhys, kSubtableFlags);
+            // No slot 1 chain pointer — subtables for buffer pages are
+            // lazily installed by reservePerDomainStaticBuffer via
+            // ensureStaticBufferSubtable.
+        }
+
+        // Publish.
+        const size_t index = freeArenaIndex.fetch_add(1, RELAXED);
+        vmmArenaTable[index] =
+            arch::PTE<kRootLevel - 1>::subtableEntry(rootPhys, kSubtableFlags);
+
+        staticBufferSlotBase = arenaVirtualBase(index);
+        staticBufferNextVA   = staticBufferSlotBase + VMSubstrateHelper::kSelfRefSize;
+        staticBufferSlotEnd  = staticBufferSlotBase + getKernelMemRegionSize();
+    }
+
+    void* cpuLocalPageFor(arch::ProcessorID i) {
+        // Arena indices match logical CPU IDs (see init()'s createArena loop).
+        const virt_addr arenaBase = arenaVirtualBase(static_cast<size_t>(i));
+        return reinterpret_cast<void*>(
+            VMSubstrateHelper::cpuLocalPageBase(arenaBase).value);
+    }
+
+    void* reservePerDomainStaticBuffer(size_t byteSize, numa::DomainID d) {
+        assert(staticBufferSlotBase.value != 0,
+               "reservePerDomainStaticBuffer called before VMSubstrate::init");
+        assert(byteSize > 0, "reservePerDomainStaticBuffer: byteSize must be > 0");
+
+        const size_t pages = divideAndRoundUp(byteSize, arch::smallPageSize);
+        assert(staticBufferNextVA.value + pages * arch::smallPageSize <= staticBufferSlotEnd.value,
+               "reservePerDomainStaticBuffer: static-buffer region exhausted");
+
+        const virt_addr origVA = staticBufferNextVA;
+
+        using Flag = arch::PageEntryFlag;
+        constexpr auto kLeafFlags = Flag::Write | Flag::Global | Flag::NoExecute;
+        const arch::ProcessorID cpu = arch::getCurrentProcessorID();
+
+        for (size_t i = 0; i < pages; i++) {
+            const virt_addr pageVA = staticBufferNextVA + i * arch::smallPageSize;
+
+            // Lazy-install any missing subtables (PD → leaf PT chain).
+            VMSubstrateHelper::ensureStaticBufferSubtable<pageTableLevelForKMemRegion()>(
+                staticBufferSlotBase, pageVA, cpu);
+
+            // Place the data page on the requested NUMA domain.
+            const phys_addr phys = PageAllocator::allocateSmallPage(d);
+            auto& pte = *reinterpret_cast<arch::PTE<VMSubstrateHelper::leafLevel>*>(
+                VMSubstrateHelper::leafPTEAddrFor(staticBufferSlotBase, pageVA).value);
+            pte = arch::PTE<VMSubstrateHelper::leafLevel>::leafEntry(phys, kLeafFlags);
+            arch::invlpg(pageVA);
+
+            // Zero-fill: vmsmalloc relies on the buffer being zeroed
+            // (per the spec contract; MagazineTuning.currentK is the only
+            // non-zero seeding vmsmallocInit does).
+            memset(reinterpret_cast<void*>(pageVA.value), 0, arch::smallPageSize);
+        }
+
+        staticBufferNextVA = staticBufferNextVA + pages * arch::smallPageSize;
+        return reinterpret_cast<void*>(origVA.value);
     }
 
     void ensureTLBEntryFresh(void* ptr) {
@@ -786,9 +986,29 @@ namespace kernel::mm::VMSubstrate {
         bootPageTable[VMM_SUBSTRATE_ROOT_INDEX] = arch::PTE<0>::subtableEntry(
             early_boot_virt_to_phys(virt_addr(&vmmArenaTable)),
             kSubtableFlags);
+
+        // Per-CPU arenas claim indices 0..processorCount()-1; the
+        // static-buffer slot then claims processorCount(). Assert the
+        // vmmArenaTable has room for both.
+        assert(arch::processorCount() + 1 <= arch::pageTableDescriptor.entryCount[0],
+               "VMSubstrate::init: CPU arenas + static-buffer slot overflow arena table");
+
         for (size_t i = 0; i < arch::processorCount(); i++) {
             createArena(static_cast<arch::ProcessorID>(i));
         }
+
+        // vmsmalloc Phase 4.5: re-point the BSP's GSBase from the BSS
+        // bspBootstrapCpuLocal struct (set up by bspSetPID in
+        // processor_early) to the arena-resident CpuLocal that
+        // createArena(0) just allocated on the BSP's NUMA domain.
+        // Magazines / interrupts state stays zero across the swap (the
+        // bootstrap struct never accumulates any). APs do their own
+        // setCurrentCpuLocalBase in their ap_routine.
+        arch::setCurrentCpuLocalBase(cpuLocalPageFor(0));
+
+        // vmsmalloc Phase 3: static-buffer slot for reservePerDomainStaticBuffer.
+        initializeStaticBufferSlot();
+
         arch::flushTLB();
         return true;
     }

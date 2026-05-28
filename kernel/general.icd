@@ -52,6 +52,15 @@ depends_on = ["PageAllocator"]
 provides_capabilities = ["mmio"]
 routine = "kernel::mm::VMSubstrate::init"
 
+[VMSubstrateSlab]
+
+name = "VM Substrate Slab Init"
+required = true
+per_cpu = false
+phase = "memory_management"
+depends_on = ["VMSubstrate"]
+routine = "kernel::mm::vmsmalloc::vmsmallocInit"
+
 [InterruptManager]
 
 name = "Interrupt Manager"

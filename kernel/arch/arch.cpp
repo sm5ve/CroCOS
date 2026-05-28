@@ -3,11 +3,11 @@
 //
 
 #include <arch.h>
+#include <CpuLocal.h>
 #include <mem/PageAllocator.h>
 
 #ifdef __x86_64__
 #include "arch/amd64/amd64.h"
-#include <arch/amd64/smp.h>
 #endif
 extern size_t archProcessorCount;
 
@@ -43,10 +43,13 @@ namespace arch{
         return archProcessorCount;
     }
 
+    // Architecture-agnostic: every supported arch wires the current CPU's
+    // per-CPU base register at very early boot (BSP via initBspCpuLocal in
+    // CpuLocal.cpp; APs via initApCpuLocal during their ap_routine), so
+    // kernel::getLogicalProcessorID() reads the right value without an
+    // arch dispatch here.
     ProcessorID getCurrentProcessorID(){
-#ifdef __x86_64__
-        return amd64::smp::getLogicalProcessorID();
-#endif
+        return kernel::getLogicalProcessorID();
     }
 
     void SerialPrintStream::putString(const char * str){

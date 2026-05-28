@@ -255,6 +255,89 @@ struct SlabDescriptor : SlabDescriptorBase {
     LibAlloc::SlabBookkeeper<N> bookkeeper;
 };
 
+// ============================================================
+// Phase 3 — Per-domain shared-state storage
+//
+// `partial[d][c]` (a TreiberHead) and `tuning[d][c]` (a MagazineTuning) live
+// in a NUMA-distributed per-domain buffer. Phase 4's ChainedTreiberStack
+// reads/writes TreiberHead; Phase 10's tuning policy reads/writes
+// MagazineTuning. Phase 3 just lays down the storage, init-time-only.
+//
+// The per-CPU `Magazine[kNumSizeClasses]` array is *not* declared here —
+// per the P7-DEC-010 amendment 2026-05-27 (referenced under Phase 4.5 in
+// the canonical phase order) it folds into `kernel::CpuLocal`, accessed
+// at runtime as `kernel::cpuLocal().magazines[c]`.
+// ============================================================
+
+// 64-byte cache-line alignment hardcoded per CLAUDE.md (arch::cacheLineSize
+// is not exposed as a kernel-wide constant; documented value is 64 on AMD64).
+inline constexpr size_t kVmsmallocCacheLine = 64;
+
+struct alignas(kVmsmallocCacheLine) TreiberHead {
+    uint64_t head;  // DEC-015 tagged-head encoding; consumed by Phase 4.
+};
+
+struct alignas(kVmsmallocCacheLine) Magazine {
+    SlabDescriptorBase* head;
+    uint32_t depth;
+    // (no tail per DEC-041 — chain head is the only externally-visible end.)
+};
+
+struct alignas(kVmsmallocCacheLine) MagazineTuning {
+    Atomic<uint32_t> currentK;
+    Atomic<uint32_t> overflowCount;
+    Atomic<uint32_t> starvationCount;
+    Atomic<uint32_t> policyLock;
+};
+
+// Tuning bounds (provisional per P3-DEC-002 — Phase 10 revisits with
+// RadixVM workload data).
+inline constexpr uint32_t kInitialK = 8;
+inline constexpr uint32_t kMinK     = 2;
+inline constexpr uint32_t kMaxK     = 64;
+static_assert(kMinK <= kInitialK && kInitialK <= kMaxK);
+
+// Per-domain buffer layout: TreiberHead array, then MagazineTuning array,
+// each indexed by size-class.
+inline constexpr size_t kPartialOffset = 0;
+inline constexpr size_t kPartialBytes  = kNumSizeClasses * sizeof(TreiberHead);
+inline constexpr size_t kTuningOffset  = roundUpToNearestMultiple(
+    kPartialOffset + kPartialBytes, alignof(MagazineTuning));
+inline constexpr size_t kTuningBytes   = kNumSizeClasses * sizeof(MagazineTuning);
+inline constexpr size_t kPerDomainBufBytes = roundUpToNearestMultiple(
+    kTuningOffset + kTuningBytes, arch::smallPageSize);
+
+static_assert(kPerDomainBufBytes % arch::smallPageSize == 0,
+              "kPerDomainBufBytes must be a whole number of pages");
+
+// Upper cap on DomainID values we'll index. Real consumer hardware is
+// single-NUMA-domain; multi-domain servers stay well under 64. The static
+// array sized to this cap costs ~512 B in .bss — negligible.
+inline constexpr size_t kMaxDomains = 64;
+
+// Per-domain buffer base pointers (defined in VMSubstrateSlab.cpp). A
+// `nullptr` entry means that DomainID is not CPU-bearing; DEC-018 / DEC-038
+// guarantee that no descriptor's `numaDomain` will index a null slot.
+extern void* perDomainBufs[kMaxDomains];
+
+inline TreiberHead* partialFor(numa::DomainID d) {
+    assert(perDomainBufs[d.value] != nullptr,
+           "partialFor: indexed domain has no per-domain buffer");
+    return reinterpret_cast<TreiberHead*>(
+        static_cast<uint8_t*>(perDomainBufs[d.value]) + kPartialOffset);
+}
+
+inline MagazineTuning* tuningFor(numa::DomainID d) {
+    assert(perDomainBufs[d.value] != nullptr,
+           "tuningFor: indexed domain has no per-domain buffer");
+    return reinterpret_cast<MagazineTuning*>(
+        static_cast<uint8_t*>(perDomainBufs[d.value]) + kTuningOffset);
+}
+
+// Init entry point — registered in general.icd under memory_management
+// phase, depends_on VMSubstrate.
+bool vmsmallocInit();
+
 } // namespace kernel::mm::vmsmalloc
 
 #endif // CROCOS_VMSUBSTRATE_SLAB_H

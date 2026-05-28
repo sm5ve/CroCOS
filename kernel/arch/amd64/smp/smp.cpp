@@ -15,21 +15,6 @@ Atomic<size_t> upCount;
 namespace arch::amd64::smp{
     ProcessorInfo* pinfo;
 
-    void setLogicalProcessorID(ProcessorID pid){
-        static_assert(sizeof(ProcessorID) <= sizeof(uint8_t), "You need to update your use of gsbase to support a larger processor ID");
-        uint64_t currentGsBase;
-        asm volatile("rdgsbase %0" : "=r"(currentGsBase));
-        currentGsBase &= ~0xfful;
-        currentGsBase |= static_cast<uint64_t>(pid) & 0xfful;
-        asm volatile("wrgsbase %0" : : "r"(currentGsBase));
-    }
-
-    ProcessorID getLogicalProcessorID(){
-        uint64_t currentGsBase;
-        asm volatile("rdgsbase %0" : "=r"(currentGsBase));
-        return currentGsBase & 0xff;
-    }
-
     bool populateProcessorInfo() {
         auto& madt = acpi::the<MADT>();
         pinfo = new ProcessorInfo[processorCount()];

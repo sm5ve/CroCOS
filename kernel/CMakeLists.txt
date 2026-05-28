@@ -37,6 +37,9 @@ set(KERNEL_SRC
         mm/NUMA.cpp
         acpi/NUMAIterators.cpp
         mm/VMSubstrate.cpp
+        mm/VMSubstrateSlab.cpp
+        CpuLocal.cpp
+        arch/amd64/CpuLocalBase.cpp
 )
 
 file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/generated_headers)
@@ -121,6 +124,9 @@ target_link_options(Kernel PUBLIC
 )
 target_include_directories(Kernel PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_include_directories(Kernel PRIVATE ${CMAKE_BINARY_DIR}/generated_headers)
+# kernel/mm holds vmsmalloc's implementation-internal headers (VMSubstrateSlab.h);
+# cpu_local.h needs the Magazine type definition from there per P45-DEC-001.
+target_include_directories(Kernel PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/mm)
 target_link_libraries(Kernel PRIVATE CoreKernel AllocKernel MMIOKernel gcc)
 
 add_custom_command(TARGET Kernel POST_BUILD

@@ -16,6 +16,7 @@
 #include <arch/amd64/interrupts/APIC.h>
 #include <arch/amd64/interrupts/AuxiliaryDomains.h>
 #include <arch/amd64/timers/HPET.h>
+#include <CpuLocal.h>
 #include <kmemlayout.h>
 #include <mem/NUMA.h>
 #include <acpi/NUMAIterators.h>
@@ -99,15 +100,22 @@ namespace arch::amd64{
         return true;
     }
 
+    // BSP-side per-CPU bootstrap routine. The CpuLocal setup itself is
+    // arch-agnostic — delegate to kernel::initBspCpuLocal so this file
+    // does not carry any CpuLocal-specific knowledge beyond what the
+    // generic init API needs.
     bool bspSetPID() {
-        smp::setLogicalProcessorID(0);
+        kernel::initBspCpuLocal();
         return true;
     }
 
+    // AP-side per-CPU bootstrap routine. The logical-ID lookup is
+    // AMD64-specific (LAPIC ID → ProcessorID via MADT); the CpuLocal
+    // wire-up itself is arch-agnostic — delegate.
     bool apSetPID() {
         auto lapicID = interrupts::getLAPICDomain() -> getID();
         auto pinfo = smp::getProcessorInfoForLapicID(static_cast<uint8_t>(lapicID));
-        smp::setLogicalProcessorID(pinfo.logicalID);
+        kernel::initApCpuLocal(pinfo.logicalID);
         return true;
     }
 

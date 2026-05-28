@@ -7,6 +7,8 @@
 
 #include <stddef.h>
 #include <mem/MemTypes.h>
+#include <mem/NUMA.h>
+#include <arch.h>
 
 namespace kernel::mm::VMSubstrate {
     bool init();
@@ -24,6 +26,23 @@ namespace kernel::mm::VMSubstrate {
     // Maps a physical MMIO page into the current CPU's arena with cache-disable semantics.
     // paddr must be page-aligned.  The returned virtual address is permanently mapped.
     void* mapMMIOPage(phys_addr paddr);
+
+    // ─── vmsmalloc Phase 3 — init-only NUMA-aware pinned-buffer primitive ───
+    //
+    // Allocates `divideAndRoundUp(byteSize, smallPageSize)` physical pages
+    // on NUMA domain `d`, maps them contiguously inside VMSubstrate's
+    // static-buffer region, zero-fills, and returns the base VA. The
+    // returned VA is page-aligned and pinned for the kernel's lifetime
+    // (no freeing API). Single-threaded init context only — asserts in
+    // debug builds; panics on PageAllocator failure or region exhaustion.
+    void* reservePerDomainStaticBuffer(size_t byteSize, numa::DomainID d);
+
+    // Returns the base VA of CPU `i`'s per-CPU CpuLocal page (sized via
+    // kernel::kCpuLocalBytes in cpu_local.h). The page is allocated and
+    // mapped during createArena(i) on the arena owner's NUMA domain, and
+    // is zero-filled at that time. Pure address arithmetic — safe to call
+    // from any context after VMSubstrate::init returns.
+    void* cpuLocalPageFor(arch::ProcessorID i);
 
     template <typename T>
     struct SafePtr {
