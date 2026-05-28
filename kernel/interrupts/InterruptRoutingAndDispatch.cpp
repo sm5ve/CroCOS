@@ -2,6 +2,7 @@
 // Created by Spencer Martin on 8/29/25.
 //
 #include <interrupts/interrupts.h>
+#include <interrupts/InterruptContextDepths.h>
 #include <core/algo/GraphAlgorithms.h>
 #include <core/ds/LinkedList.h>
 #include <liballoc/InternalAllocator.h>
@@ -315,6 +316,14 @@ namespace kernel::interrupts::managed {
     }
 
     void dispatchInterrupt(arch::InterruptFrame& frame) {
+        // Phase 7 (P7-DEC-008): track the per-CPU interrupt-context depth for
+        // the duration of dispatch. Must be the FIRST statement — the counter
+        // must reflect this context before any handler runs (DEC-014's
+        // forbidden-context check for vmsmalloc/vmsfree reads it). Interrupts
+        // are disabled here (the IDT entry keeps IF clear), so the increment is
+        // race-free; the guard's destructor decrements on return.
+        InterruptContextGuard ctx(arch::interruptKind(frame));
+
         auto& eoiBehavior = eoiBehaviorTable[frame.vector_index];
         if (eoiBehavior.triggerType == RoutingNodeTriggerType::TRIGGER_EDGE || eoiBehavior.triggerType == RoutingNodeTriggerType::TRIGGER_UNDETERMINED) {
             if (eoiBehavior.chain) {

@@ -9,6 +9,11 @@
 #include <mem/MemTypes.h>
 #include <mem/NUMA.h>
 #include <arch.h>
+// P7-DEC-007: make<T>'s compile-time alignment/size checks need the size-class
+// accessors (sizeClassFor / slotAlignment / kNumSizeClasses). VMSubstrateSlab.h
+// is the implementation-internal vmsmalloc header; every includer of this
+// public header is a kernel TU with kernel/mm on its include path.
+#include <VMSubstrateSlab.h>
 
 namespace kernel::mm::VMSubstrate {
     bool init();
@@ -20,6 +25,11 @@ namespace kernel::mm::VMSubstrate {
 
     void ensureTLBEntryFresh(void*);
 
+    // Convention-internal: external callers should prefer make<T> / destroy<T>.
+    // These are unavoidably declared here because make<T> / destroy<T> are
+    // templates whose bodies must live in this public header; structural hiding
+    // is not possible under the template-visibility constraint. See parent-spec
+    // DEC-028 (amended).
     void* vmsmalloc(size_t size);
     void vmsfree(void*);
 
@@ -64,6 +74,20 @@ namespace kernel::mm::VMSubstrate {
 
     template <typename T, typename... Ts>
     SafePtr<T> make(Ts&&... args) {
+        // DEC-004/DEC-029: T must fit in a page (slab class or whole-page bypass).
+        constexpr size_t c = vmsmalloc::sizeClassFor(sizeof(T));
+        static_assert(c < vmsmalloc::kNumSizeClasses || sizeof(T) <= arch::smallPageSize,
+                      "VMSubstrate::make<T>: sizeof(T) exceeds a page");
+        // DEC-025: for slab-backed T, alignof(T) must not exceed its size class's
+        // slot alignment. Short-circuits for the whole-page bypass (c ==
+        // kNumSizeClasses), whose pageSize alignment dominates any alignof(T) —
+        // the `c >= kNumSizeClasses` term also keeps slotAlignment(c) from being
+        // evaluated out of range in that case.
+        static_assert(c >= vmsmalloc::kNumSizeClasses ||
+                          alignof(T) <= vmsmalloc::slotAlignment(c),
+                      "VMSubstrate::make<T>: alignof(T) exceeds the slot alignment of its "
+                      "size class. Pad T into a power-of-two size class, split the "
+                      "over-aligned subobject, or use a different allocator.");
         auto* mem = vmsmalloc(sizeof(T));
         return new (mem) T(forward<Ts>(args)...);
     }

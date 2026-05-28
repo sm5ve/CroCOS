@@ -87,6 +87,16 @@ namespace arch{
     //Guaranteed to be between 0 and (the total number of logical processors - 1)
     ProcessorID getCurrentProcessorID();
     size_t processorCount();
+
+    // Portable classification of an interrupt/exception into the kinds the
+    // kernel's interrupt-context tracker (and vmsmalloc's DEC-014 forbidden-
+    // context check) reasons about. The vocabulary is shared across
+    // architectures; the mapping from a hardware InterruptFrame to a kind is
+    // architecture-specific (e.g. AMD64 reads the vector number, ARMv8 would
+    // decode the exception syndrome). Each backend implements interruptKind();
+    // architecture-specific constants stay inside that backend.
+    enum class InterruptKind : uint8_t { Other, IRQ, NMI, UD, DF, GP, MC, PF };
+    InterruptKind interruptKind(const InterruptFrame& frame);
 #ifndef CROCOS_TESTING
     static_assert(MemoryMapIterator<MemMapIterator>);
 

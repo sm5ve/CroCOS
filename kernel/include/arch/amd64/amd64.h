@@ -146,6 +146,18 @@ namespace arch::amd64 {
             uint64_t ss;
         };
 
+        // AMD64 architectural exception vector numbers (Intel/AMD SDM). Used by
+        // the arch::interruptKind classifier to map a frame to a portable
+        // arch::InterruptKind. Vectors >= kFirstExternalVector are external
+        // IRQs; the gaps below are exceptions CroCOS does not track separately.
+        inline constexpr uint8_t VECTOR_NMI = 2;   // #NMI non-maskable interrupt
+        inline constexpr uint8_t VECTOR_UD  = 6;   // #UD invalid opcode
+        inline constexpr uint8_t VECTOR_DF  = 8;   // #DF double fault
+        inline constexpr uint8_t VECTOR_GP  = 13;  // #GP general protection
+        inline constexpr uint8_t VECTOR_PF  = 14;  // #PF page fault
+        inline constexpr uint8_t VECTOR_MC  = 18;  // #MC machine check
+        inline constexpr uint8_t kFirstExternalVector = 32;  // 0..31 reserved
+
         bool areInterruptsEnabled();
     }
 

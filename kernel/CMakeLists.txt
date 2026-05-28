@@ -29,6 +29,7 @@ set(KERNEL_SRC
         arch/amd64/timers/HPET.cpp
         interrupts/InterruptRoutingAndDispatch.cpp
         interrupts/InterruptRoutingPolicyImpls.cpp
+        interrupts/InterruptContextDepths.cpp
         interrupts/ExplicitTypes.cpp
         timing/BlockingSleep.cpp
         arch/amd64/smp/smpboot.asm

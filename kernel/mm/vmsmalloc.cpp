@@ -35,6 +35,7 @@
 #include <kernel.h>
 #include <kmemlayout.h>
 #include <CpuLocal.h>
+#include <interrupts/InterruptContextDepths.h>
 #include <core/atomic.h>
 #include <core/atomic/TreiberStack.h>
 #include <core/math.h>
@@ -291,6 +292,31 @@ inline void sameDomainPublishAndMaybeFlush(arch::ProcessorID i,
     }
 }
 
+// ─── Phase 7 entry-point predicates ────────────────────────────────────────
+
+// DEC-014 (amended ITEM-052, + #UD/#DF per user direction): vmsmalloc / vmsfree
+// must not run from IRQ/NMI/#UD/#DF/#GP/#MC context (same-CPU reentry hazard on
+// the magazine). #PF is conditionally legal and is NOT in the set. Reads the
+// per-CPU interrupt-context depth counters maintained by the InterruptContextGuard.
+inline bool inForbiddenContextForVmsmalloc() {
+    const auto& d = kernel::interrupts::currentCpuInterruptDepths();
+    return d.irq > 0 || d.nmi > 0 || d.ud > 0
+        || d.df  > 0 || d.gp  > 0 || d.mc > 0;
+}
+
+// DEC-030 caller-side contract (P7-DEC-003): the caller must hold the thread
+// non-preemptible and pinned to its current CPU. Two separate predicates name
+// the two distinct obligations; both are vacuously true until CroCOS has a
+// preemptive scheduler, at which point only these bodies change.
+inline bool preemptionDisabled() {
+    // TODO(DEC-030, future scheduler): per-CPU preempt-count check.
+    return true;
+}
+inline bool cpuPinned() {
+    // TODO(DEC-030, future scheduler): per-thread migrate-disable check.
+    return true;
+}
+
 }  // namespace
 
 // ─── Phase-3 init hooks (declared in VMSubstrateSlab.h) ────────────────────
@@ -427,13 +453,20 @@ namespace kernel::mm::VMSubstrate {
 void* vmsmalloc(size_t size) {
     using namespace kernel::mm::vmsmalloc;
 
+    // Entry-point contract asserts (Phase 7, all debug-only per P7-DEC-001).
+    // Release builds trust the caller; bad inputs misbehave silently.
+    assert(size > 0, "vmsmalloc: size must be positive");                   // DEC-023
+    assert(size <= arch::smallPageSize, "vmsmalloc: size exceeds page");    // DEC-004
+    assert(!inForbiddenContextForVmsmalloc(),                               // DEC-014
+           "vmsmalloc: illegal in IRQ/NMI/#UD/#DF/#GP/#MC context");
+    assert(preemptionDisabled(), "vmsmalloc: caller must hold preempt-disable");  // DEC-030
+    assert(cpuPinned(), "vmsmalloc: caller must be pinned to current CPU");        // DEC-030
+
     // DEC-029 whole-page bypass. sizeClassFor returns the kNumSizeClasses
-    // sentinel for sizes above the largest slab class.
+    // sentinel for sizes above the largest slab class. (The size<=pageSize
+    // guard is now the debug-only entry assert above — DEC-004 hoist.)
     const size_t c = sizeClassFor(size);
     if (c >= kNumSizeClasses) {
-        // Load-bearing branch guard: without it vmsmalloc(8000) would silently
-        // hand back a 4 KiB page. Phase 7 hoists this to the entry-point chain.
-        assert(size <= arch::smallPageSize, "vmsmalloc: size exceeds page");
         return allocPage();  // panics on failure (DEC-012)
     }
 
@@ -512,11 +545,15 @@ void* vmsmalloc(size_t size) {
 void vmsfree(void* p) {
     using namespace kernel::mm::vmsmalloc;
 
-    // Phase 7 adds the DEC-023 nullptr assert and the DEC-014 IRQ/NMI/#GP/#MC
-    // context assert at entry. Phase 6 carries the DEC-026 validation chain;
-    // each step depends on its predecessors, so the source order is
-    // load-bearing (DEC-026 amended) — do not reorder.
+    // Entry-point contract asserts (Phase 7, all debug-only per P7-DEC-001).
+    assert(p != nullptr, "vmsfree: pointer must be non-null");              // DEC-023
+    assert(!inForbiddenContextForVmsmalloc(),                              // DEC-014
+           "vmsfree: illegal in IRQ/NMI/#UD/#DF/#GP/#MC context");
+    assert(preemptionDisabled(), "vmsfree: caller must hold preempt-disable");  // DEC-030
+    assert(cpuPinned(), "vmsfree: caller must be pinned to current CPU");        // DEC-030
 
+    // Phase 6 carries the DEC-026 validation chain; each step depends on its
+    // predecessors, so the source order is load-bearing (DEC-026 amended).
     const uintptr_t pa = reinterpret_cast<uintptr_t>(p);
 
     // DEC-026 range check — BEFORE the freshness call, so an arbitrary VA never

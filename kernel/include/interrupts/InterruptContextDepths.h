@@ -19,6 +19,7 @@
 #define CROCOS_INTERRUPT_CONTEXT_DEPTHS_H
 
 #include <stdint.h>
+#include <arch.h>   // arch::InterruptKind (portable interrupt classification)
 
 namespace kernel::interrupts {
 
@@ -39,6 +40,35 @@ struct alignas(kInterruptContextDepthsAlignment) InterruptContextDepths {
 };
 
 static_assert(alignof(InterruptContextDepths) == kInterruptContextDepthsAlignment);
+
+// ─── Phase 7 — interrupt-context tracking consumer logic ───────────────────
+//
+// The RAII guard that maintains the per-CPU depth counters around
+// dispatchInterrupt, keyed by the portable arch::InterruptKind. The
+// vector→kind classification itself is architecture-specific and lives behind
+// arch::interruptKind (see arch.h); this layer only tracks depths per kind.
+// The guard's bodies and the currentCpuInterruptDepths accessor live in
+// InterruptContextDepths.cpp (they touch kernel::cpuLocal(), whose header
+// includes THIS one — defining them out-of-line keeps the include graph
+// acyclic).
+
+// RAII guard constructed at the top of dispatchInterrupt: the constructor
+// increments the matching per-CPU depth counter, the destructor decrements it.
+// arch::InterruptKind::Other is a no-op (no counter). CPU-local, no atomics —
+// the dispatch path runs with interrupts disabled.
+class InterruptContextGuard {
+public:
+    explicit InterruptContextGuard(arch::InterruptKind k) noexcept;
+    ~InterruptContextGuard() noexcept;
+    InterruptContextGuard(const InterruptContextGuard&) = delete;
+    InterruptContextGuard& operator=(const InterruptContextGuard&) = delete;
+private:
+    arch::InterruptKind kind_;
+};
+
+// Read-only view of the calling CPU's depth counters (defined in the .cpp,
+// where kernel::cpuLocal() is reachable).
+const InterruptContextDepths& currentCpuInterruptDepths() noexcept;
 
 } // namespace kernel::interrupts
 

@@ -244,4 +244,24 @@ namespace arch {
         // EBX[15:8] is the CLFLUSH line size in 8-byte units
         return ((ebx >> 8) & 0xFF) * 8;
     }
+
+    // AMD64 backend for the portable interrupt classifier. Maps the frame's
+    // vector number to a portable InterruptKind using the architecture's
+    // vector constants. Untracked exceptions (vectors < 32 other than the ones
+    // below) map to Other; vectors >= 32 are external IRQs.
+    InterruptKind interruptKind(const InterruptFrame& frame) {
+        namespace v = arch::amd64::interrupts;
+        switch (frame.vector_index) {
+            case v::VECTOR_NMI: return InterruptKind::NMI;
+            case v::VECTOR_UD:  return InterruptKind::UD;
+            case v::VECTOR_DF:  return InterruptKind::DF;
+            case v::VECTOR_GP:  return InterruptKind::GP;
+            case v::VECTOR_PF:  return InterruptKind::PF;
+            case v::VECTOR_MC:  return InterruptKind::MC;
+            default:
+                return frame.vector_index >= v::kFirstExternalVector
+                           ? InterruptKind::IRQ
+                           : InterruptKind::Other;
+        }
+    }
 }
