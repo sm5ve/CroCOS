@@ -23,7 +23,7 @@ enum MemoryOrder : int{
 #endif
 
 template <typename T>
-constexpr bool _use_intrinsic_atomic_ops = (is_trivially_copyable_v<T>) && ((sizeof(T) == 1) || (sizeof(T) == 2) || (sizeof(T) == 4) || (sizeof(T) == 8));
+constexpr bool _use_intrinsic_atomic_ops = (is_trivially_copyable_v<T>) && ((sizeof(T) == 1) || (sizeof(T) == 2) || (sizeof(T) == 4) || (sizeof(T) == 8) || (sizeof(T) == 16));
 
 // Storage type for Atomic<T>:
 //   enum     → underlying integer type  (existing behaviour)
@@ -38,13 +38,23 @@ using _atomic_storage_t = conditional_t<
     >
 >;
 
+// __atomic_*_n only accept integer or pointer arguments. For wider trivially-
+// copyable types (e.g. the 16-byte head encoding used by TreiberStack), we fall
+// back to the generic __atomic_load / __atomic_store / __atomic_compare_exchange
+// builtins which take a size and treat the operand as an opaque buffer. Lock-
+// freedom is still required (the __atomic_is_lock_free check in the consuming
+// type catches platforms without a native wide CAS).
 template<typename T>
 inline void atomic_store(T& dest, T val, MemoryOrder mem_order = SEQ_CST){
     //use __atomic_store_n if trivially copiable and right size (can I force alignment on arguments?)
     //use lock-based fallback if not. Use C++ concepts to allow use of an object's internal acquire if it has one
     if constexpr(_use_intrinsic_atomic_ops<T>){
 #ifdef __GNUC__
-        __atomic_store_n(&dest, val, mem_order);
+        if constexpr (sizeof(T) <= 8) {
+            __atomic_store_n(&dest, val, mem_order);
+        } else {
+            __atomic_store(&dest, &val, mem_order);
+        }
 #endif
     }
     else{
@@ -58,7 +68,11 @@ inline void atomic_store(volatile T& dest, T val, MemoryOrder mem_order = SEQ_CS
     //use lock-based fallback if not. Use C++ concepts to allow use of an object's internal acquire if it has one
     if constexpr(_use_intrinsic_atomic_ops<T>){
 #ifdef __GNUC__
-        __atomic_store_n(&dest, val, mem_order);
+        if constexpr (sizeof(T) <= 8) {
+            __atomic_store_n(&dest, val, mem_order);
+        } else {
+            __atomic_store(&dest, &val, mem_order);
+        }
 #endif
     }
     else{
@@ -70,7 +84,17 @@ template<typename T>
 inline T atomic_load( T& src, MemoryOrder mem_order = SEQ_CST){
     if constexpr(_use_intrinsic_atomic_ops<T>){
 #ifdef __GNUC__
-        return __atomic_load_n(&src, mem_order);
+        if constexpr (sizeof(T) <= 8) {
+            return __atomic_load_n(&src, mem_order);
+        } else {
+            // For wider sizes, use the generic builtin. Cast away const so
+            // __atomic_load's (T*, T*) signature accepts the source; the load
+            // does not mutate *src.
+            using Bare = __remove_cv(T);
+            Bare out{};
+            __atomic_load(const_cast<Bare*>(&src), &out, mem_order);
+            return out;
+        }
 #endif
     }
     else{
@@ -82,7 +106,17 @@ template<typename T>
 inline T atomic_load(volatile T& src, MemoryOrder mem_order = SEQ_CST){
     if constexpr(_use_intrinsic_atomic_ops<T>){
 #ifdef __GNUC__
-        return __atomic_load_n(&src, mem_order);
+        if constexpr (sizeof(T) <= 8) {
+            return __atomic_load_n(&src, mem_order);
+        } else {
+            // For wider sizes, use the generic builtin. Cast away const so
+            // __atomic_load's (T*, T*) signature accepts the source; the load
+            // does not mutate *src.
+            using Bare = __remove_cv(T);
+            Bare out{};
+            __atomic_load(const_cast<Bare*>(&src), &out, mem_order);
+            return out;
+        }
 #endif
     }
     else{
@@ -389,7 +423,11 @@ inline bool atomic_cmpxchg(T& src, T& expected, T value, bool weak = false,
                           MemoryOrder success_order = SEQ_CST, MemoryOrder failure_order = SEQ_CST){
     if(_use_intrinsic_atomic_ops<T>){
 #ifdef __GNUC__
-        return __atomic_compare_exchange_n(&src, &expected, value, weak, success_order, failure_order);
+        if constexpr (sizeof(T) <= 8) {
+            return __atomic_compare_exchange_n(&src, &expected, value, weak, success_order, failure_order);
+        } else {
+            return __atomic_compare_exchange(&src, &expected, &value, weak, success_order, failure_order);
+        }
 #endif
     }
     else{
@@ -402,7 +440,11 @@ inline bool atomic_cmpxchg(volatile T& src, T& expected, T value, bool weak = fa
                           MemoryOrder success_order = SEQ_CST, MemoryOrder failure_order = SEQ_CST){
     if(_use_intrinsic_atomic_ops<T>){
 #ifdef __GNUC__
-        return __atomic_compare_exchange_n(&src, &expected, value, weak, success_order, failure_order);
+        if constexpr (sizeof(T) <= 8) {
+            return __atomic_compare_exchange_n(&src, &expected, value, weak, success_order, failure_order);
+        } else {
+            return __atomic_compare_exchange(&src, &expected, &value, weak, success_order, failure_order);
+        }
 #endif
     }
     else{

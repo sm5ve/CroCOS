@@ -62,6 +62,18 @@ static void call_presort_if_exists() {
 
 namespace CroCOSTest {
 
+// TSan instrumentation slows concurrent tests dramatically (every atomic
+// op becomes a function call; thread-launch is heavier). Per-test timeouts
+// pinned for ASan/uninstrumented runs blow out in-suite under TSan, even
+// when the same test passes in <2s when run alone. Scale up so the
+// per-test timeouts hold under either build.
+#if defined(__SANITIZE_THREAD__) || \
+    (defined(__has_feature) && __has_feature(thread_sanitizer))
+constexpr int kTimeoutMultiplier = 10;
+#else
+constexpr int kTimeoutMultiplier = 1;
+#endif
+
     const TestInfo* const* TestRunner::getTests(size_t& testCount) {
 #ifdef __APPLE__
         unsigned long macCount;
@@ -133,14 +145,15 @@ namespace CroCOSTest {
                 }
             });
 
-            if (future.wait_for(std::chrono::milliseconds(test->timeoutMs)) == std::future_status::timeout) {
+            if (future.wait_for(std::chrono::milliseconds(test->timeoutMs * kTimeoutMultiplier)) == std::future_status::timeout) {
                 // Register the thread so the next allocation it makes throws
                 // ThreadTerminationRequest, unwinding its stack gracefully.
                 MemoryTracker::ignoreThread(testThread.get_id());
                 // Clear any tracking state the timed-out thread may have dirtied.
                 MemoryTracker::reset();
                 testThread.detach();
-                std::string msg = "Test timed out after " + std::to_string(test->timeoutMs) + "ms";
+                std::string msg = "Test timed out after "
+                    + std::to_string(test->timeoutMs * kTimeoutMultiplier) + "ms";
                 printf("  ✗ FAILED: %s\n", msg.c_str());
                 fflush(stdout);
                 return TestResult(test->name, false, msg);

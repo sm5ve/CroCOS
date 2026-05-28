@@ -1,6 +1,6 @@
 # CroCOS Kernel Unit Tests
 # Created by Spencer Martin on 7/27/25.
-# 
+#
 # This CMakeLists.txt tests kernel functionality using the host compiler
 # with host-compatible compilation flags
 
@@ -26,6 +26,7 @@ target_sources(CoreTests PRIVATE
     AtomicLinkedListTest.cpp
     AtomicBitPoolTest.cpp
     SplitBitmapTest.cpp
+    TreiberStackTest.cpp
     #AtomicBitPoolGlobalLockMock.cpp
     #AtomicBitPoolConcurrentLinkedList.cpp
 )
@@ -141,10 +142,142 @@ if(NOT APPLE)
     )
 endif()
 
-# Add a custom target to run kernel tests
+# Run both ASan and TSan core test runners (mirrors the Phase-1
+# LibAlloc/run_liballoc_tests target).
 add_custom_target(run_core_tests
     COMMAND CoreTestRunner
-    DEPENDS CoreTestRunner
+    COMMAND CoreTestRunnerTSan
+    DEPENDS CoreTestRunner CoreTestRunnerTSan
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-    COMMENT "Running CroCOS corelib unit tests"
+    COMMENT "Running CroCOS corelib unit tests (ASan + TSan)"
+)
+
+# ============================================================
+# TSan-instrumented parallel runner (vmsmalloc Phase-4 release gate for
+# ARMv8 weak-memory correctness — parent-spec DEC-042 #4).
+#
+# TSan and ASan are mutually exclusive at link time, so we build a sibling
+# library + runner pair instead of toggling flags on the ASan target.
+# Mirrors the Phase-1 LibAllocTestRunnerTSan pattern.
+# ============================================================
+
+add_library(CoreTestsTSan STATIC)
+
+target_sources(CoreTestsTSan PRIVATE
+    ArrayTest.cpp
+    GraphTest.cpp
+    HeapTest.cpp
+    ObjectTest.cpp
+    OptionalTest.cpp
+    PermutationTest.cpp
+    RingBufferTest.cpp
+    HighReliabilityRingBufferTests.cpp
+    SmartPointerTest.cpp
+    TreeTest.cpp
+    VariantTest.cpp
+    VectorTest.cpp
+    LinkedListTests.cpp
+    AtomicLinkedListTest.cpp
+    AtomicBitPoolTest.cpp
+    SplitBitmapTest.cpp
+    TreiberStackTest.cpp
+)
+
+target_include_directories(CoreTestsTSan PUBLIC
+    ..
+    ../harness
+    ../../libraries/Core/include
+)
+
+target_sources(CoreTestsTSan PRIVATE
+    ../../libraries/Core/PrintStream.cpp
+    ../../libraries/Core/str.cpp
+    ../../libraries/Core/atomic/atomic.cpp
+    ../../libraries/Core/atomic/AtomicBitPool.cpp
+    ../../libraries/Core/Object.cpp
+)
+
+target_compile_options(CoreTestsTSan PRIVATE
+    -std=c++2c
+    -fexceptions
+    -Wall
+    -Wextra
+    -Wno-c++26-extensions
+    -Wno-vla
+    -DCORE_KERNEL_TESTING
+    -DCORE_LINKED_WITH_KERNEL
+    -DCORE_LIBRARY_TESTING
+    -DCROCOS_TESTING
+    -O1
+    -g
+    -fsanitize=thread
+)
+
+# Force include test.h ONLY for the Core library source files being tested
+# (mirrors the ASan library above).
+set_source_files_properties(
+    ../../libraries/Core/PrintStream.cpp
+    ../../libraries/Core/str.cpp
+    ../../libraries/Core/atomic/atomic.cpp
+    ../../libraries/Core/Object.cpp
+    PROPERTIES COMPILE_FLAGS "-include ${CMAKE_CURRENT_SOURCE_DIR}/../test.h -DCROCOS_TEST_INSTRUMENT_ALLOCATORS"
+)
+
+set_source_files_properties(
+    ../../libraries/Core/atomic/AtomicBitPool.cpp
+    PROPERTIES COMPILE_FLAGS "-include ${CMAKE_CURRENT_SOURCE_DIR}/../test.h -DCROCOS_TEST_INSTRUMENT_ALLOCATORS -include string.h"
+)
+
+add_custom_command(TARGET CoreTestsTSan PRE_LINK
+    COMMENT "Instrumenting corelib TSan test object files for memory tracking before linking"
+    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/../instrument_objects.sh ${CMAKE_CURRENT_BINARY_DIR} CoreTestsTSan
+)
+
+add_executable(CoreTestRunnerTSan)
+
+target_sources(CoreTestRunnerTSan PRIVATE
+    ../TestMain.cpp
+)
+
+target_link_libraries(CoreTestRunnerTSan PRIVATE
+    CoreTestsTSan
+    TestHarness
+)
+
+target_include_directories(CoreTestRunnerTSan PRIVATE
+    ..
+    ../harness
+    ../../kernel/include
+    ../../libraries/Core/include
+)
+
+target_compile_options(CoreTestRunnerTSan PRIVATE
+    -std=c++2c
+    -fexceptions
+    -Wall
+    -Wextra
+    -DCORE_KERNEL_TESTING
+    -O1
+    -g
+    -fsanitize=thread
+)
+
+target_link_options(CoreTestRunnerTSan PRIVATE -fsanitize=thread)
+
+if(APPLE)
+    target_link_options(CoreTestRunnerTSan PRIVATE
+        -Wl,-force_load,$<TARGET_FILE:CoreTestsTSan>
+    )
+else()
+    target_link_options(CoreTestRunnerTSan PRIVATE
+        -Wl,--keep-section=.crocos_unit_tests
+    )
+endif()
+
+# Add a custom target to run both ASan and TSan core tests
+add_custom_target(run_core_tests_tsan
+    COMMAND CoreTestRunnerTSan
+    DEPENDS CoreTestRunnerTSan
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    COMMENT "Running CroCOS corelib unit tests (TSan)"
 )
