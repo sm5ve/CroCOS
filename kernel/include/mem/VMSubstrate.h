@@ -9,6 +9,7 @@
 #include <mem/MemTypes.h>
 #include <mem/NUMA.h>
 #include <arch.h>
+#include <kmemlayout.h>   // pageTableLevelForKMemRegion (for kWindowAddressBits)
 // P7-DEC-007: make<T>'s compile-time alignment/size checks need the size-class
 // accessors (sizeClassFor / slotAlignment / kNumSizeClasses). VMSubstrateSlab.h
 // is the implementation-internal vmsmalloc header; every includer of this
@@ -17,6 +18,17 @@
 
 namespace kernel::mm::VMSubstrate {
     bool init();
+
+    // Width, in bits, of the VMSubstrate VA window — one entry at the top of
+    // its page-table subtree (PML4[VMM_SUBSTRATE_ROOT_INDEX] on AMD64 = 39
+    // bits / 512 GiB). This is the substrate's own geometry; vmsmalloc's
+    // DEC-015 packed-tagged-head encoding consumes it to size the page-offset
+    // field (kOffsetBits = kWindowAddressBits - log2(smallPageSize)) instead
+    // of reaching into arch::pageTableDescriptor directly. The userspace test
+    // harness supplies the same constant from its MockVMSubstrate.
+    inline constexpr unsigned kWindowAddressBits =
+        arch::pageTableDescriptor.getVirtualAddressBitCount(
+            pageTableLevelForKMemRegion() - 1);
 
     // Returns the base virtual address of the arena at the given index.
     virt_addr arenaVirtualBase(size_t index);

@@ -33,7 +33,6 @@
 #include <arch.h>
 #include <kassert.h>
 #include <kernel.h>
-#include <kmemlayout.h>
 #include <CpuLocal.h>
 #include <interrupts/InterruptContextDepths.h>
 #include <core/atomic.h>
@@ -53,15 +52,15 @@ namespace {
 
 // ─── DEC-015 head encoding constants (derived, not hardcoded) ──────────────
 //
-// The VMSubstrate VA window occupies one entry at the top of its page-table
-// subtree (PML4[VMM_SUBSTRATE_ROOT_INDEX] on AMD64). The span of that entry,
-// in bits, is getVirtualAddressBitCount(pageTableLevelForKMemRegion() - 1) —
-// the same shift arenaVirtualBase uses to position the window. Subtracting
-// the small-page shift gives the number of page-offset bits the encoding must
-// carry; the remaining bits of the 64-bit head are the ABA counter.
-inline constexpr unsigned kVmsRegionVABits =
-    arch::pageTableDescriptor.getVirtualAddressBitCount(
-        kernel::mm::pageTableLevelForKMemRegion() - 1);
+// The page-offset field spans the VMSubstrate VA window, whose width in bits
+// is the substrate's own geometry (VMSubstrate::kWindowAddressBits — one
+// top-level page-table entry, 39 bits / 512 GiB on AMD64). vmsmalloc consumes
+// that constant rather than reaching into arch::pageTableDescriptor, so the
+// same source compiles against the kernel's VMSubstrate and the userspace
+// harness's MockVMSubstrate alike. Subtracting the small-page shift gives the
+// page-offset bit count; the remaining bits of the 64-bit head are the ABA
+// counter.
+inline constexpr unsigned kVmsRegionVABits = VMSubstrate::kWindowAddressBits;
 inline constexpr unsigned kPageShift = log2floor(arch::smallPageSize);
 
 // File-scope VA window, published once by vmsmallocLateInit and immutable
