@@ -316,6 +316,18 @@ inline void operator delete(void*, void*) noexcept {}
 #endif
 #endif
 
+// Obtain a pointer to the object that lives at `p`'s address, defeating any
+// compiler assumption that the bytes there still hold the *previous* object.
+// Required when recovering an object that was placement-new'd into a byte
+// buffer (e.g. vmsmalloc's per-domain ChainedTreiberStack instances, which
+// live in an opaque PartialStackStorage carved out of a NUMA-distributed
+// buffer). Wraps the compiler intrinsic so callers don't depend on std::launder
+// (unavailable in the freestanding build).
+template <typename T>
+[[nodiscard]] inline T* launder(T* p) noexcept {
+    return __builtin_launder(p);
+}
+
 template <typename T>
 inline void swap(T& t1, T& t2){
     T temp = move(t1);

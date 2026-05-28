@@ -954,9 +954,10 @@ namespace kernel::mm::VMSubstrate {
             pte = arch::PTE<VMSubstrateHelper::leafLevel>::leafEntry(phys, kLeafFlags);
             arch::invlpg(pageVA);
 
-            // Zero-fill: vmsmalloc relies on the buffer being zeroed
-            // (per the spec contract; MagazineTuning.currentK is the only
-            // non-zero seeding vmsmallocInit does).
+            // Zero-fill: vmsmalloc relies on the buffer being zeroed (the
+            // per-domain ChainedTreiberStack instances are placement-new'd
+            // over the zeroed storage by vmsmallocLateInit; the tuning
+            // counters stay zero).
             memset(reinterpret_cast<void*>(pageVA.value), 0, arch::smallPageSize);
         }
 

@@ -256,12 +256,21 @@ struct SlabDescriptor : SlabDescriptorBase {
 };
 
 // ============================================================
-// Phase 3 — Per-domain shared-state storage
+// Phase 3 / Phase 5 — Per-domain shared-state storage
 //
-// `partial[d][c]` (a TreiberHead) and `tuning[d][c]` (a MagazineTuning) live
-// in a NUMA-distributed per-domain buffer. Phase 4's ChainedTreiberStack
-// reads/writes TreiberHead; Phase 10's tuning policy reads/writes
-// MagazineTuning. Phase 3 just lays down the storage, init-time-only.
+// `partial[d][c]` and `tuning[d][c]` live in a NUMA-distributed per-domain
+// buffer. Phase 3 lays down the raw storage (init-time-only); Phase 5
+// (P5-DEC-002) populates the partial slots with full
+// `Core::ChainedTreiberStack` instances and consumes the tuning counters.
+//
+// The ChainedTreiberStack instance is parameterized by vmsmalloc's DEC-015
+// head encoding, its linkage extractors, and its tuning Hooks — all of which
+// stay file-scope-internal to vmsmalloc.cpp (Phase 5). So this header cannot
+// name the concrete stack type. Instead each partial slot is an opaque,
+// correctly-aligned `PartialStackStorage` blob; vmsmalloc.cpp placement-news a
+// stack into it during vmsmallocLateInit and recovers it (via `launder`) in
+// its `partialFor` accessor. `kPartialStackStorageBytes` is a generous fixed
+// size; vmsmalloc.cpp static_asserts `sizeof(PartialStack)` fits.
 //
 // The per-CPU `Magazine[kNumSizeClasses]` array is *not* declared here —
 // per the P7-DEC-010 amendment 2026-05-27 (referenced under Phase 4.5 in
@@ -273,8 +282,13 @@ struct SlabDescriptor : SlabDescriptorBase {
 // is not exposed as a kernel-wide constant; documented value is 64 on AMD64).
 inline constexpr size_t kVmsmallocCacheLine = 64;
 
-struct alignas(kVmsmallocCacheLine) TreiberHead {
-    uint64_t head;  // DEC-015 tagged-head encoding; consumed by Phase 4.
+// Opaque storage for one per-(domain, class) ChainedTreiberStack instance.
+// A ChainedTreiberStack with a 64-bit head encoding occupies two cache lines
+// (cache-line-isolated head + maxChainLength, plus the tuning Hooks pointer).
+// vmsmalloc.cpp asserts sizeof(PartialStack) <= kPartialStackStorageBytes.
+inline constexpr size_t kPartialStackStorageBytes = 2 * kVmsmallocCacheLine;
+struct alignas(kVmsmallocCacheLine) PartialStackStorage {
+    unsigned char bytes[kPartialStackStorageBytes];
 };
 
 struct alignas(kVmsmallocCacheLine) Magazine {
@@ -283,24 +297,27 @@ struct alignas(kVmsmallocCacheLine) Magazine {
     // (no tail per DEC-041 — chain head is the only externally-visible end.)
 };
 
+// Residual per-(domain, class) tuning counters. The magazine-depth knob `K`
+// is now the ChainedTreiberStack's own `maxChainLength` (P5-DEC-002), so the
+// earlier `currentK` field is gone; these are the contention / starvation
+// signals the Phase-10 policy will read, plus its single-runner try-lock.
 struct alignas(kVmsmallocCacheLine) MagazineTuning {
-    Atomic<uint32_t> currentK;
     Atomic<uint32_t> overflowCount;
     Atomic<uint32_t> starvationCount;
     Atomic<uint32_t> policyLock;
 };
 
 // Tuning bounds (provisional per P3-DEC-002 — Phase 10 revisits with
-// RadixVM workload data).
+// RadixVM workload data). kInitialK seeds each stack's maxChainLength.
 inline constexpr uint32_t kInitialK = 8;
 inline constexpr uint32_t kMinK     = 2;
 inline constexpr uint32_t kMaxK     = 64;
 static_assert(kMinK <= kInitialK && kInitialK <= kMaxK);
 
-// Per-domain buffer layout: TreiberHead array, then MagazineTuning array,
-// each indexed by size-class.
+// Per-domain buffer layout: PartialStackStorage array, then MagazineTuning
+// array, each indexed by size-class.
 inline constexpr size_t kPartialOffset = 0;
-inline constexpr size_t kPartialBytes  = kNumSizeClasses * sizeof(TreiberHead);
+inline constexpr size_t kPartialBytes  = kNumSizeClasses * sizeof(PartialStackStorage);
 inline constexpr size_t kTuningOffset  = roundUpToNearestMultiple(
     kPartialOffset + kPartialBytes, alignof(MagazineTuning));
 inline constexpr size_t kTuningBytes   = kNumSizeClasses * sizeof(MagazineTuning);
@@ -320,10 +337,12 @@ inline constexpr size_t kMaxDomains = 64;
 // guarantee that no descriptor's `numaDomain` will index a null slot.
 extern void* perDomainBufs[kMaxDomains];
 
-inline TreiberHead* partialFor(numa::DomainID d) {
+// Base of the per-domain PartialStackStorage array. vmsmalloc.cpp recovers a
+// typed `PartialStack*` from `&partialStorageFor(d)[c]`.
+inline PartialStackStorage* partialStorageFor(numa::DomainID d) {
     assert(perDomainBufs[d.value] != nullptr,
-           "partialFor: indexed domain has no per-domain buffer");
-    return reinterpret_cast<TreiberHead*>(
+           "partialStorageFor: indexed domain has no per-domain buffer");
+    return reinterpret_cast<PartialStackStorage*>(
         static_cast<uint8_t*>(perDomainBufs[d.value]) + kPartialOffset);
 }
 
@@ -337,6 +356,22 @@ inline MagazineTuning* tuningFor(numa::DomainID d) {
 // Init entry point — registered in general.icd under memory_management
 // phase, depends_on VMSubstrate.
 bool vmsmallocInit();
+
+// ─── Phase 5 hooks into the Phase-3 init (defined in vmsmalloc.cpp) ───
+//
+// vmsmallocInit calls vmsmallocLateInit once the per-domain buffers exist:
+// it publishes the VMSubstrate VA window (base/size) for the DEC-015 head
+// encoding and placement-news a ChainedTreiberStack into every
+// (CPU-bearing domain, class) partial slot with its Hooks bound to the
+// matching tuning row. `vmsBase` is arenaVirtualBase(0); `vmsSize` is the
+// span actually covered by the live arenas (asserted to fit the DEC-015
+// page-offset budget).
+void vmsmallocLateInit(uintptr_t vmsBase, size_t vmsSize);
+
+// Phase-5 boot smoke exercise (P5-DEC-005): one allocation per size class
+// plus the whole-page bypass classes, with alignment / magazine asserts.
+// Leaks the allocations (no vmsfree until Phase 6).
+void vmsmallocBootSmoke();
 
 } // namespace kernel::mm::vmsmalloc
 

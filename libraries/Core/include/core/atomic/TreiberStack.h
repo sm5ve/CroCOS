@@ -148,7 +148,16 @@ namespace Core {
         static constexpr Tag advanceTag(Tag t)   { return t + 1; }
 
         static_assert(sizeof(Storage) == 16);
-        static_assert(__atomic_is_lock_free(16, nullptr),
+        // The `|| sizeof(T) == 0` term makes the condition value-dependent on
+        // T, deferring the check to instantiation. Without it, GCC's
+        // -Wtemplate-body evaluates the non-dependent __atomic_is_lock_free at
+        // parse time, which breaks any freestanding TU that merely *includes*
+        // this header on a target without 16-byte lock-free CAS (e.g. the
+        // CroCOS kernel, which deliberately uses a 64-bit HeadEncoding per
+        // DEC-015 and never instantiates Uint128HeadEncoding). The assertion
+        // still fires if a consumer actually instantiates this encoding on
+        // such a target.
+        static_assert(__atomic_is_lock_free(16, nullptr) || sizeof(T) == 0,
                       "Uint128HeadEncoding requires native 16-byte lock-free CAS "
                       "(cmpxchg16b on AMD64; LDXP/STXP or CASP on ARMv8). "
                       "Supply a custom HeadEncoding policy if your target lacks it.");

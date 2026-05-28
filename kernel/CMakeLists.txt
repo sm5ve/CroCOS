@@ -38,6 +38,7 @@ set(KERNEL_SRC
         acpi/NUMAIterators.cpp
         mm/VMSubstrate.cpp
         mm/VMSubstrateSlab.cpp
+        mm/vmsmalloc.cpp
         CpuLocal.cpp
         arch/amd64/CpuLocalBase.cpp
 )

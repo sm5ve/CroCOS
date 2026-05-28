@@ -18,6 +18,7 @@
 #include <core/mem.h>
 #include <CpuLocal.h>
 #include <kernel.h>
+#include <kmemlayout.h>
 #include <mem/NUMA.h>
 #include <mem/VMSubstrate.h>
 #include "VMSubstrateSlab.h"
@@ -51,28 +52,39 @@ bool vmsmallocInit() {
         }
     }
 
-    // Reserve one per-domain buffer per CPU-bearing domain.
+    // Reserve one per-domain buffer per CPU-bearing domain. The buffer is
+    // zero-filled by reservePerDomainStaticBuffer; the partial-stack
+    // instances and tuning counters are populated by vmsmallocLateInit
+    // below (the tuning counters stay zero; the stacks are constructed with
+    // maxChainLength = kInitialK and their head encodes the empty stack).
     for (size_t d = 0; d < kMaxDomains; d++) {
         if (!domainHasCpu[d]) continue;
         void* buf = VMSubstrate::reservePerDomainStaticBuffer(
             kPerDomainBufBytes, numa::DomainID{static_cast<uint16_t>(d)});
         perDomainBufs[d] = buf;
-
-        // Seed MagazineTuning::currentK on every entry. Other tuning
-        // fields stay zero per the reservePerDomainStaticBuffer zero-fill
-        // contract; TreiberHead.head stays zero, which decodes to the
-        // empty-stack tagged head per DEC-015.
-        auto* tuning = tuningFor(numa::DomainID{static_cast<uint16_t>(d)});
-        for (size_t c = 0; c < kNumSizeClasses; c++) {
-            tuning[c].currentK.store(kInitialK, RELEASE);
-        }
     }
+
+    // Publish the VMSubstrate VA window and construct the per-(domain, class)
+    // ChainedTreiberStack instances (Phase 5, P5-DEC-002 / P5-DEC-003).
+    //
+    // The window base is arena 0's base; its size is the span actually
+    // covered by the live arenas (one per CPU plus the topmost static-buffer
+    // slot). All arithmetic is derived from arch::pageTableDescriptor via
+    // arenaVirtualBase / getKernelMemRegionSize — no hardcoded layout.
+    const uintptr_t vmsBase = VMSubstrate::arenaVirtualBase(0).value;
+    const size_t    vmsSize = (cpuCount + 1) * mm::getKernelMemRegionSize();
+    vmsmallocLateInit(vmsBase, vmsSize);
 
     klog() << "VMSubstrateSlab init: perDomainBufs="
            << static_cast<uint64_t>(cpuBearingDomainCount)
            << ", perCpuCpuLocalPages="
            << static_cast<uint64_t>(cpuCount * kernel::kCpuLocalPages)
            << "\n";
+
+    // Phase-5 boot smoke (P5-DEC-005): one allocation per class + whole-page
+    // bypass, with alignment / magazine asserts. Leaks the allocations until
+    // Phase 6 supplies vmsfree.
+    vmsmallocBootSmoke();
 
     return true;
 }
