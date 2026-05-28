@@ -1,3 +1,4 @@
+
 # CroCOS Kernel Unit Tests
 # Created by Spencer Martin on 7/27/25.
 # 
@@ -14,12 +15,14 @@ target_sources(KernelTests PRIVATE
     InterruptGraphTests.cpp
     PageAllocatorTests.cpp
     NUMATests.cpp
+    vmsmalloc/SlabLayoutTest.cpp
 )
 
 # Add the TestHarness from parent directory
 target_include_directories(KernelTests PUBLIC
     ../harness
     ../../kernel/include
+    ../../kernel/mm                  # implementation-internal headers (VMSubstrateSlab.h)
     ../../libraries/Core/include
     ../../libraries/LibAlloc/include
 )
