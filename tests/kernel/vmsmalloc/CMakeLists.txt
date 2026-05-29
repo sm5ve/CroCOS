@@ -11,6 +11,7 @@ set(VMS_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../..)
 set(VMS_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/../../TestMain.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/IntegrationTest.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/ConcurrentTest.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/mocks/MockVMSubstrate.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/mocks/MockKernelEnv.cpp
     ${VMS_ROOT}/kernel/mm/vmsmalloc.cpp
@@ -66,3 +67,30 @@ add_custom_target(run_vmsmalloc_integration_tests
     DEPENDS KernelVmsmallocIntegrationTestRunner
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     COMMENT "Running vmsmalloc integration tests (ASan/leak)")
+
+# ─── TSan runner (ARMv8/M1 = primary release gate, P8-DEC-004) ──────────────
+# Same sources compiled with -fsanitize=thread. TestHarness links uninstrumented
+# (-undefined,dynamic_lookup on Apple, mirroring the Phase-1/4 TSan runners).
+add_executable(KernelVmsmallocIntegrationTestRunnerTSan ${VMS_SOURCES})
+target_include_directories(KernelVmsmallocIntegrationTestRunnerTSan PRIVATE ${VMS_INCLUDES})
+target_compile_definitions(KernelVmsmallocIntegrationTestRunnerTSan PRIVATE ${VMS_DEFINES})
+target_compile_options(KernelVmsmallocIntegrationTestRunnerTSan PRIVATE
+    -std=c++2c -fexceptions -Wall -Wextra -Wno-c++26-extensions
+    -O1 -g -fsanitize=thread
+    -include ${CMAKE_CURRENT_SOURCE_DIR}/../../assert_support.h)
+target_link_libraries(KernelVmsmallocIntegrationTestRunnerTSan PRIVATE TestHarness)
+target_link_options(KernelVmsmallocIntegrationTestRunnerTSan PRIVATE -fsanitize=thread)
+if(APPLE)
+    target_link_options(KernelVmsmallocIntegrationTestRunnerTSan PRIVATE
+        -Wl,-force_load,$<TARGET_FILE:TestHarness>
+        -Wl,-undefined,dynamic_lookup)
+else()
+    target_link_options(KernelVmsmallocIntegrationTestRunnerTSan PRIVATE
+        -Wl,--keep-section=.crocos_unit_tests)
+endif()
+
+add_custom_target(run_vmsmalloc_integration_tests_tsan
+    COMMAND KernelVmsmallocIntegrationTestRunnerTSan
+    DEPENDS KernelVmsmallocIntegrationTestRunnerTSan
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    COMMENT "Running vmsmalloc integration tests (TSan)")
