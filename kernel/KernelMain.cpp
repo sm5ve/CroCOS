@@ -65,27 +65,6 @@ namespace kernel{
         return true;
     }
 
-    using PagePool = void*[2048];
-
-    PagePool page_pools[16];
-
-    [[noreturn]] bool naiveTest() {
-        klog() << "Running VMSubstrate test on CPU " << arch::getCurrentProcessorID() << "\n";
-        constexpr size_t kPageCount = sizeof(PagePool) / sizeof(void*);
-        while (true) {
-            auto& pool = page_pools[arch::getCurrentProcessorID()];
-            for (size_t i = 0; i < kPageCount; i++) {
-                pool[i] = mm::VMSubstrate::allocPage();
-                assert(pool[i] != nullptr, "VMSubstrate::allocPage returned null");
-                *static_cast<volatile size_t*>(pool[i]) = i;
-            }
-            for (size_t i = 0; i < kPageCount; i++) {
-                assert(*static_cast<volatile size_t*>(pool[i]) == i, "VMSubstrate page content corrupted");
-                mm::VMSubstrate::freePage(pool[i]);
-            }
-        }
-    }
-
     bool enqueueShutdown() {
         arch::amd64::sti();
         klog() << "Enqueuing shutdown\n";

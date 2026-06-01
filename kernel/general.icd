@@ -89,11 +89,11 @@ phase = "smp_bringup"
 depends_on = ["SMP"]
 routine = "kernel::enqueueShutdown"
 
-[Test]
+[VmsmallocStress]
 
-name = "Naive Test"
+name = "Vmsmalloc Stress Test"
 required = true
 per_cpu = true
 phase = "smp_bringup"
 depends_on = ["Shutdown"]
-routine = "kernel::naiveTest"
+routine = "kernel::vmsmallocStress"
