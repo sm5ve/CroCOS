@@ -35,6 +35,15 @@ namespace kernel::mm::VMSubstrate {
     void* allocPage();
     void freePage(void*);
 
+    // DEC-047: slab-reclaim sibling of freePage. Used only by vmsmalloc's
+    // DEC-036 eager-free walk. Behaves like freePage (real frame returned to the
+    // allocator, VA released) but leaves the freed VA mapped read-only onto a
+    // shared sentinel page, so a concurrent lock-free Treiber pop mid-flight on
+    // the reclaimed slab descriptor reads harmless garbage instead of faulting
+    // on a torn-down PTE. Whole-page frees keep using freePage (never Treiber
+    // nodes). The userspace mock recycles like freePage (no page tables).
+    void reclaimSlabPage(void*);
+
     void ensureTLBEntryFresh(void*);
 
     // Convention-internal: external callers should prefer make<T> / destroy<T>.

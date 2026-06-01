@@ -70,6 +70,15 @@ void freePage(void* p) {
     gActiveCount--;
 }
 
+// DEC-047: in the kernel this remaps the VA read-only onto a sentinel page so a
+// racing popper's speculative read stays a harmless garbage read. Userspace has
+// no page tables / TLB and the Phase 8 harness does not simulate the reclaim
+// race (deferred to the in-kernel stress test), so the mock just recycles the
+// page exactly like freePage to keep the active-page leak accounting correct.
+void reclaimSlabPage(void* p) {
+    freePage(p);
+}
+
 void* mapMMIOPage(phys_addr) { std::abort(); }
 
 void* reservePerDomainStaticBuffer(size_t byteSize, numa::DomainID) {

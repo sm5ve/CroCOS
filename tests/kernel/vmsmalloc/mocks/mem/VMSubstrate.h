@@ -35,6 +35,10 @@ namespace kernel::mm::VMSubstrate {
     // Page primitives — mmap-backed (MockVMSubstrate.cpp).
     void* allocPage();
     void  freePage(void* p);
+    // DEC-047 slab-reclaim sibling of freePage. The harness does not simulate
+    // the read-only sentinel remap (no page tables in userspace); it recycles
+    // the page like freePage. See MockVMSubstrate.cpp.
+    void  reclaimSlabPage(void* p);
     void* mapMMIOPage(phys_addr paddr);
 
     // No-op in userspace: no TLB, no dirty bitmap. The call site in

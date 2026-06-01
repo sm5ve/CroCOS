@@ -524,7 +524,11 @@ void* vmsmalloc(size_t size) {
             while (m.depth > 1 &&
                    dispatchOnClass(c, m.head, [](auto* d) { return d->bookkeeper.isEmpty(); })) {
                 SlabDescriptorBase* next = m.head->chainNext.load(RELAXED);
-                VMSubstrate::freePage(m.head);
+                // DEC-047: reclaimSlabPage (not freePage) — the slab being
+                // reclaimed may still be the encoded head of a concurrent
+                // ChainedTreiberStack::pop on another CPU; the sentinel remap
+                // keeps that pop's speculative pre-CAS read fault-safe.
+                VMSubstrate::reclaimSlabPage(m.head);
                 m.head = next;
                 m.depth--;
                 if (m.depth > 0) {

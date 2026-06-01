@@ -641,6 +641,22 @@ namespace kernel::mm::VMSubstrate {
     static virt_addr staticBufferNextVA{uint64_t{0}};
     static virt_addr staticBufferSlotEnd{uint64_t{0}};
 
+    // ────────────────────────────────────────────────────────────────────────
+    // DEC-047 — slab-reclaim sentinel page.
+    //
+    // reclaimSlabPage (the DEC-036 eager-free reclaim path) remaps a freed slab
+    // VA read-only onto this single shared page instead of clearing the leaf
+    // PTE. A concurrent ChainedTreiberStack::pop that already acquire-loaded the
+    // reclaimed descriptor as its head may speculatively read topPtr->next
+    // between its onPreTouch/ensureTLBEntryFresh and its CAS; pointing the VA at
+    // a present read-only page turns that read into a harmless garbage load
+    // (discarded by the failing CAS) instead of a #PF on a torn-down PTE. The
+    // page contents are never consumed; zero-filled BSS suffices. sentinelPhys
+    // is resolved once in init() (while the early-boot mapping is still live).
+    // ────────────────────────────────────────────────────────────────────────
+    alignas(arch::smallPageSize) static uint8_t sentinelPage[arch::smallPageSize];
+    static phys_addr sentinelPhys{};
+
     // Construct one hardware page table page at the given level. For the
     // arena root: writes a self-reference at slot 0 and the chain pointer at
     // slot 1. For the leaf level: installs per-CPU dirty-bitmap pages at
@@ -776,17 +792,36 @@ namespace kernel::mm::VMSubstrate {
         return reinterpret_cast<void*>(va.value);
     }
 
-    void freePage(void* ptr) {
+    // Shared body of freePage / reclaimSlabPage. Recovers the real phys page
+    // backing `ptr`, rewrites its leaf PTE (cleared for freePage; read-only
+    // sentinel remap for reclaimSlabPage — DEC-047), propagates the change
+    // lazily to other CPUs, returns the real phys to the allocator, and runs
+    // the multi-freer-safe radix-tree leaf-bit release. The only difference
+    // between the two callers is the PTE write.
+    static void releaseLeafMapping(void* ptr, bool sentinelRemap) {
         const virt_addr va{reinterpret_cast<uint64_t>(ptr)};
         const virt_addr arenaBase{
             roundDownToNearestMultiple(va.value, getKernelMemRegionSize())
         };
 
-        // Clear the leaf PTE and recover the underlying phys page.
+        // Recover the underlying phys page, then rewrite the leaf PTE.
         auto& leafPTE = *reinterpret_cast<arch::PTE<VMSubstrateHelper::leafLevel>*>(
             VMSubstrateHelper::leafPTEAddrFor(arenaBase, va).value);
         const phys_addr phys = leafPTE.getPhysicalAddress();
-        leafPTE = arch::PTE<VMSubstrateHelper::leafLevel>{};
+        if (sentinelRemap) {
+            // DEC-047: remap read-only onto the shared sentinel page (present →
+            // present), so a racing Treiber pop's speculative read of this VA
+            // stays a harmless garbage load rather than faulting on a cleared
+            // PTE. A later allocPage reserving this VA overwrites the sentinel
+            // entry present → present, leaving no non-present window.
+            assert(sentinelPhys.value != 0,
+                   "reclaimSlabPage called before VMSubstrate::init resolved sentinelPhys");
+            using Flag = arch::PageEntryFlag;
+            constexpr auto kSentinelFlags = Flag::Global | Flag::NoExecute;  // read-only
+            leafPTE = arch::PTE<VMSubstrateHelper::leafLevel>::leafEntry(sentinelPhys, kSentinelFlags);
+        } else {
+            leafPTE = arch::PTE<VMSubstrateHelper::leafLevel>{};
+        }
 
         // Local TLB clear; remote CPUs will lazy-invlpg via SafePtr/dirty-bitmap.
         VMSubstrateHelper::setDirtyForOtherCPUs(va);
@@ -807,6 +842,20 @@ namespace kernel::mm::VMSubstrate {
             if (prevCount == 0)
                 VMSubstrateHelper::propagateEdge(arenaBase, T, true);
         }
+    }
+
+    void freePage(void* ptr) {
+        releaseLeafMapping(ptr, /*sentinelRemap=*/false);
+    }
+
+    // DEC-047: slab-reclaim sibling of freePage used by vmsmalloc's DEC-036
+    // eager-free walk. Identical to freePage except the freed VA is left mapped
+    // read-only onto the shared sentinel page (see sentinelPage above), so a
+    // concurrent ChainedTreiberStack::pop mid-flight on the reclaimed descriptor
+    // does not #PF on its speculative pre-CAS read. The real phys frame is still
+    // returned to the allocator and the VA is still released to the radix tree.
+    void reclaimSlabPage(void* ptr) {
+        releaseLeafMapping(ptr, /*sentinelRemap=*/true);
     }
 
     void* createArena(arch::ProcessorID cpu) {
@@ -987,6 +1036,12 @@ namespace kernel::mm::VMSubstrate {
         bootPageTable[VMM_SUBSTRATE_ROOT_INDEX] = arch::PTE<0>::subtableEntry(
             early_boot_virt_to_phys(virt_addr(&vmmArenaTable)),
             kSubtableFlags);
+
+        // DEC-047: resolve the slab-reclaim sentinel page's phys once, while the
+        // early-boot identity mapping is still live (early_boot_virt_to_phys
+        // asserts it has not expired). reclaimSlabPage remaps freed slab VAs
+        // read-only onto this page thereafter.
+        sentinelPhys = early_boot_virt_to_phys(virt_addr(&sentinelPage));
 
         // Per-CPU arenas claim indices 0..processorCount()-1; the
         // static-buffer slot then claims processorCount(). Assert the
