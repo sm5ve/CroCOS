@@ -82,7 +82,13 @@ namespace kernel::mm::VMSubstrate {
                       "size class. Pad T into a power-of-two size class, split the "
                       "over-aligned subobject, or use a different allocator.");
         auto* mem = vmsmalloc(sizeof(T));
-        return new (mem) T(forward<Ts>(args)...);
+        // malloc (not calloc) semantics — mirror the real header: default-init
+        // with no args so trivial T is left uninitialized, not zero-filled.
+        if constexpr (sizeof...(Ts) == 0) {
+            return new (mem) T;
+        } else {
+            return new (mem) T(forward<Ts>(args)...);
+        }
     }
 
     template <typename T>

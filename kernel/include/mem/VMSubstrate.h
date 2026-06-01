@@ -110,7 +110,18 @@ namespace kernel::mm::VMSubstrate {
                       "size class. Pad T into a power-of-two size class, split the "
                       "over-aligned subobject, or use a different allocator.");
         auto* mem = vmsmalloc(sizeof(T));
-        return new (mem) T(forward<Ts>(args)...);
+        // malloc (not calloc) semantics, per DEC-024 ("does not zero-initialize
+        // returned memory in any build configuration"): with no constructor
+        // arguments, *default*-initialize — a trivially-constructible T is left
+        // UNINITIALIZED rather than zero-filled. (Value-init `T()` would memset
+        // the storage, which dominated allocator profiles.) Callers needing
+        // zeroed storage construct it explicitly (e.g. make<T>(T{}) or a T whose
+        // constructor zeroes).
+        if constexpr (sizeof...(Ts) == 0) {
+            return new (mem) T;                       // default-initialization
+        } else {
+            return new (mem) T(forward<Ts>(args)...); // direct-initialization
+        }
     }
 
     template <typename T>
