@@ -49,8 +49,8 @@ constexpr bool before(int y, int m, int d) {
 #define assertUnimplemented(...) assert_base(false, "Assert unimplemented: ", __VA_ARGS__)
 #else
 #define assert(condition, message, ...) (void)(condition)
-#define assertNotReached(message)
-#define assertUnimplemented(message)
+#define assertNotReached(...) PANIC_NO_STACKTRACE("Assert not reached ", __VA_ARGS__)
+#define assertUnimplemented(...) PANIC_NO_STACKTRACE("Assert unimplemented: ", __VA_ARGS__)
 #endif
 #define temporaryHack(d, m, y, message) static_assert(before(y, m, d), "Hack expired: " message)
 
