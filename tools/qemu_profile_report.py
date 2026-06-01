@@ -31,18 +31,18 @@ from pathlib import Path
 HOTBLOCKS_HDR = "pc, tcount, icount, ecount"
 HOTPAGES_HDR = "Addr, RCPUs, Reads, WCPUs, Writes"
 
-CAVEATS = (
-    "# Caveats:\n"
-    "#  - Full-system TCG: basic-block counts are noisy — blocks get\n"
-    "#    re-translated as mappings change, so a single hot routine may appear\n"
-    "#    as several block entries.\n"
-    "#  - Single-threaded TCG only (-accel tcg,thread=single); plugin counters\n"
-    "#    are not multi-thread-safe.\n"
-    "#  - Bounded window: the kernel boots, runs the stress workload briefly,\n"
-    "#    then self-shuts-down (Shutdown init phase), so under slow plugin'd TCG\n"
-    "#    the profile is boot-dominated. Extend the workload / delay shutdown to\n"
-    "#    profile the allocator hot paths more deeply.\n"
-)
+def caveats(note):
+    base = (
+        "# Caveats:\n"
+        "#  - Full-system TCG: basic-block counts are noisy — blocks get\n"
+        "#    re-translated as mappings change, so a single hot routine may appear\n"
+        "#    as several block entries.\n"
+        "#  - Single-threaded TCG only (-accel tcg,thread=single); plugin counters\n"
+        "#    are not multi-thread-safe.\n"
+    )
+    if note:
+        base += "#  - " + note.replace("\n", "\n#    ") + "\n"
+    return base
 
 
 def split_sections(log_path):
@@ -157,10 +157,10 @@ def parse_hotpages(lines):
     return rows
 
 
-def format_hotblocks(rows, top, addrs, names):
+def format_hotblocks(rows, top, addrs, names, note):
     out = []
     out.append("=== QEMU hotblocks — top {} basic blocks by execution count ===".format(top))
-    out.append(CAVEATS)
+    out.append(caveats(note))
     out.append(f"{'ecount':>16}  {'icount':>8}  {'tcount':>6}  {'pc':>18}  symbol")
     out.append("-" * 80)
     for pc, tcount, icount, ecount in rows[:top]:
@@ -170,10 +170,10 @@ def format_hotblocks(rows, top, addrs, names):
     return "\n".join(out) + "\n"
 
 
-def format_hotpages(rows, top):
+def format_hotpages(rows, top, note):
     out = []
     out.append("=== QEMU hotpages — top {} guest-physical pages by total accesses ===".format(top))
-    out.append(CAVEATS)
+    out.append(caveats(note))
     out.append(f"{'reads+writes':>14}  {'reads':>12}  {'writes':>12}  {'phys page':>18}")
     out.append("-" * 64)
     for addr, reads, writes in rows[:top]:
@@ -191,6 +191,7 @@ def main():
     ap.add_argument("--cxxfilt", default="x86_64-elf-c++filt", help="c++filt tool for demangling")
     ap.add_argument("--out-dir", required=True, help="output directory")
     ap.add_argument("--top", type=int, default=20, help="entries per summary")
+    ap.add_argument("--note", default="", help="extra caveat line (e.g. ROI status)")
     args = ap.parse_args()
 
     out_dir = Path(args.out_dir)
@@ -202,8 +203,8 @@ def main():
 
     addrs, names = load_symbols(args.nm, args.kernel_debug, args.cxxfilt)
 
-    blocks_summary = format_hotblocks(parse_hotblocks(blocks_lines), args.top, addrs, names)
-    pages_summary = format_hotpages(parse_hotpages(pages_lines), args.top)
+    blocks_summary = format_hotblocks(parse_hotblocks(blocks_lines), args.top, addrs, names, args.note)
+    pages_summary = format_hotpages(parse_hotpages(pages_lines), args.top, args.note)
 
     (out_dir / "hotblocks_summary.txt").write_text(blocks_summary)
     (out_dir / "hotpages_summary.txt").write_text(pages_summary)
