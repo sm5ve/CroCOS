@@ -1,4 +1,7 @@
 cmake-build-amd64-kernel-debug/
+cmake-build-release/
+cmake-build-debug/
+cmake-build-o2/
 tests/build/
 tools/__pycache__
 stress_tests/build/
