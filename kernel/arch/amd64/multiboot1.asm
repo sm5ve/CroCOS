@@ -71,6 +71,15 @@ gdt_end:
 .section .bss
 .align 16
 
+# Everything between __boot_reserved_start and __boot_reserved_end is set up by
+# _start (below) and is STILL LIVE during the cpp_init zeroBSS pass: we run on
+# this stack, CR3 points at bootPageTable, and mboot_magic/mboot_table hold the
+# multiboot info pointer consumed later. zeroBSS skips this whole block so it
+# does not zero the live page tables / stack out from under the running kernel
+# (doing so triple-faults under -O2 — see kernel::zeroBSS).
+.global __boot_reserved_start
+__boot_reserved_start:
+
 stack_bottom:
 .skip KERNEL_STACK_SIZE
 .global stack_top
@@ -94,6 +103,9 @@ boot_page_directory_pointer_table:
     .skip 4096
 boot_page_directory:
     .skip 4096
+
+.global __boot_reserved_end
+__boot_reserved_end:
 
 .section .text.bootstrap
 .global _start

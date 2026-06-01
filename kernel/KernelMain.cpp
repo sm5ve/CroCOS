@@ -16,6 +16,11 @@ extern "C" void (*__init_array_start[])(void) __attribute__((weak));
 extern "C" void (*__init_array_end[])(void) __attribute__((weak));
 extern "C" uint32_t __bss_virt_start;
 extern "C" uint32_t __bss_virt_end;
+// Bracket the boot-reserved .bss block (boot stack, saved multiboot info, and
+// boot page tables) defined in multiboot1.asm. This block is still live during
+// cpp_init, so zeroBSS must not zero it.
+extern "C" uint8_t __boot_reserved_start;
+extern "C" uint8_t __boot_reserved_end;
 // NOLINTEND
 
 namespace kernel{
@@ -31,7 +36,20 @@ namespace kernel{
     }
 
     bool zeroBSS(){
-        memset(&__bss_virt_start, 0, reinterpret_cast<size_t>(&__bss_virt_end) - reinterpret_cast<size_t>(&__bss_virt_start));
+        // The boot stack, saved multiboot info, and boot page tables live in a
+        // contiguous .bss block (multiboot1.asm) that is STILL LIVE here: we are
+        // running on that stack and CR3 points at bootPageTable. Zeroing it out
+        // from under the kernel triple-faults under -O2 (the first page walk
+        // after the PML4 is cleared faults; zeroing the stack clobbers our own
+        // return address). It is set up by _start and must persist until the
+        // memory_management phase rebuilds paging, so zero .bss in the two
+        // segments surrounding the reserved block rather than straight through.
+        auto* bssStart = reinterpret_cast<uint8_t*>(&__bss_virt_start);
+        auto* bssEnd   = reinterpret_cast<uint8_t*>(&__bss_virt_end);
+        auto* resStart = &__boot_reserved_start;
+        auto* resEnd   = &__boot_reserved_end;
+        memset(bssStart, 0, static_cast<size_t>(resStart - bssStart));
+        memset(resEnd,   0, static_cast<size_t>(bssEnd - resEnd));
         return true;
     }
 
