@@ -81,11 +81,6 @@ bool vmsmallocInit() {
            << static_cast<uint64_t>(cpuCount * kernel::kCpuLocalPages)
            << "\n";
 
-    // Phase-5 boot smoke (P5-DEC-005): one allocation per class + whole-page
-    // bypass, with alignment / magazine asserts. Leaks the allocations until
-    // Phase 6 supplies vmsfree.
-    vmsmallocBootSmoke();
-
     return true;
 }
 

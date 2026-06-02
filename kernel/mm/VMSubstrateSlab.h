@@ -368,11 +368,6 @@ bool vmsmallocInit();
 // page-offset budget).
 void vmsmallocLateInit(uintptr_t vmsBase, size_t vmsSize);
 
-// Phase-5 boot smoke exercise (P5-DEC-005): one allocation per size class
-// plus the whole-page bypass classes, with alignment / magazine asserts.
-// Leaks the allocations (no vmsfree until Phase 6).
-void vmsmallocBootSmoke();
-
 } // namespace kernel::mm::vmsmalloc
 
 #endif // CROCOS_VMSUBSTRATE_SLAB_H
