@@ -770,18 +770,48 @@ namespace LibAlloc::InternalAllocator {
         span -> markUnreleasable();
     }
 
-    InternalAllocator internalAllocator;
+    // internalAllocator deliberately does not participate in static
+    // initialisation. The heap has to be usable *before* global constructors
+    // run -- they allocate -- so the allocator cannot itself be constructed by
+    // one of them. Raw storage plus the explicit construction below keeps it
+    // out of .init_array entirely.
+    //
+    // Writing `InternalAllocator internalAllocator;` instead gives it a
+    // compiler-generated constructor that runs after la_init() has already
+    // granted the initial heap span, silently discarding it. The next
+    // allocation then finds no memory and falls through to Backend::allocPages.
+    // An accessor rather than a reference: a namespace-scope reference bound to
+    // a reinterpret_cast is itself dynamically initialised, which would put it
+    // back in .init_array and leave it holding garbage during la_init() -- the
+    // one moment it must already work.
+    alignas(InternalAllocator) unsigned char internalAllocatorStorage[sizeof(InternalAllocator)];
+    // Both live in .bss, so they are zero-initialised before any code runs --
+    // no dynamic initialiser, which is the whole point.
+    bool internalAllocatorConstructed = false;
+
+    // Self-initialising on first use. The kernel calls la_init() long before
+    // anything allocates, so the branch is predictable and taken once; callers
+    // that never call it (the LibAlloc unit tests, for instance) still get a
+    // valid allocator rather than dereferencing raw storage.
+    static inline InternalAllocator& internalAllocator() {
+        if (condition_unlikely(!internalAllocatorConstructed)) {
+            new(internalAllocatorStorage) InternalAllocator();
+            internalAllocatorConstructed = true;
+        }
+        return *reinterpret_cast<InternalAllocator*>(internalAllocatorStorage);
+    }
 
     void initializeInternalAllocator() {
-        new(&internalAllocator) InternalAllocator();
+        new(internalAllocatorStorage) InternalAllocator();
+        internalAllocatorConstructed = true;
     }
 
     void* malloc(size_t size, std::align_val_t align) {
-        return internalAllocator.allocate(size, align);
+        return internalAllocator().allocate(size, align);
     }
 
     void free(void* ptr) {
-        assert(internalAllocator.free(ptr), "Tried to free invalid pointer");
+        assert(internalAllocator().free(ptr), "Tried to free invalid pointer");
     }
 
     void validateNoAdjacentFreeBlocks(MemorySpanHeader& span) {
@@ -818,20 +848,20 @@ namespace LibAlloc::InternalAllocator {
     }
 
     void validateAllocatorIntegrity() {
-        internalAllocator.coarseAllocator.spansByAddress.visitDepthFirstInOrder([](MemorySpanHeader& header){
+        internalAllocator().coarseAllocator.spansByAddress.visitDepthFirstInOrder([](MemorySpanHeader& header){
             validateSpan(header);
         });
     }
 
     size_t computeTotalAllocatedSpaceInCoarseAllocator() {
-        for (auto& slab : internalAllocator.slabAllocators) {
+        for (auto& slab : internalAllocator().slabAllocators) {
             slab.releaseAllFreeSlabs();
         }
         size_t out = 0;
-        internalAllocator.coarseAllocator.spansByAddress.visitDepthFirstInOrder([&](MemorySpanHeader& header){
+        internalAllocator().coarseAllocator.spansByAddress.visitDepthFirstInOrder([&](MemorySpanHeader& header){
             out += totalAllocatedBlockSize(header);
         });
-        /*for (auto& slab : internalAllocator.slabAllocators) {
+        /*for (auto& slab : internalAllocator().slabAllocators) {
             auto stats = slab.getStatistics();
             out -= stats.totalBackingSize;
             out += stats.currentlyAllocatedSize;
@@ -840,14 +870,14 @@ namespace LibAlloc::InternalAllocator {
     }
 
     size_t computeTotalFreeSpaceInCoarseAllocator() {
-        for (auto& slab : internalAllocator.slabAllocators) {
+        for (auto& slab : internalAllocator().slabAllocators) {
             slab.releaseAllFreeSlabs();
         }
         size_t out = 0;
-        internalAllocator.coarseAllocator.spansByAddress.visitDepthFirstInOrder([&](MemorySpanHeader& header){
+        internalAllocator().coarseAllocator.spansByAddress.visitDepthFirstInOrder([&](MemorySpanHeader& header){
             out += totalFreeBlockSize(header);
         });
-        /*for (auto& slab : internalAllocator.slabAllocators) {
+        /*for (auto& slab : internalAllocator().slabAllocators) {
             auto stats = slab.getStatistics();
             out += stats.totalBackingSize;
             out -= stats.currentlyAllocatedSize;
@@ -856,23 +886,23 @@ namespace LibAlloc::InternalAllocator {
     }
 
     bool isValidPointer(void *ptr) {
-        auto* slab = internalAllocator.slabTree.floor(reinterpret_cast<uintptr_t>(ptr));
+        auto* slab = internalAllocator().slabTree.floor(reinterpret_cast<uintptr_t>(ptr));
         if (slab != nullptr) {
             if (slab -> containsWithAlignment(ptr) && !slab -> isFree(ptr)) {
                 return true;
             }
         }
-        auto* span = internalAllocator.coarseAllocator.findSpanContaining(ptr);
+        auto* span = internalAllocator().coarseAllocator.findSpanContaining(ptr);
         if (span == nullptr) return false;
         return span -> isPointerAllocated(ptr);
     }
 
     InternalAllocatorStats getAllocatorStats() {
-        for (auto& slab : internalAllocator.slabAllocators) {
+        for (auto& slab : internalAllocator().slabAllocators) {
             slab.releaseAllFreeSlabs();
         }
         InternalAllocatorStats out{};
-        const auto coarseStats = internalAllocator.coarseAllocator.getStatistics();
+        const auto coarseStats = internalAllocator().coarseAllocator.getStatistics();
         out.totalSystemMemoryAllocated = coarseStats.totalSystemMemoryAllocated;
 #ifdef TRACK_REQUESTED_ALLOCATION_STATS
         out.totalBytesRequested = coarseStats.totalBytesRequested;
@@ -891,11 +921,11 @@ namespace LibAlloc::InternalAllocator {
     }*/
 
     size_t getInternalAllocRemainingSlabCount() {
-        for (auto& slab : internalAllocator.slabAllocators) {
+        for (auto& slab : internalAllocator().slabAllocators) {
             slab.releaseAllFreeSlabs();
         }
         size_t out = 0;
-        internalAllocator.slabTree.visitDepthFirstInOrder([&](auto _) {
+        internalAllocator().slabTree.visitDepthFirstInOrder([&](auto _) {
             (void)_;
             out++;
         });
@@ -903,7 +933,7 @@ namespace LibAlloc::InternalAllocator {
     }
 
 	void grantBuffer(void* buffer, size_t size) {
-        internalAllocator.grantBuffer(buffer, size);
+        internalAllocator().grantBuffer(buffer, size);
     }
 
 #endif

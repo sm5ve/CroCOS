@@ -252,8 +252,8 @@ namespace arch::amd64::timers{
         }
     };
 
-    WITH_GLOBAL_CONSTRUCTOR(MonotonicBimap, comparatorBimap);
-    WITH_GLOBAL_CONSTRUCTOR(MonotonicBimap, ioapicBimap);
+    static MonotonicBimap comparatorBimap;
+    static MonotonicBimap ioapicBimap;
 
     using namespace kernel::interrupts;
     CRClass(HPETComparatorSourceDomain, public platform::InterruptDomain, public platform::InterruptEmitter) {

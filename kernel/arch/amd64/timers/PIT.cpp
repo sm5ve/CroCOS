@@ -86,11 +86,20 @@ namespace arch::amd64::timers{
         using CBType = BOUND_METHOD_T(PITEventSource, triggerCallback);
         CBType caller;
     public:
+        // Must stay inert: this runs during static initialisation, before any
+        // other kernel subsystem exists. Anything touching hardware or another
+        // subsystem belongs in init() below, which the core_devices phase calls.
         PITEventSource() : EventSource("PIT", PIT_FLAGS) {
             _quality = 100;
             _calibrationData = FrequencyData::fromHz(PIT_FREQUENCY);
-            auto interruptDomain = setupPITHardware();
             caller = bind_method(this, &PITEventSource::triggerCallback);
+        }
+
+        // Registers the PIT's interrupt domain with the topology graph and
+        // hooks up the handler. Requires the interrupt subsystem to be up, so
+        // it cannot run any earlier than the core_devices phase.
+        void init() {
+            auto interruptDomain = setupPITHardware();
             managed::registerHandler(managed::InterruptSourceHandle(interruptDomain, 0), caller);
         }
 
@@ -144,7 +153,7 @@ namespace arch::amd64::timers{
     PITEventSource pitEventSource;
 
     bool initPIT(){
-        new(&pitEventSource) PITEventSource();
+        pitEventSource.init();
         timing::registerEventSource(pitEventSource);
         pitEventSource.disarm();
         return true;

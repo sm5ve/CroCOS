@@ -9,8 +9,6 @@
 #include "assert_support.h"
 #include "harness/MemoryTrackingGuard.h"
 
-#define WITH_GLOBAL_CONSTRUCTOR(a, b) a b
-
 // Only define dummy allocators when instrumenting library code for objcopy
 // Test files should use real allocators from the standard library
 #ifdef CROCOS_TEST_INSTRUMENT_ALLOCATORS

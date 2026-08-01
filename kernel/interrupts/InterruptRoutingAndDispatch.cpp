@@ -83,8 +83,8 @@ namespace kernel::interrupts::managed {
     using InterruptHandlerPointerRef = SharedPtr<InterruptHandler>;
     using InterruptHandlerListForVector = Vector<InterruptHandlerPointerRef>;
     using SourceToHandlerMap = HashMap<InterruptSourceHandle, InterruptHandlerPointerRef>;
-    WITH_GLOBAL_CONSTRUCTOR(SourceToHandlerMap, registeredHandlers);
-    ARRAY_WITH_GLOBAL_CONSTRUCTOR(UniquePtr<InterruptHandlerListForVector>, arch::CPU_INTERRUPT_COUNT, handlersByVector);
+    static SourceToHandlerMap registeredHandlers;
+    static UniquePtr<InterruptHandlerListForVector> handlersByVector[arch::CPU_INTERRUPT_COUNT];
 
     void populateHandlerTable(const RoutingGraph& routingGraph, VertexAnnotation<Optional<size_t>, RoutingGraph>& annotation) {
         for (auto& ptr : handlersByVector) {
@@ -262,7 +262,7 @@ namespace kernel::interrupts::managed {
         EOIBehaviorMetadata() : triggerType(RoutingNodeTriggerType::TRIGGER_UNDETERMINED) {}
     };
 
-    ARRAY_WITH_GLOBAL_CONSTRUCTOR(EOIBehaviorMetadata, arch::CPU_INTERRUPT_COUNT, eoiBehaviorTable);
+    static EOIBehaviorMetadata eoiBehaviorTable[arch::CPU_INTERRUPT_COUNT];
 
     void populateEOIBehaviorTable(const RoutingGraph& routingGraph, VertexAnnotation<Optional<size_t>, RoutingGraph>& vectorNumberMap) {
         auto orderedSources = getSourcesByResultingVector(vectorNumberMap, routingGraph);

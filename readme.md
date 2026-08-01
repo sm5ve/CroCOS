@@ -7,7 +7,27 @@
 
 ## Building and running
 
-CroCOS makes use of the `__builtin_is_virtual_base_of` type intrinsic in GCC, present in version 15 and above. 
-You will need an x86_64-elf cross compiler. On macOS, this can be installed with homebrew via 
-`brew install x86_64-elf-gcc`. If you have QEMU installed, you may build and test the kernel by building the `run` 
-target with CMake.
+CroCOS is built with its own `x86_64-crocos` cross toolchain, which you build once from source:
+
+```sh
+./tools/toolchain/build-toolchain.sh
+export PATH="$HOME/opt/crocos-toolchain/bin:$PATH"
+```
+
+Expect 30–60 minutes and roughly 8 GiB of transient disk; the installed toolchain is about 500 MiB.
+You will also need QEMU to run the kernel, and Python 3. On macOS the toolchain build needs
+Homebrew's `gmp`, `mpfr` and `libmpc`.
+
+CroCOS is C++26, so CMake must be new enough to enable that dialect for GCC. CMake 4.2.2 works;
+CMake 3.28 does **not** and fails at generate time with *"Target ... requires the language dialect
+CXX26 ... but the current compiler GNU does not support this"*. Note that CLion bundles its own
+CMake, which is typically much newer than the one on your `PATH` — if the command line fails but the
+IDE works, this is why.
+
+A stock `x86_64-elf-gcc` (Homebrew's, for instance) **will not** build a correct kernel. Such a compiler
+emits global constructors into legacy `.ctors` sections rather than `.init_array`, which the kernel's
+linker script does not collect — so every global constructor is silently discarded and the objects are
+left zero-initialised, with no diagnostic. See [`tools/toolchain/README.md`](tools/toolchain/README.md)
+for the full explanation, and for what else the custom target buys us.
+
+With the toolchain on your `PATH`, build and test the kernel by building the `run` target with CMake.

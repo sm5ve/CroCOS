@@ -3,6 +3,41 @@ set(CMAKE_ASM_FLAGS "-ffreestanding -mcmodel=kernel  -fno-exceptions -nostdlib -
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fimplicit-constexpr -fno-use-cxa-atexit -mno-sse -mno-sse2 -mno-avx -ffreestanding -fno-rtti -fno-exceptions -fno-sized-deallocation -fconcepts -nostdlib -Wall -Wextra -pedantic -Wshadow -Wcast-align -Wwrite-strings -Wredundant-decls -Winline -Wno-long-long -Wconversion -Werror -mno-red-zone -mcmodel=kernel -masm=att -fconcepts-diagnostics-depth=3 -fstack-protector-strong -DKERNEL -DCR_BOOT -Wno-vla")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-use-cxa-atexit -mno-sse -mno-sse2 -mno-avx -ffreestanding -fno-rtti -fno-exceptions -nostdlib -Wall -Wextra -pedantic -Wshadow -Wcast-align -Wwrite-strings -Wredundant-decls -Winline -Wno-long-long -Wconversion -Werror -mno-red-zone -mcmodel=kernel -masm=att -fstack-protector-strong -DCR_BOOT -Wno-vla")
 
+# Assert the kernel links the libgcc built for its own ABI.
+#
+# The toolchain provides two (see tools/toolchain/README.md): a PIC one for
+# eventual userspace, and a -mcmodel=kernel -mno-red-zone one for us. GCC picks
+# between them purely by matching the multilib spec against the flags above, and
+# a mismatch is silent -- the kernel would just link the small-model, red-zone,
+# PIC libgcc and keep working right up until it doesn't. Ask the compiler which
+# one the real CMAKE_CXX_FLAGS actually select, so dropping either flag above is
+# a configure-time error rather than a bug discovered years later.
+separate_arguments(_crocos_kernel_flags NATIVE_COMMAND "${CMAKE_CXX_FLAGS}")
+execute_process(
+        COMMAND ${CMAKE_CXX_COMPILER} ${_crocos_kernel_flags} -print-libgcc-file-name
+        OUTPUT_VARIABLE _crocos_kernel_libgcc
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE _crocos_kernel_libgcc_result
+        ERROR_VARIABLE _crocos_kernel_libgcc_error
+)
+if(NOT _crocos_kernel_libgcc_result EQUAL 0)
+    message(FATAL_ERROR
+            "Could not determine which libgcc the kernel flags select.\n"
+            "  compiler: ${CMAKE_CXX_COMPILER}\n"
+            "  error:    ${_crocos_kernel_libgcc_error}")
+endif()
+if(NOT _crocos_kernel_libgcc MATCHES "/kernel/")
+    message(FATAL_ERROR
+            "The kernel's flags select the wrong libgcc multilib.\n"
+            "  selected: ${_crocos_kernel_libgcc}\n"
+            "  expected: a path under .../kernel/no-red-zone/\n"
+            "This means -mcmodel=kernel and/or -mno-red-zone is missing from "
+            "CMAKE_CXX_FLAGS above, or the toolchain was built without the "
+            "multilib in gcc/config/i386/t-x86_64-crocos. Rebuild it with "
+            "tools/toolchain/build-toolchain.sh.")
+endif()
+message(STATUS "Kernel libgcc: ${_crocos_kernel_libgcc}")
+
 set(KERNEL_SRC
         arch/amd64/amd64.cpp
         arch/amd64/InstructionWrappers.cpp

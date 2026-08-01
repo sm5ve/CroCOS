@@ -23,30 +23,18 @@ namespace kernel{
 
 #include <assert.h>
 
-//Kinda hacky - what appears to be a call to the constructor name(__VA_ARGS__) does nothing
-//but it tricks the compiler into going forward with compilation. The name##_init() is what actually
-//calls the constructor.
-//This is a seemingly necessary hack to prevent having to recompile crtstart/end with the kernel memory model
-//and linking it in with the kernel as suggested by https://forum.osdev.org/viewtopic.php?t=28066
-#ifndef CROCOS_TESTING
-#define WITH_GLOBAL_CONSTRUCTOR(Type, name, ...)                                  \
-    __attribute__((used)) static Type name __VA_ARGS__;                           \
-    static void name##_init() {                                                   \
-        static bool initialized = false;                                          \
-        assert(!initialized, "Double-initialized ", #name);                       \
-        initialized = true;                                                       \
-        new (& name) Type(__VA_ARGS__);                                           \
-    }                                                                             \
-    static void (*name##_ctor)(void) __attribute__((used, section(".init_array"))) = name##_init;
+// WITH_GLOBAL_CONSTRUCTOR / ARRAY_WITH_GLOBAL_CONSTRUCTOR used to live here.
+// They hand-rolled a function pointer into .init_array and placement-new'd the
+// object, because a stock x86_64-elf cross compiler emits global constructors
+// into legacy .ctors sections that the kernel's linker script never collected.
+//
+// They are gone because the toolchain now does this correctly -- and because
+// they became actively harmful once it did. The macro declared `static Type
+// name;` and then constructed over it, so for any Type with a non-trivial
+// default constructor GCC emitted its own initializer as well. That initializer
+// used to be silently discarded along with the rest of .ctors; with a working
+// .init_array it runs too, constructing every such object twice.
+//
+// Write plain globals. See tools/toolchain/README.md.
 
-#define ARRAY_WITH_GLOBAL_CONSTRUCTOR(Type, size, name)                           \
-    __attribute__((used)) static Type name[size];                                 \
-    static void name##_init() {                                                   \
-        static bool initialized = false;                                          \
-        assert(!initialized, "Double-initialized ", #name);                       \
-        initialized = true;                                                       \
-        for (auto& x : (name)) new (& x) Type();                                  \
-    }                                                                             \
-    static void (*name##_ctor)(void) __attribute__((used, section(".init_array"))) = name##_init;
-#endif
 #endif //CROCOS_KERNEL_H

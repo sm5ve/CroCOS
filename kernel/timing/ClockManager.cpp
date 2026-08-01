@@ -11,8 +11,8 @@
 namespace kernel::timing {
     using ClockSourceVec = Vector<ClockSource*>;
     using EventSourceVec = Vector<EventSource*>;
-    WITH_GLOBAL_CONSTRUCTOR(ClockSourceVec, clockSources);
-    WITH_GLOBAL_CONSTRUCTOR(EventSourceVec, eventSources);
+    static ClockSourceVec clockSources;
+    static EventSourceVec eventSources;
 
     ClockSource* watchdogClockSource;
     ClockSource* bestClockSource;

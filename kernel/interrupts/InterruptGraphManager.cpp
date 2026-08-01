@@ -26,10 +26,10 @@ namespace kernel::interrupts {
 #else
         bool isGraphDirty = false;
         bool isTopologicalOrderDirty = false;
-        WITH_GLOBAL_CONSTRUCTOR(Optional<TopologyGraph>, cachedGraph);
-        WITH_GLOBAL_CONSTRUCTOR(GraphBuilder<TopologyGraph>, topologyBuilder);
-        WITH_GLOBAL_CONSTRUCTOR(Vector<SharedPtr<platform::InterruptDomain>>, _topologicallySortedDomains);
-        WITH_GLOBAL_CONSTRUCTOR(TopologicalOrderMap, _topologicalOrderMap);
+        static Optional<TopologyGraph> cachedGraph;
+        static GraphBuilder<TopologyGraph> topologyBuilder;
+        static Vector<SharedPtr<platform::InterruptDomain>> _topologicallySortedDomains;
+        static TopologicalOrderMap _topologicalOrderMap;
         GraphBuilder<TopologyGraph>& getBuilder() {
             return topologyBuilder;
         }
@@ -114,7 +114,7 @@ namespace kernel::interrupts {
             cachedGraph = {};
         }
 #else
-        WITH_GLOBAL_CONSTRUCTOR(ExclusiveConnectorMap, exclusiveConnectors);
+        static ExclusiveConnectorMap exclusiveConnectors;
 
         ExclusiveConnectorMap& getExclusiveConnectors() {
             return exclusiveConnectors;

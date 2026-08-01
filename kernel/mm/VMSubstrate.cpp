@@ -624,7 +624,7 @@ namespace kernel::mm::VMSubstrate {
     arch::PageTable<pageTableLevelForKMemRegion() - 1> vmmArenaTable;
 
     Atomic<size_t> freeArenaIndex = 0;
-    WITH_GLOBAL_CONSTRUCTOR(Spinlock, arenaCreationLock);
+    static Spinlock arenaCreationLock;
 
     // ────────────────────────────────────────────────────────────────────────
     // vmsmalloc Phase 3 — static-buffer slot state.

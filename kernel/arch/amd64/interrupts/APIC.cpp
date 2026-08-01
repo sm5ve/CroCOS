@@ -172,9 +172,9 @@ namespace arch::amd64::interrupts{
     }
 
     using IOAPIC_Tree = RedBlackTree<SharedPtr<IOAPIC>, IOAPIC_GSI_Comparator>;
-    WITH_GLOBAL_CONSTRUCTOR(IOAPIC_Tree, ioapicsByGSI);
+    static IOAPIC_Tree ioapicsByGSI;
     using IOAPIC_ID_Map = HashMap<size_t, SharedPtr<IOAPIC>>;
-    WITH_GLOBAL_CONSTRUCTOR(IOAPIC_ID_Map, ioapicsByID);
+    static IOAPIC_ID_Map ioapicsByID;
 
     void createIOAPICStructures(acpi::MADT& madt) {
         for (const auto ioapicEntry : madt.entries<acpi::MADT_IOAPIC_Entry>()) {
