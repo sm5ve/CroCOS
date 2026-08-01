@@ -1,0 +1,201 @@
+--- a/config.sub
++++ b/config.sub
+@@ -1740,6 +1740,7 @@
+ 	     | midipix* | mingw32* | mingw64* | mint* \
+ 	     | uxpv* | beos* | mpeix* | udk* | moxiebox* \
+ 	     | interix* | uwin* | mks* | rhapsody* | darwin* \
++	     | crocos* \
+ 	     | openstep* | oskit* | conix* | pw32* | nonstopux* \
+ 	     | storm-chaos* | tops10* | tenex* | tops20* | its* \
+ 	     | os2* | vos* | palmos* | uclinux* | nucleus* | morphos* \
+--- a/fixincludes/mkfixinc.sh
++++ b/fixincludes/mkfixinc.sh
+@@ -18,6 +18,7 @@
+     powerpc-*-rtems*   | \
+     powerpcle-*-eabisim* | \
+     powerpcle-*-eabi* | \
++    *-*-crocos* | \
+     *-*-vxworks7* | \
+     *-musl* )
+ 	#  IF there is no include fixing,
+--- a/gcc/acinclude.m4
++++ b/gcc/acinclude.m4
+@@ -426,6 +426,12 @@
+       aarch64*-linux-gnu*)
+ 	# AArch64 postdates glibc support for .init_array/.fini_array,
+ 	# so we don't need the preprocessor test above.
++	gcc_cv_initfini_array=yes
++	;;
++
++      *-*-crocos*)
++	# CroCOS is ELF-only and its linker script collects .init_array, so
++	# there is nothing to probe for.
+ 	gcc_cv_initfini_array=yes
+ 	;;
+ 
+--- a/gcc/configure
++++ b/gcc/configure
+@@ -26431,6 +26431,10 @@
+       aarch64*-linux-gnu*)
+ 	# AArch64 postdates glibc support for .init_array/.fini_array,
+ 	# so we don't need the preprocessor test above.
++	gcc_cv_initfini_array=yes
++	;;
++
++      *-*-crocos*)
+ 	gcc_cv_initfini_array=yes
+ 	;;
+ 
+--- a/gcc/config.gcc
++++ b/gcc/config.gcc
+@@ -878,6 +878,22 @@
+   target_has_targetdm=yes
+   rust_target_objs="${rust_target_objs} freebsd-rust.o"
+   target_has_targetrustm=yes
++  ;;
++*-*-crocos*)
++  gas=yes
++  gnu_ld=yes
++  default_use_cxa_atexit=yes
++  # There is no CroCOS C library yet. Built --without-headers there is no
++  # system stdint.h to wrap, so GCC must provide a complete freestanding one
++  # of its own; without this the target installs no stdint.h at all and even
++  # freestanding code including <stdint.h> fails outright. This mirrors what
++  # the generic *-*-elf case does. Once CroCOS has libc headers of its own, a
++  # build pointed at them with --with-headers switches to wrapping instead.
++  use_gcc_stdint=wrap
++  case "${with_newlib}-${with_headers}" in
++  no-no) use_gcc_stdint=provide ;;
++  *) ;;
++  esac
+   ;;
+ *-*-fuchsia*)
+   native_system_header_dir=/include
+@@ -1962,6 +1978,10 @@
+ x86_64-*-elf*)
+ 	tm_file="${tm_file} i386/unix.h i386/att.h elfos.h newlib-stdint.h i386/i386elf.h i386/x86-64.h"
+ 	;;
++x86_64-*-crocos*)
++	tm_file="${tm_file} i386/unix.h i386/att.h elfos.h newlib-stdint.h i386/i386elf.h i386/x86-64.h crocos.h"
++	tmake_file="${tmake_file} i386/t-x86_64-crocos"
++	;;
+ x86_64-*-rtems*)
+ 	tm_file="${tm_file} i386/unix.h i386/att.h elfos.h newlib-stdint.h i386/i386elf.h i386/x86-64.h i386/rtemself.h rtems.h"
+ 	;;
+--- a/libgcc/config.host
++++ b/libgcc/config.host
+@@ -374,6 +374,13 @@
+   tmake_file=t-vxworks
+   ;;
+ *-*-elf)
++  extra_parts="crtbegin.o crtend.o"
++  ;;
++*-*-crocos*)
++  # Same as *-*-elf above. This OS-level case is what supplies crtbegin.o and
++  # crtend.o; the x86_64-*-crocos* case further down only appends crti.o and
++  # crtn.o to whatever is set here. Note *-*-elf) has no trailing '*', so a
++  # crocos host never matched it and shipped no crtstuff at all.
+   extra_parts="crtbegin.o crtend.o"
+   ;;
+ esac
+@@ -764,6 +771,13 @@
+ 	    ;;
+ 	esac
+ 	;;
++x86_64-*-crocos*)
++	# i386/t-crocos replaces the usual unconditional t-libgcc-pic: libgcc is
++	# built PIC for the default (userspace) multilib but not for the kernel
++	# multilib, which cannot be PIC under -mcmodel=kernel. See that fragment.
++	tmake_file="$tmake_file i386/t-crtstuff t-crtstuff-pic i386/t-crocos"
++	extra_parts="$extra_parts crti.o crtn.o"
++	;;
+ x86_64-*-fuchsia*)
+ 	tmake_file="$tmake_file t-libgcc-pic"
+ 	;;
+--- a/gcc/config/crocos.h
++++ b/gcc/config/crocos.h
+@@ -0,0 +1,45 @@
++/* Target definitions for CroCOS.
++   CroCOS is a microkernel operating system; see https://github.com/ (CroCOS).
++
++This file is part of GCC.
++
++GCC is free software; you can redistribute it and/or modify it under
++the terms of the GNU General Public License as published by the Free
++Software Foundation; either version 3, or (at your option) any later
++version.
++
++GCC is distributed in the hope that it will be useful, but WITHOUT ANY
++WARRANTY; without even the implied warranty of MERCHANTABILITY or
++FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++for more details.
++
++You should have received a copy of the GNU General Public License
++along with GCC; see the file COPYING3.  If not see
++<http://www.gnu.org/licenses/>.  */
++
++#undef TARGET_CROCOS
++#define TARGET_CROCOS 1
++
++/* Identify CroCOS to the preprocessor, so that code can test __crocos__
++   the way it would test __linux__ elsewhere.  */
++#undef TARGET_OS_CPP_BUILTINS
++#define TARGET_OS_CPP_BUILTINS()		\
++  do {						\
++    builtin_define ("__crocos__");		\
++    builtin_define ("__crocos");		\
++    builtin_assert ("system=crocos");		\
++  } while (0)
++
++/* CroCOS has no hosted C library yet.  These specs describe the intended
++   userspace link once it does; the kernel itself links -nostdlib with an
++   explicit -T script, so none of them apply to it.  crti.o/crtn.o and
++   crtbegin.o/crtend.o are supplied by libgcc (see libgcc/config.host);
++   crt0.o will come from the CroCOS C library.  */
++#undef STARTFILE_SPEC
++#define STARTFILE_SPEC "%{!shared:crt0.o%s} crti.o%s crtbegin.o%s"
++
++#undef ENDFILE_SPEC
++#define ENDFILE_SPEC "crtend.o%s crtn.o%s"
++
++#undef LIB_SPEC
++#define LIB_SPEC "%{!nostdlib:-lc}"
+--- a/gcc/config/i386/t-x86_64-crocos
++++ b/gcc/config/i386/t-x86_64-crocos
+@@ -0,0 +1,19 @@
++# Build libgcc for both the hosted userspace ABI and the kernel's.
++#
++# The CroCOS kernel is compiled -mcmodel=kernel -mno-red-zone. Linking a
++# -mcmodel=small libgcc into it happens to work today, because the routines the
++# kernel actually references (__udivti3 and friends) are self-contained integer
++# code with no absolute references to global data. That is a property of the
++# current call graph, not a guarantee: -mcmodel=small assumes the whole program
++# sits in the low 2GB, which a higher-half kernel does not, and the red zone is
++# actively unsafe in code that takes interrupts. Build a variant with the
++# kernel's own flags so the kernel links against a libgcc that shares its ABI.
++#
++# -mno-sse is deliberately NOT a multilib dimension. libgcc contains functions
++# that return float, and the x86-64 ABI returns those in SSE registers, so
++# building all of libgcc with -mno-sse fails outright. The kernel is safe
++# regardless: it never references those routines, so no SSE-using object is
++# ever pulled out of the archive.
++MULTILIB_OPTIONS  = mcmodel=kernel mno-red-zone
++MULTILIB_DIRNAMES = kernel no-red-zone
++MULTILIB_REQUIRED = mcmodel=kernel/mno-red-zone
+--- a/libgcc/config/i386/t-crocos
++++ b/libgcc/config/i386/t-crocos
+@@ -0,0 +1,14 @@
++# libgcc for CroCOS: PIC for userspace, non-PIC for the kernel.
++#
++# The default multilib gets a PIC libgcc exactly as x86_64-*-elf* does via
++# t-libgcc-pic, so it can eventually be linked into shared libraries. The kernel
++# multilib must not have it: -mcmodel=kernel rejects position-independent code
++# outright ("cc1: error: code model kernel does not support PIC mode"), so an
++# unconditional t-libgcc-pic breaks the build.
++#
++# MULTIDIR is computed from the real compiler flags at libgcc/Makefile.in:311,
++# and tmake fragments are included at :380, so it is available here.
++# libgcc/config/avr/t-avr uses this same findstring-on-MULTIDIR idiom.
++ifeq (,$(findstring kernel,$(MULTIDIR)))
++HOST_LIBGCC2_CFLAGS += $(PICFLAG)
++endif
