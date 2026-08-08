@@ -946,3 +946,54 @@ miss.**
 **Spec follow-up owed**: DEC-069's "refcount release/acquire-at-zero" should
 record the fence form as correct-but-untestable and the ACQ_REL form as the
 implementation's, so the next reader of §6.6 does not "fix" it back.
+
+---
+
+## D-030 — FINDING (2026-08-08, Phase 3) — growth over an EMPTY cluster strands the old root
+
+Found by the lost-CAS concurrency test, which grew a cluster nobody had mapped
+into yet and tripped the validator's §6.4 check ("an empty non-root node
+survived — reclamation did not reclaim").
+
+**It is not a defect in growth; it is a gap between two rules that are each
+correct.** §5.1 exempts the cluster root from reclamation — "the walk terminates
+at a cluster root", because its parent slot is a bucket word with no state word
+to acquire the interlock on. §6.4 reclaims a node when an operation *empties*
+it: the candidate test is `clearsHere > 0 && observed == clearsHere`. A cluster
+root that was **already empty** when growth pushed it below a new root satisfies
+neither: it is no longer exempt, and it will never be emptied again because it is
+already empty. `clearsHere` is zero for it forever.
+
+**Reachable in production**, not only in a test: an address space that unmaps a
+cluster completely — the root survives, by the exemption above — and then makes a
+fixed-address request needing a wider span grows over an empty root.
+
+**Bounded and small.** At most one stranded node per growth, and growth is capped
+at `levelCount − defaultRootLevel` steps per cluster, so **two nodes per cluster**
+at the amd64 default. It is also recoverable rather than permanent: the next
+operation that maps and then unmaps through the stranded node reclaims it by the
+ordinary path, which the test asserts.
+
+**Taken: recorded, not fixed.** The fixes all cost more than the residue:
+
+- *Reclaim the old root during growth.* It is reachable by concurrent descents
+  at that moment, so this needs the claim protocol — and the interlock does not
+  exist until after the CAS publishes the parent, which is precisely the ordering
+  that makes it hard. A two-step "grow, then reclaim" is possible but adds a
+  second publish to the one operation §5.6 keeps to a single CAS.
+- *Skip growth when the cluster is empty and re-create at the covering level
+  instead.* This replaces a node that concurrent readers may be descending, which
+  is a reclamation in disguise and has the same problem.
+- *Have the placement that motivated the growth reclaim it on the way past.* The
+  cheapest of the three and still a special case in the commit walk for a
+  two-node saving.
+
+**Spec follow-up owed**: DEC-096's residue bound should carry this term
+explicitly, and §6.4's walk-termination paragraph should note that the exemption
+is positional — a node that *was* a cluster root is an ordinary node afterwards,
+and the transition leaves this hole.
+
+Pinned by `radix_growth_over_an_empty_cluster_leaves_the_old_root_behind`, which
+asserts the residue is exactly one node **and** that the ordinary path recovers
+it. If someone later teaches growth to reclaim, that test fails and gets deleted
+deliberately rather than drifting.

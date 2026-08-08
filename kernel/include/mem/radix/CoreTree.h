@@ -55,6 +55,7 @@
 #include <mem/radix/Node.h>
 #include <mem/radix/Mapping.h>
 #include <mem/radix/DeferredRelease.h>
+#include <mem/radix/BucketCodec.h>
 #include <mem/radix/Dispatch.h>
 #include <mem/radix/Claim.h>
 
@@ -420,6 +421,10 @@ namespace kernel::mm::radix {
     class CoreTree {
     public:
         using Ops = NodeOps<G>;
+        // Built over the SAME window base as the slot codec — see
+        // SlotCodec::BasePolicy for why that is re-exported rather than
+        // re-specified.
+        using BucketCodecT = BucketCodec<G, typename Codec::BasePolicy>;
 
         [[nodiscard]] TreeStats& stats() { return counters; }
         [[nodiscard]] const TreeStats& stats() const { return counters; }
@@ -462,23 +467,66 @@ namespace kernel::mm::radix {
             return true;
         }
 
+        // The cluster form: the root lives in a bucket word, so there is nothing
+        // to allocate here and nothing to fail. `ClusterTable::createCluster`
+        // has already published a root (or the caller has adopted one); this
+        // only says which word to read.
+        void bindToBucket(BucketTable& t, size_t index, kernel::rcu::Domain& d,
+                          DeferredReleasePools& pools) {
+            assert(d.initialized(), "radix: the tree's RCU domain must be initialised first");
+            assert(pools.perCpu >= deferredReleaseBound(G),
+                   "radix: the DeferredRelease pool is shallower than this geometry's "
+                   "per-operation ceiling (§7.1's edge sum)");
+            assert(index < kBucketCount, "radix: bucket index out of range");
+            domain       = &d;
+            releasePools = &pools;
+            bucketTable  = &t;
+            bucketIndex  = index;
+            rootRef      = NodeRef();
+            level0       = 0;
+            baseVA       = 0;
+        }
+
         // Phase 1 teardown. Phase 3 replaces this with §7.4's unit-decomposed
         // walk; the structural obligation it already honours is that every node
         // releases the Mapping references its own leaf slots hold, and that
         // nothing recurses through a destructor.
         void destroyTree() {
-            if (!rootRef) return;
-            releaseSubtree(rootRef, level0);
-            rootRef = NodeRef();
+            const RootBinding b = quiescedBinding();
+            if (!b) return;
+            releaseSubtree(b.root, b.level);
+            if (bucketTable != nullptr) {
+                bucketTable->entries[bucketIndex].store(0, kPrivateInit);
+            } else {
+                rootRef = NodeRef();
+            }
         }
 
-        [[nodiscard]] bool valid() const { return static_cast<bool>(rootRef); }
-        [[nodiscard]] unsigned rootLevel() const { return level0; }
-        [[nodiscard]] uint64_t base() const { return baseVA; }
-        [[nodiscard]] uint64_t span() const { return nodeSpan(G, level0); }
-        [[nodiscard]] NodeRef root() const { return rootRef; }
+        // The binding, read WITHOUT a section. Legal only on a quiesced tree —
+        // between operations, with no concurrent mutator — which is exactly the
+        // condition every caller below already requires for its own reasons
+        // (teardown, the validators, the node census). Named separately from
+        // `currentBinding` so the two cannot be confused: using this one inside
+        // an operation would drop the protected-link-load primitive.
+        [[nodiscard]] RootBinding quiescedBinding() const {
+            if (bucketTable == nullptr) return RootBinding{rootRef, level0, baseVA};
+            const uint64_t w = bucketTable->entries[bucketIndex].load(kQuiescedRead);
+            const auto d = BucketCodecT::decode(w, bucketIndex);
+            return RootBinding{NodeRef(d.root), d.level, d.base};
+        }
+
+        // Quiesced introspection, all of it. On a bucket-homed tree these read
+        // the bucket word without a section, so they answer for the cluster as
+        // it stands between operations and must not be used inside one.
+        [[nodiscard]] bool valid() const { return static_cast<bool>(quiescedBinding()); }
+        [[nodiscard]] unsigned rootLevel() const { return quiescedBinding().level; }
+        [[nodiscard]] uint64_t base() const { return quiescedBinding().base; }
+        [[nodiscard]] uint64_t span() const { return nodeSpan(G, quiescedBinding().level); }
+        [[nodiscard]] NodeRef root() const { return quiescedBinding().root; }
         [[nodiscard]] bool contains(uint64_t va) const {
-            return va >= baseVA && va < baseVA + span();
+            const RootBinding b = quiescedBinding();
+            if (!b) return false;
+            return va >= b.base && va < b.base + nodeSpan(G, b.level);
         }
 
         // ─── Lookup (§5.5) ─────────────────────────────────────────────────
@@ -491,8 +539,6 @@ namespace kernel::mm::radix {
         // since it is already accumulating exactly the descent stack a writer
         // needs.
         [[nodiscard]] LookupResult lookup(uint64_t va) const {
-            if (!rootRef || !contains(va)) return {};
-
             // §3.1: a descent runs inside ONE ReadGuard on the tree's domain —
             // one section per descent, never one per level (DEC-001). Measured:
             // protect plus a 3-node walk costs ~0.9 ns over a bare section, and
@@ -504,6 +550,11 @@ namespace kernel::mm::radix {
             LookupResult r;
             {
                 kernel::rcu::ReadGuard guard(*domain);
+                // §5.1: "A lookup range-checks the VA against the cluster's
+                // current span, which is what answers 'unmapped'." Inside the
+                // section and against the binding the descent will use — a check
+                // against a span read outside it would be answering about a
+                // different cluster than the one traversed.
                 r = descendLocked(currentBinding(), va);
             }
 
@@ -587,6 +638,7 @@ namespace kernel::mm::radix {
 
         [[nodiscard]] LookupResult descendLocked(const RootBinding& bind, uint64_t va) const {
             if (!bind) return {};
+            if (va < bind.base || va >= bind.base + nodeSpan(G, bind.level)) return {};
             NodeRef node = bind.root;
             unsigned level = bind.level;
             uint64_t nodeBase = bind.base;
@@ -663,11 +715,23 @@ namespace kernel::mm::radix {
         //
         // `value == nullptr` clears the range; otherwise it is placed over it.
         [[nodiscard]] ApplyStatus apply(uint64_t lo, uint64_t hi, Mapping* value) {
-            assert(rootRef, "radix: apply on an uninitialised tree");
             assert(lo <= hi, "radix: empty operation range");
-            assert(contains(lo) && contains(hi),
-                   "radix: operation range escapes the cluster — DEC-058 decomposes per "
-                   "cluster before the core tree is involved");
+            if (bucketTable == nullptr) {
+                assert(rootRef, "radix: apply on an uninitialised tree");
+                assert(contains(lo) && contains(hi),
+                       "radix: operation range escapes the cluster — DEC-058 decomposes per "
+                       "cluster before the core tree is involved");
+            } else {
+                // DEC-080: "the mechanism never sees a range that crosses a
+                // bucket boundary" — the VMM decomposes those into one mapping
+                // per bucket before the tree is involved. Whether the range fits
+                // the cluster's CURRENT span is a different question, and it is
+                // asked per attempt against that attempt's own binding, because
+                // a concurrent growth can only widen it.
+                assert(bucketIndexFor<G>(lo) == bucketIndex &&
+                       bucketIndexFor<G>(hi) == bucketIndex,
+                       "radix: operation range crosses a bucket boundary (DEC-080)");
+            }
 
             return applyOrDecompose(lo, hi, value, 0);
         }
@@ -981,13 +1045,15 @@ namespace kernel::mm::radix {
         // node's real layout is the one that catches a layout regression.
         template <typename F>
         void walk(F&& fn) const {
-            if (rootRef) walkNode(rootRef, level0, baseVA, fn);
+            const RootBinding b = quiescedBinding();
+            if (b) walkNode(b.root, b.level, b.base, fn);
         }
 
         // Live node count, for the accounting targets.
         [[nodiscard]] size_t nodeCount() const {
             size_t n = 0;
-            if (rootRef) countNodes(rootRef, level0, n);
+            const RootBinding b = quiescedBinding();
+            if (b) countNodes(b.root, b.level, n);
             return n;
         }
 
@@ -1010,12 +1076,28 @@ namespace kernel::mm::radix {
         // a function and not three field reads scattered through the machinery:
         // swapping it is the whole of what growth changes here.
         [[nodiscard]] RootBinding currentBinding() const {
-            return RootBinding{rootRef, level0, baseVA};
+            if (bucketTable == nullptr) return RootBinding{rootRef, level0, baseVA};
+            // §3.1: the root-bucket word goes through the SAME protectWord
+            // primitive as every slot link, with the bucket codec's decode —
+            // "there is no exception". §7.3: one load, all three fields, and
+            // nothing from it outlives the caller's section.
+            const uint64_t w =
+                kernel::rcu::protectWord(*domain, bucketTable->entries[bucketIndex]);
+            const auto d = BucketCodecT::decode(w, bucketIndex);
+            return RootBinding{NodeRef(d.root), d.level, d.base};
         }
 
+        // A tree over a fixed span (Phase 1/2, the model check, the
+        // decomposition suite) leaves `bucketTable` null and answers from these.
+        // A tree that is a CLUSTER leaves them unset and answers from its bucket
+        // word — which is the ONLY thing that differs between the two, and the
+        // reason this is one branch in one function rather than a type split.
         NodeRef  rootRef{};
         unsigned level0 = 0;
         uint64_t baseVA = 0;
+
+        BucketTable* bucketTable = nullptr;
+        size_t       bucketIndex = 0;
         kernel::rcu::Domain* domain = nullptr;
         // §7.1's per-CPU DeferredRelease population. Per ADDRESS SPACE, not per
         // tree: a tree is one cluster and an address space has many, so the
@@ -1535,6 +1617,16 @@ namespace kernel::mm::radix {
         };
 
         ApplyStatus runAttempt(uint64_t lo, uint64_t hi, Mapping* value, Attempt& a) {
+            assert(a.binding,
+                   "radix: an attempt against a bucket holding no cluster — creation is "
+                   "the caller's to do first (§5.6), and it publishes an EMPTY root "
+                   "precisely so that placing into it is an ordinary operation");
+            assert(lo >= a.binding.base &&
+                   hi < a.binding.base + nodeSpan(G, a.binding.level),
+                   "radix: the operation's range escapes the cluster's current span — the "
+                   "caller owes a growToCover first. Growth only ever WIDENS, so a range "
+                   "that fitted when the caller checked still fits here");
+
             // ─── Pass 1: read-only ─────────────────────────────────────────
             const ReadOutcome rr =
                 readPass(a.binding.root, a.binding.level, a.binding.base, lo, hi, value, a);

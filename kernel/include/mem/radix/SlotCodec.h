@@ -148,8 +148,14 @@ namespace kernel::mm::radix {
 
     // ─── The codec ─────────────────────────────────────────────────────────
 
-    template <GeometryDescriptor G, typename BasePolicy>
+    template <GeometryDescriptor G, typename Base>
     struct SlotCodec {
+        // Re-exported so a consumer that must build a SIBLING codec over the
+        // same window — the bucket codec is the one — can do it without being
+        // told the base policy a second time. Two codecs disagreeing about where
+        // the window starts is not a compile error, it is a wild pointer.
+        using BasePolicy = Base;
+
         // The VMSubstrate VA window width. Both the kernel and the mock supply
         // this; the mock deliberately reports the production 39 so the harness
         // runs identical math with the upper offset bits simply staying zero.
