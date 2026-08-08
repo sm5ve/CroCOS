@@ -65,6 +65,13 @@ namespace kernel::mm::radix {
     // measures it.
     inline constexpr unsigned kDetachBudget = 64;
 
+    // DEC-095's `scanChunk`: the most slots a chunked scan or enumeration
+    // examines inside ONE read section. Provisional at 64, deliberately the same
+    // figure as the detachment budget — both bound the same quantity, which is
+    // how much non-preemptible, domain-wide-EBR-stalling work one section may
+    // hold — and a calibration output rather than a design commitment.
+    inline constexpr unsigned kScanChunk = 64;
+
     // §6.2's acquire predicate and its prior.
     struct ClaimOutcome {
         bool     acquired;

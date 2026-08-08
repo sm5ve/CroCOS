@@ -685,6 +685,159 @@ namespace kernel::mm::radix {
             }
         }
 
+        // ─── Chunked scanning (§5.5 DEC-083, §5.6 DEC-095) ─────────────────
+        //
+        // Enumeration and placement's free-run scan are the same walk with
+        // different consumers, and §5.5 says so — the enumeration is "chunked
+        // exactly like DEC-095's scan". One implementation, so the two cannot
+        // drift into disagreeing about what "the next thing after this VA" is.
+        //
+        // `scanStepLocked` answers, for one VA: is it mapped, and how far does
+        // the answer hold? An occupied step reports the leaf's absolute range so
+        // the caller can emit it and step past; an empty step reports how much
+        // emptiness it can prove, so the caller can skip a whole C0 slot's
+        // 32 MiB in one move rather than crawling the floor.
+        //
+        // The empty span is DELIBERATELY conservative — it is what this descent
+        // can prove, not the maximal run. A caller uses it to advance a cursor,
+        // and under-reporting costs an extra step while over-reporting would
+        // skip a live mapping.
+        struct ScanStep {
+            bool     occupied = false;
+            Mapping* mapping  = nullptr;    // occupied only
+            uint64_t lo = 0;
+            uint64_t hi = 0;                // inclusive; the range, or the hole
+        };
+
+        [[nodiscard]] ScanStep scanStepLocked(const RootBinding& bind, uint64_t va) const {
+            ScanStep out;
+            const uint64_t clusterEnd = bind.base + nodeSpan(G, bind.level) - 1;
+            if (!bind || va < bind.base || va > clusterEnd) {
+                out.lo = va;
+                out.hi = va;
+                return out;
+            }
+
+            NodeRef  node     = bind.root;
+            unsigned level    = bind.level;
+            uint64_t nodeBase = bind.base;
+
+            for (;;) {
+                const unsigned idx      = slotIndexFor(level, nodeBase, va);
+                const uint64_t span     = slotSpan(G, level);
+                const uint64_t slotBase = nodeBase + uint64_t{idx} * span;
+                const uint64_t slotEnd  = slotBase + span - 1;
+                const uint64_t word     = kernel::rcu::protectWord(*domain, node.slot(idx));
+
+                switch (Codec::kindOf(word)) {
+                case SlotKind::Empty:
+                    out.lo = slotBase;
+                    out.hi = slotEnd;
+                    return out;
+
+                case SlotKind::Leaf: {
+                    uint64_t lo = 0, hi = 0;
+                    Codec::absoluteRange(word, slotBase, level, lo, hi);
+                    if (va >= lo && va <= hi) {
+                        out.occupied = true;
+                        out.mapping  = static_cast<Mapping*>(Codec::decodeLeaf(word));
+                        out.lo = lo;
+                        out.hi = hi;
+                        return out;
+                    }
+                    // A leaf that does not cover `va`: the hole runs to the
+                    // leaf's start if we are below it, or to the slot end if we
+                    // are above it. Both are exact, because a leaf's sub-range
+                    // is the only occupied part of its slot.
+                    out.lo = va;
+                    out.hi = (va < lo) ? lo - 1 : slotEnd;
+                    return out;
+                }
+
+                case SlotKind::Child:
+                    node     = NodeRef(Codec::decodeChild(word));
+                    nodeBase = slotBase;
+                    level++;
+                    break;
+                }
+            }
+        }
+
+        // A resumable position in a scan. **A VA and nothing else** — §7.3
+        // forbids uncounted pointers crossing a section close, not addresses,
+        // and this is the whole reason the enumeration can be chunked at all.
+        // Carrying a node pointer here would be the token mistake of §3.1 in a
+        // second place.
+        struct ScanCursor {
+            uint64_t next = 0;
+            uint64_t end  = 0;         // inclusive
+            bool     done = true;
+
+            [[nodiscard]] bool finished() const { return done || next > end; }
+        };
+
+        [[nodiscard]] ScanCursor scanFrom(uint64_t lo, uint64_t hi) const {
+            ScanCursor c;
+            c.next = lo;
+            c.end  = hi;
+            c.done = (lo > hi);
+            return c;
+        }
+
+        // One chunk: at most `ScanChunk` slots examined inside ONE read section,
+        // then the section closes with only the cursor surviving.
+        //
+        // The bound is the point, not a tuning nicety. A whole-cluster descent
+        // in one section is ~10^3 nodes of non-preemptible, domain-wide
+        // EBR-stalling work — the exact cost DEC-077 bounds at 64 for
+        // detachment, and DEC-095 does not get to reintroduce it at 16x.
+        //
+        // `fn(Mapping*, lo, hi)` is called for each occupied range in ascending
+        // VA order. Ranges are emitted PER LEAF: a mapping named by four slots
+        // produces four adjacent pairs naming the same record, because coalescing
+        // across a chunk boundary would need state that outlives the section.
+        // Consumers that want merged spans coalesce on the way out.
+        template <typename F>
+        size_t enumerateChunk(ScanCursor& c, F&& fn) const {
+            if (c.finished()) { c.done = true; return 0; }
+            size_t emitted = 0;
+            kernel::rcu::ReadGuard guard(*domain);
+            const RootBinding bind = currentBinding();
+            for (unsigned budget = 0; budget < kScanChunk; budget++) {
+                if (c.next > c.end) { c.done = true; break; }
+                const ScanStep step = scanStepLocked(bind, c.next);
+                if (step.occupied) {
+                    const uint64_t lo = step.lo > c.next ? step.lo : c.next;
+                    const uint64_t hi = step.hi < c.end  ? step.hi : c.end;
+                    fn(step.mapping, lo, hi);
+                    emitted++;
+                }
+                // Advance past whatever this step proved, occupied or not. The
+                // saturating add is what keeps a range ending at the top of the
+                // address space from wrapping the cursor back to zero.
+                if (step.hi >= UINT64_MAX - 1) { c.done = true; break; }
+                c.next = step.hi + 1;
+            }
+            return emitted;
+        }
+
+        // The convenience loop. Sections open and close between chunks, which is
+        // exactly what a caller must NOT paper over by holding one open around
+        // this — the staleness contract below is the price of that.
+        //
+        // **Staleness, stated rather than implied** (the DEC-095 shape): a range
+        // mapped or unmapped BEHIND the cursor by a concurrent operation is
+        // invisible to this enumeration. That is an accepted snapshot, not a
+        // bug: the alternative is one section over the whole cluster, which is
+        // the cost being avoided.
+        template <typename F>
+        size_t enumerate(uint64_t lo, uint64_t hi, F&& fn) const {
+            ScanCursor c = scanFrom(lo, hi);
+            size_t total = 0;
+            while (!c.finished()) total += enumerateChunk(c, fn);
+            return total;
+        }
+
         // ─── Mutation (§6.1's two-pass shape) ──────────────────────────────
         //
         // Every mutation is:
