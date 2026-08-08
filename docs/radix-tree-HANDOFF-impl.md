@@ -1,7 +1,8 @@
 # radix-tree — implementation handoff (Phase 4 complete, Phase 5 in flight)
 
-**UPDATED 2026-08-08 at `06a3d8f`.** Branch `radix-tree`. **Phases 0-4 are
-complete and green. Phase 5 is partly landed and has two open defects.** §0 is
+**UPDATED 2026-08-08 at `a2fc4e5`.** Branch `radix-tree`. **Phases 0-4 are
+complete and green. Phase 5 is partly landed; both of its defects are now
+resolved or diagnosed, and two design questions are open for Spencer.** §0 is
 the current state; §0.1 below it is the Phase 3 note it superseded, kept because
 its "what Phase 4 needs to know" list is still accurate background.
 
@@ -22,7 +23,7 @@ Read in this order:
 |---|---|
 | 0-3 | Complete. See §0.1. |
 | **4** | **Complete.** The DEC-078 seam (`PinnedNode`, `pinLocked`, `resumeDescent`, `release`) and DEC-079's cache: per-CPU direct-mapped set of 4, VA-range-deferred install, generation check, `Detached`/generation eviction. All four §13 gate properties tested. Calibration report runs in the suite. |
-| **5** | **Partly landed.** The kernel instance, the node/`Mapping` censuses and the in-kernel stress exist. Debug boots clean on `run`, `run_numa`, `run_numa_hmat`. Release/LTO boots clean on **6 of 8** runs. |
+| **5** | **Partly landed.** The kernel instance, the node/`Mapping` censuses and the in-kernel stress exist, and the freshness work is done. **Debug and Release/LTO both boot clean on `run`, `run_numa` and `run_numa_hmat`; Release is 8 of 8 at 1025 cycles per boot.** Calibration is untouched. |
 
 Full suite, sequential: Core 441 + 425 TSan, Kernel 177, LibAlloc 38x2, vmsmalloc
 31x2, RCU 61x2, **radix 150x2** plus the progress audit.
@@ -42,6 +43,15 @@ sanitizers pass with every one of these calls absent.
 | The root bucket page (read by EVERY descent) | **no** | `ae23572` |
 | Reader's/writer's first touch of a `Mapping` body | **no** | `ae23572` |
 | A node pointer decoded from a slot word | **no** | `06a3d8f` |
+| **A `Mapping` accessed on a CPU that did not look it up** | **no** | `a2fc4e5` |
+
+**All of them now go through `SafePtr`, per access, and `SafePtr` grew to make
+that expressible** (`address()`, `at<U>(offset)`, `SafePtr<void>` for `NodeRef`'s
+cross-valence access, symmetric comparisons). The last row is the one that was
+*wrong* rather than unidiomatic: a call made once at acquisition guarantees
+nothing to a CPU that did not make it, and DEC-015 exists precisely so a
+`LookupResult` can cross a pager round-trip to one. `LookupResult` now holds and
+returns a `SafePtr<Mapping>`. D-044.
 
 Two of those are **design questions rather than missing calls**, and both are
 flagged for Spencer rather than decided:
@@ -57,16 +67,24 @@ flagged for Spencer rather than decided:
 
 ### The two open defects
 
-- **D-043 — a spinlock SELF-deadlock inside `Domain::init`**, ~1 run in 4. **It
-  has a debug reproduction**, which is the most useful thing in this note: set
-  `kOpsPerCycle = 24` in `RadixStress.cpp` and a debug build goes from 4 cycles
-  to 1025 with every assert live. That is ~1025 domain create/destroy pairs per
-  boot — a pattern RCU has never been asked to do. Three candidate explanations
-  are separated in D-043; the cheapest (a detector false positive) goes first.
-- **D-041 — a residual page fault** at the same `tearDownUnitAt` site, on a
-  pointer the freshness call did not save (so: a genuinely bogus child pointer,
-  not a stale-but-valid one), plus a `Mapping` residue of 2 seen once. Use
-  D-043's reproduction.
+- **D-043 — DIAGNOSED, and not a radix bug: `klog` is not reentrant.** The stack
+  is `dispatchInterrupt` → LAPIC timer → `dispatchTimerEvent` →
+  `enqueueShutdown`'s lambda → `klog()` → `AtomicPrintStream` ctor →
+  `Spinlock::acquire`, on a lock the same CPU already holds for the log line it
+  was mid-way through. `AtomicPrintStream` holds one global spinlock for the
+  whole lifetime of the temporary, so **any `klog` from interrupt context can
+  self-deadlock against a `klog` in progress on the same CPU**. The stress merely
+  makes it probable (~1025 `Domain::init` log lines per boot on CPU 0). Note the
+  detector is debug-only — in release the same interleaving is a silent hard
+  hang that the watchdog cannot report, because the watchdog is itself a timer
+  event on the wedged CPU. **The fix is core-kernel and is flagged for Spencer**
+  (per-CPU reentrancy on the print lock / mask interrupts across a `klog`
+  expression / defer interrupt-context logging to a ring).
+  Reproduce with `-DCROCOS_RADIX_STRESS_OPS=24`, debug, `-smp 8`, ~1 run in 6.
+- **D-041 — the page fault is FIXED** by D-044 (Release/LTO is now 8-of-8 clean
+  at 1025 cycles, from 6-of-8 and before that ~4-of-8). The **`Mapping` residue
+  of 2 seen once** has not recurred and stays a watch item — one clean sweep is
+  not evidence of absence.
 
 **The instinct to resist**: both look like they might be the stress's fault. That
 was checked and is not the case for the freshness family — the stress's own
