@@ -53,6 +53,9 @@ namespace kernel::mm::VMSubstrate {
 
     // ─── Page primitives (MockVMSubstrate.cpp, shared with the vmsmalloc harness) ───
     void* allocPage();
+    // DEC-048: the failable sibling. Null on pool exhaustion or under
+    // test::setPageAllocFailAt.
+    void* tryAllocPage();
     void  freePage(void* p);
     void  reclaimSlabPage(void* p);
     void* mapMMIOPage(phys_addr paddr);
@@ -68,6 +71,11 @@ namespace kernel::mm::VMSubstrate {
     virt_addr arenaVirtualBase(size_t index);
 
     void* vmsmalloc(size_t size);
+    // DEC-048: same allocation path, null returns in place of the two
+    // exhaustion panics. The real kernel/mm/vmsmalloc.cpp defines both and is
+    // compiled into this harness, so tryMake below exercises the production
+    // failable allocator rather than a userspace stand-in for it.
+    void* vmsmallocTry(size_t size);
     void  vmsfree(void*);
 
     // ─── The oracle's out-of-line half ─────────────────────────────────────
@@ -153,7 +161,7 @@ namespace kernel::mm::VMSubstrate {
     SafePtr<T> tryMake(Ts&&... args) {
         detail::checkMakeConstraints<T>();
         if (oracle::shouldInjectFailure()) return SafePtr<T>(nullptr);
-        void* mem = vmsmalloc(sizeof(T));
+        void* mem = vmsmallocTry(sizeof(T));
         if (!mem) return SafePtr<T>(nullptr);
         return detail::constructInto<T>(mem, forward<Ts>(args)...);
     }
@@ -179,6 +187,11 @@ namespace kernel::mm::VMSubstrate {
         // from the n'th onward (-1 disables). Lets a consumer's creation-unwind
         // path be driven without first exhausting a 64 MiB arena.
         void   setStaticReservationFailAt(long n);
+        // Same idea for tryAllocPage (DEC-048): fail every call from the n'th
+        // onward (-1 disables). Distinct from oracle::shouldInjectFailure —
+        // this one fails the ALLOCATOR beneath tryMake rather than tryMake
+        // itself, so it also drives vmsmalloc's slow-path unwind.
+        void   setPageAllocFailAt(long n);
     }
 }
 

@@ -1192,6 +1192,16 @@ namespace kernel::mm::PageAllocator {
         return true;
     }
 
+    bool tryAllocateSmallPage(arch::ProcessorID targetProc, phys_addr& out) {
+        phys_addr result{};
+        const size_t got =
+            gPageAllocator->allocatePages(1, [&](PageRef ref) { result = ref.addr(); },
+                                          targetProc);
+        if (got != 1) return false;
+        out = result;
+        return true;
+    }
+
     phys_addr allocateSmallPage(arch::ProcessorID targetProc) {
         phys_addr result{};
         (void)gPageAllocator->allocatePages(1, [&](PageRef ref) { result = ref.addr(); }, targetProc);

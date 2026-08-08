@@ -34,6 +34,9 @@ namespace kernel::mm::VMSubstrate {
 
     // Page primitives — mmap-backed (MockVMSubstrate.cpp).
     void* allocPage();
+    // DEC-048: the failable sibling. Null on pool exhaustion or under the
+    // harness's scripted-failure hook (test::setPageAllocFailAt).
+    void* tryAllocPage();
     void  freePage(void* p);
     // DEC-047 slab-reclaim sibling of freePage. The harness does not simulate
     // the read-only sentinel remap (no page tables in userspace); it recycles
@@ -56,6 +59,8 @@ namespace kernel::mm::VMSubstrate {
 
     // Convention-internal (defined by vmsmalloc.cpp, compiled into the harness).
     void* vmsmalloc(size_t size);
+    // DEC-048: same path, null returns in place of the two exhaustion panics.
+    void* vmsmallocTry(size_t size);
     void  vmsfree(void*);
 
     template <typename T>
@@ -95,6 +100,25 @@ namespace kernel::mm::VMSubstrate {
         }
     }
 
+    // DEC-048's failable entry point, mirroring the real header.
+    template <typename T, typename... Ts>
+    SafePtr<T> tryMake(Ts&&... args) {
+        constexpr size_t c = vmsmalloc::sizeClassFor(sizeof(T));
+        static_assert(c < vmsmalloc::kNumSizeClasses || sizeof(T) <= arch::smallPageSize,
+                      "VMSubstrate::tryMake<T>: sizeof(T) exceeds a page");
+        static_assert(c >= vmsmalloc::kNumSizeClasses ||
+                          alignof(T) <= vmsmalloc::slotAlignment(c),
+                      "VMSubstrate::tryMake<T>: alignof(T) exceeds the slot alignment of its "
+                      "size class.");
+        void* mem = vmsmallocTry(sizeof(T));
+        if (!mem) return SafePtr<T>(nullptr);
+        if constexpr (sizeof...(Ts) == 0) {
+            return new (mem) T;
+        } else {
+            return new (mem) T(forward<Ts>(args)...);
+        }
+    }
+
     template <typename T>
     void destroy(SafePtr<T> obj) {
         if (obj) { obj->~T(); vmsfree(obj.raw()); }
@@ -111,6 +135,9 @@ namespace kernel::mm::VMSubstrate {
         // from the n'th onward (-1 disables). Lets a consumer's creation-unwind
         // path be driven without first exhausting a 64 MiB arena.
         void   setStaticReservationFailAt(long n);
+        // Same idea for tryAllocPage (DEC-048): fail every call from the n'th
+        // onward (-1 disables). Drives vmsmallocTry's two exhaustion sites.
+        void   setPageAllocFailAt(long n);
     }
 }
 

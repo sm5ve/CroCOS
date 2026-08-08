@@ -221,8 +221,16 @@ inline uint8_t* slotZeroAddr(SlabDescriptorBase* d) {
 }
 
 // ─── Slow-path slab creation (DEC-018 / DEC-044 / P5-DEC-006) ──────────────
-SlabDescriptorBase* createFreshSlab(arch::ProcessorID i, size_t c) {
-    void* page = VMSubstrate::allocPage();  // panics on failure (DEC-012)
+//
+// DEC-048: `failable` selects which of the two allocation contracts this call
+// is serving. It changes exactly one thing — how a failed page allocation is
+// answered — and nothing else has run at that point, so the null return needs
+// no unwind. Everything below it is unconditional, which is the property that
+// keeps the two contracts from drifting into two implementations.
+SlabDescriptorBase* createFreshSlab(arch::ProcessorID i, size_t c, bool failable) {
+    void* page = failable ? VMSubstrate::tryAllocPage()
+                          : VMSubstrate::allocPage();  // panics on failure (DEC-012)
+    if (page == nullptr) return nullptr;
     // DEC-018: record the creating CPU's home domain. May diverge from the
     // physical page placement under local exhaustion — parent spec accepts.
     const numa::DomainID home = numa::numaPolicy().homeDomain(i);
@@ -367,7 +375,12 @@ void vmsmallocLateInit(uintptr_t base, size_t size) {
 
 namespace kernel::mm::VMSubstrate {
 
-void* vmsmalloc(size_t size) {
+// DEC-048: one allocation path, two contracts. `failable` is consulted at
+// exactly the two exhaustion sites the decision enumerates — the DEC-029
+// whole-page bypass and the DEC-018 fresh-slab slow path — both of which are
+// already cold, so the magazine fast path is untouched and there is one copy of
+// the machinery rather than two that must stay in agreement.
+static void* allocate(size_t size, bool failable) {
     using namespace kernel::mm::vmsmalloc;
 
     // Entry-point contract asserts (Phase 7, all debug-only per P7-DEC-001).
@@ -384,7 +397,8 @@ void* vmsmalloc(size_t size) {
     // guard is now the debug-only entry assert above — DEC-004 hoist.)
     const size_t c = sizeClassFor(size);
     if (c >= kNumSizeClasses) {
-        return allocPage();  // panics on failure (DEC-012)
+        return failable ? tryAllocPage()
+                        : allocPage();  // panics on failure (DEC-012)
     }
 
     const arch::ProcessorID i = arch::getCurrentProcessorID();
@@ -455,13 +469,18 @@ void* vmsmalloc(size_t size) {
         // Shared stack empty for (localDomain, c). The pop's onEmptyStack hook
         // already bumped starvationCount inside Phase 4 (P5-DEC-007). Build a
         // fresh slab on this CPU's home domain.
-        m.head  = createFreshSlab(i, c);
+        SlabDescriptorBase* fresh = createFreshSlab(i, c, failable);
+        if (fresh == nullptr) return nullptr;  // failable only (DEC-048)
+        m.head  = fresh;
         m.depth = 1;
         // No ensureTLBEntryFresh — allocPage already invalidated this CPU's
         // TLB entry for the page (DEC-046).
         continue;  // retry fast path
     }
 }
+
+void* vmsmalloc(size_t size)    { return allocate(size, /*failable=*/false); }
+void* vmsmallocTry(size_t size) { return allocate(size, /*failable=*/true);  }
 
 void vmsfree(void* p) {
     using namespace kernel::mm::vmsmalloc;

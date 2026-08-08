@@ -236,31 +236,46 @@ namespace VMSubstrateHelper {
 
     // Lazy-back the alloc + free bitmap pages covering leaf T (defined below,
     // after the self-ref arithmetic it depends on).
-    inline void ensureLeafBitmapPageMapped(kernel::mm::virt_addr arenaBase,
-                                           size_t T,
-                                           arch::ProcessorID cpu);
+    //
+    // vmsmalloc DEC-048 made this failable: backing a bitmap page takes a
+    // physical page, and the failable allocation path may not panic on
+    // physical exhaustion. Returns false with the bitmap pages left exactly as
+    // it found them plus any half it did manage to install — installing one
+    // half without the other is harmless (each half is independently
+    // initialized to its "all available" representation and the call is
+    // idempotent), so there is nothing to unwind.
+    [[nodiscard]] inline bool ensureLeafBitmapPageMapped(kernel::mm::virt_addr arenaBase,
+                                                         size_t T,
+                                                         arch::ProcessorID cpu);
 
-    struct LeafClaimResult { int bit; bool becameFull; };  // bit == -1 when leaf is full
+    struct LeafClaimResult {
+        int  bit;          // -1 when nothing was claimed
+        bool becameFull;
+        // bit == -1 because a bitmap page could not be backed, as opposed to
+        // the leaf simply being full. The caller must distinguish: a full leaf
+        // is retried at a different leaf, exhaustion is reported to the caller.
+        bool outOfMemory;
+    };
 
     // Claim a free bit from this leaf. SplitBitmap handles the alloc-side scan
     // and the drain-and-retry; this wrapper layers the radix-specific
     // freeWordCount decrement + "leaf became full" detection on top.
     [[nodiscard]] inline LeafClaimResult claimLeafBit(kernel::mm::virt_addr arenaBase, size_t T,
                                                       arch::ProcessorID cpu) {
-        ensureLeafBitmapPageMapped(arenaBase, T, cpu);
+        if (!ensureLeafBitmapPageMapped(arenaBase, T, cpu)) return {-1, false, true};
         auto bm = leafBitmapView(arenaBase, T);
         int bit = bm.tryClaimBitNoDrain();
         if (bit < 0) {
-            if (!bm.drainFreeIntoAlloc()) return {-1, false};
+            if (!bm.drainFreeIntoAlloc()) return {-1, false, false};
             bit = bm.tryClaimBitNoDrain();
-            if (bit < 0) return {-1, false};
+            if (bit < 0) return {-1, false, false};
         }
         bool becameFull = false;
         if (bm.allocSideEmpty()) {
             const uint8_t prev = leafFreeWordCount(arenaBase, T).fetch_sub(1, ACQ_REL);
             becameFull = (prev == 1);
         }
-        return {bit, becameFull};
+        return {bit, becameFull, false};
     }
 
     inline void propagateEdge(kernel::mm::virt_addr arenaBase, size_t leafIdx, bool isAvailableEdge) {
@@ -292,9 +307,17 @@ namespace VMSubstrateHelper {
     // pages and occupancy-buffer pages). Single-threaded init context.
     // Propagates "leaf full" up the radix tree if the leaf transitions to
     // fully reserved.
+    //
+    // The bitmap-page backing must already have succeeded: this runs inside an
+    // install sequence that has passed its point of no return (the caller
+    // pre-backs leaf T's bitmap pages, which are never unmapped, before
+    // committing), so a failure here would be a broken invariant rather than
+    // an exhaustion the caller could report.
     inline void reserveLeafBit(kernel::mm::virt_addr arenaBase, size_t T, size_t bit,
                                arch::ProcessorID cpu) {
-        ensureLeafBitmapPageMapped(arenaBase, T, cpu);
+        if (!ensureLeafBitmapPageMapped(arenaBase, T, cpu))
+            PANIC("VMSubstrate: leaf bitmap page unbacked at reserveLeafBit — the "
+                  "caller's pre-backing invariant is broken");
         auto bm = leafBitmapView(arenaBase, T);
         const bool wasNonEmpty = !bm.allocSideEmpty();
         bm.reserveBit(bit);
@@ -302,6 +325,36 @@ namespace VMSubstrateHelper {
             const uint8_t prevCount = leafFreeWordCount(arenaBase, T).fetch_sub(1, RELAXED);
             if (prevCount == 1)
                 propagateEdge(arenaBase, T, false);
+        }
+    }
+
+    // Index of the first radix leaf bitmap covering the pages of the hardware
+    // leaf page table that maps `va`. Spelled once because both halves of
+    // ensureSubtableInstalled's acquire/commit split need it and a second copy
+    // would have to stay in agreement with this one forever.
+    [[nodiscard]] inline size_t firstLeafBitmapIndexFor(kernel::mm::virt_addr arenaBase,
+                                                        kernel::mm::virt_addr va) {
+        return ((va.value - arenaBase.value) / arch::bigPageSize)
+             * (arch::bigPageSize / (kBranchFactor * arch::smallPageSize));
+    }
+
+    // Return a previously claimed bit to the leaf bitmap and propagate the
+    // "leaf has free descendants again" edge if this was the word's first free
+    // bit. Multi-freer safe. Shared by the ordinary free path (which has just
+    // torn down the mapping) and by tryAllocPage's unwind (which never
+    // installed one) — the bitmap and the PTE are independent pieces of state,
+    // and only the latter distinguishes the two callers.
+    inline void releaseLeafBitFor(kernel::mm::virt_addr arenaBase, kernel::mm::virt_addr va) {
+        const size_t offsetPages = (va.value - arenaBase.value) / arch::smallPageSize;
+        const size_t T   = offsetPages / kBranchFactor;
+        const size_t bit = offsetPages % kBranchFactor;
+
+        auto bm = leafBitmapView(arenaBase, T);
+        const auto result = bm.releaseBit(bit);
+        if (result.wordWasZero) {
+            const uint8_t prevCount = leafFreeWordCount(arenaBase, T).fetch_add(1, ACQ_REL);
+            if (prevCount == 0)
+                propagateEdge(arenaBase, T, true);
         }
     }
 
@@ -370,7 +423,7 @@ namespace VMSubstrateHelper {
     // before handing the bit out.
     // ────────────────────────────────────────────────────────────────────────
 
-    inline void ensureLeafBitmapPageMapped(kernel::mm::virt_addr arenaBase, size_t T,
+    inline bool ensureLeafBitmapPageMapped(kernel::mm::virt_addr arenaBase, size_t T,
                                            arch::ProcessorID cpu) {
         using Flag = arch::PageEntryFlag;
         constexpr auto kFlags = Flag::Write | Flag::Global | Flag::NoExecute;
@@ -390,11 +443,13 @@ namespace VMSubstrateHelper {
                 leafPTEAddrFor(arenaBase, pageVA).value);
             if (pte.isPresent()) continue;
 
-            const kernel::mm::phys_addr phys = kernel::mm::PageAllocator::allocateSmallPage(cpu);
+            kernel::mm::phys_addr phys{};
+            if (!kernel::mm::PageAllocator::tryAllocateSmallPage(cpu, phys)) return false;
             pte = arch::PTE<leafLevel>::leafEntry(phys, kFlags);
             arch::invlpg(pageVA);
             memset(reinterpret_cast<void*>(pageVA.value), h.fill, arch::smallPageSize);
         }
+        return true;
     }
 
     // ────────────────────────────────────────────────────────────────────────
@@ -488,12 +543,23 @@ namespace VMSubstrateHelper {
     // Single-allocator-per-arena: the caller is the sole allocator for this
     // arena, so racing installs are impossible. `entry.isPresent()` reads are
     // safe without atomics.
+    //
+    // vmsmalloc DEC-048 made this failable, and that forced a reordering: every
+    // physical page a level needs is taken BEFORE the parent entry is written,
+    // so a failure returns with that level either fully installed or not
+    // installed at all. Levels already committed by an earlier iteration stay —
+    // an installed-but-unused subtable is a valid empty page table that the next
+    // call reuses, so there is nothing to unwind and nothing leaks. What must
+    // NOT be left behind is a leaf PT missing some of its dirty-bitmap pages,
+    // which is why those are pre-allocated into `dirtyPhys` up front alongside
+    // the pre-backing of leaf T_first's radix bitmap pages (reserveLeafBit
+    // below cannot fail once they are in place).
     // ────────────────────────────────────────────────────────────────────────
 
     template <size_t level>
-    inline void ensureSubtableInstalled(kernel::mm::virt_addr arenaBase,
-                                        kernel::mm::virt_addr va,
-                                        arch::ProcessorID cpu)
+    [[nodiscard]] inline bool ensureSubtableInstalled(kernel::mm::virt_addr arenaBase,
+                                                      kernel::mm::virt_addr va,
+                                                      arch::ProcessorID cpu)
         requires (level >= kernel::mm::pageTableLevelForKMemRegion())
               && (level <  leafLevel)
     {
@@ -515,8 +581,41 @@ namespace VMSubstrateHelper {
         auto& parentEntry = *reinterpret_cast<arch::PTE<level>*>(parentEntryAddr);
 
         if (!parentEntry.isPresent()) {
-            const kernel::mm::phys_addr physAddr =
-                kernel::mm::PageAllocator::allocateSmallPage(cpu);
+            // ─── Acquire phase: everything that can fail, before any store ───
+            //
+            // Dirty-bitmap pages for a fresh leaf PT. Bounded by the compile-
+            // time processor cap, so this lives on the stack; the non-leaf
+            // levels take none and leave it untouched.
+            constexpr size_t kMaxDirtyWords = (arch::MAX_PROCESSOR_COUNT + 63) / 64;
+            [[maybe_unused]] kernel::mm::phys_addr dirtyPhys[kMaxDirtyWords];
+            [[maybe_unused]] size_t taken = 0;
+
+            if constexpr (level + 1 == leafLevel) {
+                const size_t D = LeafPageTableWrapper::dirtyWordCount();
+                // Pre-back the radix bitmap pages reserveLeafBit will need, so
+                // that the commit phase's reservation loop cannot fail.
+                if (!ensureLeafBitmapPageMapped(
+                        arenaBase, firstLeafBitmapIndexFor(arenaBase, va), cpu))
+                    return false;
+                for (; taken < D; taken++) {
+                    if (!kernel::mm::PageAllocator::tryAllocateSmallPage(cpu, dirtyPhys[taken]))
+                        break;
+                }
+                if (taken < D) {
+                    for (size_t i = 0; i < taken; i++)
+                        kernel::mm::PageAllocator::freeSmallPage(dirtyPhys[i]);
+                    return false;
+                }
+            }
+
+            kernel::mm::phys_addr physAddr{};
+            if (!kernel::mm::PageAllocator::tryAllocateSmallPage(cpu, physAddr)) {
+                for (size_t i = 0; i < taken; i++)
+                    kernel::mm::PageAllocator::freeSmallPage(dirtyPhys[i]);
+                return false;
+            }
+
+            // ─── Commit phase: infallible from here ───
             parentEntry = arch::PTE<level>::subtableEntry(physAddr, kFlags);
 
             const uint64_t childEntryAddr =
@@ -537,27 +636,24 @@ namespace VMSubstrateHelper {
                 // slots [0, D-1] and reserve the matching radix bits so the
                 // allocator never hands those slots to a caller.
                 const size_t D = LeafPageTableWrapper::dirtyWordCount();
+                const size_t T_first = firstLeafBitmapIndexFor(arenaBase, va);
                 auto* leafPT =
                     reinterpret_cast<arch::PageTable<leafLevel>*>(childTableAddr.value);
                 for (size_t dw = 0; dw < D; dw++) {
-                    const kernel::mm::phys_addr dirtyPhys =
-                        kernel::mm::PageAllocator::allocateSmallPage(cpu);
-                    (*leafPT)[dw] = arch::PTE<leafLevel>::leafEntry(dirtyPhys, kFlags);
+                    (*leafPT)[dw] = arch::PTE<leafLevel>::leafEntry(dirtyPhys[dw], kFlags);
                     arch::invlpg(kernel::mm::virt_addr{
                         roundDownToNearestMultiple(va.value, arch::bigPageSize)}
                         + dw * arch::smallPageSize);
                 }
-                // The first radix bitmap covering this leaf PT's pages.
-                const size_t T_first =
-                    ((va.value - arenaBase.value) / arch::bigPageSize)
-                    * (arch::bigPageSize / (kBranchFactor * arch::smallPageSize));
                 for (size_t bit = 0; bit < D; bit++)
                     reserveLeafBit(arenaBase, T_first, bit, cpu);
             }
         }
 
         if constexpr (level + 1 < leafLevel) {
-            ensureSubtableInstalled<level + 1>(arenaBase, va, cpu);
+            return ensureSubtableInstalled<level + 1>(arenaBase, va, cpu);
+        } else {
+            return true;
         }
     }
 
@@ -721,10 +817,17 @@ namespace kernel::mm::VMSubstrate {
         return substrateBase + index * getKernelMemRegionSize();
     }
 
-    // Reserves a free VA from the current CPU's arena. Returns the VA along
-    // with the arenaBase used (so the caller can install the leaf PTE through
-    // the self-ref shadow). Lazy-installs HW subtables as needed.
-    static virt_addr reserveFreeVA(virt_addr& outArenaBase, arch::ProcessorID& outCPU) {
+    // Reserves a free VA from the current CPU's arena. Writes the VA along with
+    // the arenaBase used (so the caller can install the leaf PTE through the
+    // self-ref shadow) and returns true. Lazy-installs HW subtables as needed.
+    //
+    // Returns false, with nothing reserved, when the arena has no free VA or
+    // when the page allocator cannot back the lazy page-table / bitmap pages
+    // the reservation needs (vmsmalloc DEC-048). Note the asymmetry: arena
+    // exhaustion is discovered by the descent, physical exhaustion by the two
+    // backing helpers, and both are the same answer to the caller.
+    [[nodiscard]] static bool tryReserveFreeVA(virt_addr& outVA, virt_addr& outArenaBase,
+                                               arch::ProcessorID& outCPU) {
         const arch::ProcessorID cpu = arch::getCurrentProcessorID();
         const virt_addr arenaBase = arenaVirtualBase(static_cast<size_t>(cpu));
         outArenaBase = arenaBase;
@@ -732,7 +835,7 @@ namespace kernel::mm::VMSubstrate {
 
         while (true) {
             const size_t T = VMSubstrateHelper::descendToFreeLeaf(arenaBase);
-            assert(T != SIZE_MAX, "VMSubstrate arena exhausted");
+            if (T == SIZE_MAX) return false;   // arena exhausted
 
             // Touch any va within T's coverage to drive lazy HW install. This
             // must happen before claimLeafBit so that, if T_first of a freshly
@@ -740,28 +843,39 @@ namespace kernel::mm::VMSubstrate {
             // we try to claim a bit.
             const virt_addr probeVA = arenaBase
                 + T * VMSubstrateHelper::kBranchFactor * arch::smallPageSize;
-            VMSubstrateHelper::ensureSubtableInstalled<pageTableLevelForKMemRegion()>(
-                arenaBase, probeVA, cpu);
+            if (!VMSubstrateHelper::ensureSubtableInstalled<pageTableLevelForKMemRegion()>(
+                    arenaBase, probeVA, cpu))
+                return false;
 
-            const auto [bit, becameFull] = VMSubstrateHelper::claimLeafBit(arenaBase, T, cpu);
-            if (bit < 0) continue;
-            if (becameFull) VMSubstrateHelper::propagateEdge(arenaBase, T, false);
+            const auto claim = VMSubstrateHelper::claimLeafBit(arenaBase, T, cpu);
+            if (claim.outOfMemory) return false;
+            if (claim.bit < 0) continue;       // leaf filled up under us — try another
+            if (claim.becameFull) VMSubstrateHelper::propagateEdge(arenaBase, T, false);
 
-            return arenaBase
+            outVA = arenaBase
                 + T * VMSubstrateHelper::kBranchFactor * arch::smallPageSize
-                + static_cast<size_t>(bit) * arch::smallPageSize;
+                + static_cast<size_t>(claim.bit) * arch::smallPageSize;
+            return true;
         }
     }
 
-    void* allocPage() {
+    // The panicking contract (DEC-012), unchanged for every caller that predates
+    // DEC-048. Prior to DEC-048 the exhaustion path here was a debug-only assert
+    // over a SIZE_MAX leaf index, which in release walked on and mapped physical
+    // page zero; making the helpers failable turns that into a loud stop.
+    static virt_addr reserveFreeVA(virt_addr& outArenaBase, arch::ProcessorID& outCPU) {
+        virt_addr va{uint64_t{0}};
+        if (!tryReserveFreeVA(va, outArenaBase, outCPU))
+            PANIC("VMSubstrate arena exhausted");
+        return va;
+    }
+
+    // Shared body of allocPage / tryAllocPage. `phys` is already owned by the
+    // caller; this only publishes the mapping.
+    static void* installLeafMapping(virt_addr arenaBase, virt_addr va, phys_addr phys) {
         using Flag = arch::PageEntryFlag;
         constexpr auto kFlags = Flag::Write | Flag::Global | Flag::NoExecute;
 
-        virt_addr arenaBase{uint64_t{0}};
-        arch::ProcessorID cpu{};
-        const virt_addr va = reserveFreeVA(arenaBase, cpu);
-
-        const phys_addr phys = PageAllocator::allocateSmallPage(cpu);
         auto& leafPTE = *reinterpret_cast<arch::PTE<VMSubstrateHelper::leafLevel>*>(
             VMSubstrateHelper::leafPTEAddrFor(arenaBase, va).value);
         leafPTE = arch::PTE<VMSubstrateHelper::leafLevel>::leafEntry(phys, kFlags);
@@ -770,6 +884,34 @@ namespace kernel::mm::VMSubstrate {
         arch::invlpg(va);
 
         return reinterpret_cast<void*>(va.value);
+    }
+
+    void* allocPage() {
+        virt_addr arenaBase{uint64_t{0}};
+        arch::ProcessorID cpu{};
+        const virt_addr va = reserveFreeVA(arenaBase, cpu);
+        return installLeafMapping(arenaBase, va, PageAllocator::allocateSmallPage(cpu));
+    }
+
+    // DEC-048's failable sibling. Returns null instead of panicking on either
+    // exhaustion — VA (arena or lazy page-table backing) or physical.
+    //
+    // The unwind is the reason the VA reservation and the data page are not
+    // taken in the other order: a reservation is a claimed radix bit with no
+    // mapping behind it, and releaseLeafBitFor gives it back without any of the
+    // PTE teardown freePage would do.
+    void* tryAllocPage() {
+        virt_addr arenaBase{uint64_t{0}};
+        virt_addr va{uint64_t{0}};
+        arch::ProcessorID cpu{};
+        if (!tryReserveFreeVA(va, arenaBase, cpu)) return nullptr;
+
+        phys_addr phys{};
+        if (!PageAllocator::tryAllocateSmallPage(cpu, phys)) {
+            VMSubstrateHelper::releaseLeafBitFor(arenaBase, va);
+            return nullptr;
+        }
+        return installLeafMapping(arenaBase, va, phys);
     }
 
     void* mapMMIOPage(phys_addr paddr) {
@@ -830,18 +972,7 @@ namespace kernel::mm::VMSubstrate {
         PageAllocator::freeSmallPage(phys);
 
         // Multi-freer-safe radix update.
-        const size_t offsetPages = (va.value - arenaBase.value) / arch::smallPageSize;
-        const size_t T   = offsetPages / VMSubstrateHelper::kBranchFactor;
-        const size_t bit = offsetPages % VMSubstrateHelper::kBranchFactor;
-
-        auto bm = VMSubstrateHelper::leafBitmapView(arenaBase, T);
-        const auto result = bm.releaseBit(bit);
-        if (result.wordWasZero) {
-            const uint8_t prevCount =
-                VMSubstrateHelper::leafFreeWordCount(arenaBase, T).fetch_add(1, ACQ_REL);
-            if (prevCount == 0)
-                VMSubstrateHelper::propagateEdge(arenaBase, T, true);
-        }
+        VMSubstrateHelper::releaseLeafBitFor(arenaBase, va);
     }
 
     void freePage(void* ptr) {

@@ -68,6 +68,13 @@ namespace kernel::mm{
         // Returns false and leaves `out` untouched on exhaustion.
         [[nodiscard]] bool tryAllocateSmallPage(numa::DomainID targetDomain, phys_addr& out);
 
+        // Processor-homed sibling, added by vmsmalloc DEC-048. Every page
+        // VMSubstrate::tryAllocPage takes — the data page and the lazily backed
+        // page-table / occupancy pages alike — is homed on the arena-owning CPU,
+        // so the failable path needs the ProcessorID overload rather than the
+        // DomainID one.
+        [[nodiscard]] bool tryAllocateSmallPage(arch::ProcessorID targetProc, phys_addr& out);
+
         // ---- Single-page free ----
 
         void freeSmallPage(phys_addr);

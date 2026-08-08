@@ -90,6 +90,25 @@ void* allocPage() {
     return p;
 }
 
+// DEC-048: the failable sibling. In the kernel this fails on arena-VA
+// exhaustion, on failure to back a lazily-installed page-table/occupancy page,
+// and on physical-page exhaustion; here the single pool stands in for all
+// three. The scripted counter exists because draining a 64 MiB pool to reach
+// the interesting path would make every failure test slow and would perturb
+// the very allocator state the test is checking survived.
+static long gPageAllocFailAt = -1;   // -1 == never fail
+static long gTryPageAllocCalls = 0;
+
+void* tryAllocPage() {
+    {
+        std::lock_guard<std::mutex> lock(gMutex);
+        const long n = gTryPageAllocCalls++;
+        if (gPageAllocFailAt >= 0 && n >= gPageAllocFailAt) return nullptr;
+        if (!gFreeHead) return nullptr;
+    }
+    return allocPage();
+}
+
 void freePage(void* p) {
     std::lock_guard<std::mutex> lock(gMutex);
     unpoisonWholePage(p);
@@ -130,6 +149,11 @@ namespace test {
         std::lock_guard<std::mutex> lock(gMutex);
         gStaticReservationFailAt = n;
         gStaticReservationCalls  = 0;
+    }
+    void setPageAllocFailAt(long n) {
+        std::lock_guard<std::mutex> lock(gMutex);
+        gPageAllocFailAt   = n;
+        gTryPageAllocCalls = 0;
     }
 }
 

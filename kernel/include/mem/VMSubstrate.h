@@ -33,6 +33,15 @@ namespace kernel::mm::VMSubstrate {
     // Returns the base virtual address of the arena at the given index.
     virt_addr arenaVirtualBase(size_t index);
     void* allocPage();
+
+    // vmsmalloc DEC-048: the failable sibling of allocPage. Returns null,
+    // having reserved nothing, on arena-VA exhaustion, on failure to back the
+    // lazily-installed page-table/occupancy pages a fresh VA needs, and on
+    // physical-page exhaustion. `freePage` is the release for both.
+    //
+    // Exists because RadixVM reaches this path from mmap/fork on behalf of
+    // untrusted userspace, which must get ENOMEM rather than a kernel panic.
+    void* tryAllocPage();
     void freePage(void*);
 
     // DEC-047: slab-reclaim sibling of freePage. Used only by vmsmalloc's
@@ -64,6 +73,10 @@ namespace kernel::mm::VMSubstrate {
     // is not possible under the template-visibility constraint. See parent-spec
     // DEC-028 (amended).
     void* vmsmalloc(size_t size);
+    // DEC-048: the identical allocation path with null returns in place of the
+    // exhaustion panics — both of them, the slab-creation slow path and the
+    // DEC-029 whole-page bypass. `vmsfree` is the release for both.
+    void* vmsmallocTry(size_t size);
     void vmsfree(void*);
 
     // Maps a physical MMIO page into the current CPU's arena with cache-disable semantics.
@@ -124,23 +137,27 @@ namespace kernel::mm::VMSubstrate {
         void* raw() const { return ptr; }
     };
 
-    template <typename T, typename... Ts>
-    SafePtr<T> make(Ts&&... args) {
-        // DEC-004/DEC-029: T must fit in a page (slab class or whole-page bypass).
-        constexpr size_t c = vmsmalloc::sizeClassFor(sizeof(T));
-        static_assert(c < vmsmalloc::kNumSizeClasses || sizeof(T) <= arch::smallPageSize,
-                      "VMSubstrate::make<T>: sizeof(T) exceeds a page");
-        // DEC-025: for slab-backed T, alignof(T) must not exceed its size class's
-        // slot alignment. Short-circuits for the whole-page bypass (c ==
-        // kNumSizeClasses), whose pageSize alignment dominates any alignof(T) —
-        // the `c >= kNumSizeClasses` term also keeps slotAlignment(c) from being
-        // evaluated out of range in that case.
-        static_assert(c >= vmsmalloc::kNumSizeClasses ||
-                          alignof(T) <= vmsmalloc::slotAlignment(c),
-                      "VMSubstrate::make<T>: alignof(T) exceeds the slot alignment of its "
-                      "size class. Pad T into a power-of-two size class, split the "
-                      "over-aligned subobject, or use a different allocator.");
-        auto* mem = vmsmalloc(sizeof(T));
+    namespace detail {
+        // The size/alignment checks make<T> and tryMake<T> share. Spelled once
+        // so the two entry points cannot drift.
+        template <typename T>
+        constexpr void checkMakeConstraints() {
+            // DEC-004/DEC-029: T must fit in a page (slab class or whole-page bypass).
+            constexpr size_t c = vmsmalloc::sizeClassFor(sizeof(T));
+            static_assert(c < vmsmalloc::kNumSizeClasses || sizeof(T) <= arch::smallPageSize,
+                          "VMSubstrate::make<T>: sizeof(T) exceeds a page");
+            // DEC-025: for slab-backed T, alignof(T) must not exceed its size class's
+            // slot alignment. Short-circuits for the whole-page bypass (c ==
+            // kNumSizeClasses), whose pageSize alignment dominates any alignof(T) —
+            // the `c >= kNumSizeClasses` term also keeps slotAlignment(c) from being
+            // evaluated out of range in that case.
+            static_assert(c >= vmsmalloc::kNumSizeClasses ||
+                              alignof(T) <= vmsmalloc::slotAlignment(c),
+                          "VMSubstrate::make<T>: alignof(T) exceeds the slot alignment of its "
+                          "size class. Pad T into a power-of-two size class, split the "
+                          "over-aligned subobject, or use a different allocator.");
+        }
+
         // malloc (not calloc) semantics, per DEC-024 ("does not zero-initialize
         // returned memory in any build configuration"): with no constructor
         // arguments, *default*-initialize — a trivially-constructible T is left
@@ -148,11 +165,32 @@ namespace kernel::mm::VMSubstrate {
         // the storage, which dominated allocator profiles.) Callers needing
         // zeroed storage construct it explicitly (e.g. make<T>(T{}) or a T whose
         // constructor zeroes).
-        if constexpr (sizeof...(Ts) == 0) {
-            return new (mem) T;                       // default-initialization
-        } else {
-            return new (mem) T(forward<Ts>(args)...); // direct-initialization
+        template <typename T, typename... Ts>
+        SafePtr<T> constructInto(void* mem, Ts&&... args) {
+            if constexpr (sizeof...(Ts) == 0) {
+                return new (mem) T;                       // default-initialization
+            } else {
+                return new (mem) T(forward<Ts>(args)...); // direct-initialization
+            }
         }
+    }
+
+    template <typename T, typename... Ts>
+    SafePtr<T> make(Ts&&... args) {
+        detail::checkMakeConstraints<T>();
+        return detail::constructInto<T>(vmsmalloc(sizeof(T)), forward<Ts>(args)...);
+    }
+
+    // DEC-048 / radix DEC-075. RadixVM allocates exclusively through this; every
+    // call site handles null. §10's inverted hazard is that a site written
+    // against never-null make<T> re-imports the panic through the back door,
+    // which is why the tree must not name `make` at all.
+    template <typename T, typename... Ts>
+    SafePtr<T> tryMake(Ts&&... args) {
+        detail::checkMakeConstraints<T>();
+        void* mem = vmsmallocTry(sizeof(T));
+        if (!mem) return SafePtr<T>(nullptr);
+        return detail::constructInto<T>(mem, forward<Ts>(args)...);
     }
 
     template <typename T>

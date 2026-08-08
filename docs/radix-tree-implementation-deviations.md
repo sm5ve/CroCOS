@@ -740,3 +740,84 @@ catch it with. **§6.8's order now has its own direct assert** in `acquireAll`
 mutant 3/3 and deterministically. Note it is the order over *held* claims, not
 "each re-dispatch site is strictly deeper" — §11 records that as an assert that
 fires on legal executions.
+
+---
+
+## D-026 — CHOICE (2026-08-08, Phase 3) — the panicking `allocPage` path now really panics
+
+Not a spec finding; a behaviour change in `kernel/mm/VMSubstrate.cpp` forced by
+building DEC-048's failable sibling next to it, worth recording because it makes
+an existing path *louder* rather than leaving it alone.
+
+**Was**: `reserveFreeVA`'s arena-exhaustion handling was
+`assert(T != SIZE_MAX, "VMSubstrate arena exhausted")` — a debug-only check
+(`kassert.h` compiles out in release). In a release build an exhausted arena
+therefore walked on with `T == SIZE_MAX` and computed a wild VA. Underneath it,
+`PageAllocator::allocateSmallPage` discards `allocatePages`' short count and
+returns a default-constructed `phys_addr`, so physical exhaustion mapped
+**physical page zero** and returned successfully. vmsmalloc DEC-012 says
+"arena exhaustion panics"; neither half of that was true in release.
+
+**Now**: the reservation helpers are failable end to end (they have to be —
+`tryAllocPage` may not panic), and the two entry points sit on top of the same
+body. `tryAllocPage` returns null; `allocPage` calls `PANIC` on the same
+condition, in every build configuration. That is the behaviour DEC-012 already
+specified, so no caller's contract changed — the callers that were written
+against "never returns null" still are, they just now stop loudly instead of
+silently mapping frame zero.
+
+The one thing this does *not* fix is `PageAllocator::allocateSmallPage`'s own
+silent short-count return, which is reachable from every other caller in the
+kernel. `tryAllocateSmallPage` (the `arch::ProcessorID` overload was added here)
+is the failable form; converting the rest is out of scope for this phase and is
+not a radix obligation.
+
+---
+
+## D-027 — CHOICE (2026-08-08, Phase 3) — lazy page-table install had to become acquire-then-commit
+
+The DEC-048 work item reads as if it were confined to vmsmalloc. It is not: both
+panic sites bottom out in `VMSubstrate::allocPage()`, and that call is not a
+single allocation. Reserving a fresh arena VA can lazily install up to two
+hardware subtables, `D = ceil(processorCount / 64)` per-CPU dirty-bitmap pages
+for a fresh leaf page table, and up to four radix occupancy-bitmap pages — every
+one of them a separate `PageAllocator` call that can now fail.
+
+**The hazard** is not the failure, it is the *partial* success. Levels of the
+page-table chain are individually harmless to leave behind (an installed but
+unused subtable is a valid empty table that the next call reuses, and the VA it
+covers is still free), so those need no unwind. A **leaf PT carrying only some
+of its dirty-bitmap pages** is not harmless — the dirty bitmap is how PTE
+changes propagate to other CPUs without IPIs, and a hole in it is a silent
+missed invalidation, which is exactly the class of defect that shows up much
+later as a stale-TLB use-after-free (cf. [[project_vmsmalloc_stale_tlb_bug]]).
+
+**Taken**: `ensureSubtableInstalled` was split into an acquire phase and a
+commit phase. Everything that can fail happens before the first store — the
+child table page, all `D` dirty pages into a stack array bounded by
+`arch::MAX_PROCESSOR_COUNT / 64`, and the pre-backing of leaf `T_first`'s radix
+bitmap pages — and a failure at any of them frees what it took and returns
+false with nothing written. After the parent entry is stored, nothing can fail:
+`reserveLeafBit`'s bitmap pages are already mapped and are never unmapped, which
+is why its internal backing call became a `PANIC` (a failure there would mean
+the caller's pre-backing invariant is broken, not that memory ran out).
+
+The VA reservation and the data page are taken in that order, not the reverse,
+because a reservation is a claimed radix bit with no mapping behind it and
+`releaseLeafBitFor` — factored out of `releaseLeafMapping` for this — gives it
+back without any of the PTE teardown `freePage` would attempt on a VA that was
+never mapped.
+
+**Coverage note.** The vmsmalloc half of DEC-048 is tested
+(`tests/kernel/vmsmalloc/FailableAllocTest.cpp`, both enumerated panic sites,
+each followed by continued use of the allocator — the decision's justification
+is "the null return composes", and a test that only checks the null return
+verifies none of it). The VMSubstrate half is **not** covered by a userspace
+test and cannot be: the harness replaces `VMSubstrate` with an mmap-backed mock,
+so there are no page tables to install. It is in-kernel-only, and Phase 5's
+stress work is where it can be driven.
+
+**Fidelity improvement worth noting**: the radix harness compiles the real
+`kernel/mm/vmsmalloc.cpp`, so its mock `tryMake<T>` now calls the production
+`vmsmallocTry` rather than the mock's own `vmsmalloc`. Every allocation the tree
+makes under test now goes through the production failable allocator.
