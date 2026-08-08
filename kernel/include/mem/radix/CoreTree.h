@@ -323,6 +323,12 @@ namespace kernel::mm::radix {
         // beyond backoff), so this is a COUNTER and never an assert — but a test
         // that sees thousands is looking at a livelock, not at bad luck.
         Atomic<uint64_t> maxRetries{0};
+        // Slots commit declined to act on because the attempt holds no claim bit
+        // for them — a clearing row that appeared in the window between
+        // re-dispatch and commit (D-013). A legal execution, so a counter rather
+        // than an assert, but a number that climbs into the operation count means
+        // the read pass is under-claiming rather than losing a genuine race.
+        Atomic<uint64_t> unheldRowsSkipped{0};
 
         void reset() {
             attempts.store(0, kPrivateInit);
@@ -330,6 +336,7 @@ namespace kernel::mm::radix {
             completions.store(0, kPrivateInit);
             claimConflicts.store(0, kPrivateInit);
             redispatchChanges.store(0, kPrivateInit);
+            unheldRowsSkipped.store(0, kPrivateInit);
         }
     };
 
@@ -1182,6 +1189,18 @@ namespace kernel::mm::radix {
             if (auto* e = set.find(node)) e->held = false;
         }
 
+        // Debug-only forcing function for D-013. Every slot `commit` mutates must
+        // be one this attempt reserved a claim bit for in the read pass —
+        // "descending THROUGH a slot takes no claim; only writing one does"
+        // (Claim.h). Two writers publishing into the same unclaimed slot is the
+        // shape that produces both §5.3's occupancy over-count and a `Mapping`
+        // refcount underflow, so assert it at the write rather than inferring it
+        // from the wreckage.
+        static bool holdsSlot(ClaimSet<G>& set, NodeRef node, unsigned slot) {
+            const auto* e = set.find(node);
+            return e != nullptr && e->held && (e->mask & (uint64_t{1} << slot)) != 0;
+        }
+
         static void releaseAll(ClaimSet<G>& set) {
             // Reverse order is not required — release is a fetch_and and the
             // order over HELD claims is what §6.8 constrains, not the release
@@ -1217,6 +1236,35 @@ namespace kernel::mm::radix {
                 const uint64_t word = node.slot(i).load(kClaimedSlotLoad);
                 const DispatchResult d =
                     dispatchSlot<G, Codec>(word, level, slotBase, clipLo, clipHi, writes);
+
+                // §6.1: "A row that changed means the set the pass computed is
+                // wrong; the answer is to discard and retry, never to extend the
+                // set in place."
+                //
+                // THIS is that check, and its absence was D-013. Re-running the
+                // dispatch is only half of it — the other half is comparing the
+                // row against what the pass actually reserved. The claim bit is
+                // the faithful expression of that comparison: the read pass takes
+                // bit `i` for exactly the rows that store to slot `i`, so a row
+                // that now writes a slot with no bit is precisely a row that
+                // changed since the pass.
+                //
+                // Both directions of the change are real and both were observed:
+                // a slot the pass saw as EMPTY (NoOp, no bit) that a concurrent
+                // writer filled, which now dispatches to a writing row; and a slot
+                // the pass saw as a LEAF that a concurrent writer subdivided,
+                // which now descends into a child the pass never enumerated and
+                // therefore never claimed anywhere.
+                //
+                // Descent and no-op are exempt because neither stores to slot `i`
+                // here — descent's own writes are checked by the recursion, and
+                // its one parent-slot store (reclamation) is interlocked on the
+                // CHILD's whole-node claim instead, which commit checks there.
+                if (d.action != DispatchAction::NoOp &&
+                    d.action != DispatchAction::DescendIntoChild &&
+                    !holdsSlot(a.claims, node, i)) {
+                    return false;
+                }
 
                 if (d.action == DispatchAction::DescendIntoChild) {
                     if (!redispatchAgrees(NodeRef(Codec::decodeChild(word)), level + 1,
@@ -1311,6 +1359,54 @@ namespace kernel::mm::radix {
                 const uint64_t word = node.slot(i).load(kClaimedSlotLoad);
                 const DispatchResult d =
                     dispatchSlot<G, Codec>(word, level, slotBase, clipLo, clipHi, writes);
+
+                // D-013 forcing function. Every row below that STORES to
+                // `node.slot(i)` must hold that slot's claim bit. The two
+                // exemptions are documented and real: `NoOp` writes nothing, and
+                // `DescendIntoChild`'s reclamation store is protected by the
+                // CHILD's whole-node claim instead — "the interlock lives in the
+                // child, not in the parent slot" (Claim.h).
+                // ─── D-013: only a CLAIMED slot is frozen ──────────────────
+                //
+                // Re-dispatch validated every row, but validation only STAYS true
+                // for slots this attempt holds a bit on. An unclaimed slot is
+                // free to change again in the window between re-dispatch and
+                // here, and commit re-reads the word — so a row can appear that
+                // no claim covers.
+                //
+                // The reachable shape is a clearing operation: the read pass saw
+                // the slot EMPTY, which is a no-op row that takes no bit, and a
+                // concurrent writer filled it afterwards. Acting on it would
+                // clear a slot this attempt never reserved — moving an occupancy
+                // count without the interlock (§5.3's assert, the only detector
+                // over-counting has) and releasing a `Mapping` reference it never
+                // took (a refcount underflow, seen as a use-after-poison on the
+                // record). Both symptoms, one cause.
+                //
+                // Declining is not merely safe, it is the CORRECT answer: the
+                // interloping write landed after this operation's claims, so the
+                // execution in which the clear happened first and the write
+                // second is a legal linearization, and it is the one where the
+                // new mapping survives. Retrying instead would also be sound but
+                // strictly worse — it re-runs the whole operation to reach the
+                // same end state, under contention, forever.
+                //
+                // A WRITING row here would be a different matter — it would be a
+                // LOST WRITE rather than a legal ordering, so it stays an assert.
+                // It should be unreachable: a writing operation takes a bit for
+                // every slot it touches, including empty ones (an empty slot
+                // dispatches to WriteLeaf, not to a no-op), so it never reaches
+                // commit with an unclaimed row. The assert is what keeps that
+                // reasoning honest if a future dispatch row breaks it.
+                if (d.action != DispatchAction::NoOp &&
+                    d.action != DispatchAction::DescendIntoChild &&
+                    !holdsSlot(a.claims, node, i)) {
+                    assert(!writes,
+                           "radix: commit reached an unclaimed WRITING row — that is a lost "
+                           "write, not a legal reordering (D-013)");
+                    counters.unheldRowsSkipped.fetch_add(1, kRefcountAcquire);
+                    continue;
+                }
 
                 switch (d.action) {
                 case DispatchAction::NoOp:

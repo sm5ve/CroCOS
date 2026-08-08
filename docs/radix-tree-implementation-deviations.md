@@ -1,10 +1,13 @@
 # radix-tree implementation — deviations and spec findings
 
 Running log for the implementation branch (`radix-tree`), kept per
-[[feedback_spec_deviations]]. The user is asleep and delegated
-document-and-proceed for anything short of a fundamental error, so every
-judgement call made without sign-off is recorded here with its spec citation and
-the reasoning, for review in the morning.
+[[feedback_spec_deviations]].
+
+D-001 through D-020 were recorded during the autonomous overnight session of
+2026-08-08, under a document-and-proceed delegation for anything short of a
+fundamental error: every judgement call made without sign-off is recorded with
+its spec citation and reasoning. Entries from D-021 on are from ordinary
+sessions and carry their own dates.
 
 Categories:
 
@@ -15,9 +18,40 @@ Categories:
 - **GAP** — something the spec requires that is deliberately *not* implemented
   yet, with the phase it belongs to.
 
+Entries that have since been resolved say so in their heading, and keep the
+original text below the resolution — the reasoning is why the decision was
+needed.
+
 ---
 
-## D-001 — FINDING — vmsmalloc DEC-049's slots-per-slab figure is off by one at 192 B
+## D-001 — RESOLVED 2026-08-08 (user-approved) — vmsmalloc DEC-049's slots-per-slab figure is off by one at 192 B
+
+**Resolution**: the layout change was taken. `slotCount` / `slot0Offset` now align
+slot 0 to the class's **contractual** alignment rather than to
+`max(slotSize, 16)`. Spencer's reasoning: "RadixVM is the only consumer of
+vmsmalloc, it would be silly not to tune it for our purpose."
+
+Realised: 192 B goes 19 → **20** (DEC-049's stated figure, reached by changing the
+layout rather than by asserting it was already there), 320 B goes 11 → **12**.
+
+**One consequence worth recording, because D-001 did not name it**: contractual
+alignment is `<= max(slotSize, 16)` for every non-power-of-two class, so the rule
+reaches **96 B** too, which goes 39 → **40**. Its *promise* is unchanged at 16
+(DEC-025 keeps it there) — only its layout moved. Power-of-two classes are
+untouched, since for them the two formulas coincide. Aligning to a smaller value
+can only move slot 0 earlier, so no class can lose a slot.
+
+Pinned by `SizeClassTest.cpp::vmsmalloc_dec049_realised_packing` and
+`::vmsmalloc_d001_the_alignment_rule_reaches_every_non_pow2_class`, and by the
+per-class `static_assert` block in `SlabLayoutTest.cpp`. Verified with the full
+test suite, a kernel build, and a clean QEMU boot (exit 0).
+
+The original finding follows, since the inconsistency it documents is the reason
+the change was needed.
+
+---
+
+## D-001 (original finding) — vmsmalloc DEC-049's slots-per-slab figure is off by one at 192 B
 
 **Spec**: `vmsmalloc.md` DEC-049 — "Packing: 20 slots per slab at 192 B, 11 at
 320 B."
@@ -281,7 +315,25 @@ defects in three hours, five of which are now fixed. Every one was a rule the
 spec states and the implementation had not honoured — which is the useful kind
 of finding, because it means the spec was right and the code was behind it.
 
-## D-011 — OPEN — direct-slot `Mapping` releases are still synchronous
+## D-011 — DEFERRED TO PHASE 3 by user decision 2026-08-08 — direct-slot `Mapping` releases are still synchronous
+
+**Decision** (Spencer, 2026-08-08): the asynchronicity is a feature that belongs
+in Phase 3; `DeferredRelease` is already a listed Phase 3 work item and the phase
+boundary stays where the plan puts it. Phase 2 exits with this gap known.
+
+**Rider, agreed at the same time**: this is a **carried-forward** exit-gate item,
+not a closed one. Phase 2's gate names `rcuTortureForcedStall` pinning a reader
+across expand-then-reclaim, and that test cannot run until DEC-068 lands — so
+**Phase 3's gate must include re-enabling all three D-011 tests**, or the
+checklist quietly forgets them. The coverage this defers is specific and worth
+naming: with these three disabled, *every* concurrency test Phase 2 runs is
+writer-vs-writer. Phase 2 ships with no reader-side concurrency validation at all.
+
+The finding as originally recorded follows.
+
+---
+
+## D-011 (finding) — direct-slot `Mapping` releases are still synchronous
 
 **Spec**: §7.1 — "Two reclamation authorities compose only because **every
 release is deferred**. A synchronous release on a published node is a
@@ -311,7 +363,9 @@ are deferred by construction. The gap is precisely the directly-written-slot
 rows.
 
 Disabled by this: `DISABLED_radix_concurrent_readers_never_observe_a_torn_state`,
-`DISABLED_radix_concurrent_expansion_and_reclamation_are_invisible_to_a_reader`.
+`DISABLED_radix_concurrent_expansion_and_reclamation_are_invisible_to_a_reader`,
+and — established 2026-08-08, see D-014 — 
+`DISABLED_radix_concurrent_subtree_replacement_is_atomic`.
 
 ## D-012 — FIXED — `lookup` returned a raw pointer, not a counted reference
 
@@ -323,24 +377,79 @@ destruction.
 
 Caught by the Phase 0 oracle as a use-after-poison; silent without it.
 
-## D-013 — OPEN — over-counting under four-way contention on one node
+## D-013 — FIXED 2026-08-08 — commit acted on slots it held no claim on
 
-`DISABLED_radix_concurrent_contended_writers_all_complete` trips
-"occupancy count exceeded the valence" with four CPUs on a single node. Two CPUs
-pass.
+`radix_concurrent_contended_writers_all_complete` failed 100% of runs with four
+CPUs on a single node. Now passes 10/10 on ASan and under TSan, and is enabled.
 
-That assert is §5.3's, and §5.3 says it is the **only** detector — over-counting
-is invisible in release, since the 6-bit count field holds 0..63 against a legal
-maximum of 32, so 31 excess increments pass before any spare bit moves. §6.6
-names the shape: a writer re-running its dispatch on a pre-claim value publishes
-over a mapping it believes absent *and* increments the count a second time.
+**The recorded hypothesis was wrong, and usefully so.** It read the symptom
+("occupancy count exceeded the valence", §5.3's assert) through §6.6's
+double-increment shape: a writer re-running its dispatch on a pre-claim value.
+The actual mechanism is simpler and sits one layer down. The first run of this
+session did not even reproduce that assert — it reproduced a
+*use-after-poison on `Mapping::releaseRef`*, an over-**release**. Same cause,
+two faces, and chasing either symptom alone would have missed it.
 
-Left as the next session's reproducer rather than papered over.
+**Root cause.** Only a slot the attempt holds a claim bit on is frozen.
+`redispatchAgrees` re-runs the dispatch at every site, but never compares the
+resulting row against the set the read pass recorded — so §6.1's rule, *"a row
+that changed means the set the pass computed is wrong; the answer is to discard
+and retry, never to extend the set in place"*, was implemented as the re-run
+with the comparison missing. `commit` then re-reads each slot word and acts on
+whatever it finds.
 
-## D-014 — OPEN — subtree-replacement test is intermittent
+The reachable shape, confirmed 8/8 by classifying the transition rather than
+reasoning about it, is exactly one row: **`writes=0`, `ClearSlot`, unheld**. A
+munmap's read pass sees a slot empty — clearing an empty slot is a no-op that
+takes no claim bit — and a concurrent writer fills it afterwards. Commit dispatches
+`ClearSlot` on a slot nobody reserved, which:
 
-Passes in isolation, has timed out under load. Shares the contended path with
-D-013 and should be re-assessed once that is fixed, not investigated separately.
+- moves an occupancy count without the interlock → §5.3's assert, *the only
+  detector over-counting has*; and
+- releases a `Mapping` reference the attempt never took → refcount underflow,
+  surfacing as the use-after-poison.
+
+**Fix, in two parts.** `redispatchAgrees` now rejects any row that writes a slot
+the claim set does not cover, which is §6.1's stated check finally written down;
+this is what prevents a **lost write** on the `writes=1` side, by forcing a retry
+that re-plans and claims the slot. And `commit` declines a writing row it holds no
+bit for, because the window between re-dispatch and commit is real and only
+claimed slots stay validated. Declining is not a patch over a race — it is the
+correct answer: the interloping write landed after this operation's claims, so
+the linearization in which the clear happened first and the write second is legal,
+and it is the one where the new mapping survives.
+
+A `writes=1` row reaching commit unclaimed would be a lost write rather than a
+legal ordering, so it stays a debug assert. It should be unreachable — a writing
+operation takes a bit for every slot it touches, including empty ones — and the
+assert is what keeps that reasoning honest if a future dispatch row breaks it.
+
+Instrumented as `TreeStats::unheldRowsSkipped`. Under the four-CPU contended run:
+1200 completions, 48 skips (ASan) / 29 (TSan) — rare, and a number that climbs
+into the operation count would mean the read pass is under-claiming rather than
+losing a genuine race.
+
+**Method note.** The fix came from a forcing-function assert placed at the write
+(*"every slot commit mutates must be one this attempt holds a bit for"*) rather
+than from reading the commit path. That assert is kept.
+
+## D-014 — NOT A SEPARATE DEFECT — it is D-011
+
+Recorded as "intermittent; shares the contended path with D-013". It does not.
+With D-013 fixed, `radix_concurrent_subtree_replacement_is_atomic` fails
+immediately and deterministically as *"Double free: bit already set in
+freeBitmap"*, with a use-after-poison **read on a reader thread** — D-011's
+signature exactly.
+
+The mechanism: only the **first** round replaces a populated subtree, via the
+detach path, which is correctly deferred. Every round after it finds slot 0
+already holding the coarse leaf and dispatches to `OverwriteLeaf` — a *directly
+written* slot, whose displaced `Mapping` is released synchronously in the commit
+walk while readers hold counted references to it. It read as "intermittent"
+only because it depends on reader timing.
+
+Re-disabled under D-011, and re-enables with the other two when DEC-068's
+`DeferredRelease` records land in Phase 3. D-014 is retired as an entry.
 
 ## D-015 — FIXED — reclaiming a node without holding the interlock
 
@@ -401,3 +510,39 @@ range.)
 
 `retiredThisOperation` was a plain `bool` member of the shared tree, written by
 every CPU. TSan caught it; it now lives on the attempt.
+
+---
+
+# Session findings — 2026-08-08 (daytime)
+
+## D-021 — FIXED — `KernelTestRunner` had not compiled since the DEC-049 commit
+
+Not a spec defect: a stale test file, recorded because of how it was missed.
+
+`tests/kernel/vmsmalloc/SlabLayoutTest.cpp` pins the size-class schema entry by
+entry — `kNumSizeClasses == 8`, `kSlabSizeClasses[6] == 256`, and the per-class
+`slotCount` table. DEC-049 (`218f60f`) inserted the 192 B and 320 B classes,
+which shifted every index above 96 and made the schema 10 classes. The file was
+not updated, so **`KernelTestRunner` failed to compile from that commit onward**,
+with seven static-assert failures. Confirmed by stashing this session's changes
+and rebuilding the target at the previous tip.
+
+**Why it went unnoticed**: the branch's work was verified by running the *radix*
+runners, which build and pass independently. Both were green — and reporting
+"both gates green" on that basis was true of what was run and misleading about
+the tree. `SlabLayoutTest.cpp` lives in `KernelTestRunner`, a target nothing in
+the radix loop builds.
+
+**Fixed**: re-pinned against the 10-class schema, including the two new classes
+and the D-001 slot counts. Two *runtime* tests in the same file were stale the
+same way and only surfaced once it compiled again —
+`VMSubstrateSlab_DescriptorAccessors_LookupBySizeClass` (class 7 is 256 now, not
+512) and `VMSubstrateSlab_SizeClassFor_BoundaryWalk` (the boundary walk skipped
+192 and 320 entirely). `KernelTestRunner` is 173/173.
+
+**Worth keeping**: a per-phase verification loop that only runs the phase's own
+runner will not notice a sibling target it broke. The whole-suite target is the
+check, and it belongs at the end of a phase rather than only at the end of a
+session. Note also that a full parallel rebuild makes `run_all_tests` report ~16
+TSan timeouts in Core/RCU that all pass when re-run serially — the documented
+post-rebuild flake, not a regression.

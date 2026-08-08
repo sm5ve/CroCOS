@@ -73,18 +73,35 @@ TEST(vmsmalloc_dec049_classes_exist) {
     ASSERT_EQ(512u, vms::slotSize(vms::kNumSizeClasses - 1));
 }
 
-// DEC-049's rationale cites the packing as "20 slots per slab at 192 B, 11 at
-// 320 B". The realised layout gives 19 and 11: at 192 B, DEC-001's slot-0
-// formula aligns slot 0 to a 192-multiple (384, past the 32 B descriptor and the
-// 192 B bookkeeper), leaving (4096-384)/192 = 19. The cited 20 is what a 64 B
-// slot-0 alignment would give, which is not the formula DEC-049 says it is
-// relying on ("DEC-001's slot-0 formula already lands every slot of these
-// classes on a 64 B boundary" — i.e. no layout change). Pinned here so the
-// figure is recorded from the build rather than from the prose; nothing depends
-// on it being 20 (the count is a rationale figure, not a contract).
+// DEC-049 cites "20 slots per slab at 192 B" while also arguing the 64 B
+// alignment raise "changes no layout at all". Those are inconsistent, and D-001
+// resolved it (user-approved 2026-08-08) in favour of the packing: slot 0 now
+// aligns to the class's CONTRACTUAL alignment rather than to `max(slotSize, 16)`.
+//
+// At 192 B that puts slot 0 at roundUp(32 B descriptor + 192 B bookkeeper, 64)
+// = 256, giving (4096-256)/192 = 20 — DEC-049's stated figure, reached by
+// changing the layout rather than by pretending it was already there. Under the
+// old formula slot 0 landed at 384 (a 192-multiple) for 19.
+//
+// 320 B gains the same way: slot 0 at 256 gives (4096-256)/320 = 12, up from 11.
 TEST(vmsmalloc_dec049_realised_packing) {
-    ASSERT_EQ(19u, vms::slotCount(classOf(192)));
-    ASSERT_EQ(11u, vms::slotCount(classOf(320)));
+    ASSERT_EQ(20u, vms::slotCount(classOf(192)));
+    ASSERT_EQ(12u, vms::slotCount(classOf(320)));
+}
+
+// The same rule reaches every class whose contractual alignment is below
+// `max(slotSize, 16)` — which is every non-power-of-two class, not just the two
+// DEC-049 discusses. 96 B is the third: its contract is 16 (DEC-025 keeps it
+// there), so slot 0 moves from a 96-multiple at 288 to 224, and the class packs
+// 40 instead of 39.
+//
+// Pinned because it is the class D-001 did NOT name, and a future reader
+// checking "did the layout change touch anything unintended?" should find the
+// answer asserted rather than have to re-derive it.
+TEST(vmsmalloc_d001_the_alignment_rule_reaches_every_non_pow2_class) {
+    ASSERT_EQ(40u, vms::slotCount(classOf(96)));
+    // ...and the promise is unchanged: a wider layout does not widen the contract.
+    ASSERT_EQ(16u, vms::slotAlignment(classOf(96)));
 }
 
 TEST(vmsmalloc_dec049_contractual_alignment_is_64) {

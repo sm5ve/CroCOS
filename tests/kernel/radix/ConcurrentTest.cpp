@@ -170,11 +170,7 @@ TEST(radix_concurrent_disjoint_writers_do_not_interfere) {
 //
 // Two CPUs pass; four do not. Left enabled-in-source and disabled-at-run so the
 // next session starts from the reproducer rather than from this comment.
-TEST(DISABLED_radix_concurrent_contended_writers_all_complete) {
-    std::fprintf(stderr,
-        "[radix] SKIP contended-writers: over-counting under 4-way contention "
-        "(D-013). Reproduce by removing DISABLED_ from the test name.\n");
-    return;
+TEST(radix_concurrent_contended_writers_all_complete) {
     constexpr size_t kCpus = 4;
     Harness h(kCpus, 1);
     TreeA tree;
@@ -221,10 +217,12 @@ TEST(DISABLED_radix_concurrent_contended_writers_all_complete) {
     // moving rather than as a timeout.
     std::fprintf(stderr,
                  "[radix] contended: %llu completions, %llu claim conflicts, "
-                 "%llu re-dispatch changes, longest retry run %llu\n",
+                 "%llu re-dispatch changes, %llu unheld rows skipped, "
+                 "longest retry run %llu\n",
                  (unsigned long long)tree.stats().completions.load(RELAXED),
                  (unsigned long long)tree.stats().claimConflicts.load(RELAXED),
                  (unsigned long long)tree.stats().redispatchChanges.load(RELAXED),
+                 (unsigned long long)tree.stats().unheldRowsSkipped.load(RELAXED),
                  (unsigned long long)tree.stats().maxRetries.load(RELAXED));
 
     quiesce(h);
@@ -360,12 +358,24 @@ TEST(DISABLED_radix_concurrent_readers_never_observe_a_torn_state) {
 
 // ─── Subtree replacement is atomic over its subtree ────────────────────────
 
-// DISABLED — intermittent (D-014): passes in isolation, has timed out under
-// load. Shares the contended path with D-013 and should be re-assessed once that
-// is fixed rather than investigated separately.
+// DISABLED — and the reason is D-011, not a flake. This was recorded as
+// "intermittent (D-014)" on the suspicion that it shared the contended path with
+// D-013; it does not. With D-013 fixed it fails immediately and deterministically
+// as "Double free: bit already set in freeBitmap", with a use-after-poison READ
+// on a READER thread.
+//
+// The mechanism is D-011 exactly. Only the FIRST round replaces a populated
+// subtree (the detach path, which is correctly deferred). Every round after it
+// finds slot 0 already holding the coarse leaf, so it dispatches to
+// OverwriteLeaf — a DIRECTLY WRITTEN slot, whose displaced `Mapping` is released
+// synchronously in the commit walk while readers are taking counted references
+// to it. That is §7.1's named hazard, and it re-enables with DEC-068's
+// DeferredRelease records alongside the other two D-011 tests.
 TEST(DISABLED_radix_concurrent_subtree_replacement_is_atomic) {
     std::fprintf(stderr,
-        "[radix] SKIP subtree-replacement: intermittent under load (D-014).\n");
+        "[radix] SKIP subtree-replacement: direct-slot Mapping releases are still "
+        "synchronous (D-011, was mis-filed as D-014). Re-enable with DEC-068's "
+        "DeferredRelease records.\n");
     return;
     constexpr size_t kCpus = 3;
     Harness h(kCpus, 1);

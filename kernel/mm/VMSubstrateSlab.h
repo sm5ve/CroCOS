@@ -82,14 +82,18 @@ inline constexpr size_t kNumSizeClasses = kSlabSizeClasses.size();
 // non-power-of-two classes take alignof(max_align_t) == 16 (DEC-022), with one
 // exception — the 192 B and 320 B classes added for the radix tree promise 64 B.
 //
-// That raise is free: it changes no layout at all. Both sizes are 64-multiples,
-// slabs are page-aligned, and DEC-001's slot-0 formula already lands every slot
-// of these classes on a 64 B boundary — the contract is being brought up to
-// match the layout, not the layout bent to fit the contract. The 96 B class
-// deliberately stays at 16 even though its realised layout would support 32
-// (DEC-025: "the 96 B class remains the 16 B case"); promising only what the
-// spec promises keeps a future schema retune from quietly breaking a caller who
-// relied on a derived-and-undocumented guarantee.
+// This table is the ONE source of the slot-0 alignment: slotCount/slot0Offset
+// align to it rather than to `max(slotSize, 16)` (D-001, user-approved
+// 2026-08-08). DEC-049 claimed the 64 B raise "changes no layout at all" AND
+// that the 192 B class packs 20 slots; only the second is achievable, and it is
+// the one taken — see slotCount for the arithmetic.
+//
+// The 96 B class deliberately stays at 16 even though its realised layout would
+// support 32 (DEC-025: "the 96 B class remains the 16 B case"); promising only
+// what the spec promises keeps a future schema retune from quietly breaking a
+// caller who relied on a derived-and-undocumented guarantee. Note this still
+// affects 96's LAYOUT — a 16 B slot-0 alignment packs more slots than a 96 B one
+// — it just does not raise what 96 promises.
 //
 // The validateAllClasses static_assert below checks each entry against the
 // realised layout, so a schema change that invalidates one of these promises
@@ -196,7 +200,22 @@ inline constexpr size_t bookkeeperSize(size_t kWordCount) {
 
 inline constexpr size_t slotCount(size_t c) {
     const size_t ss = slotSize(c);
-    const size_t align = max(ss, size_t{16});
+    // DEC-049 as resolved (D-001, user-approved 2026-08-08): slot 0 is aligned to
+    // the class's CONTRACTUAL alignment, not to `max(slotSize, 16)`.
+    //
+    // DEC-049 asserted both "20 slots per slab at 192 B" and that raising the
+    // 192/320 alignment contract to 64 B "changes no layout at all". Those are
+    // inconsistent: under `max(slotSize, 16)` the 192 B class aligns slot 0 to a
+    // 192-multiple, which lands it at 384 past the 32 B descriptor and its
+    // bookkeeper and yields 19, not 20. Aligning to the contract instead lands
+    // slot 0 at 256 and realises the stated 20; 320 B goes 11 → 12.
+    //
+    // Contractual alignment is <= max(slotSize, 16) for every class, so this can
+    // only move slot 0 EARLIER — it never costs a slot anywhere. It also reaches
+    // the 96 B class, whose contract is 16 (DEC-025 keeps it there); that is the
+    // same win, not a special case, and validateAllClasses re-checks every
+    // promise against the realised layout.
+    const size_t align = slotAlignment(c);
     // Step 1: upper-bound N assuming zero bookkeeper bytes.
     size_t nUpper = (arch::smallPageSize - sizeof(SlabDescriptorBase)) / ss;
     size_t kWC = divideAndRoundUp(nUpper, size_t{64});
@@ -216,7 +235,9 @@ inline constexpr size_t slotCount(size_t c) {
 }
 
 inline constexpr size_t slot0Offset(size_t c) {
-    const size_t align = max(slotSize(c), size_t{16});
+    // Must use the same alignment as slotCount's fixpoint above, or the two
+    // disagree and the page-fit assert catches it.
+    const size_t align = slotAlignment(c);
     const size_t kWC = divideAndRoundUp(slotCount(c), size_t{64});
     return roundUpToNearestMultiple(sizeof(SlabDescriptorBase) + bookkeeperSize(kWC), align);
 }
