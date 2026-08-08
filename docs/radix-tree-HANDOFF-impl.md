@@ -1,8 +1,8 @@
 # radix-tree — implementation handoff (Phase 4 complete, Phase 5 in flight)
 
-**UPDATED 2026-08-08 at `a2fc4e5`.** Branch `radix-tree`. **Phases 0-4 are
-complete and green. Phase 5 is partly landed; both of its defects are now
-resolved or diagnosed, and two design questions are open for Spencer.** §0 is
+**UPDATED 2026-08-08 at `17f3589`.** Branch `radix-tree`. **Phases 0-4 are
+complete and green. Phase 5 is partly landed; both of its defects are FIXED, and
+two design questions are open for Spencer.** §0 is
 the current state; §0.1 below it is the Phase 3 note it superseded, kept because
 its "what Phase 4 needs to know" list is still accurate background.
 
@@ -67,20 +67,19 @@ flagged for Spencer rather than decided:
 
 ### The two open defects
 
-- **D-043 — DIAGNOSED, and not a radix bug: `klog` is not reentrant.** The stack
-  is `dispatchInterrupt` → LAPIC timer → `dispatchTimerEvent` →
+- **D-043 — FIXED, and never a radix bug: `klog` is not reentrant.** The stack
+  was `dispatchInterrupt` → LAPIC timer → `dispatchTimerEvent` →
   `enqueueShutdown`'s lambda → `klog()` → `AtomicPrintStream` ctor →
-  `Spinlock::acquire`, on a lock the same CPU already holds for the log line it
-  was mid-way through. `AtomicPrintStream` holds one global spinlock for the
-  whole lifetime of the temporary, so **any `klog` from interrupt context can
-  self-deadlock against a `klog` in progress on the same CPU**. The stress merely
-  makes it probable (~1025 `Domain::init` log lines per boot on CPU 0). Note the
-  detector is debug-only — in release the same interleaving is a silent hard
-  hang that the watchdog cannot report, because the watchdog is itself a timer
-  event on the wedged CPU. **The fix is core-kernel and is flagged for Spencer**
-  (per-CPU reentrancy on the print lock / mask interrupts across a `klog`
-  expression / defer interrupt-context logging to a ring).
-  Reproduce with `-DCROCOS_RADIX_STRESS_OPS=24`, debug, `-smp 8`, ~1 run in 6.
+  `Spinlock::acquire`, on a lock the same CPU already held for the line it was
+  mid-way through. `AtomicPrintStream` holds one global spinlock for the whole
+  lifetime of the temporary, so **any `klog` from interrupt context
+  self-deadlocks against a `klog` in progress on the same CPU**. Six sites moved
+  to `emergencyLog()` (the two timer messages, both stress watchdogs, and four
+  lines inside `dispatchInterrupt` itself), and the rule is documented at
+  `klog()`, at `emergencyLog()` and at `AtomicPrintStream`. Note the detector is
+  debug-only — in release the same interleaving is a silent hang the watchdog
+  cannot report, because the watchdog is a timer event on the wedged CPU.
+  12 of 12 clean on the repro that used to fail ~1 in 6.
 - **D-041 — the page fault is FIXED** by D-044 (Release/LTO is now 8-of-8 clean
   at 1025 cycles, from 6-of-8 and before that ~4-of-8). The **`Mapping` residue
   of 2 seen once** has not recurred and stays a watch item — one clean sweep is
