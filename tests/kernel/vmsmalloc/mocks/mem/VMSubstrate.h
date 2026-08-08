@@ -47,6 +47,10 @@ namespace kernel::mm::VMSubstrate {
 
     // Phase-3 storage primitives.
     void* reservePerDomainStaticBuffer(size_t byteSize, numa::DomainID d);
+    // vmsmalloc DEC-050/051: the failable, runtime-callable variant. The mock
+    // fails on window exhaustion and under the harness's scripted-failure hook,
+    // so the RCU domain-lifecycle unwind paths are drivable here.
+    void* tryReservePerDomainStaticBuffer(size_t byteSize, numa::DomainID d);
     void* cpuLocalPageFor(arch::ProcessorID i);
     virt_addr arenaVirtualBase(size_t index);
 
@@ -103,6 +107,10 @@ namespace kernel::mm::VMSubstrate {
         void initialize(size_t cpuCount, size_t domainCount);
         void shutdown();              // munmap + reset all state
         size_t activePageCount();     // live slab/whole-page pages (leak check)
+        // Scripted failure for tryReservePerDomainStaticBuffer: fail every call
+        // from the n'th onward (-1 disables). Lets a consumer's creation-unwind
+        // path be driven without first exhausting a 64 MiB arena.
+        void   setStaticReservationFailAt(long n);
     }
 }
 

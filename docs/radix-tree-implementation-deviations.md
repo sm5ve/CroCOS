@@ -209,3 +209,65 @@ replaces it with unlink → `retire` → deleter, and the structure is already s
 for that: `releaseSubtree` releases node by node, each node releasing only the
 Mapping references *its own* leaf slots hold, child-node slots releasing nothing
 — which is exactly the deleter's contract, running early.
+
+---
+
+## D-008 — CHOICE — `EpochDomain::checkQuiescent()` made public
+
+**Spec**: RCU-DEC-043 — "`deinit()` ... requires quiescence (no open sections, no
+undrained bags), **debug-asserted**".
+
+The check already existed as `EpochDomain::checkQuiescent()`, but it was private,
+reachable only through `DebugIntrospection` — which is gated behind
+`CROCOS_RCU_TEST_HARNESS` and therefore **does not exist in a kernel build**.
+`deinit` is the explicit destruction path for dynamic domains and needs exactly
+the check `~EpochDomain` carries for static ones, in the build that ships.
+
+**Taken**: made it public, with a comment saying why. It is const, debug-only and
+idempotent, so exposing it grants no ability to mutate a domain. The alternative —
+routing `deinit` through a test-only header — would have compiled, and would have
+silently removed the check from every non-harness build.
+
+---
+
+## D-009 — FINDING (harness) — the RCU block freelist outlived the arena it points into
+
+Not a spec defect: a defect in the *interaction* between RCU-DEC-043's freelist
+and the userspace harness, found by two of the new lifecycle tests.
+
+The freelist is process-global, which is correct in the kernel — VMSubstrate's
+static-buffer window lives as long as the kernel does, so a recycled block is
+valid forever. The harness mmaps a **fresh arena per test** and munmaps it
+afterwards, so a block left on the freelist by test N is a dangling pointer into
+unmapped memory by test N+1, and the next `Domain::init` hands it out as a slot
+array.
+
+It surfaced as two apparently unrelated failures, which is what makes it worth
+recording:
+
+- a test asserting a *fresh* reservation got a stale recycled block instead;
+- a test scripting a reservation failure never saw it fire, because the freelist
+  satisfied the request without ever calling the reservation.
+
+**Fixed** by `rcu::test::resetDomainManagementState()`, called from the
+lifecycle harness's teardown. Any future harness that calls `deinit` must call it
+too; the requirement is stated in `tests/kernel/rcu/DebugIntrospection.h`.
+
+---
+
+## D-010 — GAP — a partially-reserved multi-page slot block is stranded
+
+`reserveFreshSlotBlockLocked` reserves the slot array one page at a time, for the
+per-page NUMA placement P2-I4 documents. With the failable reservation, a
+mid-block failure cannot hand the earlier pages back — reservations are
+kernel-lifetime by contract — and cannot recycle them either, since the freelist
+holds whole blocks. Those pages are stranded in the static-buffer window.
+
+Bounded by construction: reaching it needs **both** a machine with more than 32
+CPUs (so a block spans pages) **and** physical exhaustion mid-block, at which
+point the system is already failing allocations everywhere. It is logged rather
+than left silent.
+
+The clean fix is to reserve the whole block in one call, which costs the per-page
+NUMA refinement — a deliberate, documented decision (P2-I4, user-confirmed
+2026-08-01) that should not be reversed in-absentia.

@@ -1226,10 +1226,21 @@ namespace Core::rcu {
             }
         }
 
+    public:
         // RCU-DEC-034's check, factored out so DebugIntrospection::assertQuiescent()
         // can exercise it directly. Routing the negative test through the
         // destructor is impossible: under the test harness assert throws, and a
         // throwing assert cannot escape a noexcept destructor.
+        //
+        // PUBLIC because RCU-DEC-043's `Domain::deinit()` must assert quiescence
+        // in a KERNEL build, where DebugIntrospection does not exist (it is gated
+        // behind CROCOS_RCU_TEST_HARNESS). deinit is the explicit destruction
+        // path for dynamic domains, so it needs exactly the check the destructor
+        // carries for static ones — and routing it through a test-only header
+        // would mean the check silently vanished from the build that ships.
+        //
+        // Const, debug-only, and idempotent; exposing it grants no ability to
+        // mutate the domain.
         void checkQuiescent() const CROCOS_RCU_NOEXCEPT {
             for (size_t i = 0; i < slotCount; ++i) {
                 assert(!isActive(slots[i].state.load(kScanLoad)),

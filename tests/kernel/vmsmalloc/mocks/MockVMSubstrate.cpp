@@ -109,6 +109,30 @@ void reclaimSlabPage(void* p) {
 
 void* mapMMIOPage(phys_addr) { std::abort(); }
 
+// Scripted failure for the try-variant, so a consumer's creation-unwind path is
+// drivable without exhausting a 64 MiB arena first. -1 == never fail.
+static long gStaticReservationFailAt = -1;
+static long gStaticReservationCalls  = 0;
+
+void* tryReservePerDomainStaticBuffer(size_t byteSize, numa::DomainID d) {
+    {
+        std::lock_guard<std::mutex> lock(gMutex);
+        const long n = gStaticReservationCalls++;
+        if (gStaticReservationFailAt >= 0 && n >= gStaticReservationFailAt) return nullptr;
+        const size_t pages = (byteSize + kPageSize - 1) / kPageSize;
+        if (gStaticNext + pages * kPageSize > gStaticEnd) return nullptr;
+    }
+    return reservePerDomainStaticBuffer(byteSize, d);
+}
+
+namespace test {
+    void setStaticReservationFailAt(long n) {
+        std::lock_guard<std::mutex> lock(gMutex);
+        gStaticReservationFailAt = n;
+        gStaticReservationCalls  = 0;
+    }
+}
+
 void* reservePerDomainStaticBuffer(size_t byteSize, numa::DomainID) {
     std::lock_guard<std::mutex> lock(gMutex);
     // Rounded to whole pages, exactly like the kernel's implementation
@@ -180,6 +204,8 @@ void shutdown() {
     if (gRegion) { munmap(gRegion, gRegionBytes); }
     gRegion = nullptr; gRegionBytes = 0;
     gStaticNext = gStaticEnd = gCpuLocalBase = nullptr;
+    gStaticReservationFailAt = -1;
+    gStaticReservationCalls  = 0;
     gFreeHead = nullptr; gActiveCount = 0;
     for (auto& b : vmsmalloc::perDomainBufs) b = nullptr;
 }

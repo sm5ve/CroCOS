@@ -35,6 +35,7 @@ set(RCU_SUPPORT_SOURCES
 
 set(RCU_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/VeneerTest.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/LifecycleTest.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/AssertionsTest.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ConcurrentTest.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/TortureTest.cpp

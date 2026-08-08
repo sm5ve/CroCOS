@@ -55,6 +55,19 @@ namespace kernel::mm{
         size_t allocatePages(size_t count, FunctionRef<void(PageRef)> cb, numa::DomainID targetDomain, AllocFlags flags = {});
         size_t allocatePages(size_t count, FunctionRef<void(PageRef)> cb, arch::ProcessorID targetProc, AllocFlags flags = {});
 
+        // ---- Failable single-page allocation ----
+        //
+        // The `allocateSmallPage` family above discards allocatePages' return
+        // count, so an exhausted allocator hands back a default-constructed
+        // phys_addr and the caller cannot tell. Every existing caller is a
+        // never-fails path where that is acceptable; the runtime static-buffer
+        // reservation (vmsmalloc DEC-051) is the first that must FAIL CLEANLY,
+        // because untrusted userspace reaches it through address-space creation
+        // and the alternative is a userspace-triggerable panic.
+        //
+        // Returns false and leaves `out` untouched on exhaustion.
+        [[nodiscard]] bool tryAllocateSmallPage(numa::DomainID targetDomain, phys_addr& out);
+
         // ---- Single-page free ----
 
         void freeSmallPage(phys_addr);

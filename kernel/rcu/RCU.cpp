@@ -241,12 +241,44 @@ namespace {
     // threaded through Phase 1's hot path (exact, but 4 KiB/CPU and it reopens a
     // shipped, TSan-green engine).
     //
-    // CONTIGUITY DEPENDENCY: consecutive reservations returning consecutive VAs
-    // is a property of VMSubstrate's bump allocator, not a documented contract
-    // of reservePerDomainStaticBuffer. It is checked rather than assumed —
-    // silently non-contiguous pages would give a slot array whose upper slots
-    // alias unrelated storage, which no later assertion would catch.
-    Core::rcu::ReaderSlot* reserveSlots(size_t cpuCount, const char* name) {
+    // ─── The domain-management lock and the block freelist (RCU-DEC-043) ───
+    //
+    // ONE lock for the whole framework, not one per Domain: it serializes every
+    // init/deinit AND every consumer-side static-buffer reservation against the
+    // same-entry install race (vmsmalloc DEC-051c), so it has to be the same
+    // lock in both places.
+    //
+    // The freelist recycles slot blocks. Reservations are kernel-lifetime and
+    // are never returned to VMSubstrate, so without recycling the reservation
+    // would grow with CUMULATIVE process churn until the static-buffer window
+    // ran out and every later fork failed — which is precisely the high-water-
+    // mark claim vmsmalloc DEC-050 makes. Every block is the same size (the
+    // slot count is fixed at boot), so one list suffices.
+    //
+    // Linkage lives in the block's first word. Legal because a freed block holds
+    // no live object: deinit has already poisoned it, and init re-zeroes before
+    // constructing.
+    Spinlock gDomainManagementLock;
+    void*    gFreeSlotBlocks = nullptr;      // guarded by gDomainManagementLock
+    size_t   gReservedBlockCount = 0;        // high-water mark, for the log
+
+    void* popFreeSlotBlockLocked() {
+        void* b = gFreeSlotBlocks;
+        if (b) gFreeSlotBlocks = *reinterpret_cast<void**>(b);
+        return b;
+    }
+
+    void pushFreeSlotBlockLocked(void* b) {
+        *reinterpret_cast<void**>(b) = gFreeSlotBlocks;
+        gFreeSlotBlocks = b;
+    }
+
+    // Reserve a fresh slot block from VMSubstrate. Caller holds the lock.
+    //
+    // Returns null on exhaustion rather than panicking (RCU-DEC-043 ii /
+    // vmsmalloc DEC-051a): this path is reachable from address-space creation,
+    // so untrusted userspace drives it and must get ENOMEM, not a panic.
+    unsigned char* reserveFreshSlotBlockLocked(size_t cpuCount, const char* name) {
         const size_t pages = divideAndRoundUp(cpuCount, kSlotsPerPage);
         unsigned char* base = nullptr;
 
@@ -266,23 +298,63 @@ namespace {
             const auto firstCpu = static_cast<arch::ProcessorID>(firstCpuIndex);
             const numa::DomainID d = numa::numaPolicy().homeDomain(firstCpu);
 
-            void* got = mm::VMSubstrate::reservePerDomainStaticBuffer(arch::smallPageSize, d);
+            void* got =
+                mm::VMSubstrate::tryReservePerDomainStaticBuffer(arch::smallPageSize, d);
+            if (got == nullptr) {
+                // Multi-page blocks only, and only under genuine exhaustion: a
+                // partially-reserved block cannot be handed back (reservations
+                // are kernel-lifetime by contract) and cannot be recycled either,
+                // since the freelist holds whole blocks. The pages are therefore
+                // stranded, and the honest thing is to say so rather than to let
+                // the window quietly shrink.
+                //
+                // Bounded by construction: reaching here needs BOTH a machine
+                // with more than kSlotsPerPage CPUs AND physical exhaustion
+                // mid-block, at which point the system is already failing
+                // allocations everywhere.
+                if (p > 0) {
+                    klog() << "rcu: [" << name << "] slot reservation ran out after "
+                           << static_cast<uint64_t>(p)
+                           << " page(s); those pages are stranded in the static-buffer "
+                              "window\n";
+                }
+                return nullptr;
+            }
             auto* page = static_cast<unsigned char*>(got);
 
             if (p == 0) {
                 base = page;
             } else if (page != base + p * arch::smallPageSize) {
+                // CONTIGUITY DEPENDENCY: consecutive reservations returning
+                // consecutive VAs is a property of VMSubstrate's bump allocator,
+                // not a documented contract. Checked rather than assumed —
+                // silently non-contiguous pages would give a slot array whose
+                // upper slots alias unrelated storage, which no later assertion
+                // would catch.
                 klog() << "rcu: [" << name << "] slot reservation was not contiguous at page "
                        << static_cast<uint64_t>(p) << " — aborting init\n";
                 return nullptr;
             }
         }
+        gReservedBlockCount++;
+        return base;
+    }
 
-        // The storage is zero-filled by reservePerDomainStaticBuffer and P1-I3
-        // guarantees the all-zero pattern decodes as "inactive / (tag 0, Free)",
-        // so this loop changes no bytes. It runs anyway to start the objects'
-        // lifetimes formally, which is the same reason vmsmallocLateInit
-        // placement-news over its own zeroed buffer.
+    // Draw a slot block: recycled if one is free, freshly reserved otherwise.
+    // Caller holds gDomainManagementLock.
+    unsigned char* acquireSlotBlockLocked(size_t cpuCount, const char* name) {
+        if (void* recycled = popFreeSlotBlockLocked()) {
+            return static_cast<unsigned char*>(recycled);
+        }
+        return reserveFreshSlotBlockLocked(cpuCount, name);
+    }
+
+    // Construct the ReaderSlot objects over a block that init has already
+    // zeroed. P1-I3 guarantees the all-zero pattern decodes as "inactive /
+    // (tag 0, Free)", so this changes no bytes; it runs to start the objects'
+    // lifetimes formally, the same reason vmsmallocLateInit placement-news over
+    // its own zeroed buffer.
+    Core::rcu::ReaderSlot* constructSlots(unsigned char* base, size_t cpuCount) {
         auto* slots = reinterpret_cast<Core::rcu::ReaderSlot*>(base);
         for (size_t i = 0; i < cpuCount; i++) {
             new (&slots[i]) Core::rcu::ReaderSlot();
@@ -306,6 +378,9 @@ namespace detail {
             return *launder(reinterpret_cast<const Engine*>(d.engineStorage));
         }
         [[nodiscard]] static void* storage(Domain& d) noexcept { return d.engineStorage; }
+        [[nodiscard]] static const void* slotBlockOf(const Domain& d) noexcept {
+            return d.slotBlock;
+        }
         static void markInitialized(Domain& d, const char* name) noexcept {
             d.domainName    = name;
             d.isInitialized = true;
@@ -327,12 +402,43 @@ bool Domain::init(const char* name, size_t drainBatchBound) CROCOS_RCU_NOEXCEPT 
     const size_t cpuCount = arch::processorCount();
     assert(cpuCount > 0, "rcu: processorCount() is zero at Domain::init");
 
-    Core::rcu::ReaderSlot* slots = reserveSlots(cpuCount, name);
-    if (slots == nullptr) return false;
+    // init takes the lock ITSELF. A caller holding DomainManagementLockGuard
+    // across this call self-deadlocks (RCU-DEC-043) — consumer reservation and
+    // framework init are two independent rare acquisitions, never one hold
+    // spanning both.
+    unsigned char* block = nullptr;
+    {
+        LockGuard<Spinlock> guard(gDomainManagementLock);
+        block = acquireSlotBlockLocked(cpuCount, name);
+    }
+    if (block == nullptr) return false;
+
+    const size_t blockBytes =
+        divideAndRoundUp(cpuCount, kSlotsPerPage) * arch::smallPageSize;
+
+    // RCU-DEC-043 (i): ZERO BEFORE INITIALIZING. The zero-fill guarantee is per
+    // RESERVATION (vmsmalloc DEC-051), not per domain, so a freelist-recycled
+    // block still carries the prior tenant's reader state — and a recycled
+    // engine-storage block carries its teardownActive / inDrain / initialized
+    // flags, which makes tryAdvance return at the top forever (silent
+    // no-reclamation) or defeats the use-before-init assert. Zeroing here makes
+    // every init valid regardless of block provenance, which is the only form
+    // of the rule that does not depend on how the caller obtained its storage.
+    memset(block, 0, blockBytes);
+    memset(engineStorage, 0, sizeof(engineStorage));
+
+    Core::rcu::ReaderSlot* slots = constructSlots(block, cpuCount);
 
     Engine* engine = new (detail::Access::storage(*this)) Engine(slots, cpuCount);
     engine->setDrainBatchBound(drainBatchBound);
 
+    slotBlock = block;
+
+    // RCU-DEC-043 (iii), install-before-publish: the block is fully mapped and
+    // the engine fully constructed BEFORE `initialized` is set, so any reader
+    // that can name this domain observes present, immutable page-table entries
+    // and a live engine. The consumer half of the same rule is that it publishes
+    // the control block only after init returns (radix DEC-101).
     detail::Access::markInitialized(*this, name);
 
     // P2-DEC-004's verification target. The absence of this line is the
@@ -350,6 +456,52 @@ bool Domain::init(const char* name, size_t drainBatchBound) CROCOS_RCU_NOEXCEPT 
                << " page(s), drain batch " << static_cast<uint64_t>(drainBatchBound) << "\n";
     }
     return true;
+}
+
+// ─── Domain::deinit (RCU-DEC-043) ──────────────────────────────────────────
+
+bool Domain::deinit() CROCOS_RCU_NOEXCEPT {
+    assert(isInitialized, "rcu: Domain::deinit on an uninitialized domain");
+
+    // Quiescence is the caller's precondition and is debug-asserted here rather
+    // than fixed up: a domain with undrained bags at deinit means the consumer
+    // skipped drainAllQuiescent, and draining on its behalf would run deleters
+    // from a teardown path that has already torn down what they touch. The
+    // sanctioned sequence is quiesce -> drainAllQuiescent() -> deinit().
+    detail::Access::engine(*this).checkQuiescent();
+
+    // Read everything we need BEFORE poisoning.
+    void* block = slotBlock;
+
+#if CROCOS_RCU_DEBUG_CHECKS
+    // Poison the whole block, THEN clear `initialized` — in that order.
+    //
+    // The order is the decision, not a detail. `initialized` is a plain
+    // nonzero-checked bool sitting inside the poisoned region, so a fill that
+    // covers it LAST leaves it reading 0xA5 — i.e. true — and defeats the very
+    // use-before-init assert this clause exists to arm. A dangling handle to a
+    // freelisted domain would then sail past the check and reclaim freely.
+    __builtin_memset(static_cast<void*>(this), 0xA5, sizeof(Domain));
+#endif
+    isInitialized = false;
+    domainName    = nullptr;
+    slotBlock     = nullptr;
+
+    if (block != nullptr) {
+        LockGuard<Spinlock> guard(gDomainManagementLock);
+        pushFreeSlotBlockLocked(block);
+    }
+    return true;
+}
+
+// ─── DomainManagementLockGuard (RCU-DEC-043) ───────────────────────────────
+
+DomainManagementLockGuard::DomainManagementLockGuard() noexcept {
+    gDomainManagementLock.acquire();
+}
+
+DomainManagementLockGuard::~DomainManagementLockGuard() noexcept {
+    gDomainManagementLock.release();
 }
 
 // ─── Context predicates ────────────────────────────────────────────────────
@@ -565,6 +717,22 @@ size_t drain(Domain& d) CROCOS_RCU_NOEXCEPT {
     return detail::Access::engine(d).sweepExpired(kernel::getLogicalProcessorID());
 }
 
+// ─── drainAllQuiescent (RCU-DEC-035, exposed by RCU-DEC-043) ───────────────
+//
+// The teardown drain: acts as universal owner, force-sealing every open bag,
+// and drains the domain to empty.
+//
+// The no-new-users precondition is the CALLER's and cannot be checked here. For
+// the radix consumer it is discharged by thread destruction — every thread of
+// the address space is destroyed before the teardown walk begins, and a thread
+// join is exactly the happens-before edge RCU-DEC-035 requires. It is NOT
+// discharged by radix DEC-065's dying-flag-plus-synchronize barrier, which
+// serves the walk's uncontendedness; conflating the two leaves a live user.
+size_t drainAllQuiescent(Domain& d) CROCOS_RCU_NOEXCEPT {
+    assert(d.initialized(), "rcu: drainAllQuiescent on an uninitialized domain");
+    return detail::Access::engine(d).drainAllQuiescent();
+}
+
 // ─── The general-purpose kernel domain + the .icd routine ──────────────────
 
 // RCU-DEC-015 / P2-I5. constexpr-inert, so this is constant-initialized into
@@ -589,6 +757,29 @@ namespace test {
     size_t   openBagResidue(const Domain& d, size_t i) { return Intro::openBagResidue(detail::Access::engine(d), i); }
     void     assertQuiescent(const Domain& d)        { Intro::assertQuiescent(detail::Access::engine(d)); }
     size_t   drainAllQuiescent(Domain& d)            { return detail::Access::engine(d).drainAllQuiescent(); }
+    // RCU-DEC-043: the slot block this domain drew, so the freelist-recycling
+    // test can assert the SAME storage comes back rather than merely that
+    // nothing ran out.
+    const void* slotAddress(const Domain& d)         { return detail::Access::slotBlockOf(d); }
+
+    // Drop every recycled slot block (RCU-DEC-043's freelist).
+    //
+    // Exists ONLY for the harness, and for a reason that cannot arise in the
+    // kernel: there, VMSubstrate's static-buffer window lives as long as the
+    // kernel does, so a recycled block is valid forever. The harness mmaps a
+    // FRESH arena per test and munmaps it afterwards, so a block left on the
+    // freelist by test N is a dangling pointer into unmapped memory by test
+    // N+1 — which the next Domain::init would hand out as a slot array.
+    //
+    // Two live tests caught this the hard way: one asserted a fresh reservation
+    // and got a stale recycled block, and one scripted a reservation failure
+    // that never fired because the freelist satisfied the request without ever
+    // calling the reservation.
+    void resetDomainManagementState() {
+        LockGuard<Spinlock> guard(gDomainManagementLock);
+        gFreeSlotBlocks     = nullptr;
+        gReservedBlockCount = 0;
+    }
 }
 #endif // CROCOS_RCU_TEST_HARNESS
 

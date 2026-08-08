@@ -80,6 +80,25 @@ namespace kernel::mm::VMSubstrate {
     // debug builds; panics on PageAllocator failure or region exhaustion.
     void* reservePerDomainStaticBuffer(size_t byteSize, numa::DomainID d);
 
+    // DEC-050 / DEC-051: the failable, runtime-callable variant.
+    //
+    // The panicking form above stays init-only. This one is additionally legal
+    // at runtime **under the RCU domain-management lock**
+    // (kernel::rcu::DomainManagementLockGuard), and returns null rather than
+    // panicking on physical-page or window exhaustion. Both matter: the runtime
+    // callers are Domain::init() and the radix per-address-space control block,
+    // both reached from address-space creation, so untrusted userspace can drive
+    // this path and must not be able to panic the kernel — it gets ENOMEM.
+    //
+    // Reservations are kernel-lifetime and are never returned to VMSubstrate;
+    // callers recycle them through their own freelists, which is what makes the
+    // reservation high-water-mark at the maximum concurrent address spaces
+    // rather than grow with cumulative process churn.
+    //
+    // Zero-fill is a per-RESERVATION guarantee. A recycled block is the caller's
+    // to re-zero.
+    void* tryReservePerDomainStaticBuffer(size_t byteSize, numa::DomainID d);
+
     // Returns the base VA of CPU `i`'s per-CPU CpuLocal page (sized via
     // kernel::kCpuLocalBytes in cpu_local.h). The page is allocated and
     // mapped during createArena(i) on the arena owner's NUMA domain, and

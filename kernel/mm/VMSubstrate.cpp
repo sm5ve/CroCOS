@@ -982,14 +982,59 @@ namespace kernel::mm::VMSubstrate {
             VMSubstrateHelper::cpuLocalPageBase(arenaBase).value);
     }
 
-    void* reservePerDomainStaticBuffer(size_t byteSize, numa::DomainID d) {
+    // The shared body of both reservation entry points. `failable` selects
+    // whether exhaustion returns null or asserts.
+    //
+    // ─── Why this is safe at runtime without a shootdown (DEC-051b) ─────────
+    //
+    // Every entry this writes — leaf or intermediate — transitions not-present
+    // -> present EXACTLY ONCE and never changes. x86 caches no not-present entry
+    // at any level, so no CPU can hold a stale view: a first touch TLB-misses
+    // into a fresh, immutable entry. That was always the real content of the
+    // init-time hazard note; restating it over TRANSITIONS rather than over boot
+    // phases is what makes it carry the runtime case, which DEC-050's
+    // relaxation would otherwise have silently invalidated.
+    //
+    // Serialization where it is needed comes from the caller: the RCU
+    // domain-management lock (DEC-050) serializes the same-entry
+    // check-then-install race between concurrent reservations. Concurrent
+    // hardware walkers and other-entry writers in shared paging-structure pages
+    // are safe because entry stores are naturally-aligned 8-byte writes.
+    static void* reserveStaticBufferImpl(size_t byteSize, numa::DomainID d, bool failable) {
         assert(staticBufferSlotBase.value != 0,
                "reservePerDomainStaticBuffer called before VMSubstrate::init");
         assert(byteSize > 0, "reservePerDomainStaticBuffer: byteSize must be > 0");
 
         const size_t pages = divideAndRoundUp(byteSize, arch::smallPageSize);
-        assert(staticBufferNextVA.value + pages * arch::smallPageSize <= staticBufferSlotEnd.value,
-               "reservePerDomainStaticBuffer: static-buffer region exhausted");
+
+        // Window exhaustion. Checked BEFORE anything is installed, so the
+        // failable path leaves no partial state at all.
+        if (staticBufferNextVA.value + pages * arch::smallPageSize > staticBufferSlotEnd.value) {
+            if (failable) return nullptr;
+            assert(false, "reservePerDomainStaticBuffer: static-buffer region exhausted");
+            return nullptr;
+        }
+
+        // Physical pages are drawn UP FRONT, before any PTE is written. That
+        // ordering is what makes the unwind clean: a mid-loop physical
+        // exhaustion would otherwise leave installed leaf entries at VAs the
+        // reservation never returns, and the write-once argument above forbids
+        // ever rewriting them.
+        //
+        // The bound is the RCU slot array and the radix control block, both a
+        // handful of pages; a caller wanting more than this uses the boot-time
+        // panicking form, which has no unwind to size.
+        constexpr size_t kMaxFailablePages = 8;
+        phys_addr frames[kMaxFailablePages];
+        if (failable) {
+            if (pages > kMaxFailablePages) return nullptr;
+            for (size_t i = 0; i < pages; i++) {
+                if (!PageAllocator::tryAllocateSmallPage(d, frames[i])) {
+                    for (size_t k = 0; k < i; k++) PageAllocator::freeSmallPage(frames[k]);
+                    return nullptr;
+                }
+            }
+        }
 
         const virt_addr origVA = staticBufferNextVA;
 
@@ -1005,7 +1050,8 @@ namespace kernel::mm::VMSubstrate {
                 staticBufferSlotBase, pageVA, cpu);
 
             // Place the data page on the requested NUMA domain.
-            const phys_addr phys = PageAllocator::allocateSmallPage(d);
+            const phys_addr phys =
+                failable ? frames[i] : PageAllocator::allocateSmallPage(d);
             auto& pte = *reinterpret_cast<arch::PTE<VMSubstrateHelper::leafLevel>*>(
                 VMSubstrateHelper::leafPTEAddrFor(staticBufferSlotBase, pageVA).value);
             pte = arch::PTE<VMSubstrateHelper::leafLevel>::leafEntry(phys, kLeafFlags);
@@ -1015,11 +1061,27 @@ namespace kernel::mm::VMSubstrate {
             // per-domain ChainedTreiberStack instances are placement-new'd
             // over the zeroed storage by vmsmallocLateInit; the tuning
             // counters stay zero).
+            //
+            // DEC-051: this is a PER-RESERVATION guarantee, not a per-consumer
+            // one. A block the caller RECYCLES through its own freelist is the
+            // caller's to re-zero — Domain::init owns the domain block's
+            // re-zero, and the address-space creation path owns the radix
+            // control block's. Getting that wrong is silent: a recycled block
+            // carries the prior tenant's teardownActive/inDrain/initialized
+            // state, which makes tryAdvance return at the top forever.
             memset(reinterpret_cast<void*>(pageVA.value), 0, arch::smallPageSize);
         }
 
         staticBufferNextVA = staticBufferNextVA + pages * arch::smallPageSize;
         return reinterpret_cast<void*>(origVA.value);
+    }
+
+    void* reservePerDomainStaticBuffer(size_t byteSize, numa::DomainID d) {
+        return reserveStaticBufferImpl(byteSize, d, /*failable=*/false);
+    }
+
+    void* tryReservePerDomainStaticBuffer(size_t byteSize, numa::DomainID d) {
+        return reserveStaticBufferImpl(byteSize, d, /*failable=*/true);
     }
 
     bool ensureTLBEntryFresh(void* ptr) {

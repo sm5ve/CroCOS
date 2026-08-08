@@ -10,14 +10,19 @@
 // (kernel/mm/vmsmalloc.cpp:537-564): declared here, defined inside RCU.cpp where
 // the engine is visible, and gated so the kernel build never sees it.
 //
-// drainAllQuiescent is deliberately exposed HERE and nowhere else. RCU-DEC-035
-// gives it a precondition — an external guarantee that no CPU will touch the
-// domain again — that Phase 2 has no kernel path to supply (dynamic domain
-// teardown is a Non-Goal), so it gets no veneer entry point. The tests DO
-// satisfy that precondition, at the end of a joined single- or multi-threaded
-// scenario, and they need it: without a teardown drain every test would leave
-// its retirees in limbo and the residue assertions would be measuring the
-// previous test's garbage.
+// drainAllQuiescent WAS exposed here and nowhere else: RCU-DEC-035 gives it a
+// precondition — an external guarantee that no CPU will touch the domain again —
+// that Phase 2 had no kernel path to supply, dynamic domain teardown being a
+// Non-Goal at the time. **RCU-DEC-043 (2026-08-07) retired that Non-Goal and
+// added the veneer** (`kernel::rcu::drainAllQuiescent`), its precondition
+// supplied by the radix consumer's thread-destruction step.
+//
+// This forwarder stays because it is what the existing tests call and because it
+// is reachable on an uninitialized domain, which the veneer deliberately asserts
+// against. The tests satisfy the precondition at the end of a joined single- or
+// multi-threaded scenario, and they need it: without a teardown drain every test
+// would leave its retirees in limbo and the residue assertions would be
+// measuring the previous test's garbage.
 //
 // SNAPSHOTS ASSUME A QUIESCENT DOMAIN, exactly as the Core one does — ordinary
 // loads with no protocol participation. Taken while other threads are live they
@@ -63,6 +68,14 @@ namespace kernel::rcu::test {
     // RCU-DEC-035. Teardown drain under the caller's no-new-users guarantee;
     // force-seals remote Open bags. Engine-only in Phase 2 — see the file header.
     size_t drainAllQuiescent(Domain& d);
+    // The domain's slot block, for the RCU-DEC-043 freelist-recycling test:
+    // it asserts the SAME storage comes back, not merely that nothing ran out.
+    const void* slotAddress(const Domain& d);
+    // Drop the RCU-DEC-043 block freelist. The harness re-mmaps its arena per
+    // test, so a block recycled by the previous test dangles into unmapped
+    // memory; the kernel's window lives as long as the kernel and never needs
+    // this. Every harness that constructs domains must call it at teardown.
+    void resetDomainManagementState();
 
 }   // namespace kernel::rcu::test
 

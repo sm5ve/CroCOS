@@ -167,8 +167,47 @@ namespace kernel::rcu {
         // without it no kernel path could ever set it — and the #PF-latency
         // motivation for having a bound at all applies only in the environment
         // that has #PF. kUnboundedDrainBatch means "drain the bag to the end".
+        // RCU-DEC-043 as amended (2026-08-08). Three clauses matter and each is
+        // silent if dropped:
+        //
+        //  (i)  init ZEROES the block first. The zero-fill guarantee is per
+        //       RESERVATION (vmsmalloc DEC-051), so a freelist-recycled block
+        //       otherwise carries the prior tenant's teardownActive / inDrain /
+        //       initialized state — which makes tryAdvance return at the top
+        //       forever (silent no-reclamation) or defeats the use-before-init
+        //       assert. Init-side zeroing makes every init valid regardless of
+        //       block provenance.
+        //  (ii) At runtime it draws storage through
+        //       tryReservePerDomainStaticBuffer and returns false on null; the
+        //       consumer surfaces ENOMEM at address-space creation. The
+        //       panicking reservation stays boot-only, so untrusted userspace
+        //       cannot reach it through fork/spawn.
+        //  (iii) The RCU-DEC-024 fault-free/pinned-storage premise survives
+        //       runtime creation by INSTALL-BEFORE-PUBLISH: the block is fully
+        //       mapped before init returns, and the domain is published to its
+        //       readers only afterwards.
+        //
+        // init acquires the domain-management lock ITSELF. A caller already
+        // holding DomainManagementLockGuard would self-deadlock — consumer
+        // reservation and framework init are two independent rare acquisitions,
+        // never one hold spanning both.
         bool init(const char* name,
                   size_t drainBatchBound = Core::rcu::kUnboundedDrainBatch) CROCOS_RCU_NOEXCEPT;
+
+        // RCU-DEC-043. Lock-serialized; requires quiescence (no open sections,
+        // no undrained bags), debug-asserted. Forbidden from interrupt and #PF
+        // contexts.
+        //
+        // Debug-poisons the block and THEN clears `initialized`, in that order.
+        // The order is the decision: `initialized` is a plain nonzero-checked
+        // bool, so a poison fill covering it last would leave it reading TRUE
+        // and defeat the very assert this clause exists to arm.
+        //
+        // A domain is destroyed only when its owning consumer is torn down —
+        // for the radix tree, at address-space teardown, after
+        // drainAllQuiescent. Static boot-lifetime domains never call this and
+        // still have no destructor.
+        bool deinit() CROCOS_RCU_NOEXCEPT;
 
         [[nodiscard]] bool initialized() const noexcept { return isInitialized; }
         [[nodiscard]] const char* name() const noexcept { return domainName; }
@@ -178,11 +217,49 @@ namespace kernel::rcu {
 
         alignas(kEngineStorageAlign) unsigned char engineStorage[kEngineStorageBytes] = {};
         const char* domainName  = nullptr;
+        // The slot-array reservation this domain drew, kept so deinit can return
+        // it to the freelist. Reservations are never given back to VMSubstrate
+        // (they are kernel-lifetime), so recycling here is what high-water-marks
+        // the reservation at the maximum CONCURRENT address spaces rather than
+        // letting it grow with cumulative process churn — which is the claim
+        // vmsmalloc DEC-050 rests on.
+        void*       slotBlock   = nullptr;
         // P2-DEC-009 / failure table: with opaque storage there is NO engine
         // pointer to null-check, so used-before-init is caught by this flag and
         // nothing else. Zeroed storage scans clean — an uninitialized domain
         // would reclaim freely with no reader protection.
         bool        isInitialized = false;
+    };
+
+    // ─── DomainManagementLockGuard (RCU-DEC-043, round-6/7 amendment) ──────
+    //
+    // A scoped guard over the SINGLE framework-global domain-management lock —
+    // one lock in the kernel, not one per Domain and not one per process. It
+    // serializes every init/deinit and every static-buffer reservation against
+    // the same-entry install race (vmsmalloc DEC-051c).
+    //
+    // Exported so consumers can take it for their OWN reservations and freelist
+    // returns in that storage: the radix per-address-space control block is
+    // reserved under it at creation and returned under it at teardown (radix
+    // DEC-082/DEC-101). The *domain* block's freelist push, by contrast, happens
+    // inside deinit() under its internal acquisition and never under this guard.
+    //
+    // **Must NOT be held across init()/deinit()**, which acquire the lock
+    // themselves — that is a self-deadlock, and it is the shape a caller
+    // naturally reaches for when it wants "the whole creation sequence" to be
+    // atomic. It does not need to be: the sequence is a reservation, then an
+    // init, as two independent rare acquisitions.
+    //
+    // Same forbidden contexts as the lock: never from interrupt or #PF context.
+    class DomainManagementLockGuard {
+    public:
+        DomainManagementLockGuard() noexcept;
+        ~DomainManagementLockGuard() noexcept;
+
+        DomainManagementLockGuard(const DomainManagementLockGuard&)            = delete;
+        DomainManagementLockGuard& operator=(const DomainManagementLockGuard&) = delete;
+        DomainManagementLockGuard(DomainManagementLockGuard&&)                 = delete;
+        DomainManagementLockGuard& operator=(DomainManagementLockGuard&&)      = delete;
     };
 
     // ─── ReadGuard ─────────────────────────────────────────────────────────
@@ -232,6 +309,30 @@ namespace kernel::rcu {
                                                       const Atomic<T*>& src) CROCOS_RCU_NOEXCEPT {
         detail::assertInSection(d);
         return mm::VMSubstrate::SafePtr<T>(src.load(kProtectedLinkLoad));
+    }
+
+    // ─── protectWord (RCU-DEC-044) ─────────────────────────────────────────
+    //
+    // The raw-word sibling of `protect`, for links that are not plain typed
+    // pointers. `protect(Domain&, const Atomic<T*>&)` cannot type a radix slot:
+    // it is a tagged, possibly compressed codec word whose pointee type (node
+    // vs Mapping) is known only AFTER decoding, and even the uncompressed
+    // harness codec sets bit 0 on leaves, so no slot word is a valid T*.
+    //
+    // Without a veneer primitive the consumer's "every link load goes through
+    // the protected-link-load primitive" invariant would be supplied by a bare
+    // consumer-side atomic load, silently dropping the two things only the
+    // framework provides: the NAMED ordering constant (fragmenting
+    // RCU-DEC-010's discipline) and the debug assert that a section is genuinely
+    // open on the right domain — the assert that catches the "a raw link load
+    // outside a section still compiles, and in release silently" hazard.
+    //
+    // The caller owns decoding, and whatever pointer it derives carries the
+    // SafePtr freshness obligation exactly as with `protect`.
+    [[nodiscard]] inline uint64_t protectWord(Domain& d,
+                                              const Atomic<uint64_t>& src) CROCOS_RCU_NOEXCEPT {
+        detail::assertInSection(d);
+        return src.load(kProtectedLinkLoad);
     }
 
     namespace detail {
@@ -353,6 +454,19 @@ namespace kernel::rcu {
     // Sweep expired bags only, no advance attempt. Returns the number of objects
     // destroyed.
     size_t drain(Domain& d) CROCOS_RCU_NOEXCEPT;
+
+    // The teardown drain (RCU-DEC-035, exposed by RCU-DEC-043). Acts as
+    // universal owner — force-sealing every open bag — and drains the domain to
+    // empty. Returns the number of objects destroyed.
+    //
+    // **The caller supplies the no-new-users precondition**, and the framework
+    // cannot check it. For the radix consumer that precondition is THREAD
+    // DESTRUCTION: every thread of the address space is destroyed before the
+    // teardown walk begins, and a thread join is exactly the happens-before edge
+    // RCU-DEC-035 requires. Note it is NOT the dying-flag-plus-synchronize
+    // barrier of radix DEC-065 — that one serves the walk's uncontendedness, a
+    // different property, and conflating the two leaves a user alive.
+    size_t drainAllQuiescent(Domain& d) CROCOS_RCU_NOEXCEPT;
 
     // ─── The general-purpose kernel domain ─────────────────────────────────
     //
