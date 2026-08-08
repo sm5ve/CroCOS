@@ -24,6 +24,7 @@ set(RDX_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/CodecTest.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/DispatchTest.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/CoreTreeTest.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/DecompositionTest.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ModelTest.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/OrderingSpellingTest.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ConcurrentTest.cpp

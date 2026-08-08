@@ -546,3 +546,71 @@ check, and it belongs at the end of a phase rather than only at the end of a
 session. Note also that a full parallel rebuild makes `run_all_tests` report ~16
 TSan timeouts in Core/RCU that all pass when re-run serially — the documented
 post-rebuild flake, not a regression.
+
+## D-022 — §6.5 decomposition implemented; the per-slot rows are the ORDINARY dispatch
+
+Phase 2's largest remaining work item. Over-budget detachment previously returned
+`NeedsDecomposition` to the caller; it now decomposes.
+
+**Shape taken.** `apply` splits into `runToCompletion` (one unit: the §6.1
+attempt/retry loop) and `decompose`. The site is found by descending while the
+whole range still fits one slot and that slot holds a child — §6.5's "deepest
+node containing the operation's *entire range*", anchored to the RANGE, which is
+what makes both rejected predicates unreachable. Every intersected slot at the
+site, ascending VA, is then handed to an ordinary attempt over its clipped
+sub-range, recursing when that reports `NeedsDecomposition`.
+
+**The one judgement call worth recording**: §6.5 enumerates six per-slot rows
+(covered leaf, fully- and partially-intersected empty, partially-covered leaf,
+partially-covered child, fully-covered child). These are **not re-implemented**.
+Handing each clipped sub-range to the ordinary attempt path makes the ordinary
+dispatch produce exactly those six rows, because they *are* §6.3's rows applied
+to a sub-range. Writing them out again would create a second table that has to be
+kept in agreement with §6.3 forever — and §6.5's own warning is that every
+paraphrase during review introduced a fatal. Reuse makes "a decomposed `MAP_FIXED`
+over a range with holes maps exactly what the unit path would — no more, no less"
+true by construction rather than by inspection.
+
+Deliberately **not** asserted, per §6.5's explicit warning: "one detachment site
+per unit" and "claims ≤ one subtree" fire on legal executions. The structural
+check is the claim set's fixed capacity.
+
+**Termination** is the property the shape has to earn, since the recursion is on
+the same entry point. Per-slot recursion strictly descends (the site is the
+deepest node containing the range, so a sub-range either straddles several slots
+— each strictly smaller — or lands in a slot with no child, which has no subtree
+to blow the budget). Two asserts hold that: the sub-range must be strictly
+smaller, and a depth ceiling. The depth assert is not decorative — it was one of
+the two things that caught mutation B below.
+
+**`detachBudget` is now a template parameter** of `CoreTree`/`ClaimSet`,
+defaulting to `kDetachBudget`. §11 specifies "a tiny geometry with a tiny
+`detachBudget`", and decomposition is otherwise unreachable on any tree small
+enough to assert over. DEC-077 calls 64 provisional, so this is a knob the design
+already expects to turn. At the tiny geometry the budget has to be **1**: a
+level-2 subtree is 5 nodes but a level-3 one is 1, so at 2 all three §11 cases
+fit in a single unit and would have passed while testing nothing.
+
+**Tests** (`tests/kernel/radix/DecompositionTest.cpp`) are §11's three cases plus
+a fourth. Each runs the identical sequence on two trees differing ONLY in budget
+and requires agreement at every floor unit — §11 words every case as "equals the
+UNIT PATH's", which is a relative property, so the second tree is the oracle. The
+fourth case is the polarity check: a `MAP_FIXED` over the same holes must FILL
+them, which stops "skip every empty slot" from being an acceptable fix for the
+munmap case.
+
+**The suite was mutation-tested**, because a decomposition test that passes
+vacuously is the failure mode here:
+
+- *skip empty slots in the decomposition loop* (the natural "optimization") →
+  caught by the map-over-holes case.
+- *anchor the site to where the range starts rather than to the whole range* (the
+  shape of the rejected DCA predicate) → caught by all four, via the
+  orphaned-tail assertion and the depth assert.
+
+**Unrelated flake observed while verifying**: `rcuTortureDeadSlotDoesNotUnbound
+Limbo` fails `residue <= kResidueBound` about 3 times in 12 under TSan. Measured
+at 3/12 both with these changes and at the pre-session baseline, so it is
+pre-existing and independent — it counts retired OBJECTS, not memory, so neither
+D-001's slab packing nor the radix work reaches it. Distinct from the documented
+post-rebuild timeout flake; worth its own investigation.

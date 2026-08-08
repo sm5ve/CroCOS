@@ -122,9 +122,14 @@ namespace kernel::mm::radix {
     // Fixed-capacity and stack-resident: never a heap allocation, because a
     // writer may not allocate while holding a claim and because the whole point
     // of DEC-077's budget is that the set is bounded by a constant.
-    template <GeometryDescriptor G>
+    // `DetachBudget` is a parameter rather than a bare use of `kDetachBudget`
+    // because §11's decomposition targets specify "a tiny geometry with a TINY
+    // detachBudget" — decomposition is unreachable at the production budget on any
+    // tree small enough to assert over. DEC-077 calls 64 "provisional" anyway, so
+    // the knob is one the design already expects to turn.
+    template <GeometryDescriptor G, unsigned DetachBudget = kDetachBudget>
     struct ClaimSet {
-        static constexpr size_t kCapacity = kDetachBudget + siteBound(G);
+        static constexpr size_t kCapacity = DetachBudget + siteBound(G);
 
         struct Entry {
             NodeRef  node;

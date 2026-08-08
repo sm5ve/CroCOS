@@ -49,7 +49,8 @@ namespace CroCOSTest::radix {
         // Walks the tree and checks every structural and lifetime invariant that
         // is decidable from shape alone. Throws on the first violation, naming
         // the invariant.
-        static void validate(const rdx::CoreTree<G, Codec>& tree, const char* what) {
+        template <unsigned DB>
+        static void validate(const rdx::CoreTree<G, Codec, DB>& tree, const char* what) {
             TreeValidator v(what);
             if (!tree.valid()) return;
             v.visit(tree.root(), tree.rootLevel(), tree.base(), /*isRoot=*/true);
@@ -57,8 +58,9 @@ namespace CroCOSTest::radix {
         }
 
         // The naming-slot census on its own, for tests that want the numbers.
+        template <unsigned DB>
         static std::map<const rdx::Mapping*, size_t>
-        namingSlotCensus(const rdx::CoreTree<G, Codec>& tree) {
+        namingSlotCensus(const rdx::CoreTree<G, Codec, DB>& tree) {
             TreeValidator v("census");
             if (tree.valid()) v.visit(tree.root(), tree.rootLevel(), tree.base(), true);
             return v.namingSlots;

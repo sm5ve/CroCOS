@@ -329,6 +329,10 @@ namespace kernel::mm::radix {
         // than an assert, but a number that climbs into the operation count means
         // the read pass is under-claiming rather than losing a genuine race.
         Atomic<uint64_t> unheldRowsSkipped{0};
+        // §6.5 decompositions entered (including recursive ones). A `MAP_FIXED`
+        // shape that decomposes when the geometry says it should not is a
+        // budget-tuning signal, not a correctness one.
+        Atomic<uint64_t> decompositions{0};
 
         void reset() {
             attempts.store(0, kPrivateInit);
@@ -337,10 +341,11 @@ namespace kernel::mm::radix {
             claimConflicts.store(0, kPrivateInit);
             redispatchChanges.store(0, kPrivateInit);
             unheldRowsSkipped.store(0, kPrivateInit);
+            decompositions.store(0, kPrivateInit);
         }
     };
 
-    template <GeometryDescriptor G, typename Codec>
+    template <GeometryDescriptor G, typename Codec, unsigned DetachBudget = kDetachBudget>
     class CoreTree {
     public:
         using Ops = NodeOps<G>;
@@ -520,6 +525,15 @@ namespace kernel::mm::radix {
                    "radix: operation range escapes the cluster — DEC-058 decomposes per "
                    "cluster before the core tree is involved");
 
+            return applyOrDecompose(lo, hi, value, 0);
+        }
+
+        // One unit: the attempt/retry loop of §6.1, which is what §6.5 means by
+        // "each unit is an ordinary attempt with its own section, claim set and
+        // marks". Returns `NeedsDecomposition` rather than decomposing, so the
+        // caller decides whether this range is a whole operation or one slot of
+        // somebody's decomposition.
+        [[nodiscard]] ApplyStatus runToCompletion(uint64_t lo, uint64_t hi, Mapping* value) {
             unsigned retryCount = 0;
             bool retiredAnything = false;
             for (;;) {
@@ -591,10 +605,193 @@ namespace kernel::mm::radix {
             }
         }
 
+        // ─── §6.5 decomposition ────────────────────────────────────────────
+        //
+        // Run this range as one unit; if it does not fit the budget, decompose.
+        // Every entry into the tree goes through here, so a sub-range produced by
+        // decomposition is treated exactly like a top-level operation — which is
+        // §6.5's "the sub-range inside that child is a sub-operation whose own
+        // detachment count is summed and budget-checked, decomposing at its own
+        // site if over".
+        [[nodiscard]] ApplyStatus applyOrDecompose(uint64_t lo, uint64_t hi, Mapping* value,
+                                                   unsigned depth) {
+            const ApplyStatus st = runToCompletion(lo, hi, value);
+            if (st != ApplyStatus::NeedsDecomposition) return st;
+            return decompose(lo, hi, value, depth);
+        }
+
+        // The **site node**: "the deepest node containing the operation's *entire
+        // range*" (§6.5, DEC-077). Unique and well-defined for a contiguous
+        // range, and it necessarily contains every fully-covered subtree.
+        //
+        // §6.5 records that two earlier predicates were wrong, and both are worth
+        // keeping visible because each looks more natural than this one:
+        //
+        //   - "deepest node beneath which the subtrees sum over budget" is
+        //     upward-closed, so its minimal elements need not be unique — an
+        //     ordinary multi-GiB MAP_FIXED reaches sixteen incomparable
+        //     candidates, each of which drops the other fifteen's spans.
+        //   - "deepest common ancestor of the fully-covered subtrees" need not
+        //     contain the range at all: with every covered subtree inside one
+        //     dense child and the range's tail in a sparse sibling, the DCA is
+        //     the dense child and the tail's slots are assigned to no unit — a
+        //     decomposed MAP_FIXED that maps only part of its range.
+        //
+        // Anchoring to the RANGE closes both. The descent is therefore driven
+        // purely by the range: descend while the whole range still fits inside a
+        // single slot AND that slot holds a node to descend into.
+        struct SiteRef {
+            NodeRef  node;
+            unsigned level    = 0;
+            uint64_t nodeBase = 0;
+        };
+
+        [[nodiscard]] SiteRef findSiteLocked(uint64_t lo, uint64_t hi) const {
+            SiteRef s{rootRef, level0, baseVA};
+            for (;;) {
+                const unsigned first = slotIndexFor(s.level, s.nodeBase, lo);
+                const unsigned last  = slotIndexFor(s.level, s.nodeBase, hi);
+                // The range straddles two slots here, so no deeper node contains
+                // it: this node is the site.
+                if (first != last) return s;
+                const uint64_t word = s.node.slot(first).load(kSlotLoad);
+                // A leaf or an empty slot has no node beneath it to be the site.
+                if (!Codec::isChild(word)) return s;
+                s.nodeBase += uint64_t{first} * slotSpan(G, s.level);
+                s.node = NodeRef(Codec::decodeChild(word));
+                s.level++;
+            }
+        }
+
+        // "the operation **decomposes per child slot at the site node**", and the
+        // decomposition processes "**every slot the operation's range intersects**
+        // at it — empty ones included — ascending VA".
+        //
+        // The six per-slot rows §6.5 enumerates are NOT re-implemented here. Each
+        // intersected slot is handed to an ordinary attempt over its clipped
+        // sub-range, and the ordinary dispatch produces exactly the row §6.5
+        // names for it:
+        //
+        //   operation-covered leaf      → OverwriteLeaf / ClearSlot
+        //   fully-intersected empty     → WriteLeaf for a map; NoOp for a clear
+        //                                 (no store, NO COUNT DECREMENT — §6.3's
+        //                                 clear row is for OCCUPIED slots, and the
+        //                                 spurious fetch_sub is silent in release)
+        //   partially-intersected empty → NoOp for a clear; for a map an
+        //                                 edge-partial sub-range leaf, or §6.1's
+        //                                 shortfall spine where the boundary is
+        //                                 inexpressible at this level (writing the
+        //                                 full span would map addresses the caller
+        //                                 never asked for)
+        //   partially-covered leaf      → the ordinary edge/subdivision rows
+        //   partially-covered child     → DescendIntoChild — never subdivision,
+        //                                 which would detach a live interior node
+        //                                 — and recurses
+        //   fully-covered child         → DetachChild if its subtree fits the
+        //                                 budget, otherwise recurses, the
+        //                                 recursion landing on that child as its
+        //                                 own site
+        //
+        // Reusing the dispatch is what makes "a decomposed MAP_FIXED over a range
+        // with holes maps exactly what the unit path would — no more, no less"
+        // true by construction rather than by a parallel table that has to be
+        // kept in agreement with §6.3.
+        //
+        // Note what is deliberately NOT asserted here. §6.5 is explicit that
+        // "one detachment site per unit" and "claims <= one subtree" are asserts
+        // that FIRE ON LEGAL EXECUTIONS — a fitting sub-range's several small
+        // subtrees are legitimately one unit. The budget is cumulative per
+        // attempt, and the claim set's fixed capacity is the structural check.
+        [[nodiscard]] ApplyStatus decompose(uint64_t lo, uint64_t hi, Mapping* value,
+                                            unsigned depth) {
+            // The per-slot recursion strictly descends, so tree depth bounds it.
+            // The final unit below can re-enter at the same range if a concurrent
+            // operation rebuilt under the site, which is legal but must not be
+            // able to spin: this is the forcing function for that.
+            assert(depth <= 2 * (G.levelCount + 2),
+                   "radix: decomposition recursion is not descending (§6.5)");
+
+            SiteRef site;
+            {
+                kernel::rcu::ReadGuard guard(*domain);
+                site = findSiteLocked(lo, hi);
+            }
+
+            const uint64_t span  = slotSpan(G, site.level);
+            const unsigned first = slotIndexFor(site.level, site.nodeBase, lo);
+            const unsigned last  = slotIndexFor(site.level, site.nodeBase, hi);
+
+            counters.decompositions.fetch_add(1, kRefcountAcquire);
+
+            // "Every intersected slot is assigned this way, none skipped."
+            for (unsigned i = first; i <= last; i++) {
+                const uint64_t slotBase = site.nodeBase + uint64_t{i} * span;
+                const uint64_t slotEnd  = slotBase + span - 1;
+                const uint64_t clipLo   = lo > slotBase ? lo : slotBase;
+                const uint64_t clipHi   = hi < slotEnd  ? hi : slotEnd;
+
+                ApplyStatus st = runToCompletion(clipLo, clipHi, value);
+                if (st == ApplyStatus::NeedsDecomposition) {
+                    // Recursing on the SAME range would not terminate. It cannot
+                    // happen: the site is the deepest node containing the range,
+                    // so either the range straddles several of its slots (each
+                    // sub-range is strictly smaller) or the single slot it lands
+                    // in holds no child — and a slot with no child beneath it has
+                    // no subtree to blow the detachment budget. A sub-range that
+                    // is still over budget with nowhere to descend is a geometry
+                    // defect, not a decomposable shape.
+                    assert(!(clipLo == lo && clipHi == hi),
+                           "radix: decomposition cannot make the range smaller — the site "
+                           "is not the deepest node containing it (§6.5)");
+                    st = decompose(clipLo, clipHi, value, depth + 1);
+                }
+                if (st != ApplyStatus::Ok) return st;
+            }
+
+            // ─── The final coarse-replacement unit ─────────────────────────
+            //
+            // "**The coarse-value replacement of the flattened site happens only
+            // when the site itself is fully covered, is not the cluster root, and
+            // the operation writes a value**" — then a final unit applies the
+            // fully-covered-child row at its PARENT, and the terminal state is the
+            // unit path's single coarse leaf.
+            //
+            // Each of the three conditions excludes a different disaster:
+            //
+            //   - A **clearing** operation gets no final unit: §6.4's ordinary
+            //     reclamation-candidate path is the terminal mechanism, and
+            //     wiring both would RETIRE THE SITE TWICE.
+            //   - A **cluster-root** site gets none: its parent is a bucket word
+            //     with no state word to claim, and invariant 16 forbids marking or
+            //     unlinking the cluster root before teardown. An emptied cluster
+            //     root simply stays, exactly as §6.4's walk-termination prescribes.
+            //   - A **partially-covered** site is never replaced: its per-slot
+            //     results stand. Wiping it wholesale would unmap the survivors in
+            //     its partially-covered slots — the hole-freedom violation
+            //     invariant 30 forbids.
+            //
+            // Since the site is by construction the deepest node CONTAINING the
+            // range, "the site is fully covered" is exactly "the range is the
+            // site's whole span".
+            const uint64_t siteSpan = nodeSpan(G, site.level);
+            const bool siteFullyCovered =
+                (lo <= site.nodeBase) && (hi >= site.nodeBase + siteSpan - 1);
+            const bool siteIsClusterRoot = (site.node == rootRef);
+
+            if (value != nullptr && siteFullyCovered && !siteIsClusterRoot) {
+                // The site's slots now all name `value`, so the subtree behind
+                // this row is the site alone — one node, comfortably under the
+                // budget — and the row taken at the parent is DetachChild.
+                return applyOrDecompose(lo, hi, value, depth + 1);
+            }
+            return ApplyStatus::Ok;
+        }
+
         // ─── Structural walk, for validators and tests ─────────────────────
         //
-        // Visits every (level, slotBase, word) in ascending VA. `fn` returns
-        // void. Kept here rather than in the harness because the quiesced-tree
+        // Visits every NODE as `fn(level, nodeBase, node)`, in ascending VA;
+        // slots are the caller's to iterate. `fn` returns void. Kept here rather
+        // than in the harness because the quiesced-tree
         // validators of §11 need it and because a walk written against the
         // node's real layout is the one that catches a layout regression.
         template <typename F>
@@ -835,7 +1032,7 @@ namespace kernel::mm::radix {
         // identical minus the guard, which is why those tests are the regression
         // suite for this path.
         struct Attempt {
-            ClaimSet<G> claims;
+            ClaimSet<G, DetachBudget> claims;
 
             // Subtrees built during the read pass, before any claim is taken —
             // §6.1's "allocate before you claim". Bounded by 2 per level: only
@@ -1108,7 +1305,7 @@ namespace kernel::mm::radix {
         // address. Because the refcount keeps it alive, it does not even crash.
         ApplyStatus planDetachment(NodeRef node, unsigned level, uint64_t nodeBase,
                                    Attempt& a) {
-            if (++a.detachNodes > kDetachBudget) return ApplyStatus::NeedsDecomposition;
+            if (++a.detachNodes > DetachBudget) return ApplyStatus::NeedsDecomposition;
             if (!a.claims.addOrMerge(node, level, nodeBase, valenceMask(G, level),
                                      /*wholeNode=*/true)) {
                 return ApplyStatus::NeedsDecomposition;
@@ -1128,7 +1325,7 @@ namespace kernel::mm::radix {
         }
 
         // ─── Acquisition (§6.8) ────────────────────────────────────────────
-        static bool acquireAll(ClaimSet<G>& set) {
+        static bool acquireAll(ClaimSet<G, DetachBudget>& set) {
             for (size_t i = 0; i < set.count; i++) {
                 auto& e = set.entries[i];
                 // DEC-046's once-per-node rule, enforced structurally: the set
@@ -1179,13 +1376,13 @@ namespace kernel::mm::radix {
         // §6.4's rule is the other half: "A node that empties but was NOT a
         // candidate is simply not reclaimed on this pass — an opportunistic miss,
         // bounded by the residue figure rather than unbounded in history."
-        static bool holdsWholeNode(ClaimSet<G>& set, NodeRef node, unsigned level) {
+        static bool holdsWholeNode(ClaimSet<G, DetachBudget>& set, NodeRef node, unsigned level) {
             const auto* e = set.find(node);
             return e != nullptr && e->held && (e->mask & valenceMask(G, level)) ==
                                                   valenceMask(G, level);
         }
 
-        static void retainClaim(ClaimSet<G>& set, NodeRef node) {
+        static void retainClaim(ClaimSet<G, DetachBudget>& set, NodeRef node) {
             if (auto* e = set.find(node)) e->held = false;
         }
 
@@ -1196,12 +1393,12 @@ namespace kernel::mm::radix {
         // shape that produces both §5.3's occupancy over-count and a `Mapping`
         // refcount underflow, so assert it at the write rather than inferring it
         // from the wreckage.
-        static bool holdsSlot(ClaimSet<G>& set, NodeRef node, unsigned slot) {
+        static bool holdsSlot(ClaimSet<G, DetachBudget>& set, NodeRef node, unsigned slot) {
             const auto* e = set.find(node);
             return e != nullptr && e->held && (e->mask & (uint64_t{1} << slot)) != 0;
         }
 
-        static void releaseAll(ClaimSet<G>& set) {
+        static void releaseAll(ClaimSet<G, DetachBudget>& set) {
             // Reverse order is not required — release is a fetch_and and the
             // order over HELD claims is what §6.8 constrains, not the release
             // sequence — but it keeps the window in which a partially-released
@@ -1319,7 +1516,7 @@ namespace kernel::mm::radix {
         // between the read pass and the claims: release everything and retry
         // from a fresh read pass (which re-counts, and decomposes if the subtree
         // is now over budget).
-        static bool detachmentIsFrozen(NodeRef node, unsigned level, ClaimSet<G>& set) {
+        static bool detachmentIsFrozen(NodeRef node, unsigned level, ClaimSet<G, DetachBudget>& set) {
             if (!holdsWholeNode(set, node, level)) return false;
             const unsigned n = valence(G, level);
             for (unsigned i = 0; i < n; i++) {
@@ -1664,7 +1861,7 @@ namespace kernel::mm::radix {
         // subtree, which then reads as fresh, resumes a descent, and silently
         // returns a Mapping for a remapped address. The refcount keeps it alive,
         // so it does not even crash.
-        static void markSubtree(NodeRef node, unsigned level, ClaimSet<G>& set) {
+        static void markSubtree(NodeRef node, unsigned level, ClaimSet<G, DetachBudget>& set) {
             markDying(node.stateWord());
             retainClaim(set, node);
             const unsigned n = valence(G, level);

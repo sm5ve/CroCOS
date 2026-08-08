@@ -106,8 +106,8 @@ namespace CroCOSTest::radix {
     // Compares a tree against its model at EVERY floor unit. Cheap on the tiny
     // geometry (256 units), which is what makes the exhaustive sweep possible;
     // on the real geometry the caller samples instead.
-    template <rdx::GeometryDescriptor G, typename Codec>
-    void assertMatchesModel(const rdx::CoreTree<G, Codec>& tree,
+    template <rdx::GeometryDescriptor G, typename Codec, unsigned DB>
+    void assertMatchesModel(const rdx::CoreTree<G, Codec, DB>& tree,
                             const ShadowMap<G>& model,
                             const char* what) {
         const uint64_t unitSize = uint64_t{1} << G.floorBits;
