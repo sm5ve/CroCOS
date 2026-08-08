@@ -1,7 +1,7 @@
 # The CroCOS Radix Tree — Design Document
 
-*Distilled 2026-08-08 from `specs/radix-tree.md` (101 decisions, `status: review`) for design
-review. This document is narrative and explanatory; the spec is normative. `DEC-nnn` and
+*Distilled 2026-08-08 from `specs/radix-tree.md` (104 decisions, **`status: ready`** — approved
+after this document's review, which itself produced DEC-102..104) for design review. This document is narrative and explanatory; the spec is normative. `DEC-nnn` and
 `ITEM-nnn` references point into the spec's decision record and open-questions table. Where this
 document and the spec disagree, the spec wins and this document has a bug.*
 
