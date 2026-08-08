@@ -318,10 +318,22 @@ namespace rcu_stress {
 
 }   // namespace rcu_stress
 
+// Phase 5 / RCU P4-DEC-013: **one in-kernel stress at a time is the shape.** The
+// radix stress takes this component's slot when CROCOS_RADIX_STRESS is defined,
+// and it does so by tail-call rather than by a second `.icd` component, because
+// two per-CPU routines in the same phase would mean the first one's infinite
+// loop silently prevents the second from ever running — a coverage hole that
+// looks exactly like a healthy boot.
+[[noreturn]] void radixStress();
+
 // Per-CPU stress driver. Runs until the shutdown timer fires; its own success
 // signal is the absence of a panic.
 [[noreturn]] bool rcuStress() {
     namespace st = rcu_stress;
+
+#ifdef CROCOS_RADIX_STRESS
+    radixStress();   // never returns
+#endif
 
     const arch::ProcessorID myCpu = getLogicalProcessorID();
     assert(static_cast<size_t>(myCpu) < st::kMaxCpus,

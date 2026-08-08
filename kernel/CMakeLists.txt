@@ -77,6 +77,7 @@ set(KERNEL_SRC
         mm/VMSubstrateSlab.cpp
         mm/vmsmalloc.cpp
         RcuStress.cpp
+        RadixStress.cpp
         rcu/RCU.cpp
         CpuLocal.cpp
         Random.cpp
@@ -95,6 +96,7 @@ set_source_files_properties(
         mm/VMSubstrateSlab.cpp
         mm/vmsmalloc.cpp
         RcuStress.cpp
+        RadixStress.cpp
         PROPERTIES COMPILE_FLAGS "-O2 -ftemplate-backtrace-limit=0"
 )
 
@@ -173,12 +175,39 @@ option(CROCOS_FRESHNESS_STATS "Count RCU freshness hits and slab-page reclaims (
 # would inflate the denominator by the inner probe's own cost.
 set(CROCOS_INSN_PROBE "" CACHE STRING "RCU retire-path instruction probe: unset, 1 (freshness call) or 2 (whole retire)")
 
+# radix-tree Phase 5. Selects which in-kernel stress the smp_bringup slot runs:
+# RCU Phase 4's by default, the radix tree's when this is ON. **One at a time is
+# the shape** (RCU P4-DEC-013) — two per-CPU stress routines in one phase means
+# the first one's infinite loop silently starves the second, so this is a
+# selection and not an addition.
+#
+# `RadixStress.cpp` compiles either way, deliberately: the tree is header-only
+# and has no other kernel consumer yet, so this is the only translation unit that
+# type-checks it against the real freestanding toolchain, `-mcmodel=kernel` and
+# `-Werror`. A flag that also removed the compilation would let the kernel build
+# stay green through a target-only break in the tree.
+option(CROCOS_RADIX_STRESS "Run the radix-tree in-kernel stress instead of the RCU one" OFF)
+
+# The node and Mapping censuses (§11's residue gate). Implied by the stress,
+# which cannot state its gate without them, and separately selectable so a future
+# consumer can measure without running the stress. Counters on the allocation
+# path, so OFF by default.
+option(CROCOS_RADIX_NODE_CENSUS "Count live radix nodes and Mapping records" OFF)
+
 add_executable(Kernel ${KERNEL_SRC} ${GENERATED_INIT_CPP})
 if(CROCOS_FRESHNESS_STATS)
     target_compile_definitions(Kernel PRIVATE CROCOS_FRESHNESS_STATS)
 endif()
 if(CROCOS_INSN_PROBE)
     target_compile_definitions(Kernel PRIVATE CROCOS_INSN_PROBE=${CROCOS_INSN_PROBE})
+endif()
+if(CROCOS_RADIX_STRESS)
+    # The census is not optional under the stress: §11's residue gate is stated
+    # in live nodes, and without the counters the stress would report a bound it
+    # never measured.
+    target_compile_definitions(Kernel PRIVATE CROCOS_RADIX_STRESS CROCOS_RADIX_NODE_CENSUS)
+elseif(CROCOS_RADIX_NODE_CENSUS)
+    target_compile_definitions(Kernel PRIVATE CROCOS_RADIX_NODE_CENSUS)
 endif()
 add_dependencies(Kernel generate_idt_macros generate_init_registry create_linker_script create_linker_script)
 target_compile_options(Kernel PRIVATE -gdwarf-4)

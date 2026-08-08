@@ -1313,3 +1313,148 @@ Every fixture that wants a floor-level node now maps a **pair of adjacent
 pages**: two leaves inside one 64 KiB level-5 slot force subdivision to the floor.
 The file carries a `static_assert` on the shortfall so a geometry change breaks
 the build rather than the assumption.
+
+---
+
+## D-039 — DEFECT (found by the first in-kernel run, Phase 5) — §7.1's freshness sites were never implemented, and its list is incomplete
+
+**The single most valuable thing Phase 5 has produced, and it landed on the first
+boot.** It is also the DEC-047 precedent repeating exactly: a stale-TLB bug class
+that the userspace harness is *structurally* incapable of seeing, because its
+`ensureTLBEntryFresh` is a no-op and it has no page tables.
+
+§7.1 states the rule and names three sites:
+
+> "**Deleters touch bodies, and freshness is not free there** (RCU-DEC-006):
+> `onPreTouch` covers each retire subject's `RetireHead` fields and nothing else,
+> so every access a deleter makes beyond the head — a node deleter reading its own
+> slots, either deleter RMW-ing a `Mapping`'s count word, the record deleter
+> reading its own fields — is a cross-CPU access to vmsmalloc-backed memory and
+> goes through the `SafePtr` / `ensureTLBEntryFresh` discipline." … "**The same
+> discipline covers each record's first draw**."
+
+Of those, **only the `DeferredRelease` pair was implemented** (the record deleter
+and the pool pop, both already in `DeferredRelease.h`). The node deleter's slot
+reads and the `Mapping` count-word RMW had no call at all. 150 userspace tests on
+two sanitizers pass without them.
+
+### What the target said
+
+Four cycles of churn on 8 CPUs, then:
+
+```
+radix DIAG: releaseRefs prior=0 n=1 rec=0xffffff0000238100 baseVA=0xffffff0200202280
+Panic: Assert failed: radix Mapping: release below zero
+```
+
+`prior=0` on a record whose `baseVA` is nonsense — the record's page had been
+reclaimed and re-backed, and the releasing CPU was reading the previous tenant's
+bytes through a stale mapping. Exactly the shape of vmsmalloc's own DEC-047.
+
+Ruled out before fixing, rather than after: the stress's own
+destroy-on-failure paths were disabled (`leaked=0`, `oom=0` in the liveness line
+— neither had ever run), and concurrent growth was disabled. Both left the
+failure unchanged.
+
+### Two more sites the spec does not name
+
+Fixing §7.1's two moved the failure, twice, and each move named a site the spec's
+list omits. **Both are on the fault path**, which is what makes them worth
+escalating rather than merely recording:
+
+1. **The root bucket page.** `radix bucket codec: a non-zero entry without its
+   guard bit`, at cycle 5. The table is a whole-page `tryMake<BucketTable>`
+   allocation, so its VA recycles like any other arena page — and address-space
+   creation/teardown recycles it every cycle. *Every descent* opens by loading a
+   bucket word out of it. Now behind `BucketTable::fresh(i)`.
+
+   **This is a design question, not just a missing call.** DEC-082 moved the
+   control block into pinned `reservePerDomainStaticBuffer` storage specifically
+   so that "the generation check, the `dying`-flag load and the pool heads —
+   all of which sit on other CPUs' hot paths — carry **no freshness obligation at
+   all**", and its own rationale rejects "an `ensureTLBEntryFresh` on every
+   descent-cache hit". The root page is the one per-address-space allocation that
+   did not move with the control block, and it is read *more* often than any of
+   the fields that did. Either it belongs in the pinned block too, or DEC-082's
+   argument needs to say why the root page is different. **Flagged for Spencer;
+   the freshness call is the conservative answer in the meantime.**
+
+2. **The reader's and writer's first touch of a `Mapping` body.** `radix Mapping:
+   fault VA below the mapping base — the offset derivation would underflow`,
+   i.e. `baseVA` read as garbage. `descendLocked` decodes a record from a slot
+   word and does `m->acquireRef()`; `takeSubtreeReferences` does the same on the
+   write path. Neither had a freshness call, and §7.1's list covers deleters
+   only.
+
+   The call goes at **reference acquisition**, and the placement is an argument
+   rather than a convenience: one call there covers every later access the caller
+   makes through that reference, because the counted reference is precisely what
+   stops the record being destroyed and its page recycled underneath. DEC-073
+   already says the obligation exists — "whatever pointer it derives carries the
+   `SafePtr` freshness obligation exactly as with `protect`" — so this is §7.1's
+   list being incomplete rather than the design being wrong.
+
+### Spec follow-ups owed
+
+- §7.1's freshness list should gain the reader/writer reference-acquisition site
+  and the root bucket page, or state why each is exempt.
+- DEC-082 should either extend to the root page or record why the root page's
+  freshness obligation is acceptable where the control block's was not.
+
+---
+
+## D-040 — CHOICE (2026-08-08, Phase 5) — `SubRange` is zero-initialised, and LTO is what made that necessary
+
+`-Werror=maybe-uninitialized` in the **Release/LTO** build only:
+`SubRange::{lo,hi}` were uninitialised, and both writers pass one by reference to
+the failable `Codec::subRangeFor`. One checks the result; the other
+debug-*asserts* it ("a fully-covered child slot's replacement is the whole span,
+which is always expressible"). In release the assert compiles out, so a false
+return would encode a leaf from indeterminate stack — undefined behaviour rather
+than the merely-wrong range the assert describes.
+
+The members are now `= 0`. Worth recording because of *why it was invisible*:
+without cross-TU inlining the release kernel could not see the call and the
+warning did not exist. [[project_kernel_lto]]'s point again, from the other
+direction — LTO is not only an optimisation, it is a diagnostic.
+
+---
+
+## D-041 — OPEN (2026-08-08, Phase 5) — two rare Release-only failures, not yet diagnosed
+
+Both appear only in the **Release/LTO** build, which runs ~250x more cycles in the
+same 20 s window (1025 cycles vs 4), so they are rate-limited discoveries rather
+than build-specific ones. Debug is green on every QEMU config; Release is green on
+most runs. **Neither is diagnosed, and neither should be assumed benign.**
+
+**(a) A page fault, roughly 1 run in 6.**
+
+```
+Pagefault at 0xffffffffc015ba6e accessing 0xffffff0007ffffe0
+```
+
+The faulting address is inside CPU 0's arena (substrate base + 128 MiB − 32 B) —
+32 bytes below a 128 MiB boundary, which is the shape of a read just past the end
+of a mapped region or of a VA whose backing was released. The likeliest
+candidates, in the order they should be checked: a fourth freshness site D-039
+did not reach; a node or record touched after its page was returned by
+`reclaimSlabPage`; or an arena-boundary case in vmsmalloc reached by this
+workload's allocation mix and not by RCU Phase 4's.
+
+**(b) `Mapping` residue of 2 after teardown, seen once (`run_numa_hmat`).**
+
+```
+radixStress: RESIDUE — 2 Mapping records live after teardown.
+```
+
+The node residue gate passed in the same run, so this is records specifically.
+Two suspects worth separating before anything else: the stress's own
+shallow-discard of a record whose placement failed (a decomposed `apply` that
+returns `OutOfMemory` **has** committed earlier units, so the record may be
+published — the stress notes this at the site and argues the row cannot
+decompose, and that argument is worth re-checking); and a genuine deferred-release
+record that never came home.
+
+The residue gate is what found (b), which is the gate working: it is stated at
+**zero** for records precisely because a leaked record pins its VMObject and every
+frame behind it.
