@@ -3,7 +3,7 @@
 Running log for the implementation branch (`radix-tree`), kept per
 [[feedback_spec_deviations]].
 
-**Starting a fresh context?** Read `docs/radix-tree-phase-3-HANDOFF.md` first — it
+**Starting a fresh context?** Read `docs/radix-tree-HANDOFF-impl.md` first — it
 says where the implementation stands, which entries here are live obligations
 (D-003, D-004, D-010, D-011) and which are closed.
 

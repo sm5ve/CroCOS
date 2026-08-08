@@ -1,120 +1,89 @@
-# radix-tree — implementation handoff into Phase 3
+# radix-tree — implementation handoff (Phase 3 complete, into Phase 4)
 
-**Written 2026-08-08 at `e3b82bd`; UPDATED 2026-08-08 at `ea364af`.** Branch
-`radix-tree`. Phases 0, 1 and 2 are complete and green, and **four of Phase 3's
-nine work items have landed** — see §0, which is the only part of this note that
-has moved, and which also carries the binding rule growth turns on. Everything below §0 was written before Phase 3 started and still
-holds except where §0 says otherwise.
+**Written 2026-08-08 at `e3b82bd`; UPDATED 2026-08-08 at `790671f`.** Branch
+`radix-tree`. **Phases 0, 1, 2 and 3 are complete and green** — §0 has the commit
+map, the exit gate item by item, and what Phase 4 needs to know. Everything below
+§0 was written before Phase 3 started; still accurate as background, but §0
+supersedes it wherever they differ.
 
 Read in this order:
 
 1. §0 of this note, then the rest of it.
-2. `specs/radix-tree-phase-3.md` — the work items and exit gate; the landed ones
-   are ticked.
-3. `docs/radix-tree-implementation-deviations.md` — D-001..D-029, the running
-   findings log. **D-004, D-010 and D-029 are the live obligations now**;
-   D-003 and D-011 are closed (see §0).
+2. `specs/radix-tree-phase-4.md` — the next phase. `radix-tree-phase-3.md` is
+   fully ticked.
+3. `docs/radix-tree-implementation-deviations.md` — D-001..D-032, the running
+   findings log. **Live now: D-004 and D-030 (spec text), D-010 (bounded and
+   logged), D-029 (a WATCH item — read it before touching the refcounts).**
+   D-003, D-011 and D-032 are closed.
 4. `specs/radix-tree.md` §3.1, §5.1/5.4/5.6, §7 entire, §9, §11 — Phase 3's
    sections. `specs/radix-tree-HANDOFF.md` is the *spec*-side note and is only
    needed if you intend to edit the spec.
 
 ---
 
-## 0. Phase 3 so far
+## 0. Phase 3 — COMPLETE
 
-### Landed (all committed, all green)
+**All nine work items have landed.** Full suite green, sequential on a quiet
+machine: Core 441 + 425 TSan, Kernel 177, LibAlloc 38x2, vmsmalloc 31x2, RCU
+61x2, **radix 138x2** plus the progress audit. Kernel builds and boots clean.
 
 | Commit | Item |
 |---|---|
-| `313a2ae` | **`vmsmallocTry` / `tryMake` kernel-side** (DEC-048). Closes D-003. |
-| `8a5b1f7` | **`DeferredRelease` pools** (§7.1, DEC-068). **Closes D-011** and re-enables the three reader-side tests. |
-| `4e6135b` | **The validity token and `revalidate`** (§3.1, DEC-051/070). |
-| `9efb9a7` | **Bucket table + packed entry codec** (DEC-102/103). |
-| `ea364af` | The radix runners are now in `run_all_tests`, where they always should have been. |
+| `313a2ae` | `vmsmallocTry` / `tryMake` kernel-side (DEC-048). Closes D-003. |
+| `8a5b1f7` | `DeferredRelease` pools (DEC-068). **Closes D-011.** |
+| `4e6135b` | The validity token and `revalidate` (§3.1, DEC-051/070). |
+| `9efb9a7` | Bucket table + packed entry codec (DEC-102/103). |
+| `9e80cc2` | The root-binding seam (`currentBinding`). |
+| `28e8c6c` | Cluster creation and growth (§5.6). |
+| `11b4c54` | Chunked ordered enumeration (DEC-083). |
+| `5fdb7cf` | Placement + the DEC-091 assignment seam. |
+| `d7f822c` | Control block, creation sequence, teardown sequence (DEC-082/101). |
+| `26c5ece` | The unit-decomposed teardown walk (DEC-100). **Resolves D-032.** |
+| `e63bf5a` | The TSan stress-test diagnosis and its gate. |
+| `790671f` | The placeholder entropy source (DEC-063) and the TSan default. |
 
-Full suite at `ea364af`: Core 441×2, Kernel 173, LibAlloc 38×2, vmsmalloc 31×2,
-RCU 61×2, **radix 106×2**. Kernel builds and boots clean.
+### The exit gate, item by item
 
-**D-011 is closed and that is the headline.** The three disabled tests in
-`ConcurrentTest.cpp` are on, so the tree finally has reader-side concurrency
-coverage; before this every concurrency test it had was writer-vs-writer. The
-closure was mutation-verified, not merely green — restoring the synchronous
-direct-slot release is caught by `readers_never_observe_a_torn_state` as an ASan
-use-after-poison on a reader thread.
+| §13 requirement | Where |
+|---|---|
+| Probe-retry histogram at realistic per-cluster occupancy | `PlacementTest.cpp` — reports fill by decile over a full 32 MiB cluster |
+| Memory returns to baseline after a pumped churn cycle | `DeferredReleaseTest.cpp`, `OracleTest.cpp`, `AddressSpaceTest.cpp` |
+| Coverage revalidation, incl. the full-unmap recycled-node variant | `RevalidationTest.cpp` |
+| Teardown residue ≤ the DEC-096 bound, creation-failure paths exercised | `AddressSpaceTest.cpp` — the bound is ZERO until Phase 4's cache exists, and `assertNoLiveObjects` checks exactly that; the failure sweep covers every allocation index |
+| Bucket-codec round-trip + `static_assert` gate | `BucketCodecTest.cpp` |
+| The lost-CAS row | `GrowthTest.cpp` — four CPUs racing creation and growth |
+| Record-population conservation at teardown | asserted inside `DeferredReleasePools::destroy` |
+| **Carried forward from Phase 2**: the three disabled reader-side tests, and `rcuTortureForcedStall` | `ConcurrentTest.cpp` — all three on, mutation-verified |
 
-**D-029 is a new WATCH item** and the most important thing to know before
-touching the refcounts: DEC-069's release-plus-acquire-**fence** spelling is
-correct in the C++ model and **invisible to ThreadSanitizer**, which does not
-model `atomic_thread_fence`. It has been folded into an `ACQ_REL` RMW at both
-release sites. If a `Mapping`-constructor-vs-`offsetFor` race report ever comes
-back, **do not re-silence it** — the alternative explanation is a real
-use-after-free the oracle's poison window happens to miss.
+### What Phase 4 needs to know
 
-### Growth's binding rule, and why it is smaller than it first looks
+- **The teardown walk marks** (DEC-100). That was the point of `26c5ece`, and
+  it is a hard prerequisite: landing the descent cache over a non-marking
+  teardown is the exact defect §7.4 spends a paragraph on. `resumeDescent`'s
+  `Detached` answer depends on it.
+- **D-029 is a WATCH item.** DEC-069's release-plus-acquire-*fence* refcount is
+  invisible to TSan, which does not model `atomic_thread_fence`; it is folded
+  into an `ACQ_REL` RMW at both release sites. If a `Mapping`-constructor-vs-
+  `offsetFor` race ever reappears, **do not re-silence it** — the alternative
+  explanation is a real use-after-free.
+- **The entropy source is a placeholder.** `kernel/include/Random.h` is not a
+  CSPRNG and says so; it carries the checklist for replacing it. Placement takes
+  entropy as a parameter, so the swap is two files.
+- **D-030 is an accepted, recorded residue**: growth over an empty cluster
+  strands the old root. Two nodes per cluster, recoverable by the ordinary path,
+  and a gap between two individually-correct rules rather than a bug.
+- **`CROCOS_SKIP_TSAN_STRESS` defaults ON.** The sixteen "flaky" Core TSan
+  failures were machine-load starvation of wall-clock timeouts, diagnosed in
+  `e63bf5a` — idle 441/441, loaded 425/441, reproducible both ways. Run them
+  deliberately with `-DCROCOS_SKIP_TSAN_STRESS=OFF` on a quiet machine.
 
-The remaining items in the suggested order are **growth and creation** (§5.6),
-then placement, the control block, teardown and the enumeration API.
+### Spec follow-ups owed
 
-An earlier draft of this note treated growth as blocked on a core/policy seam
-decision, on the reading that a concurrent growth makes an in-flight operation's
-`{root, level, base}` *wrong*. **That reading is mistaken and is worth correcting
-here, because it is the natural one and it inflates the work by an order of
-magnitude.**
-
-A stale binding within a section is an ordinary RCU snapshot. If a writer decodes
-`(R, level 3, base B)` and a grower then publishes `(P, level 2, base B')`:
-
-- growth does not relabel the old root — it allocates a new parent above it — so
-  `(R, 3, B)` stays a *true* description of the node it names;
-- nothing is retired and no count moves (§5.6's transfer-in-place), so `R` stays
-  reachable as `P`'s child;
-- a writer holding claims inside `R` publishes into slots that are exactly where
-  they were, and its range fit `R`'s span, which growth only widens.
-
-What §7.3 actually guards is narrower, and it is two things:
-
-1. **Atomicity of the triple.** The failure is pairing a *fresh* root pointer
-   with *stale* `{base, level}` — decode `P` in a new section but keep level 3
-   and base `B` from the old one, and the writer computes bit indices for a node
-   that is not shaped that way, "on a node it holds a valid claim in". DEC-103's
-   packing gives that atomicity for free **provided all three fields come out of
-   one load**. The rule is decode-together, not never-be-stale.
-2. **The uncounted root pointer must not cross a section close** — and this one
-   has teeth *because* of growth. Before growth `R` is the cluster root, which
-   §6.4's walk never reclaims. After growth `R` is an ordinary interior node with
-   a parent slot and a state word, so it becomes reclaimable the moment it
-   empties, and a pointer held across a close can be freed underneath.
-
-So: **decode the bucket word once at the top of each attempt, inside that
-attempt's section, all three fields from one `protectWord` load.**
-`runToCompletion` already opens one section per attempt, so nothing about the
-attempt machinery moves — which is the part §6.5 took seven rewrites to get right
-and the part not to disturb.
-
-Two consequences, both benign and worth recognising rather than debugging later:
-a writer working from the pre-growth view treats `R` as the cluster root and so
-declines to reclaim it, while one working from the post-growth view treats it as
-interior and may. The two differ in conservatism, not correctness. And
-`CoreTree`'s existing `if (node == rootRef) return false` reclamation guard stays
-correct under either, because it compares against whatever root *that attempt*
-decoded.
-
-§5.6's accounting rules are the part to re-read first and not paraphrase: **no
-count moves on the old root, nothing is retired, nothing reverts.** A CAS-
-published root is constructed at count 1 (pre-assigned, not a `+1` on a published
-object); the old root's inbound reference **transfers in place** to the new
-parent's child slot; a losing grower or creator **shallow-discards** its private
-node, pre-assigned count notwithstanding. If an implementation wants a decrement
-anywhere on the growth path, it has diverged.
-
-### Still not started
-
-Growth/creation, placement + the DEC-091 assignment seam, the control block +
-creation sequence, teardown, the lookup/enumeration API, and the **in-kernel
-entropy source** (DEC-063). The entropy source is deliberately untouched: it is
-a security-sensitive component whose algorithm, seeding policy, reseeding and
-RDSEED-unavailable behaviour are all choices, and picking them unilaterally is
-not the kind of judgement call this project wants made in the background.
+D-004 (§7.2's edge-subdivision row states a minimal-shape figure as general),
+D-029 (§6.6 should record the fence form as correct-but-untestable and the
+ACQ_REL form as the implementation's), D-030 (DEC-096's residue bound should
+carry the stranded-root term, and §6.4's walk-termination paragraph should note
+that the exemption is positional).
 
 ---
 
