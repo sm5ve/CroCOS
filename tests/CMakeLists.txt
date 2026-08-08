@@ -81,6 +81,14 @@ add_custom_target(run_all_tests
     COMMAND kernel/vmsmalloc/KernelVmsmallocIntegrationTestRunnerTSan
     COMMAND kernel/rcu/KernelRcuIntegrationTestRunner
     COMMAND kernel/rcu/KernelRcuIntegrationTestRunnerTSan
+    # The radix runners were missing here for the whole of Phases 0-2, which is
+    # the same omission the comment above records for the Core/LibAlloc TSan
+    # siblings: a phase verified by running its own runner does not notice a
+    # sibling it broke (D-021), and `run_all_tests` not covering the subsystem
+    # under active development is exactly the wrong way round. The progress-audit
+    # runner stays out — it is a deliberately expensive instrument, not a gate.
+    COMMAND kernel/radix/KernelRadixTestRunner
+    COMMAND kernel/radix/KernelRadixTestRunnerTSan
     DEPENDS core/CoreTestRunner core/CoreTestRunnerTSan
             liballoc/LibAllocTestRunner liballoc/LibAllocTestRunnerTSan
             kernel/KernelTestRunner
@@ -88,6 +96,8 @@ add_custom_target(run_all_tests
             kernel/vmsmalloc/KernelVmsmallocIntegrationTestRunnerTSan
             kernel/rcu/KernelRcuIntegrationTestRunner
             kernel/rcu/KernelRcuIntegrationTestRunnerTSan
+            kernel/radix/KernelRadixTestRunner
+            kernel/radix/KernelRadixTestRunnerTSan
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     COMMENT "Running all CroCOS unit tests"
 )
