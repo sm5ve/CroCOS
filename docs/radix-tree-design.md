@@ -62,18 +62,24 @@ descriptor derives its top-level index bits from (DEC-102) — an architecture w
 gets 2048 buckets over 64 GiB zones automatically. At the amd64 default (4 KiB page, 8 B entry)
 that is 512 buckets indexed by the top 9 bits, tiling the 47-bit user space at 256 GiB each;
 buckets hold **at most one cluster apiece** — the index is a prefix, not a hash: no probing, no
-collisions (DEC-030/033). The entry representation is the one open question here (ITEM-085):
-today it is an 8 B pointer to an out-of-line immutable descriptor {base, level, root}; a packed
-8 B inline word (33-bit compressed root pointer + 3-bit level + ≤8-bit span-aligned base offset
-+ guard bit = 45 of 64 bits) would keep single-CAS growth while deleting the descriptor as an
-object class — no retire subject, no deleter, no dual-ownership teardown release.
+collisions (DEC-030/033). A bucket entry is **one 8 B packed word** (DEC-103): a compressed root pointer (33 bits at the
+default — `VMSubstrate` window over the 64 B node alignment), root level (3), span-aligned base
+offset (≤ 8), and a guard bit — 45 of 64 bits, every width `constexpr`-derived from the
+architecture's paging constants and `static_assert`ed to fit. Packing all three fields into one
+word is what keeps growth a single CAS *without* the out-of-line descriptor object the earlier
+design used for the same purpose — and deleting the descriptor deletes an object class: no
+allocation, no retire subject, no deleter, and teardown's cluster-root release becomes
+single-owner (the root's own deleter), making the dual-release hazard structurally impossible.
+Growth and creation now retire nothing — the old word is a value. The bucket read unifies with
+the slot path (`protectWord` + codec decode).
 
 A **cluster** is a node of one conceptual full-depth tree, rooted at whatever level suits its
 current size. Its base is span-aligned by construction, and it grows by allocating a node
-*above* itself: the old root becomes one child slot of the new node, so no mapping moves. Each
-bucket entry is a pointer to an immutable **cluster descriptor** — base VA, level, root pointer —
-and growth mints a fresh descriptor and publishes it with a compare-exchange, retiring the old
-one (DEC-027/028).
+*above* itself: the old root becomes one child slot of the new node, so no mapping moves.
+Growth computes the new packed word and publishes it with a compare-exchange against the word it
+observed (DEC-027/028/103); the old root stays reachable as the new root's child, and the
+grower's pre-CAS reference and the bucket's transferred one net to zero — growth is
+retire-free.
 
 Why clusters at all: rooting one tree over the full 47-bit VA forces full depth immediately;
 rooting lazily over only the span in use makes the tree shallow but collapses ASLR entropy.
@@ -188,7 +194,7 @@ A node also carries a refcount word (unconditional on every node — the realise
 free, and opting out would fork the layout for zero bytes, DEC-078) and a 16 B inline
 `RetireHead`, for 32 B of header. Node metadata is **write-path-only** (DEC-012): descent needs
 the slot array and the discriminant, nothing else — level is known by counting from the
-descriptor, a subtree's base by masking the key — so writers use a descent stack rather than
+bucket word's decoded level, a subtree's base by masking the key — so writers use a descent stack rather than
 parent pointers, and metadata placement is free of hot-path considerations (ITEM-055 keeps the
 exact placement open pending measurement).
 
@@ -265,8 +271,9 @@ no count movement), occupied-being-cleared (store zero, then count decrement), e
 cleared (no-op — a spurious decrement is the borrow the state-word layout exists to catch).
 
 The one publish site outside the claim protocol is the **root-bucket word**: it has no state
-word, so growth's descriptor CAS *is* the arbitration, release on success, with every bucket
-read through `kernel::rcu::protect` (DEC-028/069). A losing grower shallow-discards and retries;
+word, so growth's packed-word CAS *is* the arbitration, release on success, with every bucket
+read through `protectWord` plus the bucket codec's decode — the same shape as every slot link
+(DEC-028/069/103). A losing grower shallow-discards and retries;
 a losing *creator* adopts the winner's cluster — and creation deliberately publishes an **empty**
 cluster and places into it afterward, because a pre-populated private root would carry `Mapping`
 references through a losable CAS with no safe revert (DEC-067).
@@ -284,7 +291,7 @@ before the first mark. Treating *every* node on the path as a candidate would be
 costly — whole-node claims at every level destroy the disjointness the design exists for.
 
 The walk terminates at the cluster root, which is never a reclamation candidate: its parent is a
-bucket word with no interlock, and reclaiming it would leave a descriptor pointing at freed
+bucket word with no interlock, and reclaiming it would leave the bucket word naming freed
 memory — an entire 256 GiB bucket permanently unmappable with no crash.
 
 ### 4.4 Detachment and the budget
@@ -320,11 +327,12 @@ sharpest-edged text in the spec; any future edit there should be re-refereed.
 Every state-word primitive carries a named ordering constant (DEC-045/069): claim `fetch_or`
 acquire, release `fetch_and` release, count edges release (pairing with the *next claimer's*
 acquire, not any reader load), mark release, slot publish release-store, reader slot loads
-acquire via the protected-link primitive, descriptor CAS release with `protect` on bucket loads,
+acquire via the protected-link primitive, bucket-word CAS release with `protectWord` + decode
+on bucket loads,
 refcount add relaxed (legal only under an existing guarantee) with release/acquire-at-zero on
 the decrement side, pool push release / pop acquire (single-consumer by construction).
 
-The reason for the ceremony: the claim→slot-read edge and the descriptor-publish edge fail in a
+The reason for the ceremony: the claim→slot-read edge and the bucket-publish edge fail in a
 way **the entire test matrix is structurally blind to** — x86's `lock` RMWs are full barriers,
 so no QEMU config can expose a missing acquire, and ARMv8 TSan cannot either, because every
 access involved is a well-formed atomic and TSan does not model the absence of an ordering.
@@ -451,7 +459,7 @@ the natural reading (take the reference while building the child during acquisit
 pinned record, VMObject and frames on every abort, invisibly. The one exception is cluster
 growth, whose publish is a losable CAS: the grower increments before it and a loser reverts
 synchronously — safe there and only there because the reference was never published and the
-descriptor's own reference holds the count above zero.
+bucket word's own reference holds the count above zero.
 
 ### 6.3 Deferred releases: the `DeferredRelease` pool
 
@@ -542,11 +550,11 @@ rcu.md's own writer obligation, and it is what makes the multi-section walk soun
 the walk holds only a VA cursor, and a re-descent crosses only live links because everything
 retired is already unreachable. Two fatals forced this shape: the earlier walk retired nodes
 still linked (a retire's own synchronous drains could destroy children live parents still
-pointed at), and it double-released every cluster root — the root's single structural reference
-is descriptor-held, and both the root's own deleter and the descriptor's deleter released it.
-Now **the walk never retires a cluster root**: each cluster's final unit claims and marks the
-empty root, clears the bucket word, and retires the *descriptor*, whose deleter is the root's
-only releaser.
+pointed at), and — under the since-deleted out-of-line descriptor — it double-released every
+cluster root through two deleters. With DEC-103's packed entries the second hazard is
+structurally gone: each cluster's final unit claims and marks the empty root, CASes the bucket
+word to zero, and retires **the root itself**, its own deleter the single releaser — uniform
+with every other node.
 
 Teardown claims and marks like every other path — no exemptions — because an exemption is how
 the mark-site assert gets deleted from the paths where it is load-bearing; the uncontended
