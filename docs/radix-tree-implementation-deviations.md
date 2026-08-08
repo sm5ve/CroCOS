@@ -1117,3 +1117,199 @@ runs §7.4's steps by hand so the window between the walk and the drain is
 observable, and checks all three properties in it: the root is marked, the nodes
 are still live objects (retired, not destroyed), and the bucket word is already
 clear. A synchronous walk fails the second of those immediately.
+
+---
+
+## D-033 — CHOICE (2026-08-08, Phase 4) — the pin carries `{node, base, level}`, so an entry is 64 B and not 48
+
+DEC-079 records the cache's honest footprint as **~192 B per CPU**: 4 × {8 B
+generation, 16 B range, 8 B pin} = 128 B, plus 4 × 16 B per-entry candidate
+registers = 64 B. Three cache lines, and the entry says so twice (the figure was
+itself a round-5 correction of an earlier "~72 B").
+
+The implementation is **256 B per CPU** — four lines. The difference is entirely
+the **pin: 24 B, not 8**.
+
+**Why it cannot be 8.** DEC-012 keeps level and base out of nodes: descent
+derives a node's level by counting down from the root's and a subtree's base by
+masking the search key. So a bare node pointer is not resumable — `resumeDescent`
+needs the level to index the right bit field and the base to compute slot bases,
+and `release` needs the level to pick the concrete type for `destroy<T>`
+(DEC-062's level→type map). Nothing in the node supplies either.
+
+**The packing that would have fit, and why it was rejected.** Nodes are 64 B
+aligned by contract, so the level fits in the pointer's low bits; and every
+node's span is naturally aligned, so `base` could be re-derived at resume time as
+`key & ~(nodeSpan(level) - 1)`. That is 8 B exactly and reproduces DEC-079's
+arithmetic.
+
+It was rejected because **the derivation is silently wrong for a key outside the
+node**, and the wrongness is exactly the class of failure the seam exists to
+prevent: a bad key yields a plausible base, a plausible slot index, and a
+`Mapping` for an unrelated address. The cache does check the key against the
+entry's VA range first, so the derivation would be correct *today* — but it makes
+correctness a property of the caller rather than of the handle, on the one API
+whose whole job is to be safe to hold across a section close. `resumeDescent`
+instead range-checks the key against the base it carries and answers
+`OutOfRange`, which makes the seam total.
+
+**What the extra line costs.** Nothing the spec depends on. The entry count is
+DEC-079-Provisional; DEC-096's residue bound is stated in NODES
+(`processorCount() × entries`) and is unchanged; and the per-CPU array is
+machine-global rather than per-address-space, so at the 256-CPU architectural
+maximum this is 64 KiB of BSS against DEC-096's own ≈320 KiB of pinned residue.
+
+**Spec follow-up owed**: DEC-079's certainty column should carry the corrected
+arithmetic and the reason, since it was written as a deliberate correction and a
+third figure appearing without explanation would read as drift.
+
+---
+
+## D-034 — FINDING (2026-08-08, Phase 4) — the deferred install does more than DEC-079 claims, and threshold 1 inverts DEC-016
+
+DEC-079 justifies the VA-range-deferred install with one benefit: "no atomic is
+paid on first sight". The Phase 4 calibration sweep
+(`radix_cache_calibration_report`) shows it does something else that is worth
+more, and shows the alternative failing in a way the entry does not anticipate.
+
+**The measurement.** Eight hot regions round-robin over a four-entry cache, so
+every index is over-subscribed two-to-one, 64 rounds:
+
+| threshold | hit % | installs | pin atomics | thrash |
+|---|---|---|---|---|
+| 1 (install on first sight) | 0.0 | 512 | 1020 | 508 |
+| 2 (DEC-079's) | 0.0 | 0 | 0 | 0 |
+
+Neither hits, because a direct-mapped entry genuinely cannot hold two alternating
+regions — that is the pathology DEC-079 already names. What differs is the cost
+of failing:
+
+- **At threshold 1** every miss installs, so each access pays an acquire and a
+  release. **Pin atomics scale with the LOOKUP count**, which is the precise
+  inversion of DEC-016's cost claim that "atomics fall on cache turnover rather
+  than on faults, so cost scales with miss rate". A workload that misses every
+  time pays two atomics per fault forever.
+- **At threshold 2** the two regions overwrite each other's candidate before
+  either reaches the threshold, so the entry never installs and **the cache
+  switches itself off for that index**: no atomics, no evictions, one generation
+  compare per lookup. The cost of a hopeless index falls to nearly nothing.
+
+So the deferral does not merely save one atomic on a cold range; it **bounds the
+atomic cost of an over-subscribed index at zero**. That is a stronger argument
+for the same decision, and it is the one to state, because it survives the case
+where the entry's own stated benefit is irrelevant.
+
+**Degradation is per-index, not global**, which is the other half of the answer:
+five regions over four entries runs at **58% hits with 3 installs** — three
+entries settle and the oversubscribed one switches off. The cliff is local.
+
+**What this does NOT settle.** The threshold sweep on a *non*-over-subscribed set
+cannot separate 1 from 2 (98.4% vs 96.9%, the difference being one warm-up miss
+per entry), because the synthetic workload has no locality structure for the
+deferral to exploit. **Entry count stays at DEC-079's provisional 4 and the
+threshold at 2, with the real calibration explicitly deferred to Phase 5 data** —
+which §13's Phase 4 gate permits in as many words ("entry count and install
+threshold calibrated **or explicitly deferred to Phase 5 data**").
+
+**Spec follow-up owed**: DEC-079's rationale should carry the over-subscription
+result — both that threshold 1 inverts DEC-016's cost model and that the deferral
+bounds a hopeless index at zero atomics.
+
+---
+
+## D-035 — CHOICE (2026-08-08, Phase 4) — the entry index granularity follows the pin level
+
+DEC-079 says the set is "indexed by VA bits" and does not say which. The choice is
+not free, and both wrong answers waste the set:
+
+- index **finer** than the pinned node's span and one node is installed into
+  several entries, each a redundant pin;
+- index **coarser** and two distinct pinnable nodes collide on one entry
+  permanently.
+
+So the shift is derived from the cache's pin level rather than being a constant:
+`nodeSpanBits(G, pinLevel)`, and `kPinAtDeepest` uses the geometry's floor level
+(64 KiB under the amd64 default). One knob, not two, and the two cannot drift out
+of agreement.
+
+The residual imprecision is inherent and is worth naming: **with `kPinAtDeepest`
+the pinned node's level varies with the tree's contents**, because leaves live at
+any level. A region whose subdivision stopped at level 4 gets a 32 MiB entry
+indexed at 64 KiB granularity, so 512 indices name one node. That is correct and
+merely redundant, and no fixed shift can avoid it — the alternative is indexing by
+something only known after the descent, which is not an index.
+
+---
+
+## D-036 — CHOICE (2026-08-08, Phase 4) — a new RCU veneer, `assertInReadSection`
+
+§11 asks for "no reference is acquired outside the observing section" to be
+**asserted**, not documented. The framework already has the check — `protect` and
+`protectWord` call `detail::assertInSection` — but neither is reachable from the
+pin, because a pin is a `fetch_add` on the referent and not a load of a link.
+
+`kernel::rcu::assertInReadSection(const Domain&)` is that check exported as a
+public inline veneer. Debug-only like everything behind it, and it compiles to
+nothing when `CROCOS_RCU_DEBUG_CHECKS` is off.
+
+The check is one-sided and the comment at the site says so: the framework can
+answer "is a section open on this domain", not "is it the same section the link
+was loaded in". What closes the other half is the shape of the API — a `PinSite`
+is produced by `descendLocked` and consumed by `pinLocked`, both under one
+`ReadGuard` — plus §11's own test case, which fills a candidate, closes the
+section, reclaims the node, and requires the later install to have re-descended
+rather than remembered (`radix_cache_candidate_survives_reclamation_of_its_node`).
+
+**Cross-spec follow-up owed**: `specs/rcu.md` should record the veneer alongside
+`protectWord` (RCU-DEC-044), which exists for the same reason one layer down — a
+consumer-side bare check silently drops the framework's debug assert.
+
+---
+
+## D-037 — HARNESS NOTE (2026-08-08, Phase 4) — the oracle grows a destroy observer
+
+§7.5 spends a paragraph establishing that the eviction's zero-observing
+`destroy<Node>` **inside the descent's open read section, in `#PF` context** is
+legal: it is the destructor and not a deleter, so §7.6's
+deleters-run-outside-any-section rule does not govern it; invariant 24 makes the
+destructor release nothing; vmsmalloc DEC-014 permits `vmsfree` from `#PF`.
+
+Legality is a property of **where** the call happens, and "where" leaves no trace
+in any counter. A test can assert that a destroy occurred, and that assertion
+passes just as well on an implementation that quietly moved the release outside
+the section — which is the natural refactor, since moving it there looks like
+tidying.
+
+`CroCOSTest::radix::setDestroyObserver` is the smallest thing that can answer it:
+a callback from `noteDestroyed`, i.e. from inside `VMSubstrate::destroy`, which
+asks `kernel::rcu::test::inSection` at that instant.
+`radix_cache_eviction_destroy_runs_inside_the_descent_section` arranges a pinned
+node whose structural count has already gone (unmapped, graced), then drives an
+install that evicts it, and requires the destroy to be observed **inside** a
+section.
+
+---
+
+## D-038 — TEST NOTE (2026-08-08, Phase 4) — a single page does not make a deep tree
+
+Recorded because it cost time and because the failure mode is a test that passes
+while measuring the wrong thing.
+
+Leaves live at any level, so a tree's depth is a property of its **contents**. At
+level 4 under the amd64 geometry the slot range field's unit is already 4 KiB
+(`resolutionShortfall(GA, 4) == 0`), so a single 4 KiB mapping is written as a
+leaf in a level-4 slot and the descent terminates two nodes below the cluster
+root. The deepest node it visits spans **32 MiB**, not the 64 KiB of the
+geometry's floor level.
+
+The first version of the Phase 4 tests mapped single pages and asserted entry
+spans against `nodeSpan(G, G.levelCount)` — 64 KiB. Three of them failed
+outright; the ones that passed were passing against a 32 MiB level-4 node, which
+is not what "an entry on the interior node above the mapping" means, and the
+eviction tests silently became hit tests because two VAs 256 KiB apart were
+inside the same 32 MiB node.
+
+Every fixture that wants a floor-level node now maps a **pair of adjacent
+pages**: two leaves inside one 64 KiB level-5 slot force subdivision to the floor.
+The file carries a `static_assert` on the shortfall so a geometry change breaks
+the build rather than the assumption.
