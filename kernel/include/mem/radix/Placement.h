@@ -38,13 +38,17 @@
 //
 // ─── Entropy ─────────────────────────────────────────────────────────────
 //
-// Probing and gap sizing consume randomness, and DEC-063's in-kernel source is
-// named out-of-spec prerequisite work that has NOT landed. Placement therefore
-// takes its entropy as a parameter — the harness passes Phase 0's seedable
-// source, and the kernel binding lands with DEC-063. That is a seam rather than
-// a stub: the quality requirement differs per consumer (ASLR placement wants a
-// CSPRNG; the backoff jitter in CoreTree deliberately does not), and a single
-// hard-wired source would have to satisfy the stricter one everywhere.
+// Probing and gap sizing consume randomness. Placement takes its entropy as a
+// PARAMETER — the harness passes Phase 0's seedable source, the kernel passes
+// `kernel::random::Entropy` — and that is a seam rather than a stub: the quality
+// requirement differs per consumer (ASLR placement wants a CSPRNG; the backoff
+// jitter in CoreTree deliberately does not), so a single hard-wired source would
+// have to satisfy the stricter one everywhere.
+//
+// **The kernel source is a placeholder and is not a CSPRNG** (DEC-063's real
+// work is still owed). `kernel/include/Random.h` carries the warning and the
+// checklist for replacing it. What matters here is that placement does not
+// have to change when that happens.
 //
 
 #ifndef CROCOS_RADIX_PLACEMENT_H

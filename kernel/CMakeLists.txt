@@ -79,6 +79,7 @@ set(KERNEL_SRC
         RcuStress.cpp
         rcu/RCU.cpp
         CpuLocal.cpp
+        Random.cpp
         arch/amd64/CpuLocalBase.cpp
 )
 

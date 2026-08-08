@@ -16,6 +16,7 @@ target_sources(KernelTests PRIVATE
     PageAllocatorTests.cpp
     NUMATests.cpp
     vmsmalloc/SlabLayoutTest.cpp
+    RandomTest.cpp
 )
 
 # Add the TestHarness from parent directory
