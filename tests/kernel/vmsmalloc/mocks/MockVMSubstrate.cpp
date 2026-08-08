@@ -15,6 +15,8 @@
 #include <CpuLocal.h>             // real: kCpuLocalBytes
 #include <arch.h>
 
+#include <asan_poison.h>            // radix-tree DEC-052 oracle interaction
+
 #include <sys/mman.h>
 #include <cstring>
 #include <cstdint>
@@ -55,6 +57,22 @@ namespace {
     size_t            gActiveCount  = 0;
 }
 
+// The page primitives bracket every poisoned region the DEC-052 oracle creates,
+// and both of them WRITE into the page — allocPage memsets it, freePage
+// threads it onto the intrusive free list through its first word. A page whose
+// slab still carries poisoned (destroyed) slots would therefore trip ASan
+// inside the mock itself, reported against the harness rather than against the
+// defect under test. Unpoisoning the whole page at each transition is the fix,
+// and it is also semantically right: page ownership has left the slab, so no
+// object-level poison on it means anything any more.
+//
+// Costs nothing when no oracle is active (the calls compile away without ASan,
+// and unpoisoning unpoisoned memory is a no-op), which is why this lives in the
+// shared mock rather than in a radix-only fork of it.
+static void unpoisonWholePage(void* p) {
+    CroCOSTest::unpoisonRegion(p, kPageSize);
+}
+
 void* allocPage() {
     std::lock_guard<std::mutex> lock(gMutex);
     if (!gFreeHead) {
@@ -64,6 +82,7 @@ void* allocPage() {
     void* p = gFreeHead;
     gFreeHead = *reinterpret_cast<void**>(p);
     gActiveCount++;
+    unpoisonWholePage(p);
     // Per DEC-046 the kernel's allocPage invalidates the caller's stale TLB
     // entry; in userspace we instead zero so a re-handed-out page never carries
     // a previous descriptor's bytes (cheap and keeps tests deterministic).
@@ -73,6 +92,7 @@ void* allocPage() {
 
 void freePage(void* p) {
     std::lock_guard<std::mutex> lock(gMutex);
+    unpoisonWholePage(p);
     *reinterpret_cast<void**>(p) = gFreeHead;
     gFreeHead = p;
     gActiveCount--;

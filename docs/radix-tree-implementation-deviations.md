@@ -69,3 +69,34 @@ silently invalidating a promise.
 Rejected: keying the exception on the literal sizes 192/320 inside the derived
 rule — that breaks the moment DEC-003's "tunable based on RadixVM measurements"
 provision is exercised, which is the whole point of the schema being an array.
+
+---
+
+## D-003 — GAP — the real `vmsmallocTry` / `tryMake` is not implemented yet
+
+**Spec**: vmsmalloc DEC-048; radix DEC-075; `radix-tree-phase-3.md` ("Outside
+prerequisites").
+
+The radix mock `<mem/VMSubstrate.h>` provides `tryMake<T>` from Phase 0, because
+Phase 0's work items require it (the scriptable-null fault-injection hook) and
+because the tree must be *written* against the failable contract from its first
+line — §10's inverted hazard is that a site written against never-null `make<T>`
+re-imports the userspace-triggerable panic through the back door. Nothing in the
+tree names `make`.
+
+The **kernel-side** `vmsmallocTry` / `tryMake` is not implemented. It is listed
+as a Phase 3 prerequisite, not a Phase 2 one, and it is not free: both panic
+sites bottom out in `VMSubstrate::allocPage()`, whose own failures are inside
+`reserveFreeVA` (arena exhaustion) and `PageAllocator::allocateSmallPage`
+(physical exhaustion). Making it failable means a `tryAllocPage` and a failable
+path through both, which is a change to a shipped allocator with no consumer
+until Phase 3.
+
+Since Phases 0–2 run entirely in the userspace harness, nothing is blocked. The
+work belongs with Phase 3, where its first real caller (placement, the record
+pools, the root page) arrives.
+
+**What is already done for it**: the class-dispatch switches in `vmsmalloc.cpp`
+now carry a `static_assert(kNumSizeClasses == 10)` so they cannot silently miss
+a class, which is the trap a failable-path edit would otherwise be layered on
+top of.
