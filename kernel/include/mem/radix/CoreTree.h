@@ -230,21 +230,116 @@ namespace kernel::mm::radix {
         OutOfMemory,
     };
 
-    // The result of a lookup: the record, and the ABSOLUTE range it covers.
-    // §3.1's validity token is built from the decoded pair — never from the raw
-    // slot word, which is level-relative and compares equal across a shortfall
-    // subdivision that halved the covered range.
-    struct LookupResult {
-        Mapping* mapping = nullptr;
+    // A lookup returns a **counted reference** to a Mapping together with a
+    // validity token, and §3.1 is emphatic that conflating the two is a
+    // memory-safety defect:
+    //
+    //   - The COUNTED REFERENCE guarantees the record stays alive after the
+    //     guard is destroyed (DEC-015). That is what makes a blocking round-trip
+    //     to a userspace pager possible at all — and it exists because **a
+    //     reader must close its section before blocking**: EBR stalls
+    //     reclamation domain-wide for as long as any section is open, so a guard
+    //     held across a pager IPC halts reclamation for every CPU in the domain.
+    //   - The VALIDITY TOKEN — the VA together with the DECODED answer, i.e. the
+    //     Mapping identity and the ABSOLUTE covered range — guarantees nothing on
+    //     its own. **A counted reference does not keep the address mapped**: a
+    //     concurrent partial munmap shrinks a leaf's range with a single slot
+    //     write that retires nothing and marks nothing, so no other signal
+    //     exists for a blocked thread to observe.
+    //
+    // The token records the DECODED value, never the raw slot word. A slot
+    // word's range field is level-relative, so a C0 leaf with range [0,0]
+    // covering 8 KiB and the C1 leaf covering 4 KiB that a shortfall
+    // subdivision leaves behind are a BIT-IDENTICAL WORD FOR A HALVED RANGE —
+    // comparing raw words compares equal on an address that was just unmapped.
+    //
+    // Move-only, and it RELEASES on destruction. Making the reference implicit in
+    // the type is not decoration: the first version of this returned a raw
+    // pointer, and the very first concurrent reader test dereferenced a record
+    // whose grace period had ended — reported by the Phase 0 oracle as a
+    // use-after-poison, and silent without it.
+    class LookupResult {
+    public:
+        LookupResult() = default;
+        LookupResult(Mapping* m, uint64_t lo, uint64_t hi)
+            : mappingPtr(m), rangeLo(lo), rangeHi(hi) {}
+
+        LookupResult(const LookupResult&)            = delete;
+        LookupResult& operator=(const LookupResult&) = delete;
+
+        LookupResult(LookupResult&& o) noexcept
+            : mappingPtr(o.mappingPtr), rangeLo(o.rangeLo), rangeHi(o.rangeHi) {
+            o.mappingPtr = nullptr;
+        }
+        LookupResult& operator=(LookupResult&& o) noexcept {
+            if (this != &o) {
+                reset();
+                mappingPtr = o.mappingPtr; rangeLo = o.rangeLo; rangeHi = o.rangeHi;
+                o.mappingPtr = nullptr;
+            }
+            return *this;
+        }
+
+        ~LookupResult() { reset(); }
+
+        [[nodiscard]] Mapping* mapping() const { return mappingPtr; }
+        [[nodiscard]] uint64_t lo() const { return rangeLo; }
+        [[nodiscard]] uint64_t hi() const { return rangeHi; }   // inclusive
+        explicit operator bool() const { return mappingPtr != nullptr; }
+
+    private:
+        void reset() {
+            if (mappingPtr) {
+                releaseMappingRef(mappingPtr);
+                mappingPtr = nullptr;
+            }
+        }
+        Mapping* mappingPtr = nullptr;
         uint64_t rangeLo = 0;
-        uint64_t rangeHi = 0;   // inclusive
-        explicit operator bool() const { return mapping != nullptr; }
+        uint64_t rangeHi = 0;
+    };
+
+    // §11's counters. Three of the progress targets are stated as COUNTERS
+    // rather than asserts, and the distinction is load-bearing: phantom-bit and
+    // terminal-mask failures are LEGAL executions, so asserting on them fires on
+    // a correct build. §6.7's taxonomy is exact and this is its instrumentation.
+    //
+    // `conflicts` is additionally the standing regression detector for DEC-085's
+    // accepted conditional disjointness: "Under bit-granular claims most such
+    // pairs should not conflict AT ALL — a conflict counter near zero is the
+    // stronger signal, and a HIGH ONE MEANS THE ONE-CONFLICT-SITE ANALYSIS IS
+    // WRONG." Acceptance is instrumented, not silent.
+    struct TreeStats {
+        Atomic<uint64_t> attempts{0};
+        Atomic<uint64_t> completions{0};
+        // Retries caused by a failed claim acquisition — the genuine conflicts.
+        Atomic<uint64_t> claimConflicts{0};
+        // Retries caused by re-dispatch finding a changed row. Counted apart
+        // because it is a DIFFERENT phenomenon: the claim set was computed
+        // against a tree that has since moved, not a contended bit.
+        Atomic<uint64_t> redispatchChanges{0};
+        // The longest retry run any single operation needed. §9 accepts that
+        // individual starvation is unbounded in principle (DEC-097 adds no bound
+        // beyond backoff), so this is a COUNTER and never an assert — but a test
+        // that sees thousands is looking at a livelock, not at bad luck.
+        Atomic<uint64_t> maxRetries{0};
+
+        void reset() {
+            attempts.store(0, kPrivateInit);
+            maxRetries.store(0, kPrivateInit);
+            completions.store(0, kPrivateInit);
+            claimConflicts.store(0, kPrivateInit);
+            redispatchChanges.store(0, kPrivateInit);
+        }
     };
 
     template <GeometryDescriptor G, typename Codec>
     class CoreTree {
     public:
         using Ops = NodeOps<G>;
+
+        [[nodiscard]] TreeStats& stats() { return counters; }
+        [[nodiscard]] const TreeStats& stats() const { return counters; }
 
         // A tree rooted at `rootLevel` covering `[base, base + nodeSpan(rootLevel))`.
         // The base is span-aligned by construction: a cluster root is a node of
@@ -313,8 +408,11 @@ namespace kernel::mm::radix {
             // The counted reference the caller may take from the result must be
             // acquired INSIDE this section (§7.3); the guard's scope is what
             // makes that checkable.
-            kernel::rcu::ReadGuard guard(*domain);
-            const LookupResult r = descendLocked(va);
+            LookupResult r;
+            {
+                kernel::rcu::ReadGuard guard(*domain);
+                r = descendLocked(va);
+            }
 
             // DEC-060's fault-path pump: tryAdvance AFTER the section closes.
             // Placement is forced, not stylistic — deleters run outside any
@@ -328,6 +426,7 @@ namespace kernel::mm::radix {
             // strands its open bag indefinitely, and an open bag pins one
             // operation's retirees — transitively their Mappings, VMObjects and
             // frames, not merely nodes.
+            (void)kernel::rcu::tryAdvance(*domain);
             return r;
         }
 
@@ -354,10 +453,17 @@ namespace kernel::mm::radix {
                     // dereferencing the Mapping at all, which is the common
                     // unmapped-VA lookup (DEC-022).
                     if (!Codec::covers(word, va - slotBase, level)) return {};
-                    LookupResult r;
-                    r.mapping = static_cast<Mapping*>(Codec::decodeLeaf(word));
-                    Codec::absoluteRange(word, slotBase, level, r.rangeLo, r.rangeHi);
-                    return r;
+                    auto* m = static_cast<Mapping*>(Codec::decodeLeaf(word));
+                    // §7.3's acquisition law: a counted reference is acquired
+                    // ONLY inside the read section in which that link was
+                    // observed. Taking it after the close would let the node be
+                    // unlinked, retired, graced, released to zero and destroyed,
+                    // and its slab slot handed to an unrelated allocation, before
+                    // the fetch_add landed on a stranger.
+                    m->acquireRef();
+                    uint64_t lo = 0, hi = 0;
+                    Codec::absoluteRange(word, slotBase, level, lo, hi);
+                    return LookupResult{m, lo, hi};
                 }
                 case SlotKind::Child:
                     assert(level < G.levelCount,
@@ -408,7 +514,7 @@ namespace kernel::mm::radix {
                    "cluster before the core tree is involved");
 
             unsigned retryCount = 0;
-            retiredThisOperation = false;
+            bool retiredAnything = false;
             for (;;) {
                 Attempt attempt;
                 ApplyStatus st;
@@ -426,6 +532,7 @@ namespace kernel::mm::radix {
                     // structure, so an unpinned writer can have a node reclaimed
                     // underneath it — a use-after-free in the WRITER.
                     kernel::rcu::ReadGuard guard(*domain);
+                    counters.attempts.fetch_add(1, kRefcountAcquire);
                     st = runAttempt(lo, hi, value, attempt);
                 }
                 if (st == ApplyStatus::Retry) {
@@ -438,10 +545,30 @@ namespace kernel::mm::radix {
                     // claim site at the PARENT level, same depth as a held bit,
                     // lower VA. Recomputing avoids the inversion rather than
                     // detecting it.
+                    retiredAnything = retiredAnything || attempt.retired;
                     abandon(attempt);
-                    backoff(++retryCount);
+                    ++retryCount;
+                    for (;;) {
+                        const uint64_t seen = counters.maxRetries.load(kQuiescedRead);
+                        if (seen >= retryCount) break;
+                        uint64_t expected = seen;
+                        if (counters.maxRetries.compare_exchange(
+                                expected, retryCount, kRefcountRelease, kQuiescedRead)) break;
+                    }
+                    // §9 accepts unbounded individual starvation in principle
+                    // (DEC-097 adds no bound beyond backoff), so this ceiling is
+                    // DEBUG-ONLY and deliberately absurd: no legal execution
+                    // reaches it, and reaching it means a livelock — which
+                    // otherwise presents as a hang with no output, the single
+                    // worst diagnostic outcome in this protocol (§10 names the
+                    // same shape for DEC-046's self-livelock).
+                    assert(retryCount < 1000000u,
+                           "radix: operation exceeded one million retries — this is a "
+                           "livelock, not starvation");
+                    backoff(retryCount);
                     continue;
                 }
+                retiredAnything = retiredAnything || attempt.retired;
                 if (st != ApplyStatus::Ok) abandon(attempt);
 
                 // DEC-060/DEC-071's operation-exit pump, AFTER the section
@@ -452,7 +579,7 @@ namespace kernel::mm::radix {
                 // that narrows the exposure from "one operation's retirees,
                 // forever, until teardown" to "one operation's retirees, until
                 // the next pump anywhere".
-                if (retiredThisOperation) (void)kernel::rcu::tryAdvance(*domain);
+                if (retiredAnything) (void)kernel::rcu::tryAdvance(*domain);
                 return st;
             }
         }
@@ -480,6 +607,10 @@ namespace kernel::mm::radix {
         unsigned level0 = 0;
         uint64_t baseVA = 0;
         kernel::rcu::Domain* domain = nullptr;
+        TreeStats counters{};
+        // Jitter state for the retry backoff. Shared rather than per-CPU because
+        // it only needs to decorrelate, and the CPU id is mixed in at use.
+        Atomic<uint64_t> backoffSequence{0x243F6A8885A308D3ull};
         // DEC-060: whether this operation retired anything, so operation exit
         // knows whether to pump. Pumping unconditionally would be harmless but
         // dishonest — the site exists to stop a just-filled bag sitting OPEN on
@@ -710,6 +841,23 @@ namespace kernel::mm::radix {
                 unsigned level    = 0;
                 unsigned slot     = 0;
                 void*    subtree  = nullptr;
+                // The slot word the subtree was BUILT FROM.
+                //
+                // The read pass runs unclaimed, so between reading a slot and
+                // claiming it another writer can replace its contents. The
+                // dispatch ROW can be unchanged across that — leaf-partially-
+                // covered before and after — while the leaf now names a
+                // DIFFERENT record, and the prebuilt subtree still carries
+                // survivors naming the old one. Publishing it would map the
+                // wrong record, and taking its references would touch a record
+                // whose count may already have reached zero.
+                //
+                // Comparing the raw word is exactly right HERE, and only here:
+                // same slot, same level, so identical bits mean identical
+                // decoded meaning. (§3.1's validity token cannot do this — it
+                // compares ACROSS levels, where a level-relative range field
+                // makes a bit-identical word mean a halved range.)
+                uint64_t builtFrom = 0;
             };
             Pending pending[kMaxPending];
             size_t  pendingCount = 0;
@@ -721,17 +869,29 @@ namespace kernel::mm::radix {
             // factor of the valence.
             unsigned detachNodes = 0;
 
+            // DEC-060: whether this attempt retired anything, so operation exit
+            // knows whether to pump. Per-ATTEMPT, not per-tree: a tree is shared
+            // by every CPU, so a plain bool member is a genuine data race — TSan
+            // caught exactly that, with two writers racing between `apply` and
+            // `retireSubtree`. Pumping unconditionally would hide it, and would
+            // also be dishonest: the site exists to stop a just-filled bag
+            // sitting OPEN on a CPU that may never mutate this domain again, and
+            // an operation that retired nothing has no bag to advance.
+            bool retired = false;
+
             [[nodiscard]] bool addPending(uint64_t base, unsigned level, unsigned slot,
-                                          void* subtree) {
+                                          void* subtree, uint64_t builtFrom) {
                 if (pendingCount >= kMaxPending) return false;
-                pending[pendingCount++] = Pending{base, level, slot, subtree};
+                pending[pendingCount++] = Pending{base, level, slot, subtree, builtFrom};
                 return true;
             }
 
-            [[nodiscard]] void* takePending(uint64_t base, unsigned level, unsigned slot) {
+            [[nodiscard]] void* takePending(uint64_t base, unsigned level, unsigned slot,
+                                            uint64_t currentWord) {
                 for (size_t i = 0; i < pendingCount; i++) {
                     if (pending[i].subtree && pending[i].nodeBase == base &&
-                        pending[i].level == level && pending[i].slot == slot) {
+                        pending[i].level == level && pending[i].slot == slot &&
+                        pending[i].builtFrom == currentWord) {
                         void* p = pending[i].subtree;
                         pending[i].subtree = nullptr;
                         return p;
@@ -740,10 +900,12 @@ namespace kernel::mm::radix {
                 return nullptr;
             }
 
-            [[nodiscard]] void* peekPending(uint64_t base, unsigned level, unsigned slot) const {
+            [[nodiscard]] void* peekPending(uint64_t base, unsigned level, unsigned slot,
+                                            uint64_t currentWord) const {
                 for (size_t i = 0; i < pendingCount; i++) {
                     if (pending[i].subtree && pending[i].nodeBase == base &&
-                        pending[i].level == level && pending[i].slot == slot) {
+                        pending[i].level == level && pending[i].slot == slot &&
+                        pending[i].builtFrom == currentWord) {
                         return pending[i].subtree;
                     }
                 }
@@ -768,7 +930,10 @@ namespace kernel::mm::radix {
 
             // ─── Acquire, top-down (§6.8) ──────────────────────────────────
             a.claims.sortForAcquisition();
-            if (!acquireAll(a.claims)) return ApplyStatus::Retry;
+            if (!acquireAll(a.claims)) {
+                counters.claimConflicts.fetch_add(1, kRefcountAcquire);
+                return ApplyStatus::Retry;
+            }
 
             // ─── Re-dispatch (still before the boundary, may still fail) ───
             //
@@ -777,6 +942,7 @@ namespace kernel::mm::radix {
             // wrong; the answer is to discard and retry, never to extend the set
             // in place.
             if (!redispatchAgrees(rootRef, level0, baseVA, lo, hi, value, a)) {
+                counters.redispatchChanges.fetch_add(1, kRefcountAcquire);
                 return ApplyStatus::Retry;
             }
 
@@ -789,6 +955,21 @@ namespace kernel::mm::radix {
             commit(rootRef, level0, baseVA, lo, hi, value, a);
 
             releaseAll(a.claims);
+
+            // §9: "Surplus allocations are shallow-discarded."
+            //
+            // A prebuilt subtree can go unused on the SUCCESS path, not only on
+            // an abort: the read pass runs unclaimed, so a slot it classified as
+            // Subdivide can, by the time the claim lands, dispatch to a different
+            // row entirely — an overwrite, a clear, a descend. Re-dispatch does
+            // not reject that (the operation is still perfectly well-defined), it
+            // simply never asks for the subtree. Without this the node leaks, and
+            // it leaks only under concurrency, which is where it is hardest to
+            // attribute — it surfaced as a single 288 B node outstanding after a
+            // four-CPU disjoint-writer run.
+            discardUnusedAllocations(a);
+
+            counters.completions.fetch_add(1, kRefcountAcquire);
             return ApplyStatus::Ok;
         }
 
@@ -851,7 +1032,7 @@ namespace kernel::mm::radix {
                     // held bit. A writer that would need to allocate while
                     // holding a claim releases first, which is why a shortfall
                     // costs a retry rather than an in-place allocation.
-                    if (!a.peekPending(nodeBase, level, i)) {
+                    if (!a.peekPending(nodeBase, level, i, word)) {
                         SegmentPlan plan;
                         if (Codec::isLeaf(word)) {
                             auto* displaced = static_cast<Mapping*>(Codec::decodeLeaf(word));
@@ -863,7 +1044,7 @@ namespace kernel::mm::radix {
 
                         void* built = buildSubtree(level + 1, slotBase, plan);
                         if (!built) return ReadOutcome{ApplyStatus::OutOfMemory, false};
-                        if (!a.addPending(nodeBase, level, i, built)) {
+                        if (!a.addPending(nodeBase, level, i, built, word)) {
                             destroyUnpublishedSubtree(NodeRef(built), level + 1);
                             return ReadOutcome{ApplyStatus::NeedsDecomposition, false};
                         }
@@ -973,6 +1154,30 @@ namespace kernel::mm::radix {
         // wrong. (Found by the Phase 0 oracle as a use-after-poison in
         // releaseAll; the never-release rule was in the spec and not in the
         // code.)
+        // Whether this attempt holds the WHOLE-NODE claim on `node` — i.e. it
+        // was a §6.4 reclamation candidate and its claim landed.
+        //
+        // Load-bearing, and its absence was a real stall. `commit` computes
+        // whether a node empties from its own frozen counts, and that answer can
+        // be YES for a node the read pass did NOT nominate as a candidate: the
+        // pass reads occupancy with a RELAXED, advisory load and may see a stale,
+        // higher count. Reclaiming on that basis marks a node this attempt does
+        // not hold — violating invariant 19 ("every mark is taken under a
+        // whole-node claim, on all three paths, no exemption") and, because a
+        // mark is irreversible and blocks every future claim, leaving a node
+        // permanently marked AND STILL LINKED. §6.8 describes the consequence
+        // exactly: "every inserter retries from the parent, and the range becomes
+        // silently unmappable for the address space's life."
+        //
+        // §6.4's rule is the other half: "A node that empties but was NOT a
+        // candidate is simply not reclaimed on this pass — an opportunistic miss,
+        // bounded by the residue figure rather than unbounded in history."
+        static bool holdsWholeNode(ClaimSet<G>& set, NodeRef node, unsigned level) {
+            const auto* e = set.find(node);
+            return e != nullptr && e->held && (e->mask & valenceMask(G, level)) ==
+                                                  valenceMask(G, level);
+        }
+
         static void retainClaim(ClaimSet<G>& set, NodeRef node) {
             if (auto* e = set.find(node)) e->held = false;
         }
@@ -1020,12 +1225,61 @@ namespace kernel::mm::radix {
                     }
                     continue;
                 }
+                if (d.action == DispatchAction::DetachChild) {
+                    // §6.5's FREEZE-AND-VERIFY re-walk, and it is phase one's
+                    // last step rather than a nicety.
+                    //
+                    // The claim set was recorded by the UNCLAIMED read pass, and
+                    // a concurrent placement can legally build nodes into a hole
+                    // of the subtree between that enumeration and the claims
+                    // landing — §6.4 calls exactly this interloper "disjoint and
+                    // entirely legal". Once every recorded node is whole-node-
+                    // claimed the subtree is frozen, so re-enumerating it under
+                    // the claims and requiring the discovered set to equal the
+                    // recorded one is what makes phase two safe.
+                    //
+                    // Without it the marks orphan the unclaimed newcomers
+                    // UNMARKED AND LIVE — the DEC-016 cache hazard — and their
+                    // leaf Mapping references leak. Worse in practice: marking a
+                    // node this attempt does not hold leaves it permanently
+                    // marked and still linked, and every later writer stalls on
+                    // it forever.
+                    if (!detachmentIsFrozen(NodeRef(Codec::decodeChild(word)),
+                                            level + 1, a.claims)) {
+                        return false;
+                    }
+                    continue;
+                }
                 if (d.action == DispatchAction::Subdivide) {
                     // The row still needs a subtree, and it must be the one the
                     // read pass built for exactly this site — a subtree built
                     // against a different survivor set would publish the wrong
                     // coverage.
-                    if (!a.peekPending(nodeBase, level, i)) return false;
+                    // Not merely "a subtree exists" but "the subtree built for
+                    // exactly THIS content". A row that is still Subdivide over a
+                    // slot whose leaf now names a different record needs a
+                    // different subtree, and reusing the old one publishes the
+                    // wrong coverage.
+                    if (!a.peekPending(nodeBase, level, i, word)) return false;
+                }
+            }
+            return true;
+        }
+
+        // Every node of the subtree AS IT IS NOW must be one this attempt holds
+        // a whole-node claim on. Any extra node means the subtree grew under us
+        // between the read pass and the claims: release everything and retry
+        // from a fresh read pass (which re-counts, and decomposes if the subtree
+        // is now over budget).
+        static bool detachmentIsFrozen(NodeRef node, unsigned level, ClaimSet<G>& set) {
+            if (!holdsWholeNode(set, node, level)) return false;
+            const unsigned n = valence(G, level);
+            for (unsigned i = 0; i < n; i++) {
+                const uint64_t w = node.slot(i).load(kClaimedSlotLoad);
+                if (Codec::isChild(w)) {
+                    if (!detachmentIsFrozen(NodeRef(Codec::decodeChild(w)), level + 1, set)) {
+                        return false;
+                    }
                 }
             }
             return true;
@@ -1066,7 +1320,11 @@ namespace kernel::mm::radix {
                     NodeRef child(Codec::decodeChild(word));
                     const bool childEmpty =
                         commit(child, level + 1, slotBase, clipLo, clipHi, value, a);
-                    if (childEmpty) {
+                    // Candidacy is a NECESSARY PRECONDITION, not the decision.
+                    // The exact emptiness answer comes from the claim-frozen
+                    // counts above; what this adds is that we may only ACT on it
+                    // where the attempt actually holds the interlock.
+                    if (childEmpty && holdsWholeNode(a.claims, child, level + 1)) {
                         // §6.4: reclamation. The child is marked under the
                         // whole-node claim this attempt already holds, THEN
                         // unlinked. The mark is always set before the unlink that
@@ -1076,7 +1334,7 @@ namespace kernel::mm::radix {
                         retainClaim(a.claims, child);
                         node.slot(i).store(0, kSlotPublish);
                         occupancyDelta--;
-                        retireNode(child, level + 1);
+                        retireNode(child, level + 1, a);
                     }
                     break;
                 }
@@ -1136,12 +1394,12 @@ namespace kernel::mm::radix {
                     // must exempt it explicitly.
                     node.slot(i).store(replacement, kSlotPublish);
                     if (!writes) occupancyDelta--;
-                    retireSubtree(child, level + 1);
+                    retireSubtree(child, level + 1, a);
                     break;
                 }
 
                 case DispatchAction::Subdivide: {
-                    void* child = a.takePending(nodeBase, level, i);
+                    void* child = a.takePending(nodeBase, level, i, word);
                     assert(child, "radix: commit reached a subdivision with no prebuilt "
                                   "subtree — re-dispatch should have caught this before the "
                                   "boundary");
@@ -1192,6 +1450,16 @@ namespace kernel::mm::radix {
         // slot values, never counted references.
         void abandon(Attempt& a) {
             releaseAll(a.claims);
+            discardUnusedAllocations(a);
+        }
+
+        // Shallow-discard every carried allocation the attempt did not publish.
+        // "Shallow-discard is the direct destroy of a never-published allocation
+        // — reachable by nothing, outside the reclamation protocol" (§7.3), and
+        // it is count-clean by construction: every structural `+1` is a
+        // commit-phase step taken at publish, so an unpublished subtree holds
+        // only PLANNED slot values and never a counted reference.
+        static void discardUnusedAllocations(Attempt& a) {
             for (size_t i = 0; i < a.pendingCount; i++) {
                 if (a.pending[i].subtree) {
                     destroyUnpublishedSubtree(NodeRef(a.pending[i].subtree),
@@ -1203,18 +1471,43 @@ namespace kernel::mm::radix {
         }
 
         // §6.7 property 3: the residual failure shape is timing-aligned mutual
-        // abort (livelock), excluded PROBABILISTICALLY rather than
-        // deterministically. A probed placement re-probes at a fresh random
-        // address; a MAP_FIXED retry takes randomized backoff, and DEC-097
-        // records that no starvation bound beyond this is added.
+        // abort (livelock), and it is excluded **PROBABILISTICALLY rather than
+        // deterministically**. A probed placement re-probes at a fresh random
+        // address; a MAP_FIXED retry takes RANDOMIZED backoff, and DEC-097
+        // records that no starvation bound beyond that is added.
+        //
+        // **The randomization is load-bearing, not decoration.** A deterministic
+        // exponential backoff leaves threads that started together still aligned
+        // after every doubling, so they re-collide at each retry — which is
+        // precisely the timing-aligned mutual abort the randomization exists to
+        // break. Measured here: with a deterministic `1 << attempt` spin, four
+        // CPUs contending on one node stalled indefinitely (~100 of 1200
+        // operations completing before the test timed out); two CPUs completed
+        // fine, which is the signature of alignment rather than of deadlock.
+        //
+        // The jitter source is deliberately cheap and local rather than drawn
+        // from an entropy service: DEC-063's in-kernel CSPRNG is named out-of-
+        // spec prerequisite work for Phase 3, and backoff jitter does not need a
+        // cryptographic source — only decorrelation between CPUs. Mixing the
+        // CPU id in is what supplies that.
         void backoff(unsigned attempt) {
-            // Deterministic in the harness (the seedable source is the test
-            // side's, §12); the kernel instance draws from DEC-063's entropy
-            // source, which is named out-of-spec prerequisite work.
-            const unsigned spins = 1u << (attempt < 8 ? attempt : 8);
-            for (unsigned k = 0; k < spins; k++) {
-                // A compiler barrier is enough here: the loop exists to spread
-                // two writers' retry timing apart, not to synchronize anything.
+            const unsigned capped = attempt < 10 ? attempt : 10;
+            const uint64_t window = uint64_t{1} << capped;
+
+            // splitmix64 step over (cpu, attempt, a per-tree sequence). Distinct
+            // per CPU by construction, so two CPUs at the same retry index draw
+            // different delays.
+            uint64_t x = backoffSequence.fetch_add(0x9E3779B97F4A7C15ull, kRefcountAcquire);
+            x += static_cast<uint64_t>(arch::getCurrentProcessorID()) * 0xD1B54A32D192ED03ull;
+            x += uint64_t{attempt} * 0xBF58476D1CE4E5B9ull;
+            x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
+            x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
+            x ^= x >> 31;
+
+            const uint64_t spins = 1 + (x & (window - 1));
+            for (uint64_t k = 0; k < spins; k++) {
+                // A compiler barrier is enough: the loop exists to spread two
+                // writers' retry timing apart, not to synchronize anything.
                 __asm__ __volatile__("" ::: "memory");
             }
         }
@@ -1241,16 +1534,16 @@ namespace kernel::mm::radix {
         // reader exists — §10 names it as "the NATURAL implementation, since the
         // commit walk already visits every node", which is exactly why it is
         // called out here rather than left to be noticed.
-        void retireNode(NodeRef node, unsigned level) {
+        void retireNode(NodeRef node, unsigned level, Attempt& a) {
             // Unlink -> retire. The unlink store has already happened at the
             // call site: rcu.md's writer obligation is that EVERY store making
             // the object unreachable is sequenced before `retire`, and `retire`
             // issues its own fence.
             Ops::template retire<Codec>(*domain, level, node);
-            retiredThisOperation = true;
+            a.retired = true;
         }
 
-        void retireSubtree(NodeRef node, unsigned level) {
+        void retireSubtree(NodeRef node, unsigned level, Attempt& a) {
             // Node by node, each through its own head — never one retire for the
             // whole subtree. "A subtree detach is equivalent to clearing every
             // slot and unlinking every node, executed as one parent-slot store":
@@ -1260,10 +1553,10 @@ namespace kernel::mm::radix {
             for (unsigned i = 0; i < n; i++) {
                 const uint64_t w = node.slot(i).load(kClaimedSlotLoad);
                 if (Codec::isChild(w)) {
-                    retireSubtree(NodeRef(Codec::decodeChild(w)), level + 1);
+                    retireSubtree(NodeRef(Codec::decodeChild(w)), level + 1, a);
                 }
             }
-            retireNode(node, level);
+            retireNode(node, level, a);
         }
 
         // Phase two of §6.5: mark EVERY node of the subtree, not just its root,

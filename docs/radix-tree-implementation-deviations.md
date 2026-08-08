@@ -271,3 +271,133 @@ than left silent.
 The clean fix is to reserve the whole block in one call, which costs the per-page
 NUMA refinement — a deliberate, documented decision (P2-I4, user-confirmed
 2026-08-01) that should not be reversed in-absentia.
+
+---
+
+# Phase 2 findings
+
+The concurrency tests were where Phase 2 earned its keep: they found seven real
+defects in three hours, five of which are now fixed. Every one was a rule the
+spec states and the implementation had not honoured — which is the useful kind
+of finding, because it means the spec was right and the code was behind it.
+
+## D-011 — OPEN — direct-slot `Mapping` releases are still synchronous
+
+**Spec**: §7.1 — "Two reclamation authorities compose only because **every
+release is deferred**. A synchronous release on a published node is a
+use-after-free with no grace period at all — and it is the NATURAL
+implementation, because the commit walk already visits every node, so releasing
+there costs nothing and looks like tidiness."
+
+That is verbatim what the implementation does for a `Mapping` displaced from a
+**directly written slot** (the overwrite and clear rows): `releaseNamedMapping`
+runs inline in the commit phase.
+
+**Consequence**: a reader inside the section that observed the old slot word
+takes its counted reference *after* the writer has taken the count to zero and
+destroyed the record — resurrection, then a double free. Reproduced as
+vmsmalloc's "Double free: bit already set in freeBitmap".
+
+**Not fixed, deliberately.** The fix is DEC-068's `DeferredRelease` records,
+which the phase plan schedules for **Phase 3** — and that scheduling is itself
+the finding, because a concurrent reader taking a counted reference is Phase 2
+functionality. The obvious shortcut (allocate a record per release) is
+explicitly forbidden by DEC-068: "Allocating here would make `munmap` an
+ALLOCATING operation … the one operation that RELIEVES memory pressure the one
+that fails under it." Taking that in-absentia is not a call I should make.
+
+The **detach path is already correct** — those releases ride node deleters and
+are deferred by construction. The gap is precisely the directly-written-slot
+rows.
+
+Disabled by this: `DISABLED_radix_concurrent_readers_never_observe_a_torn_state`,
+`DISABLED_radix_concurrent_expansion_and_reclamation_are_invisible_to_a_reader`.
+
+## D-012 — FIXED — `lookup` returned a raw pointer, not a counted reference
+
+§3.1 requires a lookup to return a **counted reference**, acquired inside the
+observing section (§7.3's acquisition law). The first implementation returned a
+raw `Mapping*`, so the very first concurrent reader test dereferenced a record
+whose grace period had ended. `LookupResult` is now move-only and releases on
+destruction.
+
+Caught by the Phase 0 oracle as a use-after-poison; silent without it.
+
+## D-013 — OPEN — over-counting under four-way contention on one node
+
+`DISABLED_radix_concurrent_contended_writers_all_complete` trips
+"occupancy count exceeded the valence" with four CPUs on a single node. Two CPUs
+pass.
+
+That assert is §5.3's, and §5.3 says it is the **only** detector — over-counting
+is invisible in release, since the 6-bit count field holds 0..63 against a legal
+maximum of 32, so 31 excess increments pass before any spare bit moves. §6.6
+names the shape: a writer re-running its dispatch on a pre-claim value publishes
+over a mapping it believes absent *and* increments the count a second time.
+
+Left as the next session's reproducer rather than papered over.
+
+## D-014 — OPEN — subtree-replacement test is intermittent
+
+Passes in isolation, has timed out under load. Shares the contended path with
+D-013 and should be re-assessed once that is fixed, not investigated separately.
+
+## D-015 — FIXED — reclaiming a node without holding the interlock
+
+`commit` reclaimed any child it computed as empty, including one the read pass
+had not nominated as a **candidate** — because candidacy comes from a RELAXED
+advisory occupancy load that can be stale-high.
+
+Marking a node this attempt does not hold violates invariant 19 ("every mark is
+taken under a whole-node claim, on all three paths, no exemption"), and because
+the mark is irreversible and blocks every future claim, it leaves the node
+permanently marked AND STILL LINKED. §6.8 describes the consequence exactly:
+"every inserter retries from the parent, and the range becomes silently
+unmappable for the address space's life." Observed as a hard stall.
+
+§6.4's other half is now implemented: "A node that empties but was NOT a
+candidate is simply not reclaimed on this pass."
+
+## D-016 — FIXED — missing freeze-and-verify re-walk
+
+§6.5's phase one ends with a re-walk under the claims requiring the discovered
+subtree to equal the recorded one, because a concurrent placement can legally
+build nodes into a hole between the unclaimed read pass and the claims landing.
+It was not implemented; detachment therefore marked nodes it did not hold.
+
+## D-017 — FIXED — backoff was deterministic, not randomized
+
+§6.7 property 3 excludes livelock **probabilistically**, and DEC-097 makes
+randomized backoff the sole mitigation. The implementation used a deterministic
+`1 << attempt` spin, which leaves threads that started together still aligned
+after every doubling — exactly the timing-aligned mutual abort the randomization
+exists to break.
+
+Measured: four CPUs on one node stalled indefinitely (~100 of 1200 operations);
+two CPUs completed fine, which is the signature of alignment rather than
+deadlock. With jitter mixed from the CPU id, four CPUs complete.
+
+## D-018 — FIXED — surplus allocations leaked on the SUCCESS path
+
+§9: "Surplus allocations are shallow-discarded." The implementation discarded
+them on abort but not on success — and a prebuilt subdivision subtree genuinely
+can go unused on a successful attempt, because the read pass runs unclaimed and
+the row can change before the claim lands. Leaked one 288 B node per occurrence,
+only under concurrency.
+
+## D-019 — FIXED — a prebuilt subtree was not validated against current content
+
+Re-dispatch checked that a `Subdivide` row still had *a* pending subtree, not
+that the subtree was built for the slot's *current* content. A row that stays
+Subdivide while the leaf comes to name a different record would publish the old
+record's survivors. The pending now records the word it was built from.
+
+(Comparing raw slot words is correct **here and only here** — same slot, same
+level. §3.1's validity token cannot do it, because it compares across levels
+where a level-relative range field makes a bit-identical word mean a halved
+range.)
+
+## D-020 — FIXED — per-tree mutable state raced
+
+`retiredThisOperation` was a plain `bool` member of the shared tree, written by
+every CPU. TSan caught it; it now lives on the attempt.

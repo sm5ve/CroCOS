@@ -98,9 +98,9 @@ TEST(radix_tree_lookup_finds_a_leaf_at_the_root_level) {
     quiesce(h);
     ASSERT_EQ(size_t{1}, f->nodeCount());    // just the root
 
-    ASSERT_EQ(m, f->lookup(0).mapping);
-    ASSERT_EQ(m, f->lookup(slot - 1).mapping);
-    ASSERT_EQ(m, f->lookup(slot / 2).mapping);
+    ASSERT_EQ(m, f->lookup(0).mapping());
+    ASSERT_EQ(m, f->lookup(slot - 1).mapping());
+    ASSERT_EQ(m, f->lookup(slot / 2).mapping());
     ASSERT_FALSE(static_cast<bool>(f->lookup(slot)));
 
     ValidA::validate(f.tree, "root-level leaf");
@@ -116,8 +116,8 @@ TEST(radix_tree_lookup_walks_to_the_floor_when_the_range_demands_it) {
     // is inexpressible there and the placement builds a spine down to the floor.
     ASSERT_TRUE(f->apply(0, kPage - 1, m) == rdx::ApplyStatus::Ok);
     quiesce(h);
-    ASSERT_EQ(m, f->lookup(0).mapping);
-    ASSERT_EQ(m, f->lookup(kPage - 1).mapping);
+    ASSERT_EQ(m, f->lookup(0).mapping());
+    ASSERT_EQ(m, f->lookup(kPage - 1).mapping());
     ASSERT_FALSE(static_cast<bool>(f->lookup(kPage)));
 
     // Exactly TWO nodes: the C0 root plus one C1 child. §6.1's bound is one node
@@ -159,12 +159,18 @@ TEST(radix_tree_translation_uses_both_terms) {
     ASSERT_TRUE(f->apply(base, base + rdx::slotSpan(GA, 3) - 1, m) == rdx::ApplyStatus::Ok);
     quiesce(h);
 
-    auto r = f->lookup(base + 3 * kPage);
-    ASSERT_EQ(m, r.mapping);
-    ASSERT_EQ(objOff + 3 * kPage, r.mapping->offsetFor(base + 3 * kPage));
-    // The first byte of the mapping resolves to the object offset itself, not to
-    // the object's first byte and not to the leaf's slot base.
-    ASSERT_EQ(objOff, r.mapping->offsetFor(base));
+    {
+        auto r = f->lookup(base + 3 * kPage);
+        ASSERT_EQ(m, r.mapping());
+        ASSERT_EQ(objOff + 3 * kPage, r.mapping()->offsetFor(base + 3 * kPage));
+        // The first byte of the mapping resolves to the object offset itself, not
+        // to the object's first byte and not to the leaf's slot base.
+        ASSERT_EQ(objOff, r.mapping()->offsetFor(base));
+    }
+    // Scoped deliberately: a lookup result holds a COUNTED reference, and §11
+    // requires the naming-slot census to run with none outstanding — "which
+    // would otherwise mask it entirely". Holding `r` here inflates the record's
+    // count by one and the validator correctly reports it.
     ValidA::validate(f.tree, "translation");
 }
 
@@ -188,12 +194,12 @@ TEST(radix_tree_middle_punch_builds_a_spine_not_a_leaf_pair) {
     quiesce(h);
 
     // Coverage is exactly right...
-    ASSERT_EQ(m, f->lookup(0).mapping);
-    ASSERT_EQ(m, f->lookup(punch - 1).mapping);
+    ASSERT_EQ(m, f->lookup(0).mapping());
+    ASSERT_EQ(m, f->lookup(punch - 1).mapping());
     ASSERT_FALSE(static_cast<bool>(f->lookup(punch)));
     ASSERT_FALSE(static_cast<bool>(f->lookup(punch + kPage - 1)));
-    ASSERT_EQ(m, f->lookup(punch + kPage).mapping);
-    ASSERT_EQ(m, f->lookup(slot - 1).mapping);
+    ASSERT_EQ(m, f->lookup(punch + kPage).mapping());
+    ASSERT_EQ(m, f->lookup(slot - 1).mapping());
 
     // ...and the shape is a spine of many leaves, not two.
     const auto census = ValidA::namingSlotCensus(f.tree);
@@ -231,8 +237,8 @@ TEST(radix_tree_edge_mmap_minimal_shape_leaves_the_old_record_at_delta_zero) {
 
     quiesce(h);
 
-    ASSERT_EQ(newM, f->lookup(0).mapping);
-    ASSERT_EQ(oldM, f->lookup(kPage).mapping);
+    ASSERT_EQ(newM, f->lookup(0).mapping());
+    ASSERT_EQ(oldM, f->lookup(kPage).mapping());
     ASSERT_FALSE(static_cast<bool>(f->lookup(2 * kPage)));
 
     ASSERT_EQ(uint64_t{1}, oldM->refcountRelaxed());   // +1 new slot, -1 displaced
@@ -265,9 +271,9 @@ TEST(radix_tree_edge_mmap_wide_survivor_takes_the_per_transition_delta) {
     ASSERT_EQ(uint64_t{1}, newM->refcountRelaxed());
 
     // Coverage is what matters, and it is exact.
-    ASSERT_EQ(newM, f->lookup(0).mapping);
+    ASSERT_EQ(newM, f->lookup(0).mapping());
     for (uint64_t va = kPage; va < slot; va += kPage) {
-        ASSERT_EQ(oldM, f->lookup(va).mapping);
+        ASSERT_EQ(oldM, f->lookup(va).mapping());
     }
     ValidA::validate(f.tree, "edge mmap, wide survivor");
 }
@@ -309,7 +315,7 @@ TEST(radix_tree_in_place_shrink_moves_no_count) {
     ASSERT_EQ(uint64_t{1}, m->refcountRelaxed());
     ASSERT_EQ(size_t{1}, f->nodeCount());    // still no depth built
     ASSERT_FALSE(static_cast<bool>(f->lookup(0)));
-    ASSERT_EQ(m, f->lookup(kPage).mapping);
+    ASSERT_EQ(m, f->lookup(kPage).mapping());
     ValidA::validate(f.tree, "in-place shrink");
 }
 
@@ -365,7 +371,7 @@ TEST(radix_tree_reclamation_stops_at_the_first_non_empty_ancestor) {
 
     quiesce(h);
     ASSERT_EQ(before, f->nodeCount());
-    ASSERT_EQ(keep, f->lookup(kPage).mapping);
+    ASSERT_EQ(keep, f->lookup(kPage).mapping());
     ValidA::validate(f.tree, "partial reclamation");
 
     ASSERT_TRUE(f->apply(kPage, 2 * kPage - 1, nullptr) == rdx::ApplyStatus::Ok);
@@ -407,8 +413,8 @@ TEST(radix_tree_detaching_a_subtree_releases_every_leaf_reference) {
     ASSERT_EQ(size_t{1}, liveCountOf<rdx::Mapping>());
     ASSERT_EQ(uint64_t{1}, coarse->refcountRelaxed());
     ASSERT_EQ(size_t{1}, f->nodeCount());              // subtree gone
-    ASSERT_EQ(coarse, f->lookup(0).mapping);
-    ASSERT_EQ(coarse, f->lookup(slot - 1).mapping);
+    ASSERT_EQ(coarse, f->lookup(0).mapping());
+    ASSERT_EQ(coarse, f->lookup(slot - 1).mapping());
     ValidA::validate(f.tree, "detach");
     (void)nameCount;
 }

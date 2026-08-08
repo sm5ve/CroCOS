@@ -116,12 +116,12 @@ namespace CroCOSTest::radix {
             const auto got = tree.lookup(va);
             rdx::Mapping* want = model.at(va);
 
-            if (got.mapping != want) {
+            if (got.mapping() != want) {
                 char msg[256];
                 std::snprintf(msg, sizeof(msg),
                               "%s: cover mismatch at VA %llu — tree says %p, model says %p",
                               what, static_cast<unsigned long long>(va),
-                              static_cast<const void*>(got.mapping),
+                              static_cast<const void*>(got.mapping()),
                               static_cast<const void*>(want));
                 throw AssertionFailure(std::string(msg));
             }
@@ -130,27 +130,27 @@ namespace CroCOSTest::radix {
             // The reported range must contain the query and be uniform in the
             // model. An over-wide leaf — the hole-freedom violation, and the one
             // a cover-only check would miss — fails the uniformity half.
-            if (got.rangeLo > va || got.rangeHi < va) {
+            if (got.lo() > va || got.hi() < va) {
                 char msg[256];
                 std::snprintf(msg, sizeof(msg),
                               "%s: reported range [%llu,%llu] does not contain VA %llu",
                               what,
-                              static_cast<unsigned long long>(got.rangeLo),
-                              static_cast<unsigned long long>(got.rangeHi),
+                              static_cast<unsigned long long>(got.lo()),
+                              static_cast<unsigned long long>(got.hi()),
                               static_cast<unsigned long long>(va));
                 throw AssertionFailure(std::string(msg));
             }
             uint64_t runLo = 0, runHi = 0;
             model.runAt(va, runLo, runHi);
-            if (got.rangeLo < runLo || got.rangeHi > runHi) {
+            if (got.lo() < runLo || got.hi() > runHi) {
                 char msg[320];
                 std::snprintf(msg, sizeof(msg),
                               "%s: reported range [%llu,%llu] at VA %llu escapes the model's "
                               "uniform run [%llu,%llu] — the leaf covers addresses that do not "
                               "name this record",
                               what,
-                              static_cast<unsigned long long>(got.rangeLo),
-                              static_cast<unsigned long long>(got.rangeHi),
+                              static_cast<unsigned long long>(got.lo()),
+                              static_cast<unsigned long long>(got.hi()),
                               static_cast<unsigned long long>(va),
                               static_cast<unsigned long long>(runLo),
                               static_cast<unsigned long long>(runHi));

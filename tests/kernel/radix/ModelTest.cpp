@@ -291,7 +291,7 @@ TEST(radix_model_randomized_sequences_real_geometry) {
         // check, and the tree is only populated in the window anyway.
         for (uint64_t va = 0; va < window; va += unit) {
             const auto got = tree.lookup(va);
-            ASSERT_EQ(model.at(va), got.mapping);
+            ASSERT_EQ(model.at(va), got.mapping());
         }
 
         ASSERT_TRUE(tree.apply(0, span - 1, nullptr) == rdx::ApplyStatus::Ok);
@@ -333,7 +333,7 @@ TEST(radix_model_an_address_mapped_before_and_after_is_never_lost) {
 
             // Snapshot everything outside the operation's range.
             std::vector<rdx::Mapping*> before(units);
-            for (uint64_t u = 0; u < units; u++) before[u] = tree.lookup(u * unit).mapping;
+            for (uint64_t u = 0; u < units; u++) before[u] = tree.lookup(u * unit).mapping();
 
             ASSERT_TRUE(tree.apply(lo, hi, v) == rdx::ApplyStatus::Ok);
             model.apply(lo, hi, v);
@@ -342,7 +342,7 @@ TEST(radix_model_an_address_mapped_before_and_after_is_never_lost) {
             for (uint64_t u = 0; u < units; u++) {
                 const uint64_t va = u * unit;
                 if (va >= lo && va <= hi) continue;      // the operation's own range
-                ASSERT_EQ(before[u], tree.lookup(va).mapping);
+                ASSERT_EQ(before[u], tree.lookup(va).mapping());
             }
             ValidT::validate(tree, "hole-freedom");
         }
