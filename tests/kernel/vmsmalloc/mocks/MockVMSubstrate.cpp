@@ -80,9 +80,23 @@ void* allocPage() {
         std::abort();
     }
     void* p = gFreeHead;
+    // Unpoison BEFORE reading the free-list link out of the page, not after.
+    //
+    // The order looks arbitrary and is not. The DEC-052 oracle poisons
+    // `sizeof(T)` bytes at `destroy<T>` — deliberately AFTER `vmsfree`, so the
+    // allocator's own validation and its DEC-024 scribble do not run over
+    // poisoned memory. For a slab-backed T that poison covers one slot. For a
+    // **whole-page** T (radix's 4 KiB BucketTable is the first) it covers the
+    // entire page, INCLUDING the word this function threads the free list
+    // through — so the page returns to the pool fully poisoned and the pop below
+    // reads a poisoned link.
+    //
+    // Latent until a whole-page object existed, which is why it surfaced as a
+    // use-after-poison inside allocPage the first time an address space was
+    // created and destroyed.
+    unpoisonWholePage(p);
     gFreeHead = *reinterpret_cast<void**>(p);
     gActiveCount++;
-    unpoisonWholePage(p);
     // Per DEC-046 the kernel's allocPage invalidates the caller's stale TLB
     // entry; in userspace we instead zero so a re-handed-out page never carries
     // a previous descriptor's bytes (cheap and keeps tests deterministic).

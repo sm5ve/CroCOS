@@ -118,20 +118,33 @@ namespace kernel::mm::radix {
             return true;
         }
 
-        // Phase 3's teardown item (§7.4) replaces this. What it already honours
-        // is the shape: every cluster is torn down before the table page goes,
-        // and the page itself is the last thing freed.
-        void destroy() {
+        // §7.4's WALK, split from the page free because the sequence separates
+        // them: the walk is step 4 and the root page goes at step 6, after
+        // `drainAllQuiescent`. Conflating them frees the page while retired
+        // nodes are still in bags naming slots inside it.
+        //
+        // The walk itself is not yet DEC-100's unit-decomposed one — see D-032.
+        void tearDownClusters() {
             if (table == nullptr) return;
             for (size_t i = 0; i < kBucketCount; i++) {
                 const uint64_t w = table->entries[i].load(kQuiescedRead);
                 if (BucketCodecT::isEmpty(w)) continue;
                 Tree t = treeFor(i);
                 t.destroyTree();
-                table->entries[i].store(0, kPrivateInit);
             }
+        }
+
+        void freeRootPage() {
+            if (table == nullptr) return;
             VMSubstrate::destroy(VMSubstrate::SafePtr<BucketTable>(table));
             table = nullptr;
+        }
+
+        // The two together, for callers outside the §7.4 sequence (the growth
+        // tests, which have no address space around them).
+        void destroy() {
+            tearDownClusters();
+            freeRootPage();
         }
 
         [[nodiscard]] bool valid() const { return table != nullptr; }

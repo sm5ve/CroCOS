@@ -1042,3 +1042,48 @@ on `!cursor.finished()`.
 **Both were found by the same test, and neither by any correctness check.** The
 histogram exists because DEC-095 wanted a measurement; it earned its place by
 catching two bugs that no assertion about mappings would have seen.
+
+---
+
+## D-032 — GAP (2026-08-08, Phase 3) — the teardown walk is not yet DEC-100's
+
+§7.4's SEQUENCE is implemented in its stated order (`destroyAddressSpace`), and
+the phase plan's warning that "every reordering reviewed was a fatal" was taken
+literally: dying flag → thread destruction (the caller's) → `synchronize` → the
+walk → `drainAllQuiescent` → free the root page and the pools → `deinit` → return
+the control block.
+
+**What is not yet DEC-100's** is the walk itself. DEC-100 asks for a
+unit-decomposed walk — each cluster torn down as a series of units that claim,
+mark, unlink and **retire**, with the final unit clearing the bucket word and
+retiring the root inside its own read section. What is implemented is the
+Phase-1 synchronous release: a post-order walk running each node's deleter
+directly, which is correct here because `synchronize` plus thread destruction has
+made the walk genuinely unobserved.
+
+**Two consequences, one of which required a deviation from the stated sequence.**
+
+**(a) An extra drain, before the walk.** Under DEC-100 every `Mapping` release at
+teardown — the ones riding node deleters and the ones riding `DeferredRelease`
+records — happens inside the single `drainAllQuiescent` that follows the walk, so
+each record's count reaches zero exactly once and the order among them does not
+matter. With a **synchronous** walk it does: a record still sitting in a bag from
+an earlier operation would release a `Mapping` the walk has already destroyed at
+count zero. So `destroyAddressSpace` drains **before** the walk as well, which
+empties those bags while the tree is still whole. Nothing runs between the two —
+the threads are gone — so no new record can appear. The extra drain disappears
+when the walk becomes retire-based.
+
+**(b) No marking.** DEC-100's walk marks every node it unlinks, and §7.4 says why:
+"Without any marking at all, teardown would be the only unlink path setting no
+mark, leaving a foreign CPU's surviving cache entry pointed at a node that is
+unlinked, unmarked, alive, and holding slots that point at freed children." That
+hazard is **Phase 4's**, because the descent cache does not exist yet — there is
+no surviving cache entry to mislead. It becomes live the moment DEC-016's cache
+lands, and the cache's `resumeDescent` contract depends on teardown's marking to
+make `Detached` double as the address-space-gone answer.
+
+**Scheduled, not deferred indefinitely**: the unit-decomposed walk is a Phase 3
+work item that is *partially* complete, and it is a **hard prerequisite for Phase
+4**, not merely a tidy-up. Landing the descent cache over a non-marking teardown
+is the exact defect §7.4 spends a paragraph on.
