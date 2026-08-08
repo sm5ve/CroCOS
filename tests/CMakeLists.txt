@@ -70,6 +70,30 @@ add_subdirectory(core)
 # time; CoreTestRunnerTSan in particular is the ONLY thing covering
 # Core::rcu::EpochDomain's concurrency tests under the ARMv8 release gate, so its
 # absence meant the RCU engine's weak-memory coverage was opt-in.
+# ─── CROCOS_SKIP_TSAN_STRESS ───────────────────────────────────────────────
+#
+# Sixteen timing-bounded concurrency stress tests (AtomicBitPool, SplitBitmap,
+# TreiberStack, AtomicLinkedList, the RCU engine's concurrent trio) carry
+# wall-clock timeouts. Those timeouts are LIVENESS checks — "did this hang?" —
+# and under TSan's ~10-20x slowdown they become performance assertions.
+#
+# Measured rather than assumed: on an idle machine CoreTestRunnerTSan is
+# 441/441 across repeated runs; with two other TSan runners running in parallel
+# it is 425/441, failing exactly those sixteen, reproducibly in both directions.
+# It is starvation, not flakiness, and `run_all_tests` chains the runners
+# sequentially, so the gate is green when it is run the way it is meant to be.
+#
+# Default OFF, deliberately: these are the ONLY tests exercising the lock-free
+# structures under a race detector, so a TSan build with them skipped is not
+# covering the thing TSan is there for. Turn it on where a quiet machine cannot
+# be guaranteed — a shared CI box, or a developer running the suite alongside a
+# build — and accept that trade knowingly:
+#
+#     cmake -S tests -B tests/build -DCROCOS_SKIP_TSAN_STRESS=ON
+#
+option(CROCOS_SKIP_TSAN_STRESS
+       "Skip the load-sensitive concurrency stress tests in TSan builds" OFF)
+
 add_custom_target(run_all_tests
     USES_TERMINAL
     COMMAND core/CoreTestRunner

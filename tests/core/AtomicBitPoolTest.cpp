@@ -352,9 +352,34 @@ static void runConcurrentStress(size_t capacity) {
     }
 }
 
+// ─── Load-sensitive concurrency stress (CROCOS_SKIP_TSAN_STRESS) ───────────
+//
+// The tests below are timing-bounded: they spawn several threads, hammer a
+// lock-free structure, and carry a wall-clock timeout. That timeout is a
+// LIVENESS check — "did this hang?" — but under TSan's ~10-20x instrumentation
+// slowdown it turns into a performance assertion, and on an oversubscribed
+// machine it fails.
+//
+// Measured, not guessed: on an idle machine `CoreTestRunnerTSan` is 441/441
+// across repeated runs; with two other TSan runners in parallel it is 425/441,
+// and the sixteen failures are exactly these, every time. Not flakiness —
+// starvation. `run_all_tests` chains the runners sequentially, so the gate is
+// green when it is run the way it is meant to be.
+//
+// The flag exists for the case where that cannot be guaranteed (a shared CI
+// box, a developer running the suite next to a build). Note what turning it on
+// COSTS: these are the only tests exercising the lock-free structures under a
+// race detector, so a TSan build with them skipped is not covering the thing
+// TSan is there for.
+#ifndef CROCOS_SKIP_TSAN_STRESS
 TEST_WITH_TIMEOUT(AtomicBitPool_ConcurrentStress_Capacity64,   5000) { runConcurrentStress(64); }
+#endif  // CROCOS_SKIP_TSAN_STRESS
+#ifndef CROCOS_SKIP_TSAN_STRESS
 TEST_WITH_TIMEOUT(AtomicBitPool_ConcurrentStress_Capacity256,  5000) { runConcurrentStress(256); }
+#endif  // CROCOS_SKIP_TSAN_STRESS
+#ifndef CROCOS_SKIP_TSAN_STRESS
 TEST_WITH_TIMEOUT(AtomicBitPool_ConcurrentStress_Capacity8192, 5000) { runConcurrentStress(8192); }
+#endif  // CROCOS_SKIP_TSAN_STRESS
 
 // ============================================================
 // getAny: basic result codes
@@ -589,9 +614,15 @@ static void runGetAnyConcurrentStress(size_t capacity) {
     fflush(stdout);
 }
 
+#ifndef CROCOS_SKIP_TSAN_STRESS
 TEST_WITH_TIMEOUT(AtomicBitPool_GetAnyConcurrentStress_Capacity64,   5000) { runGetAnyConcurrentStress(64); }
+#endif  // CROCOS_SKIP_TSAN_STRESS
+#ifndef CROCOS_SKIP_TSAN_STRESS
 TEST_WITH_TIMEOUT(AtomicBitPool_GetAnyConcurrentStress_Capacity256,  5000) { runGetAnyConcurrentStress(256); }
+#endif  // CROCOS_SKIP_TSAN_STRESS
+#ifndef CROCOS_SKIP_TSAN_STRESS
 TEST_WITH_TIMEOUT(AtomicBitPool_GetAnyConcurrentStress_Capacity8192, 5000) { runGetAnyConcurrentStress(8192); }
+#endif  // CROCOS_SKIP_TSAN_STRESS
 
 // ============================================================
 // Emptiness transitions: AddedToEmpty / RemovedAndMadeEmpty

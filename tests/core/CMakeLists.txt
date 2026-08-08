@@ -268,6 +268,15 @@ target_compile_options(CoreTestRunnerTSan PRIVATE
 
 target_link_options(CoreTestRunnerTSan PRIVATE -fsanitize=thread)
 
+# The TSan build is the one where the load-sensitive stress tests can starve —
+# see the option's comment in tests/CMakeLists.txt. Applied to the TSan targets
+# only; the ASan and uninstrumented builds always run them.
+if(CROCOS_SKIP_TSAN_STRESS)
+    target_compile_definitions(CoreTestsTSan PRIVATE CROCOS_SKIP_TSAN_STRESS)
+    target_compile_definitions(CoreTestRunnerTSan PRIVATE CROCOS_SKIP_TSAN_STRESS)
+endif()
+
+
 if(APPLE)
     target_link_options(CoreTestRunnerTSan PRIVATE
         -Wl,-force_load,$<TARGET_FILE:CoreTestsTSan>

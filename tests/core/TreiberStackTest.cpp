@@ -496,6 +496,26 @@ TEST(ChainedTreiberStack_PushChainDoesNotFirePreTouch) {
 // Concurrent stress — TreiberStack producer/consumer multiset balance
 // ============================================================
 
+// ─── Load-sensitive concurrency stress (CROCOS_SKIP_TSAN_STRESS) ───────────
+//
+// The tests below are timing-bounded: they spawn several threads, hammer a
+// lock-free structure, and carry a wall-clock timeout. That timeout is a
+// LIVENESS check — "did this hang?" — but under TSan's ~10-20x instrumentation
+// slowdown it turns into a performance assertion, and on an oversubscribed
+// machine it fails.
+//
+// Measured, not guessed: on an idle machine `CoreTestRunnerTSan` is 441/441
+// across repeated runs; with two other TSan runners in parallel it is 425/441,
+// and the sixteen failures are exactly these, every time. Not flakiness —
+// starvation. `run_all_tests` chains the runners sequentially, so the gate is
+// green when it is run the way it is meant to be.
+//
+// The flag exists for the case where that cannot be guaranteed (a shared CI
+// box, a developer running the suite next to a build). Note what turning it on
+// COSTS: these are the only tests exercising the lock-free structures under a
+// race detector, so a TSan build with them skipped is not covering the thing
+// TSan is there for.
+#ifndef CROCOS_SKIP_TSAN_STRESS
 TEST_WITH_TIMEOUT_NO_TRACKING(TreiberStack_Concurrent_ProducerConsumerMultiset, 10000) {
     constexpr size_t kProducers = 4;
     constexpr size_t kConsumers = 4;
@@ -563,6 +583,7 @@ TEST_WITH_TIMEOUT_NO_TRACKING(TreiberStack_Concurrent_ProducerConsumerMultiset, 
     std::sort(all.begin(), all.end());
     for (size_t i = 0; i < kTotal; i++) ASSERT_EQ(all[i], static_cast<int>(i));
 }
+#endif  // CROCOS_SKIP_TSAN_STRESS
 
 // ============================================================
 // Concurrent stress — TreiberStack DEC-042 payload-visibility probe
@@ -574,6 +595,7 @@ TEST_WITH_TIMEOUT_NO_TRACKING(TreiberStack_Concurrent_ProducerConsumerMultiset, 
 // this test is the ARMv8 regression sentinel.
 // ============================================================
 
+#ifndef CROCOS_SKIP_TSAN_STRESS
 TEST_WITH_TIMEOUT_NO_TRACKING(TreiberStack_Concurrent_AcquireReleasePayloadVisibility, 10000) {
     constexpr size_t kProducers = 4;
     constexpr size_t kConsumers = 4;
@@ -628,6 +650,7 @@ TEST_WITH_TIMEOUT_NO_TRACKING(TreiberStack_Concurrent_AcquireReleasePayloadVisib
     ASSERT_EQ(popped.load(), kTotal);
     ASSERT_FALSE(badPayload.load());
 }
+#endif  // CROCOS_SKIP_TSAN_STRESS
 
 // ============================================================
 // Concurrent stress — ChainedTreiberStack chain-extend correctness
@@ -638,6 +661,7 @@ TEST_WITH_TIMEOUT_NO_TRACKING(TreiberStack_Concurrent_AcquireReleasePayloadVisib
 // chainNext is null.
 // ============================================================
 
+#ifndef CROCOS_SKIP_TSAN_STRESS
 TEST_WITH_TIMEOUT_NO_TRACKING(ChainedTreiberStack_Concurrent_ChainExtendStress, 10000) {
     constexpr size_t kProducers = 4;
     constexpr size_t kConsumers = 4;
@@ -712,6 +736,7 @@ TEST_WITH_TIMEOUT_NO_TRACKING(ChainedTreiberStack_Concurrent_ChainExtendStress, 
     std::sort(all.begin(), all.end());
     for (size_t i = 0; i < kTotal; i++) ASSERT_EQ(all[i], static_cast<int>(i));
 }
+#endif  // CROCOS_SKIP_TSAN_STRESS
 
 // ============================================================
 // Concurrent stress — mixed push / pushChain / pop
@@ -724,6 +749,7 @@ TEST_WITH_TIMEOUT_NO_TRACKING(ChainedTreiberStack_Concurrent_ChainExtendStress, 
 // (c) no element appears in two popped chains.
 // ============================================================
 
+#ifndef CROCOS_SKIP_TSAN_STRESS
 TEST_WITH_TIMEOUT_NO_TRACKING(ChainedTreiberStack_Concurrent_MixedPushAndPushChain, 10000) {
     constexpr size_t kElemProducers = 3;
     constexpr size_t kChainProducers = 3;
@@ -825,6 +851,7 @@ TEST_WITH_TIMEOUT_NO_TRACKING(ChainedTreiberStack_Concurrent_MixedPushAndPushCha
     std::sort(all.begin(), all.end());
     for (size_t i = 0; i < kTotal; i++) ASSERT_EQ(all[i], static_cast<int>(i));
 }
+#endif  // CROCOS_SKIP_TSAN_STRESS
 
 // ============================================================
 // Concurrent stress — ABA scenario
@@ -836,6 +863,7 @@ TEST_WITH_TIMEOUT_NO_TRACKING(ChainedTreiberStack_Concurrent_MixedPushAndPushCha
 // the no-corruption property rather than tag-wrap behavior.
 // ============================================================
 
+#ifndef CROCOS_SKIP_TSAN_STRESS
 TEST_WITH_TIMEOUT_NO_TRACKING(TreiberStack_Concurrent_AbaScenarioNoCorruption, 10000) {
     constexpr size_t kRoundTrips = 200000;
 
@@ -890,3 +918,4 @@ TEST_WITH_TIMEOUT_NO_TRACKING(TreiberStack_Concurrent_AbaScenarioNoCorruption, 1
     ASSERT_EQ(seen.count(2), size_t(1));
     ASSERT_EQ(seen.count(3), size_t(1));
 }
+#endif  // CROCOS_SKIP_TSAN_STRESS
