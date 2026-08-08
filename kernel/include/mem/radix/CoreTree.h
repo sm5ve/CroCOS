@@ -380,6 +380,97 @@ namespace kernel::mm::radix {
         uint64_t rangeHi = 0;
     };
 
+    // ─── The seam handle (§5.5, §7.5; DEC-016 / DEC-078) ───────────────────
+    //
+    // "The one genuine leak across the seam is the descent cache, which holds a
+    // reference to an interior core node and must learn on hit whether it is
+    // dying."
+    //
+    // The handle is **opaque to the policy layer** — it never dereferences it —
+    // and it is **counted**, which is half of §7.5's duality:
+    //
+    //   - the counted reference stops the node's memory being freed and reused
+    //     as a *different* node. Without it a cached pointer could silently come
+    //     to name a valid, unmarked, unrelated node, and the cache would then
+    //     return a `Mapping` for the wrong address without crashing (ABA).
+    //   - the dying mark, read on every hit, is what tells the entry its node
+    //     has been detached. **The mark, not the reference, is what makes a
+    //     cached node's CHILDREN safe to read**: a reference keeps the node
+    //     itself alive and says nothing about the slots inside it.
+    //
+    // Three values, not one, because DEC-012 keeps level and base OUT of nodes:
+    // descent derives level by counting and a subtree's base by masking the
+    // search key, so a bare node pointer cannot be resumed from. Both are
+    // intrinsic and immutable for the node's life — growth builds a parent
+    // ABOVE the old root rather than relabelling it — so carrying them in the
+    // handle is not a staleness hazard, unlike the `{root, level, base}` triple
+    // decoded from a bucket word (§7.3).
+    //
+    // Move-only and self-releasing, for LookupResult's reason: a copy that did
+    // not bump the count is a double release, and a dropped handle is a node
+    // pinned for the machine's life. `release()` is still the seam's third
+    // operation and the cache calls it explicitly — the destructor is the
+    // backstop, not the intended path.
+    //
+    // **The release may destroy.** Invariant 24 makes the destructor release
+    // nothing, so that is bounded straight-line work and legal even inside a
+    // read section in `#PF` context: a refcount-zero destroy is the DESTRUCTOR,
+    // not a deleter, and §7.6's deleters-run-outside-any-section rule does not
+    // reach it (§7.5).
+    template <GeometryDescriptor G>
+    class PinnedNode {
+    public:
+        PinnedNode() = default;
+        PinnedNode(const PinnedNode&)            = delete;
+        PinnedNode& operator=(const PinnedNode&) = delete;
+
+        PinnedNode(PinnedNode&& o) noexcept
+            : node(o.node), nodeBase(o.nodeBase), nodeLevel(o.nodeLevel) {
+            o.node = NodeRef();
+        }
+        PinnedNode& operator=(PinnedNode&& o) noexcept {
+            if (this != &o) {
+                release();
+                node = o.node; nodeBase = o.nodeBase; nodeLevel = o.nodeLevel;
+                o.node = NodeRef();
+            }
+            return *this;
+        }
+        ~PinnedNode() { (void)release(); }
+
+        explicit operator bool() const { return static_cast<bool>(node); }
+
+        // The seam's third operation. Idempotent, so the destructor backstop
+        // cannot double-release what the cache already released.
+        //
+        // Returns whether this release was the last one and therefore destroyed.
+        // That is instrumentation, not a lifetime disclosure: DEC-016's cost
+        // claim is that "atomics fall on cache turnover rather than on faults",
+        // and a policy layer that cannot count its own destroys cannot check it.
+        bool release() {
+            if (!node) return false;
+            // ACQ_REL rather than DEC-069's release-plus-acquire-fence, for the
+            // reason kRefcountReleaseAcquire states: the fence form is correct
+            // and invisible to the release gate (D-029).
+            const uint64_t prior = node.refcount().fetch_sub(1, kRefcountReleaseAcquire);
+            assert(prior != 0, "radix: a descent-cache pin released below zero");
+            const bool destroyed = (prior == 1);
+            if (destroyed) NodeOps<G>::destroy(nodeLevel, node);
+            node = NodeRef();
+            return destroyed;
+        }
+
+    private:
+        template <GeometryDescriptor, typename, unsigned> friend class CoreTree;
+
+        PinnedNode(NodeRef n, unsigned level, uint64_t base)
+            : node(n), nodeBase(base), nodeLevel(level) {}
+
+        NodeRef  node{};
+        uint64_t nodeBase  = 0;
+        unsigned nodeLevel = 0;
+    };
+
     // §11's counters. Three of the progress targets are stated as COUNTERS
     // rather than asserts, and the distinction is load-bearing: phantom-bit and
     // terminal-mask failures are LEGAL executions, so asserting on them fires on
@@ -776,14 +867,57 @@ namespace kernel::mm::radix {
                    now.hi() == held.hi();
         }
 
+        // ─── The pin site (DEC-078) ────────────────────────────────────────
+        //
+        // Where a descent would take a descent-cache pin: the node it was
+        // standing on at the caller's chosen level, together with the level and
+        // base that DEC-012 keeps out of nodes and that a resume therefore
+        // cannot recover from the pointer alone.
+        //
+        // A site is NOT a reference. It is filled in by a descent and is only
+        // meaningful inside that descent's section; `pinLocked` is what turns
+        // one into a counted handle that outlives it, and it is the only thing
+        // in the tree allowed to do so.
+        struct PinSite {
+            NodeRef  node{};
+            unsigned level = 0;
+            uint64_t base  = 0;
+            bool     valid = false;
+        };
+
+        // "at a caller-chosen level" (DEC-078). This asks for the DEEPEST node
+        // the descent reaches — DEC-016's "interior node directly above the last
+        // accessed mapping", which is what the cache wants by default. A numeric
+        // level asks for the deepest node at or above it, so a descent that
+        // terminates shallower than the request still yields a site rather than
+        // nothing.
+        static constexpr unsigned kPinAtDeepest = ~0u;
+
         [[nodiscard]] LookupResult descendLocked(const RootBinding& bind, uint64_t va) const {
+            return descendLocked(bind, va, kPinAtDeepest, nullptr);
+        }
+
+        [[nodiscard]] LookupResult descendLocked(const RootBinding& bind, uint64_t va,
+                                                 unsigned pinLevel, PinSite* outSite) const {
             if (!bind) return {};
             if (va < bind.base || va >= bind.base + nodeSpan(G, bind.level)) return {};
-            NodeRef node = bind.root;
-            unsigned level = bind.level;
-            uint64_t nodeBase = bind.base;
+            return descendFromLocked(bind.root, bind.level, bind.base, va, pinLevel, outSite);
+        }
 
+        // The descent proper, resumable from any node. `resumeDescent` enters
+        // here with a pinned node rather than with the root binding, and that is
+        // the entire mechanical content of the cache: a hit is this loop started
+        // partway down.
+        [[nodiscard]] LookupResult descendFromLocked(NodeRef node, unsigned level,
+                                                     uint64_t nodeBase, uint64_t va,
+                                                     unsigned pinLevel,
+                                                     PinSite* outSite) const {
             for (;;) {
+                // Recorded BEFORE the slot load, so a descent that terminates
+                // here still leaves the node it terminated on as the site.
+                if (outSite != nullptr && level <= pinLevel) {
+                    *outSite = PinSite{node, level, nodeBase, true};
+                }
                 const unsigned idx = slotIndexFor(level, nodeBase, va);
                 // Invariant 21: EVERY link load on a reader path goes through
                 // the protected-link-load primitive — protectWord supplies the
@@ -823,6 +957,88 @@ namespace kernel::mm::radix {
                     break;
                 }
             }
+        }
+
+        // ─── The seam's three operations (DEC-078) ─────────────────────────
+        //
+        // pin — resume — release. Nothing else crosses, and the policy layer
+        // never dereferences the handle.
+
+        // **pin**: turn a site the caller's own descent produced into a counted
+        // handle. §7.3's law is the whole contract — "a counted reference to a
+        // node is acquired ONLY inside the read section in which that node's
+        // link was observed" — and §11 asks for it to be asserted rather than
+        // documented, so this is a `Locked` entry point taking the section from
+        // its caller and checking that it exists.
+        //
+        // The check is one-sided by construction: the framework can tell us a
+        // section is open on this domain, but not that it is the SAME section
+        // the link was loaded in. What closes that half is the shape of the
+        // call — a site is produced by `descendLocked` and consumed here, both
+        // under one `ReadGuard` — plus §11's own test case, which fills a
+        // candidate, closes the section, reclaims the node and requires the
+        // later install to have re-descended rather than remembered.
+        //
+        // No count can be zero here: the node was reached by a link load in this
+        // section, so any unlink of it is followed by a grace period this
+        // section has not yet left, and its deleter's self-release cannot have
+        // run.
+        [[nodiscard]] PinnedNode<G> pinLocked(const PinSite& site) const {
+            assert(site.valid, "radix: a pin of no node");
+            kernel::rcu::assertInReadSection(*domain);
+            site.node.refcount().fetch_add(1, kRefcountAcquire);
+            return PinnedNode<G>(site.node, site.level, site.base);
+        }
+
+        // §7.5/DEC-078's answer to a hit. `Detached` doubles as "this address
+        // space is gone", because teardown marks every node (invariant 23).
+        enum class ResumeStatus : uint8_t { Ok, Detached, OutOfRange };
+
+        struct ResumeResult {
+            ResumeStatus status = ResumeStatus::Detached;
+            LookupResult result;
+        };
+
+        // **resume**: a fresh section, an acquire load of the mark, then the
+        // descent — in that order, and the order is load-bearing.
+        //
+        // Invariant 29 binds the mark load and the slot loads into ONE section,
+        // and §7.5 says why that is the memory-safety story rather than the
+        // refcount: the reference keeps the NODE alive and says nothing about
+        // the slots inside it. For a node that is still live and linked a hit
+        // cannot read a freed child, because reclamation clears the parent slot
+        // before retiring the child and this descent re-loads that slot. The
+        // freed-children hazard is real only for a node that is itself
+        // unreachable — detachment and teardown — and both mark. Split the mark
+        // load into its own section and the node can be detached between the two
+        // sections, with the mark read clean and the children read freed.
+        //
+        // kCacheFreshnessLoad is the acquire counterpart to kMarkStore's
+        // release. A release with no acquire opposite establishes nothing.
+        [[nodiscard]] ResumeResult resumeDescent(const PinnedNode<G>& pin, uint64_t key) const {
+            assert(static_cast<bool>(pin), "radix: a resume from an empty pin");
+            ResumeResult out;
+
+            // The entry's own tag check, re-done at the seam so the seam is
+            // total rather than trusting. Free — no atomic, no section — and
+            // deliberately NOT part of §7.5's generation-then-mark-then-descend
+            // sequence: it answers "is this handle even about this key", which
+            // the caller has already answered from the entry's VA range.
+            const uint64_t span = nodeSpan(G, pin.nodeLevel);
+            if (key < pin.nodeBase || key >= pin.nodeBase + span) {
+                out.status = ResumeStatus::OutOfRange;
+                return out;
+            }
+
+            kernel::rcu::ReadGuard guard(*domain);
+            if (state::isMarked(pin.node.stateWord().load(kCacheFreshnessLoad))) {
+                out.status = ResumeStatus::Detached;
+                return out;
+            }
+            out.status = ResumeStatus::Ok;
+            out.result = descendFromLocked(pin.node, pin.nodeLevel, pin.nodeBase, key,
+                                           kPinAtDeepest, nullptr);
+            return out;
         }
 
         // ─── Chunked scanning (§5.5 DEC-083, §5.6 DEC-095) ─────────────────
@@ -1455,11 +1671,6 @@ namespace kernel::mm::radix {
             return n;
         }
 
-    private:
-        // Forward-declared: `buildSubtree` and the claim helpers take it by
-        // reference, and they are defined above its definition.
-        struct Attempt;
-
         // ─── The seam (§5.5) ───────────────────────────────────────────────
         //
         // The core layer's ONE piece of knowledge about where its root comes
@@ -1484,6 +1695,11 @@ namespace kernel::mm::radix {
             const auto d = BucketCodecT::decode(w, bucketIndex);
             return RootBinding{NodeRef(d.root), d.level, d.base};
         }
+
+    private:
+        // Forward-declared: `buildSubtree` and the claim helpers take it by
+        // reference, and they are defined above its definition.
+        struct Attempt;
 
         // A tree over a fixed span (Phase 1/2, the model check, the
         // decomposition suite) leaves `bucketTable` null and answers from these.

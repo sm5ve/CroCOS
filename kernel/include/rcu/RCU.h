@@ -335,6 +335,23 @@ namespace kernel::rcu {
         return src.load(kProtectedLinkLoad);
     }
 
+    // ─── assertInReadSection ───────────────────────────────────────────────
+    //
+    // The same debug check, for steps that are governed by the open section but
+    // are not themselves link loads and so cannot reach it through `protect` or
+    // `protectWord`. The motivating consumer is the radix tree's descent-cache
+    // pin (radix §7.3/DEC-078): "a counted reference to a node is acquired only
+    // inside the read section in which that node's link was observed" — the
+    // acquisition is a `fetch_add` on the referent, not a load of the link, so
+    // without this the one rule whose violation is a use-after-free would be
+    // enforced by comment alone.
+    //
+    // Debug-only, like everything behind `assertInSection`: it compiles to
+    // nothing when CROCOS_RCU_DEBUG_CHECKS is off.
+    inline void assertInReadSection(const Domain& d) CROCOS_RCU_NOEXCEPT {
+        detail::assertInSection(d);
+    }
+
     namespace detail {
         // container_of for the RetireHead member designated by a member-pointer
         // NTTP. No RTTI, no offsetof, and no storage: the offset of a non-virtual

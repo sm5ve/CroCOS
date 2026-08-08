@@ -140,6 +140,15 @@ namespace kernel::mm::radix {
     // a cached node's children are safe to follow.
     inline constexpr MemoryOrder kCacheFreshnessLoad = ACQUIRE;
 
+    // DEC-079's calibration inputs: hit rate, atomic counts, per-entry thrash.
+    // RELAXED and named so, for kPoolAccounting's reason — nothing reads them for
+    // a correctness decision, and a name is what stops someone later giving one
+    // an acquire and then TRUSTING it. They are read from every CPU and are
+    // deliberately allowed to be a little stale relative to each other; a hit
+    // rate computed from two counters sampled a nanosecond apart is still a hit
+    // rate.
+    inline constexpr MemoryOrder kCacheAccounting = RELAXED;
+
     // ─── Non-shared accesses ───────────────────────────────────────────────
     //
     // Named rather than left bare so the §11 spelling check can be exhaustive:
