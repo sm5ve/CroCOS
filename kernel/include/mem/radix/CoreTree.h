@@ -266,20 +266,22 @@ namespace kernel::mm::radix {
     class LookupResult {
     public:
         LookupResult() = default;
-        LookupResult(Mapping* m, uint64_t lo, uint64_t hi)
-            : mappingPtr(m), rangeLo(lo), rangeHi(hi) {}
+        LookupResult(Mapping* m, uint64_t va, uint64_t lo, uint64_t hi)
+            : mappingPtr(m), searchVA(va), rangeLo(lo), rangeHi(hi) {}
 
         LookupResult(const LookupResult&)            = delete;
         LookupResult& operator=(const LookupResult&) = delete;
 
         LookupResult(LookupResult&& o) noexcept
-            : mappingPtr(o.mappingPtr), rangeLo(o.rangeLo), rangeHi(o.rangeHi) {
+            : mappingPtr(o.mappingPtr), searchVA(o.searchVA),
+              rangeLo(o.rangeLo), rangeHi(o.rangeHi) {
             o.mappingPtr = nullptr;
         }
         LookupResult& operator=(LookupResult&& o) noexcept {
             if (this != &o) {
                 reset();
-                mappingPtr = o.mappingPtr; rangeLo = o.rangeLo; rangeHi = o.rangeHi;
+                mappingPtr = o.mappingPtr; searchVA = o.searchVA;
+                rangeLo = o.rangeLo; rangeHi = o.rangeHi;
                 o.mappingPtr = nullptr;
             }
             return *this;
@@ -288,9 +290,31 @@ namespace kernel::mm::radix {
         ~LookupResult() { reset(); }
 
         [[nodiscard]] Mapping* mapping() const { return mappingPtr; }
+        [[nodiscard]] uint64_t va() const { return searchVA; }
         [[nodiscard]] uint64_t lo() const { return rangeLo; }
         [[nodiscard]] uint64_t hi() const { return rangeHi; }   // inclusive
         explicit operator bool() const { return mappingPtr != nullptr; }
+
+        // ─── The validity token (§3.1, DEC-051) ────────────────────────────
+        //
+        // The token IS `(searchVA, mappingPtr, rangeLo, rangeHi)` — the VA
+        // together with the DECODED answer it produced. It is not a separate
+        // object here, and that is deliberate: the identity half is a pointer
+        // compared for equality, so it is only meaningful while the counted
+        // reference that keeps that record alive is still held. Detaching the
+        // token from the reference makes it possible to compare a recycled slab
+        // slot equal to the record it replaced, which is the same class of bug
+        // as the node-pointer token §3.1 rejects. Keeping them in one move-only
+        // object makes the safe usage the only expressible one.
+        //
+        // What must NOT be inferred from that packaging is that the two have the
+        // same meaning. §3.1: "The two have different lifetimes and conflating
+        // them is a memory-safety defect." The reference guarantees the RECORD
+        // stays alive. It guarantees nothing about the ADDRESS staying mapped —
+        // a concurrent partial `munmap` shrinks a leaf's covered range with a
+        // single slot write that retires nothing and marks nothing, so no other
+        // signal exists for a blocked thread to observe. That is what
+        // `CoreTree::revalidate` is for.
 
     private:
         void reset() {
@@ -300,6 +324,7 @@ namespace kernel::mm::radix {
             }
         }
         Mapping* mappingPtr = nullptr;
+        uint64_t searchVA = 0;
         uint64_t rangeLo = 0;
         uint64_t rangeHi = 0;
     };
@@ -466,6 +491,68 @@ namespace kernel::mm::radix {
             return r;
         }
 
+        // ─── Revalidation (§3.1, DEC-051 / DEC-070) ────────────────────────
+        //
+        // The caller that blocked on a pager round-trip re-opens a section,
+        // re-descends to its VA, and compares the freshly-decoded
+        // `(Mapping identity, absolute range)` against what it was told before.
+        // Three things about this are load-bearing and each has a wrong version
+        // that looks right:
+        //
+        //   - **Re-descend, do not remember.** An earlier token shape was
+        //     `(node, slot index, slot word)`, which holds a LINK-LOADED node
+        //     pointer across a section close — forbidden by §7.3, and unsafe for
+        //     exactly the reason that rule exists: the counted reference is on
+        //     the `Mapping`, not on the node, so between the close and the
+        //     pager's reply the node can be reclaimed, graced, destroyed and its
+        //     slab slot recycled. Revalidation would then read a live,
+        //     addressable, unrelated object and could compare EQUAL.
+        //
+        //   - **Compare the decoded values, never the raw word.** A slot word's
+        //     range field is level-relative — 8 KiB units at C0, 4 KiB at C1 —
+        //     so a C0 leaf with range [0,0] covers 8 KiB and the C1 leaf that
+        //     survives a 4 KiB `munmap`'s shortfall subdivision has the same
+        //     `Mapping` bits, the same tag and the same [0,0] field. A
+        //     bit-identical word for a halved range: comparing words compares
+        //     EQUAL on an address that was just unmapped.
+        //
+        //   - **A `true` here is not a guarantee, and the caller must not treat
+        //     it as one** (DEC-070). It proves the coverage held at a point
+        //     inside this section and nothing more. Writers never wait on
+        //     readers, so a shrink or an `mprotect` split can commit BETWEEN
+        //     this compare and the externally-visible commitment the caller
+        //     makes on its strength. The VMM must re-check under the
+        //     interlock it shares with its PTE-removal path — the per-page-table
+        //     lock. **The token detects every decision that committed before the
+        //     compare; the install-side interlock is what excludes the ones that
+        //     commit after it.** Without that half, a thread that revalidated
+        //     writable `v` can install a writable PTE after a concurrent
+        //     `mprotect(v, PROT_READ)` has returned — W^X defeated by an
+        //     ordinary race.
+        //
+        // Takes the `LookupResult` rather than a detached token so the counted
+        // reference is structurally still held: the identity half is a pointer
+        // compared for equality, and a released record's slab slot can be
+        // recycled into a new `Mapping` at the same address.
+        [[nodiscard]] bool revalidate(const LookupResult& held) const {
+            if (!held) return false;
+            LookupResult now;
+            {
+                kernel::rcu::ReadGuard guard(*domain);
+                now = descendLocked(held.va());
+            }
+            // Note the fresh result's own counted reference is taken and dropped
+            // by this call. That is not waste — it is §7.3's acquisition law
+            // applied without an exception: the reference must be taken inside
+            // the section that observed the link, and a "peek without acquiring"
+            // variant would be a second, weaker path through the one rule the
+            // reader side has.
+            return static_cast<bool>(now) &&
+                   now.mapping() == held.mapping() &&
+                   now.lo() == held.lo() &&
+                   now.hi() == held.hi();
+        }
+
         [[nodiscard]] LookupResult descendLocked(uint64_t va) const {
             NodeRef node = rootRef;
             unsigned level = level0;
@@ -499,7 +586,7 @@ namespace kernel::mm::radix {
                     m->acquireRef();
                     uint64_t lo = 0, hi = 0;
                     Codec::absoluteRange(word, slotBase, level, lo, hi);
-                    return LookupResult{m, lo, hi};
+                    return LookupResult{m, va, lo, hi};
                 }
                 case SlotKind::Child:
                     assert(level < G.levelCount,

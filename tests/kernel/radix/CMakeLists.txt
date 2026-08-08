@@ -29,6 +29,7 @@ set(RDX_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/OrderingSpellingTest.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ConcurrentTest.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/DeferredReleaseTest.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/RevalidationTest.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/mocks/RadixOracle.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/RandomSource.cpp
     ${VMS_MOCKS}/MockVMSubstrate.cpp
