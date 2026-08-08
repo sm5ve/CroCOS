@@ -108,9 +108,10 @@ std::vector<Op> curatedOps(uint64_t span, uint64_t unit, uint64_t slot) {
 
 // Run a sequence, checking the model and the structure after every step.
 template <typename Tree, typename Valid, rdx::GeometryDescriptor G>
-void runSequence(unsigned rootLevel, const Op* ops, size_t count, const char* what) {
+void runSequence(Harness& h, unsigned rootLevel, const Op* ops, size_t count,
+                 const char* what) {
     Tree tree;
-    if (!tree.init(rootLevel, 0)) {
+    if (!tree.init(rootLevel, 0, h.domain)) {
         throw AssertionFailure(std::string("runSequence: root allocation failed"));
     }
     ShadowMap<G> model(rootLevel, 0);
@@ -124,6 +125,8 @@ void runSequence(unsigned rootLevel, const Op* ops, size_t count, const char* wh
         }
         model.apply(ops[i].lo, ops[i].hi, v);
 
+        // Settle the deferred releases before asserting: see quiesce()'s note.
+        quiesce(h);
         assertMatchesModel(tree, model, what);
         Valid::validate(tree, what);
     }
@@ -134,6 +137,7 @@ void runSequence(unsigned rootLevel, const Op* ops, size_t count, const char* wh
         tree.destroyTree();
         throw AssertionFailure(std::string(what) + ": drain failed");
     }
+    quiesce(h);
     if (tree.nodeCount() != 1) {
         tree.destroyTree();
         throw AssertionFailure(std::string(what) + ": drain left interior nodes behind");
@@ -156,7 +160,7 @@ TEST(radix_model_exhaustive_single_operations) {
 
     const auto baseline = captureBaseline();
     for (const auto& op : ops) {
-        runSequence<TreeT, ValidT, GT>(rootLevel, &op, 1, "single");
+        runSequence<TreeT, ValidT, GT>(h, rootLevel, &op, 1, "single");
     }
     assertBaseline(baseline, "exhaustive singles");
 }
@@ -173,7 +177,7 @@ TEST(radix_model_exhaustive_single_operations_with_a_shortfall) {
 
     const auto baseline = captureBaseline();
     for (const auto& op : allOps(span, unit)) {
-        runSequence<TreeS, ValidS, GS>(rootLevel, &op, 1, "single/shortfall");
+        runSequence<TreeS, ValidS, GS>(h, rootLevel, &op, 1, "single/shortfall");
     }
     assertBaseline(baseline, "exhaustive singles, shortfall geometry");
 }
@@ -194,7 +198,7 @@ TEST(radix_model_exhaustive_operation_pairs) {
         for (const auto& b : ops) {
             pair[0] = a;
             pair[1] = b;
-            runSequence<TreeT, ValidT, GT>(rootLevel, pair, 2, "pair");
+            runSequence<TreeT, ValidT, GT>(h, rootLevel, pair, 2, "pair");
         }
     }
     assertBaseline(baseline, "exhaustive pairs");
@@ -217,7 +221,7 @@ TEST(radix_model_exhaustive_curated_triples) {
         for (const auto& b : ops) {
             for (const auto& c : ops) {
                 triple[0] = a; triple[1] = b; triple[2] = c;
-                runSequence<TreeT, ValidT, GT>(rootLevel, triple, 3, "triple");
+                runSequence<TreeT, ValidT, GT>(h, rootLevel, triple, 3, "triple");
             }
         }
     }
@@ -242,7 +246,7 @@ TEST(radix_model_randomized_sequences_tiny_geometry) {
             const uint64_t b = rng.below(units) * unit;
             seq.push_back(Op{a < b ? a : b, (a < b ? b : a) + unit - 1, rng.chance(60)});
         }
-        runSequence<TreeT, ValidT, GT>(rootLevel, seq.data(), seq.size(), "random/tiny");
+        runSequence<TreeT, ValidT, GT>(h, rootLevel, seq.data(), seq.size(), "random/tiny");
     }
     assertBaseline(baseline, "randomized tiny sequences");
 }
@@ -261,7 +265,7 @@ TEST(radix_model_randomized_sequences_real_geometry) {
     for (unsigned trial = 0; trial < 12; trial++) {
         auto rng = streamFor(5000 + trial);
         TreeA tree;
-        ASSERT_TRUE(tree.init(rootLevel, 0));
+        ASSERT_TRUE(tree.init(rootLevel, 0, h.domain));
         ShadowMap<GA> model(rootLevel, 0);
 
         // Confine the sweep to a window so the shadow map stays small and the
@@ -279,6 +283,7 @@ TEST(radix_model_randomized_sequences_real_geometry) {
 
             ASSERT_TRUE(tree.apply(lo, hi, v) == rdx::ApplyStatus::Ok);
             model.apply(lo, hi, v);
+            quiesce(h);
             ValidA::validate(tree, "random/real");
         }
 
@@ -290,6 +295,7 @@ TEST(radix_model_randomized_sequences_real_geometry) {
         }
 
         ASSERT_TRUE(tree.apply(0, span - 1, nullptr) == rdx::ApplyStatus::Ok);
+        quiesce(h);
         ASSERT_EQ(size_t{1}, tree.nodeCount());
         tree.destroyTree();
         (void)span;
@@ -315,7 +321,7 @@ TEST(radix_model_an_address_mapped_before_and_after_is_never_lost) {
     auto rng = streamFor(77);
     for (unsigned trial = 0; trial < 100; trial++) {
         TreeT tree;
-        ASSERT_TRUE(tree.init(rootLevel, 0));
+        ASSERT_TRUE(tree.init(rootLevel, 0, h.domain));
         ShadowMap<GT> model(rootLevel, 0);
 
         for (unsigned k = 0; k < 30; k++) {
@@ -331,6 +337,7 @@ TEST(radix_model_an_address_mapped_before_and_after_is_never_lost) {
 
             ASSERT_TRUE(tree.apply(lo, hi, v) == rdx::ApplyStatus::Ok);
             model.apply(lo, hi, v);
+            quiesce(h);
 
             for (uint64_t u = 0; u < units; u++) {
                 const uint64_t va = u * unit;
@@ -341,6 +348,7 @@ TEST(radix_model_an_address_mapped_before_and_after_is_never_lost) {
         }
 
         ASSERT_TRUE(tree.apply(0, span - 1, nullptr) == rdx::ApplyStatus::Ok);
+        quiesce(h);
         tree.destroyTree();
     }
 }

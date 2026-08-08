@@ -45,6 +45,7 @@
 #include <stdint.h>
 #include <kassert.h>
 #include <mem/VMSubstrate.h>
+#include <rcu/RCU.h>
 
 #include <mem/radix/Geometry.h>
 #include <mem/radix/Ordering.h>
@@ -55,6 +56,60 @@
 #include <mem/radix/Claim.h>
 
 namespace kernel::mm::radix {
+
+    // The counting mechanism owns destruction at zero — not the releaser
+    // (§7.1 / RCU-DEC-045: a deleter may release a counted reference the retired
+    // object holds, but must not traverse the referent beyond its refcount word;
+    // destruction stays with the counting mechanism).
+    inline void releaseMappingRef(Mapping* m) {
+        if (m->releaseRef()) {
+            VMSubstrate::destroy(VMSubstrate::SafePtr<Mapping>(m));
+        }
+    }
+
+    // §7.1's deleter: **the retire callback at grace-period end, NOT the
+    // destructor at refcount zero.**
+    //
+    // It releases the references its slots hold to objects that are not
+    // themselves separately retired — leaf slots release their Mapping
+    // reference, child-node slots release NOTHING — and then performs the
+    // ordinary self-release of the node's own inbound structural reference.
+    //
+    // The leaf/child asymmetry is forced, not chosen: a child node has its own
+    // unlink event and its own retire, so releasing it from the parent's deleter
+    // would double-release; a Mapping has no independent unlink event in a
+    // subtree detach, so if the parent's deleter does not release it, nothing
+    // does.
+    //
+    // And deleter-not-destructor is not cosmetic. A node retired while a foreign
+    // CPU's descent cache pins it is destroyed only when that cache turns over,
+    // which §7.4 says may never happen — so putting the release in the
+    // destructor would pin every Mapping that node named, and transitively their
+    // VMObjects and physical frames, behind a residue bound stated in NODES.
+    // **A retired-but-cache-pinned node holds no Mapping references.**
+    //
+    // A free function template rather than a member, because
+    // `retire<T, &T::head, Deleter>` takes the deleter as a non-type template
+    // parameter of type `void(*)(T*)` — RCU-DEC-016's member-pointer recovery
+    // shape. Note it needs only the VALENCE, which the concrete type carries;
+    // not the level. That is exactly what lets DEC-062's level->type map
+    // collapse to a two-way branch at the retire site.
+    template <GeometryDescriptor G, typename Codec, unsigned V>
+    void deleteRadixNode(Node<G, V>* n) {
+        for (unsigned i = 0; i < V; i++) {
+            const uint64_t w = n->slots[i].load(kQuiescedRead);
+            if (Codec::isLeaf(w)) {
+                releaseMappingRef(static_cast<Mapping*>(Codec::decodeLeaf(w)));
+            }
+        }
+        // The self-release. At zero the counting mechanism destroys.
+        const uint64_t prior = n->refcount.fetch_sub(1, kRefcountRelease);
+        assert(prior != 0, "radix: node structural refcount released below zero");
+        if (prior == 1) {
+            thread_fence(kRefcountZeroFence);
+            VMSubstrate::destroy(VMSubstrate::SafePtr<Node<G, V>>(n));
+        }
+    }
 
     // ─── Concrete-type dispatch on level (DEC-062) ─────────────────────────
     //
@@ -81,6 +136,55 @@ namespace kernel::mm::radix {
                     assert(false, "radix: no node type for this level's valence — DEC-039 "
                                   "caps valence at 32 and the geometry must be a power of two");
                     return nullptr;
+            }
+        }
+
+        // DEC-062's closed enumeration made concrete: `retire<T, &T::head>`
+        // needs a concrete T at every site, and the one place a type is
+        // discovered at runtime — the per-node retire walk of a detached subtree
+        // or of teardown, which visits nodes of mixed levels — dispatches on the
+        // node's LEVEL, which every walk already has.
+        template <typename Codec>
+        static void retire(kernel::rcu::Domain& d, unsigned level, NodeRef n) {
+            switch (valence(G, level)) {
+#define RADIX_NODE_CASE(V)                                                          \
+                case V:                                                             \
+                    kernel::rcu::retire<Node<G, V>, &Node<G, V>::head,               \
+                                        &deleteRadixNode<G, Codec, V>>(               \
+                        d, static_cast<Node<G, V>*>(n.raw()));                       \
+                    return;
+                RADIX_NODE_CASE(2)
+                RADIX_NODE_CASE(4)
+                RADIX_NODE_CASE(8)
+                RADIX_NODE_CASE(16)
+                RADIX_NODE_CASE(32)
+#undef RADIX_NODE_CASE
+                default:
+                    assert(false, "radix: no node type for this level's valence");
+            }
+        }
+
+        // The same deleter, run synchronously. Used ONLY by teardown, where the
+        // caller has already established that nothing else can reach the tree —
+        // Phase 3 replaces this with §7.4's unit-decomposed walk, whose units go
+        // through `retire` like every other unlink path. Running the deleter
+        // rather than a bespoke teardown release is what keeps "what a node
+        // releases" stated in exactly one place.
+        template <typename Codec>
+        static void runDeleter(unsigned level, NodeRef n) {
+            switch (valence(G, level)) {
+#define RADIX_NODE_CASE(V)                                                          \
+                case V:                                                             \
+                    deleteRadixNode<G, Codec, V>(static_cast<Node<G, V>*>(n.raw()));\
+                    return;
+                RADIX_NODE_CASE(2)
+                RADIX_NODE_CASE(4)
+                RADIX_NODE_CASE(8)
+                RADIX_NODE_CASE(16)
+                RADIX_NODE_CASE(32)
+#undef RADIX_NODE_CASE
+                default:
+                    assert(false, "radix: no node type for this level's valence");
             }
         }
 
@@ -149,7 +253,14 @@ namespace kernel::mm::radix {
         // its new parent, so no mapping moves).
         CoreTree() = default;
 
-        [[nodiscard]] bool init(unsigned rootLevel, uint64_t base) {
+        // The tree's domain is per-address-space (DEC-072 / RCU-DEC-043). One
+        // global domain was rejected on the merits: teardown's no-new-users
+        // precondition becomes unsatisfiable at process exit, the per-address-
+        // space residue bounds become unreachable, and ONE stalled fault-path
+        // reader in any process stalls reclamation for every process.
+        [[nodiscard]] bool init(unsigned rootLevel, uint64_t base, kernel::rcu::Domain& d) {
+            assert(d.initialized(), "radix: the tree's RCU domain must be initialised first");
+            domain = &d;
             assert(rootLevel >= 1 && rootLevel <= G.levelCount,
                    "radix: root level out of range");
             assert(base % nodeSpan(G, rootLevel) == 0,
@@ -194,13 +305,45 @@ namespace kernel::mm::radix {
         [[nodiscard]] LookupResult lookup(uint64_t va) const {
             if (!rootRef || !contains(va)) return {};
 
+            // §3.1: a descent runs inside ONE ReadGuard on the tree's domain —
+            // one section per descent, never one per level (DEC-001). Measured:
+            // protect plus a 3-node walk costs ~0.9 ns over a bare section, and
+            // the SEQ_CST fence dominates.
+            //
+            // The counted reference the caller may take from the result must be
+            // acquired INSIDE this section (§7.3); the guard's scope is what
+            // makes that checkable.
+            kernel::rcu::ReadGuard guard(*domain);
+            const LookupResult r = descendLocked(va);
+
+            // DEC-060's fault-path pump: tryAdvance AFTER the section closes.
+            // Placement is forced, not stylistic — deleters run outside any
+            // section (RCU-DEC-038), and a pump inside the descent's section
+            // could run deleters while link-loaded pointers are still live.
+            //
+            // The fault path is chosen because it is the one path that runs on
+            // every CPU that touches the tree, READERS INCLUDED: a CPU that
+            // stops mutating but keeps faulting pumps its own bag out. Without
+            // it, a CPU that performs the last munmap and never retires again
+            // strands its open bag indefinitely, and an open bag pins one
+            // operation's retirees — transitively their Mappings, VMObjects and
+            // frames, not merely nodes.
+            return r;
+        }
+
+        [[nodiscard]] LookupResult descendLocked(uint64_t va) const {
             NodeRef node = rootRef;
             unsigned level = level0;
             uint64_t nodeBase = baseVA;
 
             for (;;) {
                 const unsigned idx = slotIndexFor(level, nodeBase, va);
-                const uint64_t word = node.slot(idx).load(kSlotLoad);
+                // Invariant 21: EVERY link load on a reader path goes through
+                // the protected-link-load primitive — protectWord supplies the
+                // framework's named ACQUIRE and the debug section-open assert,
+                // and the codec supplies the decode. That composite is this
+                // consumer's RcuPtr (DEC-073); there is no exception.
+                const uint64_t word = kernel::rcu::protectWord(*domain, node.slot(idx));
                 const uint64_t slotBase = nodeBase + uint64_t{idx} * slotSpan(G, level);
 
                 switch (Codec::kindOf(word)) {
@@ -265,9 +408,26 @@ namespace kernel::mm::radix {
                    "cluster before the core tree is involved");
 
             unsigned retryCount = 0;
+            retiredThisOperation = false;
             for (;;) {
                 Attempt attempt;
-                const ApplyStatus st = runAttempt(lo, hi, value, attempt);
+                ApplyStatus st;
+                {
+                    // §3.2 / invariant 17: **one attempt is one read section.**
+                    // The read-only pass, acquisition, re-dispatch and commit all
+                    // run inside the section that observed the links; closing it
+                    // ENDS the attempt and discards the claim set, which is
+                    // forced rather than chosen — the claim set is a set of
+                    // link-loaded node pointers and those do not survive a close
+                    // (§7.3).
+                    //
+                    // The writer is inside a section for its OWN safety, not only
+                    // for reclamation (RCU-DEC-019): it traverses the shared
+                    // structure, so an unpinned writer can have a node reclaimed
+                    // underneath it — a use-after-free in the WRITER.
+                    kernel::rcu::ReadGuard guard(*domain);
+                    st = runAttempt(lo, hi, value, attempt);
+                }
                 if (st == ApplyStatus::Retry) {
                     // §9: release EVERYTHING, discard, retry from a fresh read
                     // pass. The claim set is never extended in place — a
@@ -283,6 +443,16 @@ namespace kernel::mm::radix {
                     continue;
                 }
                 if (st != ApplyStatus::Ok) abandon(attempt);
+
+                // DEC-060/DEC-071's operation-exit pump, AFTER the section
+                // closes. It advances the epoch where possible so the
+                // just-filled bag stops being the open one and becomes drainable
+                // by any CPU's later pump (stealing), rather than sitting open on
+                // a CPU that may never mutate this domain again. In honest units
+                // that narrows the exposure from "one operation's retirees,
+                // forever, until teardown" to "one operation's retirees, until
+                // the next pump anywhere".
+                if (retiredThisOperation) (void)kernel::rcu::tryAdvance(*domain);
                 return st;
             }
         }
@@ -309,6 +479,13 @@ namespace kernel::mm::radix {
         NodeRef  rootRef{};
         unsigned level0 = 0;
         uint64_t baseVA = 0;
+        kernel::rcu::Domain* domain = nullptr;
+        // DEC-060: whether this operation retired anything, so operation exit
+        // knows whether to pump. Pumping unconditionally would be harmless but
+        // dishonest — the site exists to stop a just-filled bag sitting OPEN on
+        // a CPU that may never mutate this domain again, and an operation that
+        // retired nothing has no bag to advance.
+        bool retiredThisOperation = false;
 
         static unsigned slotIndexFor(unsigned level, uint64_t nodeBase, uint64_t va) {
             return static_cast<unsigned>(((va - nodeBase) >> slotSpanBits(G, level)) &
@@ -457,7 +634,16 @@ namespace kernel::mm::radix {
         // Take the structural `+1`s a built subtree's leaf slots imply, at the
         // moment it is published. One walk, at commit, and never during
         // construction.
+        // §7.2: every structural `+1` — on a Mapping OR ON A NODE BEING LINKED
+        // — is a commit-phase step. This walk takes all of them for a subtree at
+        // the instant its root is published, and never during construction.
+        //
+        // A node gets exactly one: the slot that names it. The subtree root's
+        // comes from the parent slot about to be stored; each interior node's
+        // from its own parent slot inside the subtree. So it is +1 per node,
+        // plus +1 per naming leaf slot on the Mapping it names.
         static void takeSubtreeReferences(NodeRef node, unsigned level) {
+            node.refcount().fetch_add(1, kRefcountAcquire);
             const unsigned n = valence(G, level);
             for (unsigned i = 0; i < n; i++) {
                 const uint64_t w = node.slot(i).load(kQuiescedRead);
@@ -473,26 +659,30 @@ namespace kernel::mm::radix {
         // Mapping references ITS OWN leaf slots hold, child-node slots releasing
         // nothing (§7.1). Post-order so a node is released after the children
         // whose own releases it must not perform.
+        // Teardown's release, node by node, each running the SAME deleter the
+        // retire path runs — leaf slots release their Mapping reference,
+        // child-node slots release nothing, and the node self-releases to zero.
+        // Post-order so a node is released after the children whose own releases
+        // it must not perform.
+        //
+        // Phase 3 replaces this with §7.4's unit-decomposed walk (claim, mark,
+        // unlink, retire, one read section per unit). What is already right here
+        // is that nothing recurses through a destructor and that the release
+        // rules are the deleter's, stated once.
         static void releaseSubtree(NodeRef node, unsigned level) {
             const unsigned n = valence(G, level);
             for (unsigned i = 0; i < n; i++) {
                 const uint64_t w = node.slot(i).load(kQuiescedRead);
                 if (Codec::isChild(w)) {
                     releaseSubtree(NodeRef(Codec::decodeChild(w)), level + 1);
-                } else if (Codec::isLeaf(w)) {
-                    releaseNamedMapping(static_cast<Mapping*>(Codec::decodeLeaf(w)));
                 }
             }
-            Ops::destroy(level, node);
+            Ops::template runDeleter<Codec>(level, node);
         }
 
         // The counting mechanism owns destruction at zero, not the releaser
         // (§7.1 / RCU-DEC-045).
-        static void releaseNamedMapping(Mapping* m) {
-            if (m->releaseRef()) {
-                VMSubstrate::destroy(VMSubstrate::SafePtr<Mapping>(m));
-            }
-        }
+        static void releaseNamedMapping(Mapping* m) { releaseMappingRef(m); }
 
         // ─── One attempt (§3.2: one attempt is ONE read section) ───────────
         //
@@ -1051,12 +1241,16 @@ namespace kernel::mm::radix {
         // reader exists — §10 names it as "the NATURAL implementation, since the
         // commit walk already visits every node", which is exactly why it is
         // called out here rather than left to be noticed.
-        static void retireNode(NodeRef node, unsigned level) {
-            releaseLeafSlots(node, level);
-            Ops::destroy(level, node);
+        void retireNode(NodeRef node, unsigned level) {
+            // Unlink -> retire. The unlink store has already happened at the
+            // call site: rcu.md's writer obligation is that EVERY store making
+            // the object unreachable is sequenced before `retire`, and `retire`
+            // issues its own fence.
+            Ops::template retire<Codec>(*domain, level, node);
+            retiredThisOperation = true;
         }
 
-        static void retireSubtree(NodeRef node, unsigned level) {
+        void retireSubtree(NodeRef node, unsigned level) {
             // Node by node, each through its own head — never one retire for the
             // whole subtree. "A subtree detach is equivalent to clearing every
             // slot and unlinking every node, executed as one parent-slot store":
@@ -1070,16 +1264,6 @@ namespace kernel::mm::radix {
                 }
             }
             retireNode(node, level);
-        }
-
-        static void releaseLeafSlots(NodeRef node, unsigned level) {
-            const unsigned n = valence(G, level);
-            for (unsigned i = 0; i < n; i++) {
-                const uint64_t w = node.slot(i).load(kClaimedSlotLoad);
-                if (Codec::isLeaf(w)) {
-                    releaseNamedMapping(static_cast<Mapping*>(Codec::decodeLeaf(w)));
-                }
-            }
         }
 
         // Phase two of §6.5: mark EVERY node of the subtree, not just its root,

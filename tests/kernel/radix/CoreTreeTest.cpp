@@ -63,12 +63,18 @@ void destroyMapping(rdx::Mapping* m) {
 template <typename Tree>
 struct TreeFixture {
     Tree tree;
-    explicit TreeFixture(unsigned level, uint64_t base = 0) {
-        if (!tree.init(level, base)) {
+    explicit TreeFixture(Harness& h, unsigned level, uint64_t base = 0) {
+        if (!tree.init(level, base, h.domain)) {
             throw AssertionFailure(std::string("TreeFixture: root allocation failed"));
         }
     }
-    ~TreeFixture() { tree.destroyTree(); }
+    // Drain before teardown: retired nodes are destroyed by their DELETERS at
+    // grace-period end, so a test that tears down without draining would leave
+    // them alive and every accounting assertion would be measuring limbo rather
+    // than leaks.
+    ~TreeFixture() {
+        tree.destroyTree();
+    }
     Tree* operator->() { return &tree; }
 };
 
@@ -80,7 +86,7 @@ constexpr uint64_t kPage = 4096;
 
 TEST(radix_tree_lookup_finds_a_leaf_at_the_root_level) {
     Harness h;
-    TreeFixture<TreeA> f(3);                 // C0-rooted, 1 GiB, 32 MiB slots
+    TreeFixture<TreeA> f(h, 3);                 // C0-rooted, 1 GiB, 32 MiB slots
     auto* m = makeMapping(0);
 
     // A full-slot placement terminates AT the root: leaves live at any level, so
@@ -89,6 +95,7 @@ TEST(radix_tree_lookup_finds_a_leaf_at_the_root_level) {
     // decomposition, not to its page count.
     const uint64_t slot = rdx::slotSpan(GA, 3);
     ASSERT_TRUE(f->apply(0, slot - 1, m) == rdx::ApplyStatus::Ok);
+    quiesce(h);
     ASSERT_EQ(size_t{1}, f->nodeCount());    // just the root
 
     ASSERT_EQ(m, f->lookup(0).mapping);
@@ -102,12 +109,13 @@ TEST(radix_tree_lookup_finds_a_leaf_at_the_root_level) {
 
 TEST(radix_tree_lookup_walks_to_the_floor_when_the_range_demands_it) {
     Harness h;
-    TreeFixture<TreeA> f(3);
+    TreeFixture<TreeA> f(h, 3);
     auto* m = makeMapping(0);
 
     // One page at the very start. C0's range unit is 8 KiB, so a 4 KiB boundary
     // is inexpressible there and the placement builds a spine down to the floor.
     ASSERT_TRUE(f->apply(0, kPage - 1, m) == rdx::ApplyStatus::Ok);
+    quiesce(h);
     ASSERT_EQ(m, f->lookup(0).mapping);
     ASSERT_EQ(m, f->lookup(kPage - 1).mapping);
     ASSERT_FALSE(static_cast<bool>(f->lookup(kPage)));
@@ -126,7 +134,7 @@ TEST(radix_tree_lookup_walks_to_the_floor_when_the_range_demands_it) {
 
 TEST(radix_tree_lookup_of_an_unmapped_va_is_cheap_and_non_faulting) {
     Harness h;
-    TreeFixture<TreeA> f(3);
+    TreeFixture<TreeA> f(h, 3);
     // Nothing mapped: every lookup answers unmapped without dereferencing a
     // Mapping, because `covers` resolves the negative answer from the slot word.
     for (uint64_t va = 0; va < rdx::nodeSpan(GA, 3); va += rdx::slotSpan(GA, 3)) {
@@ -137,7 +145,7 @@ TEST(radix_tree_lookup_of_an_unmapped_va_is_cheap_and_non_faulting) {
 
 TEST(radix_tree_translation_uses_both_terms) {
     Harness h;
-    TreeFixture<TreeA> f(3);
+    TreeFixture<TreeA> f(h, 3);
 
     // §5.4: `objectOffset + (faultVA - baseVA)`. Both terms matter, and both
     // slips are silent wrong-frame bugs invisible to the partition invariant and
@@ -149,6 +157,7 @@ TEST(radix_tree_translation_uses_both_terms) {
                                                      // objectOffset is visible
     auto* m = makeMapping(base, objOff);
     ASSERT_TRUE(f->apply(base, base + rdx::slotSpan(GA, 3) - 1, m) == rdx::ApplyStatus::Ok);
+    quiesce(h);
 
     auto r = f->lookup(base + 3 * kPage);
     ASSERT_EQ(m, r.mapping);
@@ -163,7 +172,7 @@ TEST(radix_tree_translation_uses_both_terms) {
 
 TEST(radix_tree_middle_punch_builds_a_spine_not_a_leaf_pair) {
     Harness h;
-    TreeFixture<TreeA> f(3);
+    TreeFixture<TreeA> f(h, 3);
     auto* m = makeMapping(0);
 
     // Map a whole 32 MiB C0 slot, then punch one page out of the middle. §6.3:
@@ -171,10 +180,12 @@ TEST(radix_tree_middle_punch_builds_a_spine_not_a_leaf_pair) {
     // leaves naming the old record, not two."
     const uint64_t slot = rdx::slotSpan(GA, 3);
     ASSERT_TRUE(f->apply(0, slot - 1, m) == rdx::ApplyStatus::Ok);
+    quiesce(h);
     ASSERT_EQ(uint64_t{1}, m->refcountRelaxed());
 
     const uint64_t punch = slot / 2;
     ASSERT_TRUE(f->apply(punch, punch + kPage - 1, nullptr) == rdx::ApplyStatus::Ok);
+    quiesce(h);
 
     // Coverage is exactly right...
     ASSERT_EQ(m, f->lookup(0).mapping);
@@ -206,16 +217,19 @@ TEST(radix_tree_middle_punch_builds_a_spine_not_a_leaf_pair) {
 
 TEST(radix_tree_edge_mmap_minimal_shape_leaves_the_old_record_at_delta_zero) {
     Harness h;
-    TreeFixture<TreeA> f(5);                 // C2-rooted: 64 KiB slots, 4 KiB units
+    TreeFixture<TreeA> f(h, 5);                 // C2-rooted: 64 KiB slots, 4 KiB units
     auto* oldM = makeMapping(0);
     auto* newM = makeMapping(0);
 
     // Old record covers exactly two pages, so its survivor is exactly ONE child
     // slot — the shape §7.2's "0" is written for.
     ASSERT_TRUE(f->apply(0, 2 * kPage - 1, oldM) == rdx::ApplyStatus::Ok);
+    quiesce(h);
     ASSERT_EQ(uint64_t{1}, oldM->refcountRelaxed());
 
     ASSERT_TRUE(f->apply(0, kPage - 1, newM) == rdx::ApplyStatus::Ok);
+
+    quiesce(h);
 
     ASSERT_EQ(newM, f->lookup(0).mapping);
     ASSERT_EQ(oldM, f->lookup(kPage).mapping);
@@ -228,18 +242,21 @@ TEST(radix_tree_edge_mmap_minimal_shape_leaves_the_old_record_at_delta_zero) {
 
 TEST(radix_tree_edge_mmap_wide_survivor_takes_the_per_transition_delta) {
     Harness h;
-    TreeFixture<TreeA> f(5);
+    TreeFixture<TreeA> f(h, 5);
     auto* oldM = makeMapping(0);
     auto* newM = makeMapping(0);
     const uint64_t slot = rdx::slotSpan(GA, 5);        // 64 KiB
     const uint64_t children = rdx::valence(GA, 6);     // 16 C3 slots of 4 KiB
 
     ASSERT_TRUE(f->apply(0, slot - 1, oldM) == rdx::ApplyStatus::Ok);
+
+    quiesce(h);
     ASSERT_EQ(uint64_t{1}, oldM->refcountRelaxed());
 
     // One page at the edge. The survivor spans the other fifteen child slots, so
     // k = 15 and the delta is +15 - 1 = +14 — NOT the table's 0.
     ASSERT_TRUE(f->apply(0, kPage - 1, newM) == rdx::ApplyStatus::Ok);
+    quiesce(h);
 
     const auto census = ValidA::namingSlotCensus(f.tree);
     ASSERT_EQ(children - 1, census.at(oldM));
@@ -257,7 +274,7 @@ TEST(radix_tree_edge_mmap_wide_survivor_takes_the_per_transition_delta) {
 
 TEST(radix_tree_initial_placement_into_k_slots_takes_plus_k) {
     Harness h;
-    TreeFixture<TreeA> f(4);                 // C1-rooted: 32 slots of 1 MiB
+    TreeFixture<TreeA> f(h, 4);                 // C1-rooted: 32 slots of 1 MiB
     auto* m = makeMapping(0);
 
     // §7.2's first row — the one an event enumeration has no entry for at all,
@@ -265,6 +282,7 @@ TEST(radix_tree_initial_placement_into_k_slots_takes_plus_k) {
     // is verbatim the premature free DEC-048 exists to prevent.
     const uint64_t slot = rdx::slotSpan(GA, 4);
     ASSERT_TRUE(f->apply(0, 3 * slot - 1, m) == rdx::ApplyStatus::Ok);
+    quiesce(h);
 
     ASSERT_EQ(uint64_t{3}, m->refcountRelaxed());
     ASSERT_EQ(size_t{1}, f->nodeCount());    // three sibling leaves, no depth
@@ -273,11 +291,13 @@ TEST(radix_tree_initial_placement_into_k_slots_takes_plus_k) {
 
 TEST(radix_tree_in_place_shrink_moves_no_count) {
     Harness h;
-    TreeFixture<TreeA> f(5);                 // C2: 4 KiB units, shortfall 0
+    TreeFixture<TreeA> f(h, 5);                 // C2: 4 KiB units, shortfall 0
     auto* m = makeMapping(0);
     const uint64_t slot = rdx::slotSpan(GA, 5);
 
     ASSERT_TRUE(f->apply(0, slot - 1, m) == rdx::ApplyStatus::Ok);
+
+    quiesce(h);
     ASSERT_EQ(uint64_t{1}, m->refcountRelaxed());
     ASSERT_EQ(size_t{1}, f->nodeCount());
 
@@ -285,6 +305,7 @@ TEST(radix_tree_in_place_shrink_moves_no_count) {
     // subdivision, and — the row most likely to be lost to a shared helper —
     // NO reference-count change.
     ASSERT_TRUE(f->apply(0, kPage - 1, nullptr) == rdx::ApplyStatus::Ok);
+    quiesce(h);
     ASSERT_EQ(uint64_t{1}, m->refcountRelaxed());
     ASSERT_EQ(size_t{1}, f->nodeCount());    // still no depth built
     ASSERT_FALSE(static_cast<bool>(f->lookup(0)));
@@ -296,7 +317,7 @@ TEST(radix_tree_in_place_shrink_moves_no_count) {
 
 TEST(radix_tree_reclamation_actually_reclaims) {
     Harness h;
-    TreeFixture<TreeA> f(3);
+    TreeFixture<TreeA> f(h, 3);
     auto* m = makeMapping(0);
 
     // §11: "Single-threaded map-then-unmap of one leaf must leave the containing
@@ -304,10 +325,13 @@ TEST(radix_tree_reclamation_actually_reclaims) {
     // memory figure." The historical failure here was deterministic and
     // invisible to every structural check.
     ASSERT_TRUE(f->apply(0, kPage - 1, m) == rdx::ApplyStatus::Ok);
+    quiesce(h);
     ASSERT_EQ(size_t{2}, f->nodeCount());
     ASSERT_EQ(size_t{1}, liveCountOf<rdx::Mapping>());
 
     ASSERT_TRUE(f->apply(0, kPage - 1, nullptr) == rdx::ApplyStatus::Ok);
+
+    quiesce(h);
     ASSERT_EQ(size_t{1}, f->nodeCount());    // child gone, cluster root remains
 
     // The record's last naming slot released, so the COUNTING MECHANISM
@@ -327,21 +351,26 @@ TEST(radix_tree_reclamation_actually_reclaims) {
 
 TEST(radix_tree_reclamation_stops_at_the_first_non_empty_ancestor) {
     Harness h;
-    TreeFixture<TreeA> f(3);
+    TreeFixture<TreeA> f(h, 3);
     auto* keep = makeMapping(0);
     auto* go   = makeMapping(0);
 
     // Two pages in the same C3 node. Unmapping one must reclaim nothing.
     ASSERT_TRUE(f->apply(0, kPage - 1, go) == rdx::ApplyStatus::Ok);
+    quiesce(h);
     ASSERT_TRUE(f->apply(kPage, 2 * kPage - 1, keep) == rdx::ApplyStatus::Ok);
     const size_t before = f->nodeCount();
 
     ASSERT_TRUE(f->apply(0, kPage - 1, nullptr) == rdx::ApplyStatus::Ok);
+
+    quiesce(h);
     ASSERT_EQ(before, f->nodeCount());
     ASSERT_EQ(keep, f->lookup(kPage).mapping);
     ValidA::validate(f.tree, "partial reclamation");
 
     ASSERT_TRUE(f->apply(kPage, 2 * kPage - 1, nullptr) == rdx::ApplyStatus::Ok);
+
+    quiesce(h);
     ASSERT_EQ(size_t{1}, f->nodeCount());
     ValidA::validate(f.tree, "full reclamation");
     // Both records reached zero naming slots and were destroyed by the tree.
@@ -352,7 +381,7 @@ TEST(radix_tree_reclamation_stops_at_the_first_non_empty_ancestor) {
 
 TEST(radix_tree_detaching_a_subtree_releases_every_leaf_reference) {
     Harness h;
-    TreeFixture<TreeA> f(3);
+    TreeFixture<TreeA> f(h, 3);
     auto* fine = makeMapping(0);
     auto* coarse = makeMapping(0);
 
@@ -360,6 +389,7 @@ TEST(radix_tree_detaching_a_subtree_releases_every_leaf_reference) {
     for (uint64_t k = 0; k < 8; k++) {
         ASSERT_TRUE(f->apply(k * 2 * kPage, k * 2 * kPage + kPage - 1, fine)
                     == rdx::ApplyStatus::Ok);
+        quiesce(h);
     }
     const uint64_t nameCount = fine->refcountRelaxed();
     ASSERT_TRUE(nameCount >= 8);
@@ -371,6 +401,7 @@ TEST(radix_tree_detaching_a_subtree_releases_every_leaf_reference) {
     // displaced value follows the rules an individual clear already has.
     const uint64_t slot = rdx::slotSpan(GA, 3);
     ASSERT_TRUE(f->apply(0, slot - 1, coarse) == rdx::ApplyStatus::Ok);
+    quiesce(h);
 
     // Every naming slot released, so `fine` is gone; only `coarse` survives.
     ASSERT_EQ(size_t{1}, liveCountOf<rdx::Mapping>());
@@ -386,7 +417,7 @@ TEST(radix_tree_detaching_a_subtree_releases_every_leaf_reference) {
 
 TEST(radix_tree_a_mapping_outlives_its_last_naming_slot_and_no_longer) {
     Harness h;
-    TreeFixture<TreeA> f(4);                 // C1: 1 MiB slots
+    TreeFixture<TreeA> f(h, 4);                 // C1: 1 MiB slots
     const uint64_t slot = rdx::slotSpan(GA, 4);
     auto* m = makeMapping(0);
 
@@ -395,10 +426,12 @@ TEST(radix_tree_a_mapping_outlives_its_last_naming_slot_and_no_longer) {
     // outstanding lookup reference, which would otherwise hold the count above
     // its structural value and mask the whole thing.
     ASSERT_TRUE(f->apply(0, 4 * slot - 1, m) == rdx::ApplyStatus::Ok);
+    quiesce(h);
     ASSERT_EQ(uint64_t{4}, m->refcountRelaxed());
 
     for (uint64_t k = 0; k < 4; k++) {
         ASSERT_TRUE(f->apply(k * slot, (k + 1) * slot - 1, nullptr) == rdx::ApplyStatus::Ok);
+        quiesce(h);
         ValidA::validate(f.tree, "incremental unmap");
         if (k < 3) {
             // Survives while any naming slot remains.
@@ -447,12 +480,13 @@ TEST(radix_tree_destructor_releases_nothing) {
 
 TEST(radix_tree_an_aborted_subdivision_has_moved_no_count) {
     Harness h;
-    TreeFixture<TreeA> f(3);
+    TreeFixture<TreeA> f(h, 3);
     auto* m = makeMapping(0);
     auto* newM = makeMapping(0);
 
     const uint64_t slot = rdx::slotSpan(GA, 3);
     ASSERT_TRUE(f->apply(0, slot - 1, m) == rdx::ApplyStatus::Ok);
+    quiesce(h);
     ASSERT_EQ(uint64_t{1}, m->refcountRelaxed());
 
     const auto baseline = captureBaseline();
@@ -484,13 +518,14 @@ TEST(radix_tree_an_aborted_subdivision_has_moved_no_count) {
 
     // ...and the same operation succeeds once allocation does.
     ASSERT_TRUE(f->apply(kPage, 2 * kPage - 1, newM) == rdx::ApplyStatus::Ok);
+    quiesce(h);
     ASSERT_EQ(uint64_t{1}, newM->refcountRelaxed());
     ValidA::validate(f.tree, "after successful retry");
 }
 
 TEST(radix_tree_allocation_failure_is_reported_not_panicked) {
     Harness h;
-    TreeFixture<TreeA> f(3);
+    TreeFixture<TreeA> f(h, 3);
     auto* m = makeMapping(0);
 
     // DEC-075 / §10's inverted hazard: every allocation site handles null, and a
@@ -498,6 +533,7 @@ TEST(radix_tree_allocation_failure_is_reported_not_panicked) {
     // userspace-triggerable panic through the back door.
     injectAllFailures();
     ASSERT_TRUE(f->apply(0, kPage - 1, m) == rdx::ApplyStatus::OutOfMemory);
+    quiesce(h);
     resetInjection();
 
     ASSERT_EQ(uint64_t{0}, m->refcountRelaxed());   // never placed, so still ours
@@ -514,7 +550,7 @@ TEST(radix_tree_churn_returns_every_node_and_record) {
 
     const auto baseline = captureBaseline();
     {
-        TreeFixture<TreeT> f(1);
+        TreeFixture<TreeT> f(h, 1);
         ShadowMap<GT> model(1, 0);
         const uint64_t span = rdx::nodeSpan(GT, 1);
         const uint64_t unit = uint64_t{1} << GT.floorBits;
@@ -538,7 +574,11 @@ TEST(radix_tree_churn_returns_every_node_and_record) {
             rdx::Mapping* v = rng.chance(60) ? makeMapping(lo) : nullptr;
             const auto st = f->apply(lo, hi, v);
             ASSERT_TRUE(st == rdx::ApplyStatus::Ok);
+            quiesce(h);
             model.apply(lo, hi, v);
+            // Validate EVERY step, not just the end: a reference-count defect
+            // detected 3000 operations later is a bisect, not a diagnosis.
+            ValidT::validate(f.tree, "churn step");
         }
 
         assertMatchesModel(f.tree, model, "churn");
@@ -547,6 +587,7 @@ TEST(radix_tree_churn_returns_every_node_and_record) {
         // Clear everything: the tree collapses to just its root, and every
         // record's last naming slot releases.
         ASSERT_TRUE(f->apply(0, span - 1, nullptr) == rdx::ApplyStatus::Ok);
+        quiesce(h);
         ASSERT_EQ(size_t{1}, f->nodeCount());
         ASSERT_EQ(size_t{0}, liveCountOf<rdx::Mapping>());
         ValidT::validate(f.tree, "drained");

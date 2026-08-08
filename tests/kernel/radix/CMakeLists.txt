@@ -30,6 +30,8 @@ set(RDX_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/RandomSource.cpp
     ${VMS_MOCKS}/MockVMSubstrate.cpp
     ${VMS_MOCKS}/MockKernelEnv.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../rcu/mocks/MockRcuEnv.cpp
+    ${RDX_ROOT}/kernel/rcu/RCU.cpp
     ${RDX_ROOT}/kernel/mm/vmsmalloc.cpp
     ${RDX_ROOT}/libraries/Core/PrintStream.cpp
     ${RDX_ROOT}/libraries/Core/str.cpp
@@ -43,6 +45,7 @@ set(RDX_INCLUDES
     ${VMS_MOCKS}                            # <mem/NUMA.h>, <kassert.h>, MockCpuLocal.h, ...
     ${CMAKE_CURRENT_SOURCE_DIR}/../vmsmalloc  # DebugIntrospection.h — vmsmalloc.cpp includes it
                                               # under CROCOS_VMSMALLOC_TEST_HARNESS
+    ${CMAKE_CURRENT_SOURCE_DIR}/../rcu/mocks  # MockRcuEnv.h — the tree's domain needs it
     ${CMAKE_CURRENT_SOURCE_DIR}             # RadixHarness.h, RandomSource.h
     ${RDX_ROOT}/kernel/include
     ${RDX_ROOT}/kernel/mm                   # VMSubstrateSlab.h (real)
@@ -63,6 +66,7 @@ set(RDX_DEFINES
     CORE_LINKED_WITH_KERNEL
     CROCOS_VMSMALLOC_TEST_HARNESS
     CROCOS_RADIX_TEST_HARNESS
+    CROCOS_RCU_TEST_HARNESS
 )
 
 set(RDX_COMMON_OPTS

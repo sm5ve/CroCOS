@@ -17,8 +17,14 @@
 
 #include <MockCpuLocal.h>      // kernel::test::bindThreadToCpu (vmsmalloc mocks)
 #include <mem/radix/SlotCodec.h>
+#include <rcu/RCU.h>
+#include <MockInterruptContext.h>
+#include <MockRcuEnv.h>
+#include "../rcu/DebugIntrospection.h"
 
 #include "mocks/RadixOracle.h"
+#include <assert_support.h>
+#include <string>
 
 namespace CroCOSTest::radix {
 
@@ -34,9 +40,18 @@ namespace CroCOSTest::radix {
     inline constexpr uint64_t kMockArenaBytes = uint64_t{64} * 1024 * 1024;
 
     struct Harness {
+        // The tree's RCU domain. Per-address-space in production (DEC-072); one
+        // per harness here, created and torn down with the arena.
+        //
+        // drainBatchBound is DEC-059's knob, provisionally 64: an UNBOUNDED
+        // drain inherits arbitrarily many foreign deleters on a path a #PF
+        // handler sits on, and this consumer retires from the fault path.
+        kernel::rcu::Domain domain;
+
         explicit Harness(size_t cpus = 1, size_t domains = 1) {
             VS::test::initialize(cpus, domains);
             numa::test::configure(cpus, domains, &allToDomainZero);
+            arch::test::setProcessorCount(cpus);
             kernel::test::bindThreadToCpu(0);
             // Every slot word is encoded relative to the arena base, which mmap
             // chose a moment ago — so the codec must be re-bound per fixture,
@@ -48,9 +63,26 @@ namespace CroCOSTest::radix {
             // them rather than trusting the previous test to have been tidy.
             resetAccounting();
             resetInjection();
+
+            if (!domain.init("radix", 64)) {
+                VS::test::shutdown();
+                throw AssertionFailure(std::string("radix Harness: domain init failed"));
+            }
         }
 
         ~Harness() {
+            // Teardown order matters and is the consumer's obligation:
+            // drainAllQuiescent (its no-new-users precondition discharged here by
+            // the tests being single-threaded at this point, and by joined
+            // threads in the concurrent ones), THEN deinit, THEN the arena.
+            if (domain.initialized()) {
+                (void)kernel::rcu::drainAllQuiescent(domain);
+                (void)domain.deinit();
+            }
+            // The RCU block freelist is process-global while the arena is
+            // per-test; without this the next test gets a block pointing into
+            // munmapped memory.
+            kernel::rcu::test::resetDomainManagementState();
             resetInjection();
             VS::test::shutdown();
         }
@@ -58,6 +90,27 @@ namespace CroCOSTest::radix {
         Harness(const Harness&) = delete;
         Harness& operator=(const Harness&) = delete;
     };
+
+    // **Reclamation is DEFERRED.** A retired node's Mapping references come home
+    // only when its deleter runs at grace-period end, so between an operation
+    // and its grace period the structural counts legitimately exceed the naming-
+    // slot census and the live-object counters legitimately exceed the reachable
+    // set. Neither is a leak.
+    //
+    // Any assertion about structural counts, live-object accounting or node
+    // counts must therefore quiesce first — which is not a testing artifact but
+    // §11's own instruction: "Tree memory returns to baseline after churn — in-
+    // kernel stress with node accounting, AFTER AN EXPLICIT tryAdvance PUMP
+    // (DEC-060), since RCU pulls progress from the retire path and an idle CPU
+    // strands its last bag."
+    //
+    // drainAllQuiescent rather than tryAdvance because a single advance does not
+    // complete a grace period, and because the caller here genuinely satisfies
+    // its no-new-users precondition: single-threaded, or with every worker
+    // joined.
+    inline void quiesce(Harness& h) {
+        (void)kernel::rcu::drainAllQuiescent(h.domain);
+    }
 
 }  // namespace CroCOSTest::radix
 
