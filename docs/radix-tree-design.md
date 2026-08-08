@@ -77,9 +77,9 @@ A **cluster** is a node of one conceptual full-depth tree, rooted at whatever le
 current size. Its base is span-aligned by construction, and it grows by allocating a node
 *above* itself: the old root becomes one child slot of the new node, so no mapping moves.
 Growth computes the new packed word and publishes it with a compare-exchange against the word it
-observed (DEC-027/028/103); the old root stays reachable as the new root's child, and the
-grower's pre-CAS reference and the bucket's transferred one net to zero — growth is
-retire-free.
+observed (DEC-027/028/103); the old root stays reachable as the new root's child, its count
+untouched — the bucket's reference transfers in place to the new parent's slot — and growth is
+retire-free: the old word is a value, not an object.
 
 Why clusters at all: rooting one tree over the full 47-bit VA forces full depth immediately;
 rooting lazily over only the span in use makes the tree shallow but collapses ASLR entropy.
@@ -453,13 +453,16 @@ middle punch is +(k−1) where k is the survivor-leaf count, ~45 in the wide-spi
 subdivision nets zero; an in-place shrink moves nothing). The record is constructed at count
 zero; the first publish takes it to one.
 
-**Every structural +1 is a commit-phase step** (DEC-067), which is what makes aborts count-clean:
-an abandoned attempt crossed no boundary, took no increments, and has nothing to undo — where
-the natural reading (take the reference while building the child during acquisition) leaks a
-pinned record, VMObject and frames on every abort, invisibly. The one exception is cluster
-growth, whose publish is a losable CAS: the grower increments before it and a loser reverts
-synchronously — safe there and only there because the reference was never published and the
-bucket word's own reference holds the count above zero.
+**Every structural +1 is a commit-phase step, with no exceptions** (DEC-067 as amended by
+DEC-103), which is what makes aborts count-clean: an abandoned attempt crossed no boundary,
+took no increments, and has nothing to undo — where the natural reading (take the reference
+while building the child during acquisition) leaks a pinned record, VMObject and frames on
+every abort, invisibly. Growth, which originally carried the rule's one exception (a pre-CAS
++1 with loser revert), now moves **no count at all**: the bucket word's old-root reference
+transfers in place to the new parent's child slot, a CAS-published root's count of 1 is
+pre-assigned at construction while the node is still private (a published root observable at
+count 0 would let a cache pin's paired increment/release destroy a live node), and a losing
+CAS shallow-discards the never-published node directly — nothing was taken, nothing reverts.
 
 ### 6.3 Deferred releases: the `DeferredRelease` pool
 
