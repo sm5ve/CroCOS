@@ -3,7 +3,7 @@
 **Written 2026-08-08 at `e3b82bd`; UPDATED 2026-08-08 at `ea364af`.** Branch
 `radix-tree`. Phases 0, 1 and 2 are complete and green, and **four of Phase 3's
 nine work items have landed** — see §0, which is the only part of this note that
-has moved. Everything below §0 was written before Phase 3 started and still
+has moved, and which also carries the binding rule growth turns on. Everything below §0 was written before Phase 3 started and still
 holds except where §0 says otherwise.
 
 Read in this order:
@@ -20,7 +20,7 @@ Read in this order:
 
 ---
 
-## 0. Phase 3 so far, and the one decision that is blocking the next item
+## 0. Phase 3 so far
 
 ### Landed (all committed, all green)
 
@@ -50,52 +50,62 @@ release sites. If a `Mapping`-constructor-vs-`offsetFor` race report ever comes
 back, **do not re-silence it** — the alternative explanation is a real
 use-after-free the oracle's poison window happens to miss.
 
-### The decision blocking Phase 3's next item
+### Growth's binding rule, and why it is smaller than it first looks
 
 The remaining items in the suggested order are **growth and creation** (§5.6),
-then placement, the control block, teardown and the enumeration API. Growth is
-blocked on a seam question that is worth answering deliberately, because §5.6 is
-the newest text in the spec and the phase plan flags every reordering of it as
-fatal-prone.
+then placement, the control block, teardown and the enumeration API.
 
-**The problem.** `CoreTree` is rooted at a fixed `{root, level, base}` set at
-`init`. Growth changes all three at once, and they live in the packed bucket word
-— so §7.3 requires them to be **re-decoded inside every section**, or a writer
-acts on a stale `{base, level}`, computes the wrong bit index, and writes the
-wrong slot *on a node it holds a valid claim in*. (Packing turned that from a
-dangling dereference into a stale-value hazard; the discipline is unchanged.)
+An earlier draft of this note treated growth as blocked on a core/policy seam
+decision, on the reading that a concurrent growth makes an in-flight operation's
+`{root, level, base}` *wrong*. **That reading is mistaken and is worth correcting
+here, because it is the natural one and it inflates the work by an order of
+magnitude.**
 
-Three shapes, none obviously dominant:
+A stale binding within a section is an ordinary RCU snapshot. If a writer decodes
+`(R, level 3, base B)` and a grower then publishes `(P, level 2, base B')`:
 
-1. **A root-source seam on `CoreTree`.** The tree gains a small provider it
-   re-reads at the top of each attempt and each descent; a `FixedRootSource` for
-   the Phase 1/2 single-cluster tests, a `BucketRootSource` for a cluster.
-   Smallest diff, keeps the attempt loop where it is, and the re-read on the
-   lookup path is *required* rather than overhead (§3.1: the bucket word goes
-   through `protectWord` + decode, "there is no exception"). Cost: a fourth
-   template parameter or one indirection per attempt, and it puts a bucket-shaped
-   concept inside the core layer, which §5.5 draws the seam to avoid.
-2. **Move the attempt loop up to the policy layer.** The cluster opens the
-   section, decodes the bucket, and calls a core-tree *attempt* against that
-   binding. Cleanest against §5.5's stated seam — the core stays "a prefix tree
-   over a single aligned span" — but it restructures `runToCompletion`,
-   `applyOrDecompose` and `decompose`, which are the machinery §6.5 took seven
-   rewrites to get right.
-3. **Put the bucket word in `CoreTree`.** Smallest conceptual change, largest
-   violation of §5.5, and it makes the core layer untestable without a bucket
-   table.
+- growth does not relabel the old root — it allocates a new parent above it — so
+  `(R, 3, B)` stays a *true* description of the node it names;
+- nothing is retired and no count moves (§5.6's transfer-in-place), so `R` stays
+  reachable as `P`'s child;
+- a writer holding claims inside `R` publishes into slots that are exactly where
+  they were, and its range fit `R`'s span, which growth only widens.
 
-Shape 1 is the leading candidate on cost, shape 2 on layering. **This wants
-Spencer's call**, in the spirit of DEC-091's "behind a swappable policy seam" —
-it is the same question one layer down.
+What §7.3 actually guards is narrower, and it is two things:
 
-Whichever is chosen, §5.6's accounting rules are the part to re-read first and
-not paraphrase: **no count moves on the old root, nothing is retired, nothing
-reverts.** A CAS-published root is constructed at count 1 (pre-assigned, not a
-`+1` on a published object); the old root's inbound reference **transfers in
-place** to the new parent's child slot; a losing grower or creator
-**shallow-discards** its private node, pre-assigned count notwithstanding. If an
-implementation wants a decrement anywhere on the growth path, it has diverged.
+1. **Atomicity of the triple.** The failure is pairing a *fresh* root pointer
+   with *stale* `{base, level}` — decode `P` in a new section but keep level 3
+   and base `B` from the old one, and the writer computes bit indices for a node
+   that is not shaped that way, "on a node it holds a valid claim in". DEC-103's
+   packing gives that atomicity for free **provided all three fields come out of
+   one load**. The rule is decode-together, not never-be-stale.
+2. **The uncounted root pointer must not cross a section close** — and this one
+   has teeth *because* of growth. Before growth `R` is the cluster root, which
+   §6.4's walk never reclaims. After growth `R` is an ordinary interior node with
+   a parent slot and a state word, so it becomes reclaimable the moment it
+   empties, and a pointer held across a close can be freed underneath.
+
+So: **decode the bucket word once at the top of each attempt, inside that
+attempt's section, all three fields from one `protectWord` load.**
+`runToCompletion` already opens one section per attempt, so nothing about the
+attempt machinery moves — which is the part §6.5 took seven rewrites to get right
+and the part not to disturb.
+
+Two consequences, both benign and worth recognising rather than debugging later:
+a writer working from the pre-growth view treats `R` as the cluster root and so
+declines to reclaim it, while one working from the post-growth view treats it as
+interior and may. The two differ in conservatism, not correctness. And
+`CoreTree`'s existing `if (node == rootRef) return false` reclamation guard stays
+correct under either, because it compares against whatever root *that attempt*
+decoded.
+
+§5.6's accounting rules are the part to re-read first and not paraphrase: **no
+count moves on the old root, nothing is retired, nothing reverts.** A CAS-
+published root is constructed at count 1 (pre-assigned, not a `+1` on a published
+object); the old root's inbound reference **transfers in place** to the new
+parent's child slot; a losing grower or creator **shallow-discards** its private
+node, pre-assigned count notwithstanding. If an implementation wants a decrement
+anywhere on the growth path, it has diverged.
 
 ### Still not started
 
