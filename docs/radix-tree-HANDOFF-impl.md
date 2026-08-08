@@ -1,27 +1,110 @@
-# radix-tree — implementation handoff (Phase 3 complete, into Phase 4)
+# radix-tree — implementation handoff (Phase 4 complete, Phase 5 in flight)
 
-**Written 2026-08-08 at `e3b82bd`; UPDATED 2026-08-08 at `790671f`.** Branch
-`radix-tree`. **Phases 0, 1, 2 and 3 are complete and green** — §0 has the commit
-map, the exit gate item by item, and what Phase 4 needs to know. Everything below
-§0 was written before Phase 3 started; still accurate as background, but §0
-supersedes it wherever they differ.
+**UPDATED 2026-08-08 at `06a3d8f`.** Branch `radix-tree`. **Phases 0-4 are
+complete and green. Phase 5 is partly landed and has two open defects.** §0 is
+the current state; §0.1 below it is the Phase 3 note it superseded, kept because
+its "what Phase 4 needs to know" list is still accurate background.
 
 Read in this order:
 
-1. §0 of this note, then the rest of it.
-2. `specs/radix-tree-phase-4.md` — the next phase. `radix-tree-phase-3.md` is
-   fully ticked.
-3. `docs/radix-tree-implementation-deviations.md` — D-001..D-032, the running
-   findings log. **Live now: D-004 and D-030 (spec text), D-010 (bounded and
-   logged), D-029 (a WATCH item — read it before touching the refcounts).**
-   D-003, D-011 and D-032 are closed.
-4. `specs/radix-tree.md` §3.1, §5.1/5.4/5.6, §7 entire, §9, §11 — Phase 3's
-   sections. `specs/radix-tree-HANDOFF.md` is the *spec*-side note and is only
-   needed if you intend to edit the spec.
+1. §0 of this note.
+2. `docs/radix-tree-implementation-deviations.md` — **D-039, D-041, D-042 and
+   D-043 are the live ones**, and D-039/D-042 owe the spec two amendments.
+3. `specs/radix-tree-phase-5.md` — the remaining work items.
 
 ---
 
-## 0. Phase 3 — COMPLETE
+## 0. Where things stand
+
+### Complete and green
+
+| Phase | State |
+|---|---|
+| 0-3 | Complete. See §0.1. |
+| **4** | **Complete.** The DEC-078 seam (`PinnedNode`, `pinLocked`, `resumeDescent`, `release`) and DEC-079's cache: per-CPU direct-mapped set of 4, VA-range-deferred install, generation check, `Detached`/generation eviction. All four §13 gate properties tested. Calibration report runs in the suite. |
+| **5** | **Partly landed.** The kernel instance, the node/`Mapping` censuses and the in-kernel stress exist. Debug boots clean on `run`, `run_numa`, `run_numa_hmat`. Release/LTO boots clean on **6 of 8** runs. |
+
+Full suite, sequential: Core 441 + 425 TSan, Kernel 177, LibAlloc 38x2, vmsmalloc
+31x2, RCU 61x2, **radix 150x2** plus the progress audit.
+
+### What Phase 5 has already produced — read this first
+
+**The in-kernel stress found a real, four-site freshness defect on its first
+boot**, which is the vmsmalloc DEC-047 precedent repeating exactly: a stale-TLB
+bug class the userspace harness is *structurally* incapable of seeing, because
+its `ensureTLBEntryFresh` is a no-op and it has no page tables. 150 tests on two
+sanitizers pass with every one of these calls absent.
+
+| Site | Named by §7.1? | Fixed in |
+|---|---|---|
+| Node deleter's slot reads + its own refcount RMW | yes | `ae23572` |
+| Either deleter RMW-ing a `Mapping`'s count word | yes | `ae23572` |
+| The root bucket page (read by EVERY descent) | **no** | `ae23572` |
+| Reader's/writer's first touch of a `Mapping` body | **no** | `ae23572` |
+| A node pointer decoded from a slot word | **no** | `06a3d8f` |
+
+Two of those are **design questions rather than missing calls**, and both are
+flagged for Spencer rather than decided:
+
+- **The root page** is the one per-address-space allocation DEC-082 did *not*
+  move into pinned storage, and DEC-082's own rationale rejects "an
+  `ensureTLBEntryFresh` on every descent-cache hit" — yet the root page is read
+  more often than anything that did move (D-039).
+- **Node pointers** now cost one freshness call *per level* on the descent, the
+  spec's hottest path, where P4-ITEM-002 measured ~40 instructions per call. Keep
+  and price it; put nodes in never-recycling storage (DEC-082's answer one level
+  down); or strengthen a vmsmalloc guarantee (D-042).
+
+### The two open defects
+
+- **D-043 — a spinlock SELF-deadlock inside `Domain::init`**, ~1 run in 4. **It
+  has a debug reproduction**, which is the most useful thing in this note: set
+  `kOpsPerCycle = 24` in `RadixStress.cpp` and a debug build goes from 4 cycles
+  to 1025 with every assert live. That is ~1025 domain create/destroy pairs per
+  boot — a pattern RCU has never been asked to do. Three candidate explanations
+  are separated in D-043; the cheapest (a detector false positive) goes first.
+- **D-041 — a residual page fault** at the same `tearDownUnitAt` site, on a
+  pointer the freshness call did not save (so: a genuinely bogus child pointer,
+  not a stale-but-valid one), plus a `Mapping` residue of 2 seen once. Use
+  D-043's reproduction.
+
+**The instinct to resist**: both look like they might be the stress's fault. That
+was checked and is not the case for the freshness family — the stress's own
+discard paths were *disabled* (`leaked=0`, `oom=0`, neither had ever run) and
+concurrent growth was disabled, and the failures were unchanged. Classify before
+reasoning; that is D-013's lesson and it paid twice here.
+
+### Phase 5's remaining work items
+
+- The **freshness audit** is effectively what D-039/D-042 did, but it should be
+  finished deliberately rather than by defect: walk §7.1's list against the code
+  and record each site as covered or exempt.
+- **Calibration** is entirely untouched: `detachBudget`, `drainBatchBound`,
+  ITEM-084's draw-count histogram, ITEM-055's state-word placement, DEC-095's K
+  and `scanChunk`, and DEC-079's entry count. Use `-icount` per RCU P4-DEC-010,
+  **not** TCG block counts. The Phase 4 calibration harness already reports hit
+  rate, atomic counts and per-entry thrash, and D-034 records what it could and
+  could not settle.
+
+### Running it
+
+```
+cmake -B cmake-build-debug -DCMAKE_BUILD_TYPE=Debug -DCROCOS_RADIX_STRESS=ON
+cmake --build cmake-build-debug --target run          # or run_numa / run_numa_hmat
+```
+
+`CROCOS_RADIX_STRESS` **selects** the smp_bringup stress rather than adding one —
+it takes RCU Phase 4's slot by tail-call, because two per-CPU routines in one
+phase means the first one's infinite loop silently starves the second, which
+looks exactly like a healthy boot. `RadixStress.cpp` compiles either way on
+purpose: it is the only translation unit that type-checks the tree against the
+real freestanding toolchain and `-Werror`.
+
+---
+
+---
+
+## 0.1. Phase 3 — COMPLETE (superseded by §0, kept for its background)
 
 **All nine work items have landed.** Full suite green, sequential on a quiet
 machine: Core 441 + 425 TSan, Kernel 177, LibAlloc 38x2, vmsmalloc 31x2, RCU
