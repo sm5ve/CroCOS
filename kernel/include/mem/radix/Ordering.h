@@ -149,6 +149,19 @@ namespace kernel::mm::radix {
     // rate.
     inline constexpr MemoryOrder kCacheAccounting = RELAXED;
 
+    // ─── The node census (Phase 5) ─────────────────────────────────────────
+    //
+    // The in-kernel stress's allocated/destroyed pair, which is what the §11
+    // residue gate is measured against — the harness has the DEC-052 oracle and
+    // the kernel has nothing, so this is the only thing that can answer "did
+    // teardown come back to the bound".
+    //
+    // RELAXED, and the name is where the caveat lives: `live()` subtracts two
+    // counters that were not sampled together, so it is only exact on a QUIESCED
+    // tree with no CPU mid-operation — which is the only condition the residue
+    // gate reads it under, and is stated at the read site as well as here.
+    inline constexpr MemoryOrder kCensusAccounting = RELAXED;
+
     // ─── Non-shared accesses ───────────────────────────────────────────────
     //
     // Named rather than left bare so the §11 spelling check can be exhaustive:

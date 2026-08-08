@@ -193,6 +193,44 @@ namespace kernel::mm::radix {
         }
     };
 
+    // ─── The node census (Phase 5) ─────────────────────────────────────────
+    //
+    // §11's residue gate — "memory residue after teardown falls to the bound",
+    // and "tree memory returns to baseline after churn" — needs a live node
+    // count, and the in-kernel stress has no DEC-052 oracle to get one from.
+    // This is that count: one increment where a node is allocated, one where it
+    // is destroyed, and both sites are singular by construction (`NodeOps::alloc`
+    // and `destroyNode`, which every destroy path routes through).
+    //
+    // Compiled out unless CROCOS_RADIX_NODE_CENSUS. The counters sit on the
+    // allocation path, which is already the expensive half of an `mmap`, but the
+    // gate exists so a release kernel pays nothing for an instrument.
+    struct NodeCensus {
+        Atomic<uint64_t> allocated{0};
+        Atomic<uint64_t> destroyed{0};
+
+        // Exact only on a QUIESCED tree — the two counters are sampled
+        // separately, so a CPU mid-operation can be observed between its own
+        // allocate and the publish that will eventually destroy. Every §11 gate
+        // that reads this already requires quiescence for its own reasons.
+        [[nodiscard]] uint64_t liveQuiesced() const {
+            return allocated.load(kCensusAccounting) - destroyed.load(kCensusAccounting);
+        }
+        void reset() {
+            allocated.store(0, kCensusAccounting);
+            destroyed.store(0, kCensusAccounting);
+        }
+    };
+
+#ifdef CROCOS_RADIX_NODE_CENSUS
+    inline NodeCensus gNodeCensus;
+    inline void noteNodeAllocated() { gNodeCensus.allocated.fetch_add(1, kCensusAccounting); }
+    inline void noteNodeDestroyed() { gNodeCensus.destroyed.fetch_add(1, kCensusAccounting); }
+#else
+    inline void noteNodeAllocated() {}
+    inline void noteNodeDestroyed() {}
+#endif
+
     // ─── Level -> concrete node type (DEC-062) ─────────────────────────────
 
     template <GeometryDescriptor G, unsigned Level>

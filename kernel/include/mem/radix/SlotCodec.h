@@ -88,9 +88,19 @@ namespace kernel::mm::radix {
     // ─── Decoded forms ─────────────────────────────────────────────────────
 
     // A leaf's covered sub-range, in the level's units, inclusive at both ends.
+    // Zero-initialised, and that is a release-build decision rather than a
+    // style one. Both writers pass a `SubRange` by reference to the failable
+    // `subRangeFor`; one of them checks the result and the other debug-asserts
+    // it ("a fully-covered child slot's replacement is the whole span, which is
+    // always expressible"). In release the assert compiles out, so a
+    // hypothetical false return would leave the struct indeterminate and encode
+    // a leaf from uninitialised stack — which is undefined behaviour rather than
+    // the merely-wrong range the assert describes. LTO is what made this visible
+    // (`-Werror=maybe-uninitialized` across the inlined call); the members were
+    // uninitialised before and the release kernel simply had no cross-TU view.
     struct SubRange {
-        uint32_t lo;
-        uint32_t hi;   // inclusive
+        uint32_t lo = 0;
+        uint32_t hi = 0;   // inclusive
 
         constexpr bool operator==(const SubRange&) const = default;
     };

@@ -206,6 +206,41 @@ namespace kernel::mm::radix {
         [[nodiscard]] uint64_t refcountRelaxed() const { return refcount.load(kQuiescedRead); }
     };
 
+    // ─── The record census (Phase 5) ───────────────────────────────────────
+    //
+    // The `Mapping` half of Node.h's node census, and the one the residue gate
+    // cares about more: a leaked node costs 160 B, while a leaked record pins its
+    // VMObject and every physical frame behind it. §11's "a Mapping outlives its
+    // last naming slot and no longer" is a userspace-harness target with the
+    // DEC-052 oracle behind it; in the kernel this pair of counters is all there
+    // is.
+    //
+    // The allocation side is the STRESS's to count, not this header's: records
+    // are minted by the VMM, and a `Mapping` constructor cannot tell a record
+    // that will be published from one that will be discarded. Destruction is
+    // singular here, which is the half that matters.
+    struct MappingCensus {
+        Atomic<uint64_t> created{0};
+        Atomic<uint64_t> destroyed{0};
+
+        [[nodiscard]] uint64_t liveQuiesced() const {
+            return created.load(kCensusAccounting) - destroyed.load(kCensusAccounting);
+        }
+        void reset() {
+            created.store(0, kCensusAccounting);
+            destroyed.store(0, kCensusAccounting);
+        }
+    };
+
+#ifdef CROCOS_RADIX_NODE_CENSUS
+    inline MappingCensus gMappingCensus;
+    inline void noteMappingCreated()   { gMappingCensus.created.fetch_add(1, kCensusAccounting); }
+    inline void noteMappingDestroyed() { gMappingCensus.destroyed.fetch_add(1, kCensusAccounting); }
+#else
+    inline void noteMappingCreated() {}
+    inline void noteMappingDestroyed() {}
+#endif
+
     // The counting mechanism owns destruction at zero — not the releaser
     // (§7.1 / RCU-DEC-045: a deleter may release a counted reference the retired
     // object holds, but must not traverse the referent beyond its refcount word;
@@ -215,10 +250,41 @@ namespace kernel::mm::radix {
     // needs it and CoreTree.h is downstream of that header.
     inline void releaseMappingRefs(Mapping* m, uint64_t n) {
         if (m->releaseRefs(n)) {
+            noteMappingDestroyed();
             VMSubstrate::destroy(VMSubstrate::SafePtr<Mapping>(m));
         }
     }
     inline void releaseMappingRef(Mapping* m) { releaseMappingRefs(m, 1); }
+
+    // ─── §7.1's deleter freshness (RCU-DEC-006; the DEC-047 bug class) ─────
+    //
+    // "**Deleters touch bodies, and freshness is not free there**: `onPreTouch`
+    // covers each retire subject's `RetireHead` fields and nothing else, so
+    // every access a deleter makes beyond the head — a node deleter reading its
+    // own slots, **either deleter RMW-ing a `Mapping`'s count word**, the record
+    // deleter reading its own fields — is a cross-CPU access to vmsmalloc-backed
+    // memory and goes through the `SafePtr` / `ensureTLBEntryFresh` discipline."
+    //
+    // A named entry point rather than a bare call at each site, because the
+    // distinction it encodes is invisible at the call site and structurally
+    // invisible to the userspace harness: the mock's `ensureTLBEntryFresh` is a
+    // no-op, so a build with every one of these calls deleted passes 150 tests
+    // on two sanitizers. **This exact omission was found by the first in-kernel
+    // run**, as a `Mapping` refcount reading zero through a stale mapping — the
+    // same shape, on the same allocator, as vmsmalloc's own DEC-047.
+    //
+    // Deliberately NOT folded into `releaseMappingRefs`: the reader-side release
+    // (a `LookupResult` going out of scope) is not a deleter and is not on
+    // §7.1's list, and putting the call there would move an `ensureTLBEntryFresh`
+    // onto the fault path — the cost DEC-082 rearranged an entire control block
+    // to avoid. Which sites owe it is a decision, so it is spelled as one.
+    inline void releaseMappingRefsFromDeleter(Mapping* m, uint64_t n) {
+        VMSubstrate::ensureTLBEntryFresh(m);
+        releaseMappingRefs(m, n);
+    }
+    inline void releaseMappingRefFromDeleter(Mapping* m) {
+        releaseMappingRefsFromDeleter(m, 1);
+    }
 
 }  // namespace kernel::mm::radix
 

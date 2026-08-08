@@ -91,12 +91,31 @@ namespace kernel::mm::radix {
     // shape. Note it needs only the VALENCE, which the concrete type carries;
     // not the level. That is exactly what lets DEC-062's level->type map
     // collapse to a two-way branch at the retire site.
+    // The ONE destroy site. Every path that frees a node — the deleter's
+    // zero-observing self-release, the shallow-discard of an unpublished
+    // allocation, and the descent cache's eviction release — goes through here,
+    // which is what makes the Phase 5 node census a pair of counters rather than
+    // a set of them that have to be kept in agreement.
+    template <GeometryDescriptor G, unsigned V>
+    void destroyNode(Node<G, V>* n) {
+        noteNodeDestroyed();
+        VMSubstrate::destroy(VMSubstrate::SafePtr<Node<G, V>>(n));
+    }
+
     template <GeometryDescriptor G, typename Codec, unsigned V>
     void deleteRadixNode(Node<G, V>* n) {
+        // §7.1 / RCU-DEC-006: `onPreTouch` covered this node's `RetireHead` and
+        // NOTHING else, so the slot reads below and the refcount RMW at the end
+        // are cross-CPU accesses to vmsmalloc-backed memory. Deleters run
+        // wherever a pump runs, which under RCU-DEC-006 stealing is usually not
+        // the CPU that allocated the node.
+        VMSubstrate::ensureTLBEntryFresh(n);
         for (unsigned i = 0; i < V; i++) {
             const uint64_t w = n->slots[i].load(kQuiescedRead);
             if (Codec::isLeaf(w)) {
-                releaseMappingRef(static_cast<Mapping*>(Codec::decodeLeaf(w)));
+                // Each `Mapping` is its own allocation on its own page: this
+                // node being fresh says nothing about the records it names.
+                releaseMappingRefFromDeleter(static_cast<Mapping*>(Codec::decodeLeaf(w)));
             }
         }
         // The self-release. At zero the counting mechanism destroys.
@@ -105,9 +124,7 @@ namespace kernel::mm::radix {
         // correct and invisible to the release gate (D-029).
         const uint64_t prior = n->refcount.fetch_sub(1, kRefcountReleaseAcquire);
         assert(prior != 0, "radix: node structural refcount released below zero");
-        if (prior == 1) {
-            VMSubstrate::destroy(VMSubstrate::SafePtr<Node<G, V>>(n));
-        }
+        if (prior == 1) destroyNode<G, V>(n);
     }
 
     // ─── Concrete-type dispatch on level (DEC-062) ─────────────────────────
@@ -123,7 +140,9 @@ namespace kernel::mm::radix {
 #define RADIX_NODE_CASE(V)                                                        \
                 case V: {                                                         \
                     auto p = VMSubstrate::tryMake<Node<G, V>>(initialRefcount);   \
-                    return p ? p.raw() : nullptr;                                 \
+                    if (!p) return nullptr;                                       \
+                    noteNodeAllocated();                                          \
+                    return p.raw();                                               \
                 }
                 RADIX_NODE_CASE(2)
                 RADIX_NODE_CASE(4)
@@ -191,8 +210,7 @@ namespace kernel::mm::radix {
             switch (valence(G, level)) {
 #define RADIX_NODE_CASE(V)                                                        \
                 case V:                                                           \
-                    VMSubstrate::destroy(VMSubstrate::SafePtr<Node<G, V>>(         \
-                        static_cast<Node<G, V>*>(n.raw())));                       \
+                    destroyNode<G, V>(static_cast<Node<G, V>*>(n.raw()));          \
                     return;
                 RADIX_NODE_CASE(2)
                 RADIX_NODE_CASE(4)
@@ -605,7 +623,7 @@ namespace kernel::mm::radix {
             if (!b) return;
             releaseSubtree(b.root, b.level);
             if (bucketTable != nullptr) {
-                bucketTable->entries[bucketIndex].store(0, kPrivateInit);
+                bucketTable->fresh(bucketIndex).store(0, kPrivateInit);
             } else {
                 rootRef = NodeRef();
             }
@@ -711,7 +729,7 @@ namespace kernel::mm::radix {
                 // word's reference is released by the root's OWN deleter. One
                 // object, one releaser.
                 if (bucketTable != nullptr) {
-                    bucketTable->entries[bucketIndex].store(0, kBucketPublishSuccess);
+                    bucketTable->fresh(bucketIndex).store(0, kBucketPublishSuccess);
                 } else {
                     rootRef = NodeRef();
                 }
@@ -741,7 +759,7 @@ namespace kernel::mm::radix {
         // an operation would drop the protected-link-load primitive.
         [[nodiscard]] RootBinding quiescedBinding() const {
             if (bucketTable == nullptr) return RootBinding{rootRef, level0, baseVA};
-            const uint64_t w = bucketTable->entries[bucketIndex].load(kQuiescedRead);
+            const uint64_t w = bucketTable->fresh(bucketIndex).load(kQuiescedRead);
             const auto d = BucketCodecT::decode(w, bucketIndex);
             return RootBinding{NodeRef(d.root), d.level, d.base};
         }
@@ -936,6 +954,19 @@ namespace kernel::mm::radix {
                     // unmapped-VA lookup (DEC-022).
                     if (!Codec::covers(word, va - slotBase, level)) return {};
                     auto* m = static_cast<Mapping*>(Codec::decodeLeaf(word));
+                    // The reader's first touch of the record's body. The slot
+                    // word came through `protectWord`, and DEC-073 is explicit
+                    // that "whatever pointer it derives carries the SafePtr
+                    // freshness obligation exactly as with `protect`" — this is
+                    // the site where that obligation falls due on the READ path.
+                    //
+                    // One call covers everything the caller does through the
+                    // reference afterwards, and that is an argument rather than
+                    // an assumption: the counted reference is what stops the
+                    // record being destroyed and its page recycled, so nothing
+                    // can invalidate this CPU's mapping of it while the
+                    // reference is held.
+                    VMSubstrate::ensureTLBEntryFresh(m);
                     // §7.3's acquisition law: a counted reference is acquired
                     // ONLY inside the read section in which that link was
                     // observed. Taking it after the close would let the node be
@@ -1691,7 +1722,7 @@ namespace kernel::mm::radix {
             // "there is no exception". §7.3: one load, all three fields, and
             // nothing from it outlives the caller's section.
             const uint64_t w =
-                kernel::rcu::protectWord(*domain, bucketTable->entries[bucketIndex]);
+                kernel::rcu::protectWord(*domain, bucketTable->fresh(bucketIndex));
             const auto d = BucketCodecT::decode(w, bucketIndex);
             return RootBinding{NodeRef(d.root), d.level, d.base};
         }
@@ -1896,7 +1927,12 @@ namespace kernel::mm::radix {
             for (unsigned i = 0; i < n; i++) {
                 const uint64_t w = node.slot(i).load(kQuiescedRead);
                 if (Codec::isLeaf(w)) {
-                    static_cast<Mapping*>(Codec::decodeLeaf(w))->acquireRef();
+                    // Same obligation on the WRITER side: these records were
+                    // read out of slot words and this CPU may never have touched
+                    // them before.
+                    auto* m = static_cast<Mapping*>(Codec::decodeLeaf(w));
+                    VMSubstrate::ensureTLBEntryFresh(m);
+                    m->acquireRef();
                 } else if (Codec::isChild(w)) {
                     takeSubtreeReferences(NodeRef(Codec::decodeChild(w)), level + 1);
                 }
