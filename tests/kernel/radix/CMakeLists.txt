@@ -125,3 +125,37 @@ add_custom_target(run_radix_tests_tsan
     DEPENDS KernelRadixTestRunnerTSan
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     COMMENT "Running radix-tree tests (TSan)")
+
+# ─── Progress-audit runner (§11's maximum-holder assert) ────────────────────
+# §6.7's maximum-holder lemma is the only assertable progress property, and
+# asserting it needs each writer to publish what it holds so a failing writer can
+# tell a writer-held bit from a transient phantom. That publishing is two epoch
+# bumps and two stores per claim acquired, on the hottest path in the protocol —
+# a verification instrument, not a production one — so it gets its own target
+# rather than slowing the ASan and TSan gates.
+#
+# TSan rather than ASan: the property is about writers racing, and the audit's
+# own seqlock-shaped epoch window is exactly the kind of thing TSan should be
+# looking at.
+add_executable(KernelRadixProgressAuditRunner ${RDX_SOURCES})
+target_include_directories(KernelRadixProgressAuditRunner PRIVATE ${RDX_INCLUDES})
+target_compile_definitions(KernelRadixProgressAuditRunner PRIVATE
+    ${RDX_DEFINES} CROCOS_RADIX_PROGRESS_AUDIT)
+target_compile_options(KernelRadixProgressAuditRunner PRIVATE
+    ${RDX_COMMON_OPTS} -O1 -g -fsanitize=thread)
+target_link_libraries(KernelRadixProgressAuditRunner PRIVATE TestHarness)
+target_link_options(KernelRadixProgressAuditRunner PRIVATE -fsanitize=thread)
+if(APPLE)
+    target_link_options(KernelRadixProgressAuditRunner PRIVATE
+        -Wl,-force_load,$<TARGET_FILE:TestHarness>
+        -Wl,-undefined,dynamic_lookup)
+else()
+    target_link_options(KernelRadixProgressAuditRunner PRIVATE
+        -Wl,--keep-section=.crocos_unit_tests)
+endif()
+
+add_custom_target(run_radix_progress_audit
+    COMMAND KernelRadixProgressAuditRunner
+    DEPENDS KernelRadixProgressAuditRunner
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    COMMENT "Running radix-tree tests (TSan + §6.7 maximum-holder audit)")

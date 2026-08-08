@@ -581,3 +581,71 @@ TEST(radix_concurrent_claim_release_clears_only_our_own_bits) {
 
     VS::destroy(node);
 }
+
+// ─── §11's progress row: the maximum-holder audit ──────────────────────────
+//
+// The audit itself lives in ProgressAudit.h and compiles to nothing unless
+// CROCOS_RADIX_PROGRESS_AUDIT is defined (the KernelRadixProgressAuditRunner
+// target). This test is what stops it being a no-op that passes because it never
+// ran: it drives real contention and requires the audit to have CLASSIFIED
+// failures, then reports the split.
+//
+// The split is the interesting output, not the pass. §6.7 says failures against
+// a terminal mask or a transient phantom are legal and get counters; only a
+// failure against a writer-held bit, by the writer holding the lexicographically
+// maximum writer-held site, is a lemma violation — and that one is asserted
+// inside the audit, so reaching this line at all means none occurred.
+TEST(radix_progress_audit_classifies_real_contention) {
+#ifndef CROCOS_RADIX_PROGRESS_AUDIT
+    std::fprintf(stderr,
+        "[radix] SKIP progress audit: build KernelRadixProgressAuditRunner "
+        "(-DCROCOS_RADIX_PROGRESS_AUDIT) to run it.\n");
+    return;
+#else
+    constexpr size_t kCpus = 4;
+    Harness h(kCpus, 1);
+    rdx::auditReset();
+
+    TreeA tree;
+    ASSERT_TRUE(tree.init(5, 0, h.domain));
+
+    constexpr unsigned kOpsPerCpu = 300;
+    onEachCpu(kCpus, [&](size_t cpu) {
+        auto rng = streamFor(31000 + cpu);
+        for (unsigned k = 0; k < kOpsPerCpu; k++) {
+            const uint64_t a = rng.below(16) * kPage;
+            const uint64_t b = rng.below(16) * kPage;
+            const uint64_t lo = a < b ? a : b;
+            const uint64_t hi = (a < b ? b : a) + kPage - 1;
+            rdx::Mapping* v = rng.chance(50) ? makeMapping(lo) : nullptr;
+            if (tree.apply(lo, hi, v) != rdx::ApplyStatus::Ok) {
+                throw AssertionFailure("progress audit: writer got a non-Ok status");
+            }
+        }
+    });
+
+    const auto& c = rdx::gProgressAuditCounters;
+    const uint64_t terminal    = c.terminalMaskFailures.load(RELAXED);
+    const uint64_t phantom     = c.phantomFailures.load(RELAXED);
+    const uint64_t writerHeld  = c.writerHeldFailures.load(RELAXED);
+    const uint64_t inconclusive = c.inconclusive.load(RELAXED);
+
+    std::fprintf(stderr,
+                 "[radix] progress audit: %llu writer-held, %llu phantom, %llu terminal "
+                 "mask, %llu inconclusive\n",
+                 (unsigned long long)writerHeld, (unsigned long long)phantom,
+                 (unsigned long long)terminal, (unsigned long long)inconclusive);
+
+    // The audit observed contention. Without this the test would pass on a build
+    // where the instrumentation was accidentally compiled out of the hot path.
+    ASSERT_TRUE(terminal + phantom + writerHeld > 0);
+
+    quiesce(h);
+    ValidA::validate(tree, "progress audit");
+    ASSERT_TRUE(tree.apply(0, tree.span() - 1, nullptr) == rdx::ApplyStatus::Ok);
+    quiesce(h);
+    tree.destroyTree();
+    quiesce(h);
+    assertNoLiveObjects("progress audit");
+#endif
+}

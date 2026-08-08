@@ -49,6 +49,7 @@
 
 #include <mem/radix/Geometry.h>
 #include <mem/radix/Ordering.h>
+#include <mem/radix/ProgressAudit.h>
 #include <mem/radix/SlotCodec.h>
 #include <mem/radix/Node.h>
 #include <mem/radix/Mapping.h>
@@ -555,6 +556,11 @@ namespace kernel::mm::radix {
                     kernel::rcu::ReadGuard guard(*domain);
                     counters.attempts.fetch_add(1, kRefcountAcquire);
                     st = runAttempt(lo, hi, value, attempt);
+                    // The section is about to close. Nothing may still hold a
+                    // claim: the set holds link-loaded node pointers, and a
+                    // release issued after the close touches a node observed in a
+                    // section that has ended (§3.2/§7.3).
+                    assertNoClaimsHeld(attempt, "section close");
                 }
                 if (st == ApplyStatus::Retry) {
                     // §9: release EVERYTHING, discard, retry from a fresh read
@@ -807,6 +813,10 @@ namespace kernel::mm::radix {
         }
 
     private:
+        // Forward-declared: `buildSubtree` and the claim helpers take it by
+        // reference, and they are defined above its definition.
+        struct Attempt;
+
         NodeRef  rootRef{};
         unsigned level0 = 0;
         uint64_t baseVA = 0;
@@ -884,7 +894,14 @@ namespace kernel::mm::radix {
         // `plan`. Returns null on allocation failure, having destroyed whatever
         // it had built — and having taken NO reference counts, which is what
         // makes the failure path count-clean (§7.2 / DEC-067).
-        static void* buildSubtree(unsigned childLevel, uint64_t base, const SegmentPlan& plan) {
+        static void* buildSubtree(unsigned childLevel, uint64_t base, const SegmentPlan& plan,
+                                  const Attempt& a) {
+            // §11 / §9: "no claim is held across an ALLOCATION or a section
+            // close". §6.1's "allocate before you claim" is what makes a
+            // shortfall cost a retry rather than an in-place allocation, and an
+            // allocation under a held claim is also the blocking-while-holding
+            // shape §3.2 forbids outright.
+            assertNoClaimsHeld(a, "buildSubtree");
             void* raw = Ops::alloc(childLevel, /*initialRefcount=*/0);
             if (!raw) return nullptr;
             NodeRef node(raw);
@@ -935,7 +952,7 @@ namespace kernel::mm::radix {
                        "radix: subdivision ran past the resolution floor — the range should "
                        "have been expressible at the floor, since POSIX is page-granular and "
                        "the floor is a page");
-                void* grand = buildSubtree(childLevel + 1, slotBase, local);
+                void* grand = buildSubtree(childLevel + 1, slotBase, local, a);
                 if (!grand) {
                     destroyUnpublishedSubtree(node, childLevel);
                     return nullptr;
@@ -1033,6 +1050,37 @@ namespace kernel::mm::radix {
         // suite for this path.
         struct Attempt {
             ClaimSet<G, DetachBudget> claims;
+
+            // ─── §11: "No irreversible step precedes the commit boundary" ───
+            //
+            // "Per-operation phase flag asserted at EVERY mark, slot write and
+            // retire — not only the first publish, since THE MARKING VIOLATION IS
+            // THE ONE WITH NO OBSERVABLE SYMPTOM."
+            //
+            // That last clause is the whole reason this is a flag rather than a
+            // structural argument. A partially-applied mmap at least leaves an
+            // observable wrong mapping; a subtree marked by an operation that then
+            // backs off leaves no symptom at all until something tries to map that
+            // range, forever (§6.1).
+            enum class Phase : uint8_t { Planning, Committing };
+            Phase phase = Phase::Planning;
+
+            // ─── §11: "The mark is the last acquisition on its path" ────────
+            //
+            // Set by the first mark this attempt issues. Any acquisition after it
+            // is the violation — the mark is irreversible, so a claim taken after
+            // one has no way to unwind if it fails.
+            //
+            // Note this is deliberately about ACQUISITIONS, not about writes.
+            // §11's exemption list ("the post-mark parent-slot store in subtree
+            // detachment") exists because the NAIVE formulation guards writes, and
+            // §6.5 says of that store: "it is not an acquisition after a mark, and
+            // a naive 'mark is last' assert must exempt it explicitly". Guarding
+            // writes would additionally fire on an ordinary legal execution — a
+            // commit whose slot 3 detaches (marking) and whose slot 4 is a plain
+            // leaf write — so the write-based form is not merely inconvenient,
+            // it is false. See D-023.
+            bool markIssued = false;
 
             // Subtrees built during the read pass, before any claim is taken —
             // §6.1's "allocate before you claim". Bounded by 2 per level: only
@@ -1134,8 +1182,14 @@ namespace kernel::mm::radix {
 
             // ─── Acquire, top-down (§6.8) ──────────────────────────────────
             a.claims.sortForAcquisition();
-            if (!acquireAll(a.claims)) {
+            if (!acquireAll(a)) {
                 counters.claimConflicts.fetch_add(1, kRefcountAcquire);
+                // Release INSIDE the section. §3.2/§7.3: the claim set is a set
+                // of link-loaded node pointers and those do not survive a close,
+                // so a release deferred to `abandon` — which runs after the
+                // guard's scope ends — dereferences them outside the section that
+                // observed them. See D-024.
+                releaseAll(a.claims);
                 return ApplyStatus::Retry;
             }
 
@@ -1147,6 +1201,7 @@ namespace kernel::mm::radix {
             // in place.
             if (!redispatchAgrees(rootRef, level0, baseVA, lo, hi, value, a)) {
                 counters.redispatchChanges.fetch_add(1, kRefcountAcquire);
+                releaseAll(a.claims);
                 return ApplyStatus::Retry;
             }
 
@@ -1156,6 +1211,12 @@ namespace kernel::mm::radix {
             // claims froze — a pure bottom-up computation over data the writer
             // already holds. Nothing in it can fail, and it runs BEFORE the
             // first mark.
+            // ─── The commit boundary is CROSSED HERE ───────────────────────
+            //
+            // Everything above could still fail and unwind; nothing below can.
+            // The flag exists so that "nothing irreversible precedes this line"
+            // is checked at every mark, publish and retire rather than argued.
+            a.phase = Attempt::Phase::Committing;
             commit(rootRef, level0, baseVA, lo, hi, value, a);
 
             releaseAll(a.claims);
@@ -1246,7 +1307,7 @@ namespace kernel::mm::radix {
                         }
                         if (writes) plan.add(d.opRange, value);
 
-                        void* built = buildSubtree(level + 1, slotBase, plan);
+                        void* built = buildSubtree(level + 1, slotBase, plan, a);
                         if (!built) return ReadOutcome{ApplyStatus::OutOfMemory, false};
                         if (!a.addPending(nodeBase, level, i, built, word)) {
                             destroyUnpublishedSubtree(NodeRef(built), level + 1);
@@ -1325,9 +1386,24 @@ namespace kernel::mm::radix {
         }
 
         // ─── Acquisition (§6.8) ────────────────────────────────────────────
-        static bool acquireAll(ClaimSet<G, DetachBudget>& set) {
+        static bool acquireAll(Attempt& a) {
+            ClaimSet<G, DetachBudget>& set = a.claims;
             for (size_t i = 0; i < set.count; i++) {
                 auto& e = set.entries[i];
+                // §11: "The mark is the last acquisition on its path."
+                //
+                // A mark is irreversible, so a claim taken after one has no way
+                // to unwind if it fails — the operation would have to abort
+                // having already poisoned a node it no longer holds, which is
+                // §6.8's marked-but-linked disaster reached from the other side.
+                assert(!a.markIssued,
+                       "radix: an acquisition issued after a mark — the mark must be the "
+                       "last acquisition on its path (§11)");
+                // The claim set is never extended in place, so acquisition runs
+                // strictly before the boundary.
+                assert(a.phase == Attempt::Phase::Planning,
+                       "radix: acquisition after the commit boundary — a claim set extended "
+                       "in place (§6.1)");
                 // DEC-046's once-per-node rule, enforced structurally: the set
                 // merges by node, so reaching an already-issued entry means the
                 // set is malformed.
@@ -1337,10 +1413,36 @@ namespace kernel::mm::radix {
                 e.issued = true;
                 set.fetchOrIssued++;
 
+                // §11's progress row. The epochs must be sampled BEFORE the
+                // fetch_or: the audit's soundness rests on establishing that a
+                // peer's held set spanned OUR failure, which a sample taken
+                // afterwards cannot show.
+                // §6.8's total order, asserted directly. The order is what makes
+                // the maximum-holder lemma's hypothesis hold on every
+                // acquisition, so a violation here voids the progress argument
+                // outright — and it is deterministic, where the progress assert
+                // is necessarily probabilistic.
+                //
+                // Note this is the ORDER over held claims, not "each re-dispatch
+                // site is strictly deeper", which §11 records as an assert that
+                // fires on a legal execution.
+                const AuditSite entrySite{true, e.level, e.nodeBase};
+                assert(entrySite.greaterThan(maxHeldSite(set)),
+                       "radix: claims acquired out of §6.8's order (level, then ascending "
+                       "VA) — deadlock-freedom rests on it");
+
+                AuditEpochSnapshot before;
+                auditSnapshotEpochs(before);
+
                 const ClaimOutcome oc = tryClaim(e.node.stateWord(), e.mask);
-                if (!oc.acquired) return false;
+                if (!oc.acquired) {
+                    auditFailedAcquisition(before, e.node, e.mask, oc.prior,
+                                           maxHeldSite(set), entrySite);
+                    return false;
+                }
                 e.held  = true;
                 e.prior = oc.prior;
+                auditPublish(set);
             }
             return true;
         }
@@ -1386,6 +1488,91 @@ namespace kernel::mm::radix {
             if (auto* e = set.find(node)) e->held = false;
         }
 
+        // ─── The three commit-phase gate asserts (§11) ─────────────────────
+        //
+        // Every mark in the tree goes through here, on all three paths. Three
+        // separate §11 targets meet at this one site, which is why it is a
+        // funnel rather than three asserts scattered over the mark sites:
+        //
+        //   "The mark is reachable from every path"  — the writer must hold the
+        //   node's FULL VALENCE MASK. §11: "This must hold on all three paths
+        //   with no exemption — reclamation, detachment AND teardown. An
+        //   exemption for teardown is the failure mode: it removes the check
+        //   from the paths where it is load-bearing, and it is what an
+        //   implementer will reach for the first time the assert fires on a
+        //   process exit."
+        //
+        //   "No irreversible step precedes the commit boundary" — a mark is the
+        //   subtler of the two irreversible steps, and the one with no
+        //   observable symptom when it goes wrong.
+        //
+        //   "The mark is never set from a retire callback" — a deleter runs
+        //   outside any section and holds no claim, so the valence-mask assert
+        //   above is what actually catches it; the phase flag catches it too,
+        //   since a deleter carries no attempt in commit phase.
+        static void markUnderClaim(NodeRef node, unsigned level, Attempt& a) {
+            assert(a.phase == Attempt::Phase::Committing,
+                   "radix: a mark issued before the commit boundary — the one irreversible "
+                   "step whose violation has no observable symptom (§11)");
+            assert(holdsWholeNode(a.claims, node, level),
+                   "radix: a mark taken without the node's full valence mask (invariant 19, "
+                   "no exemption on any of the three paths)");
+            markDying(node.stateWord());
+            a.markIssued = true;
+        }
+
+        // A publish into a slot of a LIVE node. Every commit-phase store goes
+        // through here so §11's "asserted at every slot write" is structural
+        // rather than a count of copies that has to stay right.
+        //
+        // Deliberately NOT asserted here: `!a.markIssued`. Mark-last is a
+        // property of ACQUISITIONS, and a publish after a mark is ordinary and
+        // legal — a commit whose slot 3 detaches (marking) and whose slot 4 is a
+        // plain leaf write does exactly that. See `publishAfterMark` for the site
+        // §11 singles out, and D-023 for why the write-based formulation is false
+        // rather than merely inconvenient.
+        static void publish(NodeRef node, unsigned slot, uint64_t word, Attempt& a) {
+            assert(a.phase == Attempt::Phase::Committing,
+                   "radix: a slot published before the commit boundary (§11)");
+            assert(holdsSlot(a.claims, node, slot),
+                   "radix: publishing into a slot this attempt holds no claim bit for");
+            node.slot(slot).store(word, kSlotPublish);
+        }
+
+        // The reclamation unlink. This parent slot carries no claim bit of ours
+        // and is not supposed to: "descending THROUGH a slot takes no claim; only
+        // writing one does — a child-pointer slot cannot legitimately change
+        // except by reclamation or detachment, and both acquire the CHILD's state
+        // word, which a writer working inside that child already holds. The
+        // interlock lives in the child, not in the parent slot" (Claim.h).
+        //
+        // So the precondition here is the CHILD's whole-node claim, asserted by
+        // the `markUnderClaim` immediately above every call. A separate entry
+        // point rather than a `word == 0` escape in `publish`, which would also
+        // wave through every ordinary ClearSlot.
+        static void publishUnderChildClaim(NodeRef node, unsigned slot, uint64_t word,
+                                           Attempt& a) {
+            assert(a.phase == Attempt::Phase::Committing,
+                   "radix: a slot published before the commit boundary (§11)");
+            node.slot(slot).store(word, kSlotPublish);
+        }
+
+        // §6.5's named exemption, and §11's: "exempting the POST-MARK PARENT-SLOT
+        // STORE in subtree detachment". The store happens after the marking phase
+        // and is a publish under a bit claimed much earlier — "it is not an
+        // acquisition after a mark, and a naive 'mark is last' assert must exempt
+        // it explicitly" (§6.5).
+        //
+        // It is a distinct entry point rather than a comment so the exemption is
+        // visible in the code, and so Phase 3's second exempt site — teardown's
+        // final per-cluster bucket CAS (DEC-100) — has an obvious home.
+        static void publishAfterMark(NodeRef node, unsigned slot, uint64_t word, Attempt& a) {
+            assert(a.markIssued,
+                   "radix: publishAfterMark used at a site that has issued no mark — the "
+                   "exemption is for detachment's parent-slot store, not a general escape");
+            publish(node, slot, word, a);
+        }
+
         // Debug-only forcing function for D-013. Every slot `commit` mutates must
         // be one this attempt reserved a claim bit for in the read pass —
         // "descending THROUGH a slot takes no claim; only writing one does"
@@ -1409,6 +1596,21 @@ namespace kernel::mm::radix {
                 releaseClaim(e.node.stateWord(), e.mask);
                 e.held = false;
             }
+            auditPublish(set);
+        }
+
+        // This attempt's lexicographic maximum HELD site, in §6.8's order. Held,
+        // not merely recorded: an entry we planned but have not acquired is not
+        // part of the lemma's "writer-held" relation.
+        static AuditSite maxHeldSite(const ClaimSet<G, DetachBudget>& set) {
+            AuditSite max;
+            for (size_t i = 0; i < set.count; i++) {
+                const auto& e = set.entries[i];
+                if (!e.held) continue;
+                const AuditSite s{true, e.level, e.nodeBase};
+                if (s.greaterThan(max)) max = s;
+            }
+            return max;
         }
 
         // ─── Re-dispatch ───────────────────────────────────────────────────
@@ -1623,9 +1825,9 @@ namespace kernel::mm::radix {
                         // unlinked. The mark is always set before the unlink that
                         // makes it true, never in a retire callback, and never
                         // cleared.
-                        markDying(child.stateWord());
+                        markUnderClaim(child, level + 1, a);
                         retainClaim(a.claims, child);
-                        node.slot(i).store(0, kSlotPublish);
+                        publishUnderChildClaim(node, i, 0, a);
                         occupancyDelta--;
                         retireNode(child, level + 1, a);
                     }
@@ -1634,14 +1836,14 @@ namespace kernel::mm::radix {
 
                 case DispatchAction::WriteLeaf:
                     value->acquireRef();                       // commit-phase +1
-                    node.slot(i).store(Codec::encodeLeaf(value, d.range, level), kSlotPublish);
+                    publish(node, i, Codec::encodeLeaf(value, d.range, level), a);
                     occupancyDelta++;
                     break;
 
                 case DispatchAction::OverwriteLeaf: {
                     Mapping* displaced = static_cast<Mapping*>(Codec::decodeLeaf(word));
                     value->acquireRef();                       // +1 BEFORE the publish
-                    node.slot(i).store(Codec::encodeLeaf(value, d.range, level), kSlotPublish);
+                    publish(node, i, Codec::encodeLeaf(value, d.range, level), a);
                     releaseNamedMapping(displaced);
                     break;
                 }
@@ -1649,14 +1851,13 @@ namespace kernel::mm::radix {
                 case DispatchAction::ShrinkLeafInPlace:
                     // +-0. Deliberately does not touch the count and deliberately
                     // does not share a path with the rows that do.
-                    node.slot(i).store(
-                        Codec::encodeLeaf(Codec::decodeLeaf(word), d.range, level),
-                        kSlotPublish);
+                    publish(node, i,
+                            Codec::encodeLeaf(Codec::decodeLeaf(word), d.range, level), a);
                     break;
 
                 case DispatchAction::ClearSlot: {
                     Mapping* displaced = static_cast<Mapping*>(Codec::decodeLeaf(word));
-                    node.slot(i).store(0, kSlotPublish);
+                    publish(node, i, 0, a);
                     occupancyDelta--;
                     releaseNamedMapping(displaced);
                     break;
@@ -1680,12 +1881,12 @@ namespace kernel::mm::radix {
                     // would reproduce the irreversibility trap at scale — a
                     // marker that marks half a subtree and then fails deep has
                     // poisoned every node it touched.
-                    markSubtree(child, level + 1, a.claims);
+                    markSubtree(child, level + 1, a);
                     // The parent-slot store happens AFTER the marking phase, and
                     // is a publish under a bit claimed earlier — not an
                     // acquisition after a mark. A naive "mark is last" assert
                     // must exempt it explicitly.
-                    node.slot(i).store(replacement, kSlotPublish);
+                    publishAfterMark(node, i, replacement, a);
                     if (!writes) occupancyDelta--;
                     retireSubtree(child, level + 1, a);
                     break;
@@ -1705,7 +1906,7 @@ namespace kernel::mm::radix {
                     // whose survivors name the record it is displacing could take
                     // the count transiently to zero and destroy it.
                     takeSubtreeReferences(NodeRef(child), level + 1);
-                    node.slot(i).store(Codec::encodeChild(child), kSlotPublish);
+                    publish(node, i, Codec::encodeChild(child), a);
                     if (Codec::isEmpty(word)) occupancyDelta++;
                     if (displaced) releaseNamedMapping(displaced);
                     break;
@@ -1741,9 +1942,25 @@ namespace kernel::mm::radix {
         // step, so an operation that crossed no boundary has taken no increments
         // and there is nothing to undo. The carried subtree holds only PLANNED
         // slot values, never counted references.
+        // Runs AFTER the section has closed, so it may not touch a node: every
+        // claim must already have been released inside the section that observed
+        // the links (§3.2/§7.3). Discarding never-published allocations is safe
+        // there — they are reachable by nothing and outside the protocol.
         void abandon(Attempt& a) {
-            releaseAll(a.claims);
+            assertNoClaimsHeld(a, "abandon");
             discardUnusedAllocations(a);
+        }
+
+        // §11's other half of the progress row: "a debug assert that no claim is
+        // held across an allocation or a SECTION CLOSE."
+        static void assertNoClaimsHeld(const Attempt& a, const char* where) {
+            for (size_t i = 0; i < a.claims.count; i++) {
+                assert(!a.claims.entries[i].held,
+                       "radix: a claim is still held at a point where none may be — a claim "
+                       "outliving its section makes the claim set a set of pointers loaded "
+                       "in a section that has closed (§3.2/§7.3)");
+            }
+            (void)where;
         }
 
         // Shallow-discard every carried allocation the attempt did not publish.
@@ -1828,6 +2045,8 @@ namespace kernel::mm::radix {
         // commit walk already visits every node", which is exactly why it is
         // called out here rather than left to be noticed.
         void retireNode(NodeRef node, unsigned level, Attempt& a) {
+            assert(a.phase == Attempt::Phase::Committing,
+                   "radix: a node retired before the commit boundary (§11)");
             // Unlink -> retire. The unlink store has already happened at the
             // call site: rcu.md's writer obligation is that EVERY store making
             // the object unreachable is sequenced before `retire`, and `retire`
@@ -1861,14 +2080,14 @@ namespace kernel::mm::radix {
         // subtree, which then reads as fresh, resumes a descent, and silently
         // returns a Mapping for a remapped address. The refcount keeps it alive,
         // so it does not even crash.
-        static void markSubtree(NodeRef node, unsigned level, ClaimSet<G, DetachBudget>& set) {
-            markDying(node.stateWord());
-            retainClaim(set, node);
+        static void markSubtree(NodeRef node, unsigned level, Attempt& a) {
+            markUnderClaim(node, level, a);
+            retainClaim(a.claims, node);
             const unsigned n = valence(G, level);
             for (unsigned i = 0; i < n; i++) {
                 const uint64_t w = node.slot(i).load(kClaimedSlotLoad);
                 if (Codec::isChild(w)) {
-                    markSubtree(NodeRef(Codec::decodeChild(w)), level + 1, set);
+                    markSubtree(NodeRef(Codec::decodeChild(w)), level + 1, a);
                 }
             }
         }

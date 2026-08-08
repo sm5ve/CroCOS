@@ -614,3 +614,125 @@ at 3/12 both with these changes and at the pre-session baseline, so it is
 pre-existing and independent — it counts retired OBJECTS, not memory, so neither
 D-001's slab packing nor the radix work reaches it. Distinct from the documented
 post-rebuild timeout flake; worth its own investigation.
+
+## D-023 — FINDING — §11's "mark is last" exemption list implies a formulation that is false
+
+**Spec**: §11 — "The mark is the last acquisition on its path | Debug assert,
+**exempting the post-mark parent-slot store** in subtree detachment and the
+post-mark bucket CAS in teardown's final per-cluster unit (DEC-100)."
+
+The exemption list only makes sense against an assert that guards **writes**.
+Against one that guards **acquisitions** — which is what the row's own title says
+— neither exemption is needed, and §6.5 says so outright: the parent-slot store
+"is not an acquisition after a mark, and a naive 'mark is last' assert must
+exempt it explicitly."
+
+**The write-based formulation is not merely inconvenient, it is false.** `commit`
+iterates the site node's slots in one pass, so an ordinary legal execution —
+slot 3 dispatches to `DetachChild` (which marks), slot 4 to a plain `WriteLeaf` —
+publishes after a mark with no exemption available. Any implementation that
+guards writes fires on that, which is precisely the class of assert §11 spends
+four sentences warning against elsewhere ("fires on a legal execution").
+
+**Taken**: the assert guards acquisitions (`acquireAll`), which is the row's
+stated property and needs no exemptions.
+
+The exemptions are still represented in the code, because the *reason* they were
+listed is real and Phase 3 adds the second one. Detachment's parent-slot store
+goes through a distinct `publishAfterMark` entry point, and reclamation's unlink
+through `publishUnderChildClaim`, so both carve-outs are visible at their sites
+rather than living only in a comment — and teardown's bucket CAS has an obvious
+home when it arrives.
+
+**Suggested spec repair**: reword the row's method to "Debug assert over
+acquisitions; note that a naive write-based form must exempt the post-mark
+parent-slot store and teardown's bucket CAS — and is false regardless, since a
+commit that detaches at one slot and writes at a later one publishes after a mark
+on a legal execution."
+
+---
+
+## D-024 — DEFECT (found by the gate assert, fixed) — claims were released after the section closed
+
+Not a spec defect: the spec is unambiguous and the implementation was behind it.
+Found by implementing §11's "no claim is held across an allocation or a **section
+close**", which is exactly the assert that was missing.
+
+**Spec**: §3.2 / §7.3 — one attempt is one read section, and "the claim set is a
+set of link-loaded node pointers and those do not survive a close".
+
+**Was**: both `Retry` paths in `runAttempt` — a failed `acquireAll` and a
+disagreeing re-dispatch — returned with claims still held. The release happened
+in `abandon`, which `apply` calls **after** the `ReadGuard` scope has ended. So
+every contended retry issued a `fetch_and` on nodes whose pointers were loaded in
+a section that had already closed.
+
+**Why it had not bitten**: a held claim bit blocks the whole-node `fetch_or` that
+reclamation, detachment and teardown all require, so a node this attempt holds a
+bit on cannot be marked and therefore cannot be retired or destroyed while the
+bit is set. The window is real but the memory stays alive through it — which is
+why it survived a TSan-clean concurrency suite and is the kind of latent
+violation that only becomes a use-after-free when some later change (Phase 3's
+teardown, most plausibly, which does not take claims the same way) breaks the
+coincidence.
+
+**Fixed**: both paths release inside the section. `abandon` now only
+shallow-discards unpublished allocations, which is safe outside a section because
+those are reachable by nothing, and it asserts that nothing is still held.
+
+---
+
+## D-025 — the four Phase 2 gate asserts, and what the progress one needed
+
+§11's four remaining Phase 2 gate targets. One was already implemented; the notes
+here are the parts that were not mechanical.
+
+- **Marked-but-linked** — already present in `TreeValidator`, over the quiesced
+  tree. No work.
+- **Commit-boundary** — a per-attempt phase flag, asserted at every mark, publish
+  and retire. Every commit-phase store now routes through `publish` (or one of
+  the two named exemption entry points), so §11's "at EVERY slot write" is
+  structural rather than a count of copies that has to stay correct.
+- **Mark-last** — see D-023.
+- **Progress** — the substantial one.
+
+**The progress assert needed a registry, and the reason is worth recording.** The
+assert must classify a failed acquisition into §6.7's three buckets, and the
+state word cannot do it: a **transient phantom** and a **writer-held** bit are
+bit-identical in the word, differing only in whether some writer currently
+considers itself the owner. Only the writers know, so each writer publishes what
+it holds and a failing writer asks. (The **terminal mask** is the easy one — it
+is visible in the word.)
+
+A naive registry read races, and concluding the wrong way fires the assert on a
+legal execution. The audit uses a seqlock-shaped window instead: each writer
+brackets its published set with an odd/even epoch, and a failing writer samples
+every peer's epoch **before** its `fetch_or` and again after. An epoch that is
+unchanged and even across that window proves the peer's held set did not move
+while we failed, so reading it is exact. Any epoch that moved makes the event
+*inconclusive* and it is counted rather than asserted — deliberately biased to
+silence.
+
+It compiles to nothing unless `CROCOS_RADIX_PROGRESS_AUDIT` is defined, since
+publishing costs two epoch bumps and two stores per claim on the hottest path in
+the protocol. New target `KernelRadixProgressAuditRunner` (TSan) turns it on. A
+test reports the classification split and requires it to be non-zero, so the
+audit cannot pass by never running: a representative four-CPU run sees ~274
+writer-held, ~198 phantom, ~19 terminal-mask and ~81 inconclusive failures.
+
+**One formulation correction, found by mutation-testing.** The first version
+asserted only "we are the maximum holder and we failed against a writer-held
+bit", dropping the lemma's other hypothesis — §6.7's proof reads "a failure **at a
+greater site** would require a live holder at a greater site". Ascending
+acquisition order is what makes that hold on every acquisition, which is why §6.7
+calls the order "load-bearing for deadlock-freedom, not merely for the mark's
+irreversibility". Both halves are now explicit.
+
+That correction came from a reversed-acquisition-order mutant which the progress
+assert caught only ~1 run in 11 — because an order violation voids the lemma's
+hypothesis rather than contradicting its conclusion, so it is the wrong assert to
+catch it with. **§6.8's order now has its own direct assert** in `acquireAll`
+(each acquisition's site must exceed every site already held), which catches that
+mutant 3/3 and deterministically. Note it is the order over *held* claims, not
+"each re-dispatch site is strictly deeper" — §11 records that as an assert that
+fires on legal executions.
