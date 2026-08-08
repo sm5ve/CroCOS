@@ -504,7 +504,11 @@ There is no reclamation daemon; progress is pulled. Three pump sites (DEC-060/07
 exit** (a mutation that retired anything pumps after closing its section, so the just-filled bag
 becomes drainable by any CPU rather than sitting open on a CPU that may never mutate again),
 **the fault path** (runs on every CPU that touches the tree), and **teardown**
-(`drainAllQuiescent`). Every pump is bounded by `drainBatchBound` (provisionally 64) because an
+(`drainAllQuiescent`). A fourth site is **opportunistic idle-time maintenance** (DEC-104): before
+entering the idle process a CPU may pump domains it touched and drain deferred VMObject-teardown
+work — never correctness-load-bearing (the three pull sites must suffice on a machine that never
+idles, the IPI-policy shape), and the VMObject free queue keeps a load-path drain site so memory
+pressure is relieved under load, not merely at rest. Every pump is bounded by `drainBatchBound` (provisionally 64) because an
 unbounded drain inherits arbitrarily many foreign deleters on a path a `#PF` handler sits on —
 and for that product-of-constants argument to hold, one constraint is exported: **VMObject
 teardown must itself be deferred or incremental**, or one large `munmap` turns some later CPU's
