@@ -676,7 +676,7 @@ namespace kernel::mm::radix {
             for (unsigned i = 0; i < n; i++) {
                 const uint64_t w = node.slot(i).load(kQuiescedRead);
                 if (Codec::isChild(w)) {
-                    tearDownUnitAt(NodeRef(Codec::decodeChild(w)), level + 1, node, i, false);
+                    tearDownUnitAt(NodeRef::fresh(Codec::decodeChild(w)), level + 1, node, i, false);
                 }
             }
 
@@ -761,7 +761,7 @@ namespace kernel::mm::radix {
             if (bucketTable == nullptr) return RootBinding{rootRef, level0, baseVA};
             const uint64_t w = bucketTable->fresh(bucketIndex).load(kQuiescedRead);
             const auto d = BucketCodecT::decode(w, bucketIndex);
-            return RootBinding{NodeRef(d.root), d.level, d.base};
+            return RootBinding{NodeRef::fresh(d.root), d.level, d.base};
         }
 
         // Quiesced introspection, all of it. On a bucket-homed tree these read
@@ -982,7 +982,7 @@ namespace kernel::mm::radix {
                     assert(level < G.levelCount,
                            "radix: child pointer at the deepest level — the geometry says "
                            "there is nothing below it");
-                    node = NodeRef(Codec::decodeChild(word));
+                    node = NodeRef::fresh(Codec::decodeChild(word));
                     nodeBase = slotBase;
                     level++;
                     break;
@@ -1142,7 +1142,7 @@ namespace kernel::mm::radix {
                 }
 
                 case SlotKind::Child:
-                    node     = NodeRef(Codec::decodeChild(word));
+                    node     = NodeRef::fresh(Codec::decodeChild(word));
                     nodeBase = slotBase;
                     level++;
                     break;
@@ -1546,7 +1546,7 @@ namespace kernel::mm::radix {
                 // A leaf or an empty slot has no node beneath it to be the site.
                 if (!Codec::isChild(word)) return s;
                 s.nodeBase += uint64_t{first} * slotSpan(G, s.level);
-                s.node = NodeRef(Codec::decodeChild(word));
+                s.node = NodeRef::fresh(Codec::decodeChild(word));
                 s.level++;
             }
         }
@@ -1724,7 +1724,7 @@ namespace kernel::mm::radix {
             const uint64_t w =
                 kernel::rcu::protectWord(*domain, bucketTable->fresh(bucketIndex));
             const auto d = BucketCodecT::decode(w, bucketIndex);
-            return RootBinding{NodeRef(d.root), d.level, d.base};
+            return RootBinding{NodeRef::fresh(d.root), d.level, d.base};
         }
 
     private:
@@ -1902,7 +1902,7 @@ namespace kernel::mm::radix {
             for (unsigned i = 0; i < n; i++) {
                 const uint64_t w = node.slot(i).load(kQuiescedRead);
                 if (Codec::isChild(w)) {
-                    destroyUnpublishedSubtree(NodeRef(Codec::decodeChild(w)), level + 1);
+                    destroyUnpublishedSubtree(NodeRef::fresh(Codec::decodeChild(w)), level + 1);
                 }
                 // Leaf slots hold no reference yet — that is the whole point of
                 // the commit-phase rule.
@@ -1934,7 +1934,7 @@ namespace kernel::mm::radix {
                     VMSubstrate::ensureTLBEntryFresh(m);
                     m->acquireRef();
                 } else if (Codec::isChild(w)) {
-                    takeSubtreeReferences(NodeRef(Codec::decodeChild(w)), level + 1);
+                    takeSubtreeReferences(NodeRef::fresh(Codec::decodeChild(w)), level + 1);
                 }
             }
         }
@@ -1958,7 +1958,7 @@ namespace kernel::mm::radix {
             for (unsigned i = 0; i < n; i++) {
                 const uint64_t w = node.slot(i).load(kQuiescedRead);
                 if (Codec::isChild(w)) {
-                    releaseSubtree(NodeRef(Codec::decodeChild(w)), level + 1);
+                    releaseSubtree(NodeRef::fresh(Codec::decodeChild(w)), level + 1);
                 }
             }
             Ops::template runDeleter<Codec>(level, node);
@@ -2507,7 +2507,7 @@ namespace kernel::mm::radix {
             for (unsigned i = 0; i < n; i++) {
                 const uint64_t w = node.slot(i).load(kSlotLoad);
                 if (Codec::isChild(w)) {
-                    const ApplyStatus st = planDetachment(NodeRef(Codec::decodeChild(w)),
+                    const ApplyStatus st = planDetachment(NodeRef::fresh(Codec::decodeChild(w)),
                                                           level + 1,
                                                           nodeBase + uint64_t{i} * span, a);
                     if (st != ApplyStatus::Ok) return st;
@@ -2797,7 +2797,7 @@ namespace kernel::mm::radix {
                 }
 
                 if (d.action == DispatchAction::DescendIntoChild) {
-                    if (!redispatchAgrees(NodeRef(Codec::decodeChild(word)), level + 1,
+                    if (!redispatchAgrees(NodeRef::fresh(Codec::decodeChild(word)), level + 1,
                                           slotBase, clipLo, clipHi, value, a)) {
                         return false;
                     }
@@ -2822,7 +2822,7 @@ namespace kernel::mm::radix {
                     // node this attempt does not hold leaves it permanently
                     // marked and still linked, and every later writer stalls on
                     // it forever.
-                    if (!detachmentIsFrozen(NodeRef(Codec::decodeChild(word)),
+                    if (!detachmentIsFrozen(NodeRef::fresh(Codec::decodeChild(word)),
                                             level + 1, a.claims)) {
                         return false;
                     }
@@ -2917,7 +2917,7 @@ namespace kernel::mm::radix {
             for (unsigned i = 0; i < n; i++) {
                 const uint64_t w = node.slot(i).load(kClaimedSlotLoad);
                 if (Codec::isChild(w)) {
-                    if (!detachmentIsFrozen(NodeRef(Codec::decodeChild(w)), level + 1, set)) {
+                    if (!detachmentIsFrozen(NodeRef::fresh(Codec::decodeChild(w)), level + 1, set)) {
                         return false;
                     }
                 }
@@ -3274,7 +3274,7 @@ namespace kernel::mm::radix {
             for (unsigned i = 0; i < n; i++) {
                 const uint64_t w = node.slot(i).load(kClaimedSlotLoad);
                 if (Codec::isChild(w)) {
-                    retireSubtree(NodeRef(Codec::decodeChild(w)), level + 1, a);
+                    retireSubtree(NodeRef::fresh(Codec::decodeChild(w)), level + 1, a);
                 }
             }
             retireNode(node, level, a);
@@ -3296,7 +3296,7 @@ namespace kernel::mm::radix {
             for (unsigned i = 0; i < n; i++) {
                 const uint64_t w = node.slot(i).load(kClaimedSlotLoad);
                 if (Codec::isChild(w)) {
-                    markSubtree(NodeRef(Codec::decodeChild(w)), level + 1, a);
+                    markSubtree(NodeRef::fresh(Codec::decodeChild(w)), level + 1, a);
                 }
             }
         }
@@ -3309,7 +3309,7 @@ namespace kernel::mm::radix {
             for (unsigned i = 0; i < n; i++) {
                 const uint64_t w = node.slot(i).load(kQuiescedRead);
                 if (Codec::isChild(w)) {
-                    walkNode(NodeRef(Codec::decodeChild(w)), level + 1,
+                    walkNode(NodeRef::fresh(Codec::decodeChild(w)), level + 1,
                              nodeBase + uint64_t{i} * span, fn);
                 }
             }
@@ -3320,7 +3320,7 @@ namespace kernel::mm::radix {
             const unsigned v = valence(G, level);
             for (unsigned i = 0; i < v; i++) {
                 const uint64_t w = node.slot(i).load(kQuiescedRead);
-                if (Codec::isChild(w)) countNodes(NodeRef(Codec::decodeChild(w)), level + 1, n);
+                if (Codec::isChild(w)) countNodes(NodeRef::fresh(Codec::decodeChild(w)), level + 1, n);
             }
         }
     };

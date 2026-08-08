@@ -1427,7 +1427,11 @@ same 20 s window (1025 cycles vs 4), so they are rate-limited discoveries rather
 than build-specific ones. Debug is green on every QEMU config; Release is green on
 most runs. **Neither is diagnosed, and neither should be assumed benign.**
 
-**(a) A page fault, roughly 1 run in 6.**
+**(a) A page fault, roughly 1 run in 6 — SUBSTANTIALLY REDUCED by D-042's node
+freshness fix (6 of 8 runs now clean at 1025 cycles), but not eliminated. The
+remaining instance faults at the same `tearDownUnitAt` site on a pointer that the
+freshness call did not save, i.e. a genuinely bogus child pointer rather than a
+stale-but-valid one. See D-043 for the debug reproduction.**
 
 ```
 Pagefault at 0xffffffffc015ba6e accessing 0xffffff0007ffffe0
@@ -1458,3 +1462,100 @@ record that never came home.
 The residue gate is what found (b), which is the gate working: it is stated at
 **zero** for records precisely because a leaked record pins its VMObject and every
 frame behind it.
+
+---
+
+## D-042 — DEFECT (Phase 5, partially fixed) — a node pointer decoded from a slot word owes the freshness call too
+
+D-039's third instalment, found the same way and one layer deeper. Under
+Release/LTO — which reaches **1025 cycles** in the same 20 s window a debug build
+spends on 4 — the stress page-faulted about one run in four. Two faulting sites,
+both resolved by name rather than guessed:
+
+```
+Pagefault at 0xffffffffc015ba6e accessing 0xffffff0007ffffe0
+  -> CoreTree<...>::tearDownUnitAt   (CoreTree.h:677, `node.slot(i).load`)
+
+Pagefault at 0xffffffffc015b559 accessing 0x000000ffffe00f80
+  -> VMSubstrate::ensureTLBEntryFresh(void*)
+```
+
+The second is the first one step later: a stale slot read yields a garbage
+`Mapping*`, and the freshness call D-039 added then faults *on its own argument*.
+
+**Nodes are vmsmalloc allocations**, so a node's VA recycles like any other arena
+page, and a CPU that used that VA under a previous tenant holds a stale mapping.
+DEC-073 already states the rule — a link load goes through `protectWord` and
+"whatever pointer it derives carries the `SafePtr` freshness obligation exactly
+as with `protect`" — and a node pointer decoded from a slot word is exactly such
+a pointer. §7.1's list is about deleters and never generalises it.
+
+`NodeRef::fresh(void*)` is the fix, applied at the seventeen sites where a node
+pointer is **derived** rather than at every field read: the page cannot be
+recycled again while an operation is standing on the node, so one call per node
+per walk suffices.
+
+**Result: 6 of 8 Release runs now reach 1025 cycles cleanly, against roughly half
+before. It is an improvement, not a fix, and the remainder is D-041.**
+
+### The cost, which is not priced anywhere
+
+This is **one `ensureTLBEntryFresh` per level on the descent** — the spec's
+hottest path — and RCU P4-ITEM-002 measured a freshness call at ~40 instructions
+pre-LTO. DEC-082 rearranged an entire control block to keep *one* such call off
+the descent-cache hit path; this adds one per level to every descent.
+
+Three answers, and choosing between them is Spencer's:
+
+1. **Keep the calls.** Correct, and the cost is now measurable — Phase 5's
+   `-icount` work can price it directly.
+2. **Nodes come from storage that never recycles.** DEC-082's own answer for the
+   control block, applied one level down. Removes the obligation outright rather
+   than paying it, and would take the root bucket page (D-039) with it.
+3. **vmsmalloc discharges it.** `reclaimSlabPage` already leaves a reclaimed VA
+   mapped read-only onto a sentinel rather than unmapped, precisely so a
+   mid-flight Treiber pop reads garbage instead of faulting; whether that
+   guarantee can be strengthened into "a re-backed slab page is globally fresh"
+   is a vmsmalloc question, not a radix one.
+
+**Flagged, not decided.**
+
+---
+
+## D-043 — OPEN (Phase 5) — a spinlock SELF-deadlock in the address-space lifecycle, with a reproduction
+
+Shrinking `kOpsPerCycle` from 512 to 24 turns the debug build's 4 cycles into
+1025 and makes D-041's Release-only failures reproducible **in a debug build with
+every assert live** — which is the position any further work on this should start
+from, and is why the constant now carries the recipe in its comment.
+
+What it produced, roughly 1 run in 4:
+
+```
+rcu: domain [radix-as] ready — 8 slots across 1 page(s), dr
+Panic: Assert failed: Deadlock detected!
+```
+
+`Spinlock`'s detector is **not a timeout** — it fires when the acquiring CPU
+finds its *own* id in the lock's metadata, i.e. a genuine self-deadlock — and the
+message lands mid-way through `Domain::init`'s own log line, so the second
+acquisition is inside domain initialisation.
+
+That is DEC-101's named trap ("`Domain::init` takes the same lock *internally*;
+holding it across both steps self-deadlocks") — but `createAddressSpace` does
+scope its `DomainManagementLockGuard` to step 1 and release it before step 2, and
+a deterministic double-acquire would not be intermittent. So the likelier
+explanations are elsewhere and should be separated before anything is changed:
+
+- a second lock entirely (the VMSubstrate reservation path, or vmsmalloc), taken
+  twice on one CPU along a path only this workload reaches;
+- a `Domain::init` / `deinit` cycling defect: **this stress runs ~1025 domain
+  create/destroy pairs per boot, a pattern RCU has never been asked to do** — its
+  own Phase 4 stress creates one domain and keeps it;
+- a false positive in the detector's metadata handling under rapid re-acquisition
+  by different CPUs.
+
+The third is the cheapest to rule out and should go first.
+
+**Not diagnosed. Debug reproduction: `-DCROCOS_RADIX_STRESS=ON`, debug build,
+`kOpsPerCycle = 24`, `-smp 8`, about one run in four.**

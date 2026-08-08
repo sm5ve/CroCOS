@@ -51,7 +51,8 @@
 #include <stdint.h>
 #include <kassert.h>
 #include <core/atomic.h>
-#include <core/rcu/EpochDomain.h>   // Core::rcu::RetireHead
+#include <core/rcu/EpochDomain.h>
+#include <mem/VMSubstrate.h>   // Core::rcu::RetireHead
 
 #include <mem/radix/Geometry.h>
 #include <mem/radix/Ordering.h>
@@ -256,6 +257,41 @@ namespace kernel::mm::radix {
     public:
         NodeRef() = default;
         explicit NodeRef(void* raw) : p(raw) {}
+
+        // ─── The freshness obligation on a derived node pointer ────────────
+        //
+        // Nodes are vmsmalloc allocations, so a node's VA is subject to the same
+        // reclaim-and-re-back cycle as any other arena page — and a CPU that
+        // used that VA under a PREVIOUS tenant can hold a stale mapping for it.
+        // DEC-073 already states the rule for this exact situation: a link load
+        // goes through `protectWord`, and "whatever pointer it derives carries
+        // the `SafePtr` freshness obligation exactly as with `protect`". A node
+        // pointer decoded from a slot word IS such a pointer.
+        //
+        // The call goes where the pointer is DERIVED rather than at each read,
+        // and that is one call per node per walk instead of one per field: the
+        // page cannot be recycled again while this operation is standing on the
+        // node, because a live node is reachable and a reachable node is not
+        // reclaimable, and a retired one is inside the section that observed it.
+        //
+        // **Found by the in-kernel stress at Release/LTO speeds**, where a
+        // teardown walk read a stale node's slots, decoded a child pointer out
+        // of the previous tenant's bytes, and page-faulted following it — and
+        // where the same shape one step later faulted INSIDE
+        // `ensureTLBEntryFresh`, on a garbage `Mapping*` from the same stale
+        // read. Neither is reachable in the userspace harness, whose
+        // `ensureTLBEntryFresh` is a no-op.
+        //
+        // NOTE the cost, because it is not small and it is not yet priced: this
+        // is one call per level on the descent, the spec's hottest path, and
+        // RCU P4-ITEM-002 measured a freshness call at ~40 instructions
+        // pre-LTO. Whether nodes should instead come from storage that never
+        // recycles — DEC-082's answer for the control block — is a design
+        // question, recorded in D-042 rather than decided here.
+        [[nodiscard]] static NodeRef fresh(void* raw) {
+            if (raw != nullptr) VMSubstrate::ensureTLBEntryFresh(raw);
+            return NodeRef(raw);
+        }
 
         explicit operator bool() const { return p != nullptr; }
         void* raw() const { return p; }
