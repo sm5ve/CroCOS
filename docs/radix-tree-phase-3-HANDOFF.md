@@ -1,18 +1,110 @@
 # radix-tree — implementation handoff into Phase 3
 
-**Written 2026-08-08.** Branch `radix-tree`, tip `e3b82bd`. Phases 0, 1 and 2 are
-complete and green. This note is for a fresh context starting Phase 3; it assumes
-no memory of the sessions that produced Phases 0–2.
+**Written 2026-08-08 at `e3b82bd`; UPDATED 2026-08-08 at `ea364af`.** Branch
+`radix-tree`. Phases 0, 1 and 2 are complete and green, and **four of Phase 3's
+nine work items have landed** — see §0, which is the only part of this note that
+has moved. Everything below §0 was written before Phase 3 started and still
+holds except where §0 says otherwise.
 
 Read in this order:
 
-1. This note.
-2. `specs/radix-tree-phase-3.md` — the work items and exit gate.
-3. `docs/radix-tree-implementation-deviations.md` — D-001..D-025, the running
-   findings log. **D-003, D-010 and D-011 are live Phase 3 obligations.**
+1. §0 of this note, then the rest of it.
+2. `specs/radix-tree-phase-3.md` — the work items and exit gate; the landed ones
+   are ticked.
+3. `docs/radix-tree-implementation-deviations.md` — D-001..D-029, the running
+   findings log. **D-004, D-010 and D-029 are the live obligations now**;
+   D-003 and D-011 are closed (see §0).
 4. `specs/radix-tree.md` §3.1, §5.1/5.4/5.6, §7 entire, §9, §11 — Phase 3's
    sections. `specs/radix-tree-HANDOFF.md` is the *spec*-side note and is only
    needed if you intend to edit the spec.
+
+---
+
+## 0. Phase 3 so far, and the one decision that is blocking the next item
+
+### Landed (all committed, all green)
+
+| Commit | Item |
+|---|---|
+| `313a2ae` | **`vmsmallocTry` / `tryMake` kernel-side** (DEC-048). Closes D-003. |
+| `8a5b1f7` | **`DeferredRelease` pools** (§7.1, DEC-068). **Closes D-011** and re-enables the three reader-side tests. |
+| `4e6135b` | **The validity token and `revalidate`** (§3.1, DEC-051/070). |
+| `9efb9a7` | **Bucket table + packed entry codec** (DEC-102/103). |
+| `ea364af` | The radix runners are now in `run_all_tests`, where they always should have been. |
+
+Full suite at `ea364af`: Core 441×2, Kernel 173, LibAlloc 38×2, vmsmalloc 31×2,
+RCU 61×2, **radix 106×2**. Kernel builds and boots clean.
+
+**D-011 is closed and that is the headline.** The three disabled tests in
+`ConcurrentTest.cpp` are on, so the tree finally has reader-side concurrency
+coverage; before this every concurrency test it had was writer-vs-writer. The
+closure was mutation-verified, not merely green — restoring the synchronous
+direct-slot release is caught by `readers_never_observe_a_torn_state` as an ASan
+use-after-poison on a reader thread.
+
+**D-029 is a new WATCH item** and the most important thing to know before
+touching the refcounts: DEC-069's release-plus-acquire-**fence** spelling is
+correct in the C++ model and **invisible to ThreadSanitizer**, which does not
+model `atomic_thread_fence`. It has been folded into an `ACQ_REL` RMW at both
+release sites. If a `Mapping`-constructor-vs-`offsetFor` race report ever comes
+back, **do not re-silence it** — the alternative explanation is a real
+use-after-free the oracle's poison window happens to miss.
+
+### The decision blocking Phase 3's next item
+
+The remaining items in the suggested order are **growth and creation** (§5.6),
+then placement, the control block, teardown and the enumeration API. Growth is
+blocked on a seam question that is worth answering deliberately, because §5.6 is
+the newest text in the spec and the phase plan flags every reordering of it as
+fatal-prone.
+
+**The problem.** `CoreTree` is rooted at a fixed `{root, level, base}` set at
+`init`. Growth changes all three at once, and they live in the packed bucket word
+— so §7.3 requires them to be **re-decoded inside every section**, or a writer
+acts on a stale `{base, level}`, computes the wrong bit index, and writes the
+wrong slot *on a node it holds a valid claim in*. (Packing turned that from a
+dangling dereference into a stale-value hazard; the discipline is unchanged.)
+
+Three shapes, none obviously dominant:
+
+1. **A root-source seam on `CoreTree`.** The tree gains a small provider it
+   re-reads at the top of each attempt and each descent; a `FixedRootSource` for
+   the Phase 1/2 single-cluster tests, a `BucketRootSource` for a cluster.
+   Smallest diff, keeps the attempt loop where it is, and the re-read on the
+   lookup path is *required* rather than overhead (§3.1: the bucket word goes
+   through `protectWord` + decode, "there is no exception"). Cost: a fourth
+   template parameter or one indirection per attempt, and it puts a bucket-shaped
+   concept inside the core layer, which §5.5 draws the seam to avoid.
+2. **Move the attempt loop up to the policy layer.** The cluster opens the
+   section, decodes the bucket, and calls a core-tree *attempt* against that
+   binding. Cleanest against §5.5's stated seam — the core stays "a prefix tree
+   over a single aligned span" — but it restructures `runToCompletion`,
+   `applyOrDecompose` and `decompose`, which are the machinery §6.5 took seven
+   rewrites to get right.
+3. **Put the bucket word in `CoreTree`.** Smallest conceptual change, largest
+   violation of §5.5, and it makes the core layer untestable without a bucket
+   table.
+
+Shape 1 is the leading candidate on cost, shape 2 on layering. **This wants
+Spencer's call**, in the spirit of DEC-091's "behind a swappable policy seam" —
+it is the same question one layer down.
+
+Whichever is chosen, §5.6's accounting rules are the part to re-read first and
+not paraphrase: **no count moves on the old root, nothing is retired, nothing
+reverts.** A CAS-published root is constructed at count 1 (pre-assigned, not a
+`+1` on a published object); the old root's inbound reference **transfers in
+place** to the new parent's child slot; a losing grower or creator
+**shallow-discards** its private node, pre-assigned count notwithstanding. If an
+implementation wants a decrement anywhere on the growth path, it has diverged.
+
+### Still not started
+
+Growth/creation, placement + the DEC-091 assignment seam, the control block +
+creation sequence, teardown, the lookup/enumeration API, and the **in-kernel
+entropy source** (DEC-063). The entropy source is deliberately untouched: it is
+a security-sensitive component whose algorithm, seeding policy, reseeding and
+RDSEED-unavailable behaviour are all choices, and picking them unilaterally is
+not the kind of judgement call this project wants made in the background.
 
 ---
 
