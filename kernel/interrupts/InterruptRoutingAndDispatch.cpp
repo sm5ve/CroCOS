@@ -334,9 +334,15 @@ namespace kernel::interrupts::managed {
             }
         }
         else {
-            klog() << "Interrupt " << frame.vector_index << " triggered on level\n";
-            klog() << "This is not supported yet!\n";
-            klog() << "IP is " << (void*)frame.rip << "\n";
+            // `emergencyLog` throughout this function: we are IN an interrupt
+            // handler, and `klog` holds a global spinlock for its whole
+            // statement — logging here from a CPU interrupted mid-`klog`
+            // re-acquires a lock it already holds. Debug catches it as a PANIC;
+            // release hangs silently with the log lock held. See the note at
+            // `klog()` in kernel.h.
+            emergencyLog() << "Interrupt " << frame.vector_index << " triggered on level\n";
+            emergencyLog() << "This is not supported yet!\n";
+            emergencyLog() << "IP is " << (void*)frame.rip << "\n";
             //assertUnimplemented("I don't yet have support for level-triggered interrupt EOIs");
         }
         if (handlersByVector[frame.vector_index].get() != nullptr) {
@@ -348,7 +354,7 @@ namespace kernel::interrupts::managed {
             }
         }
         else {
-            klog() << "No interrupt handler for vector " << frame.vector_index << "\n";
+            emergencyLog() << "No interrupt handler for vector " << frame.vector_index << "\n";
         }
     }
 }

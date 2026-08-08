@@ -1541,7 +1541,7 @@ Three answers, and choosing between them is Spencer's:
 
 ---
 
-## D-043 — DIAGNOSED (Phase 5) — `klog` is not reentrant, and an interrupt-context log can self-deadlock against one in progress
+## D-043 — RESOLVED (Phase 5) — `klog` is not reentrant, and an interrupt-context log can self-deadlock against one in progress
 
 **Not a radix defect.** A pre-existing kernel-wide hazard that the stress's klog
 rate makes likely, and the stack trace names it exactly:
@@ -1579,6 +1579,48 @@ Two things worth noting beyond the fix:
 
 Reproduction: `-DCROCOS_RADIX_STRESS=ON -DCROCOS_RADIX_STRESS_OPS=24`, debug,
 `-smp 8`, about one run in six.
+
+### RESOLUTION (user-directed, same session)
+
+Spencer's call: the shutdown message uses the raw logger, and the hazard gets
+written down where it will be read.
+
+**The rule, now documented at `klog()` in `kernel.h`, at `emergencyLog()` in
+`panic.h`, and at `AtomicPrintStream` itself**: `klog()` returns a temporary
+holding a global spinlock for its whole lifetime, so `klog() << a << b << c;` is
+one critical section spanning every `<<`. That is what makes a line atomic
+against other CPUs and it is exactly why the call is not reentrant. **Timer
+callbacks, interrupt handlers and panic paths use `emergencyLog()`** — the
+unlocked stream, whose cost is that concurrent writers interleave at byte
+granularity. That trade is the right way round: interleaved output is legible, a
+deadlocked log is not.
+
+Worth stating once, because the name misleads: `emergencyLog`'s useful property
+is **lock-free**, not "for crashes". The panic path was merely its first
+consumer.
+
+**Six sites converted**, all of them genuine instances rather than the one that
+happened to fire:
+
+| Site | Context |
+|---|---|
+| `enqueueShutdown`'s `Goodbye :)` | timer callback — the one that fired |
+| `smp.cpp`'s "All N processors up!" | timer callback |
+| `rcuStress::reportHangAndExit` | watchdog timer callback |
+| `radixStress::reportHangAndExit` | watchdog timer callback |
+| `dispatchInterrupt`'s level-trigger warning (x3) | **inside the ISR** |
+| `dispatchInterrupt`'s "no handler for vector" | **inside the ISR** |
+
+The two watchdogs matter more than they look: a watchdog that hangs instead of
+reporting is worse than no watchdog, and its entire job is to be the last thing
+that still works.
+
+`klog()` in `enqueueShutdown`'s own body is deliberately left alone — that runs
+as an init routine, not in the callback.
+
+**Verified: 12 of 12 clean on the reproduction that used to fail one run in
+six**, plus debug and release green on all three QEMU configs and the full
+userspace suite.
 
 The original entry follows.
 

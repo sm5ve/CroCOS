@@ -172,14 +172,20 @@ namespace radix_stress {
 
     void watchdogTick();
 
+    // Runs inside the watchdog's TIMER CALLBACK, i.e. in interrupt context, so
+    // every line here goes to the unlocked stream: `klog` holds a global
+    // spinlock for its whole statement and would self-deadlock against a
+    // `klog` this CPU was interrupted in the middle of. A watchdog that hangs
+    // instead of reporting is worse than no watchdog — the whole point of this
+    // function is to be the last thing that still works.
     void reportHangAndExit(size_t stalled, size_t cpus) {
-        klog() << "\nradixStress: WATCHDOG — cpu=" << static_cast<uint64_t>(stalled)
+        emergencyLog() << "\nradixStress: WATCHDOG — cpu=" << static_cast<uint64_t>(stalled)
                << " made no progress across " << static_cast<uint64_t>(kStallSamples)
                << " samples (" << (kStallSamples * kWatchdogPeriodMs) << " ms)\n";
         for (size_t i = 0; i < cpus && i < kMaxCpus; ++i) {
             const uint64_t b = gHeartbeat[i].beat.load(RELAXED);
-            klog() << "  cpu=" << static_cast<uint64_t>(i) << " beat=";
-            if (b == 0) klog() << "(never started)\n"; else klog() << b << "\n";
+            emergencyLog() << "  cpu=" << static_cast<uint64_t>(i) << " beat=";
+            if (b == 0) emergencyLog() << "(never started)\n"; else emergencyLog() << b << "\n";
         }
         exitToHost(ExitStatus::Hang);
     }

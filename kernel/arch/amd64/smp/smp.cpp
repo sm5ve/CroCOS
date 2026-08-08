@@ -110,7 +110,9 @@ namespace arch::amd64::smp{
         mm::unmapIdentity();
 
         timing::enqueueEvent([] {
-            klog() << "All " << upCount + 1 << " processors up!\n";
+            // Timer callback: interrupt context, so the unlocked stream. See
+            // the note at `klog()` in kernel.h.
+            emergencyLog() << "All " << upCount + 1 << " processors up!\n";
         }, 900);
 
         return true;

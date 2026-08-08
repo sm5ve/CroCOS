@@ -69,7 +69,13 @@ namespace kernel{
         arch::amd64::sti();
         klog() << "Enqueuing shutdown\n";
         timing::enqueueEvent([] {
-            klog() << "\nGoodbye :)\n";
+            // `emergencyLog`, not `klog`: this runs in a TIMER CALLBACK, i.e. in
+            // interrupt context, and `klog` holds a global spinlock for the
+            // whole statement. A CPU interrupted mid-`klog` would re-acquire it
+            // here — a debug PANIC, and in release a silent hang with the log
+            // lock held. It was found exactly that way, landing inside an
+            // `rcu: domain ready` line (radix D-043).
+            emergencyLog() << "\nGoodbye :)\n";
             // The one path that reports success. Every other termination site
             // reports a nonzero status (specs/rcu-phase-4.md, P4-ITEM-006).
             exitToHost(ExitStatus::Success);

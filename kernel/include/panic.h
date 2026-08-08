@@ -15,6 +15,18 @@
 namespace kernel{
     void print_stacktrace();
     void print_stacktrace(uintptr_t* rbp);
+    // The raw log stream: **no lock, and therefore no atomicity** — concurrent
+    // writers interleave at byte granularity. That trade is the right way round
+    // for the contexts that need it: interleaved output is legible, a deadlocked
+    // log is not.
+    //
+    // The name says "emergency" because the panic path was its first consumer,
+    // but the property that matters is **lock-free**, which makes this equally
+    // the correct logger for any interrupt handler or timer callback —
+    // `kernel::klog()` holds a global spinlock for its whole statement and
+    // self-deadlocks if an interrupt logs on a CPU that is mid-statement (see
+    // the note at `klog()` in `kernel.h`). Read this as "the logger that cannot
+    // block", not as "only for crashes".
     Core::PrintStream& emergencyLog();
     template <bool stacktrace, typename... Args>
     [[noreturn]]

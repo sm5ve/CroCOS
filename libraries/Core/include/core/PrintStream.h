@@ -37,6 +37,16 @@ namespace Core{
         ps << t;
     };
 
+    // A print stream that holds a global lock for the LIFETIME OF THE OBJECT,
+    // so an entire `stream << a << b << c;` statement is one critical section
+    // and appears atomically against other CPUs.
+    //
+    // **That makes it non-reentrant, and the consequence is not obvious at the
+    // call site.** A CPU interrupted mid-statement, whose handler builds another
+    // one, re-acquires a lock it already holds. In a debug build the spinlock's
+    // deadlock detector catches it; in release it is a silent hard hang with the
+    // lock held. Any interrupt or timer context therefore needs an unlocked
+    // stream instead — in the kernel that is `kernel::emergencyLog()`.
     class AtomicPrintStream final : public PrintStream {
     private:
         static inline Spinlock lock;

@@ -15,6 +15,26 @@
 #endif
 
 namespace kernel{
+    // ─── klog is NOT safe from interrupt context ───────────────────────────
+    //
+    // `klog()` returns a temporary that holds a **global spinlock for its whole
+    // lifetime**, so a `klog() << a << b << c;` statement is one critical
+    // section spanning every `<<`. That is what makes a log line atomic against
+    // other CPUs, and it is also why the call is not reentrant: an interrupt
+    // taken on a CPU that is mid-statement, whose handler logs, re-acquires a
+    // lock that CPU already holds.
+    //
+    // The failure is worse than it looks. In a debug build the spinlock's
+    // deadlock detector turns it into a PANIC, which is at least loud. In
+    // release the detector is compiled out and the same interleaving is a
+    // **silent hard hang with the log lock held** — and a hang watchdog cannot
+    // report it, because the watchdog is itself a timer event on the CPU that is
+    // now spinning inside an interrupt handler.
+    //
+    // So: **timer callbacks, interrupt handlers and panic paths use
+    // `kernel::emergencyLog()`** (declared in `panic.h`), never this. Found the hard way — see
+    // `docs/radix-tree-implementation-deviations.md` D-043, where the shutdown
+    // timer's "Goodbye :)" landed inside an `rcu: domain ready` line.
     Core::AtomicPrintStream klog();
     bool heapEarlyInit();
     void* kmalloc(size_t size, std::align_val_t = std::align_val_t{1});
