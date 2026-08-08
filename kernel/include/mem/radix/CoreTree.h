@@ -205,6 +205,38 @@ namespace kernel::mm::radix {
         }
     };
 
+    // ─── The root binding (§5.1, §7.3; DEC-103) ────────────────────────────
+    //
+    // A cluster's root pointer, its root LEVEL and its base are three values
+    // that move together — growth allocates a node above the current root, so
+    // all three change at once — and DEC-103 packs them into one bucket word for
+    // exactly that reason. What the tree needs from them is stated in §7.3 and
+    // is narrower than it first looks:
+    //
+    //   - **Decode all three from ONE load.** The failure mode is not staleness:
+    //     growth does not relabel the old root, so a stale triple stays a TRUE
+    //     description of the node it names, and an operation running against it
+    //     is an ordinary RCU snapshot. The failure is pairing a FRESH pointer
+    //     with a STALE level and base — the writer then computes bit indices for
+    //     a node that is not shaped that way, "on a node it holds a valid claim
+    //     in". Packing makes that impossible per load; using the load atomically
+    //     is what makes it impossible in the code.
+    //
+    //   - **Do not carry the root pointer across a section close.** It is
+    //     uncounted (§7.3), and this has teeth precisely because of growth:
+    //     before growth the cluster root is exempt from §6.4's reclamation walk,
+    //     but after growth it is an ordinary interior node with a parent slot
+    //     and a state word, so it becomes reclaimable the moment it empties.
+    //
+    // Hence one decode per section, at the top of the work that section does.
+    struct RootBinding {
+        NodeRef  root{};
+        unsigned level = 0;
+        uint64_t base  = 0;
+
+        explicit operator bool() const { return static_cast<bool>(root); }
+    };
+
     enum class ApplyStatus : uint8_t {
         Ok,
         // §6.1: a conflict, or a re-dispatch that changed the claim set. Never
@@ -472,7 +504,7 @@ namespace kernel::mm::radix {
             LookupResult r;
             {
                 kernel::rcu::ReadGuard guard(*domain);
-                r = descendLocked(va);
+                r = descendLocked(currentBinding(), va);
             }
 
             // DEC-060's fault-path pump: tryAdvance AFTER the section closes.
@@ -539,7 +571,7 @@ namespace kernel::mm::radix {
             LookupResult now;
             {
                 kernel::rcu::ReadGuard guard(*domain);
-                now = descendLocked(held.va());
+                now = descendLocked(currentBinding(), held.va());
             }
             // Note the fresh result's own counted reference is taken and dropped
             // by this call. That is not waste — it is §7.3's acquisition law
@@ -553,10 +585,11 @@ namespace kernel::mm::radix {
                    now.hi() == held.hi();
         }
 
-        [[nodiscard]] LookupResult descendLocked(uint64_t va) const {
-            NodeRef node = rootRef;
-            unsigned level = level0;
-            uint64_t nodeBase = baseVA;
+        [[nodiscard]] LookupResult descendLocked(const RootBinding& bind, uint64_t va) const {
+            if (!bind) return {};
+            NodeRef node = bind.root;
+            unsigned level = bind.level;
+            uint64_t nodeBase = bind.base;
 
             for (;;) {
                 const unsigned idx = slotIndexFor(level, nodeBase, va);
@@ -665,6 +698,9 @@ namespace kernel::mm::radix {
                     // structure, so an unpinned writer can have a node reclaimed
                     // underneath it — a use-after-free in the WRITER.
                     kernel::rcu::ReadGuard guard(*domain);
+                    // §7.3: one decode, inside this attempt's section, all three
+                    // fields together. Nothing from it outlives the close.
+                    attempt.binding = currentBinding();
                     counters.attempts.fetch_add(1, kRefcountAcquire);
                     st = runAttempt(lo, hi, value, attempt);
                     // The section is about to close. Nothing may still hold a
@@ -789,8 +825,9 @@ namespace kernel::mm::radix {
             uint64_t nodeBase = 0;
         };
 
-        [[nodiscard]] SiteRef findSiteLocked(uint64_t lo, uint64_t hi) const {
-            SiteRef s{rootRef, level0, baseVA};
+        [[nodiscard]] SiteRef findSiteLocked(const RootBinding& bind,
+                                             uint64_t lo, uint64_t hi) const {
+            SiteRef s{bind.root, bind.level, bind.base};
             for (;;) {
                 const unsigned first = slotIndexFor(s.level, s.nodeBase, lo);
                 const unsigned last  = slotIndexFor(s.level, s.nodeBase, hi);
@@ -855,9 +892,11 @@ namespace kernel::mm::radix {
                    "radix: decomposition recursion is not descending (§6.5)");
 
             SiteRef site;
+            RootBinding bind;
             {
                 kernel::rcu::ReadGuard guard(*domain);
-                site = findSiteLocked(lo, hi);
+                bind = currentBinding();
+                site = findSiteLocked(bind, lo, hi);
             }
 
             const uint64_t span  = slotSpan(G, site.level);
@@ -919,7 +958,10 @@ namespace kernel::mm::radix {
             const uint64_t siteSpan = nodeSpan(G, site.level);
             const bool siteFullyCovered =
                 (lo <= site.nodeBase) && (hi >= site.nodeBase + siteSpan - 1);
-            const bool siteIsClusterRoot = (site.node == rootRef);
+            // Against the binding THIS decomposition descended from, not
+            // against a tree member: a concurrent growth makes the two differ,
+            // and the site was found under `bind`.
+            const bool siteIsClusterRoot = (site.node == bind.root);
 
             if (value != nullptr && siteFullyCovered && !siteIsClusterRoot) {
                 // The site's slots now all name `value`, so the subtree behind
@@ -953,6 +995,23 @@ namespace kernel::mm::radix {
         // Forward-declared: `buildSubtree` and the claim helpers take it by
         // reference, and they are defined above its definition.
         struct Attempt;
+
+        // ─── The seam (§5.5) ───────────────────────────────────────────────
+        //
+        // The core layer's ONE piece of knowledge about where its root comes
+        // from: somebody produces a {root, level, base} triple, atomically,
+        // inside the section that is about to use it. Every caller below invokes
+        // this from inside its own `ReadGuard` and holds the result no longer.
+        //
+        // A tree over a fixed span — Phase 1 and 2's shape, and the shape the
+        // model check and the decomposition suite are written against — answers
+        // from its own members. A tree that is a CLUSTER answers by reading its
+        // bucket word through `protectWord` and decoding it, which is why this is
+        // a function and not three field reads scattered through the machinery:
+        // swapping it is the whole of what growth changes here.
+        [[nodiscard]] RootBinding currentBinding() const {
+            return RootBinding{rootRef, level0, baseVA};
+        }
 
         NodeRef  rootRef{};
         unsigned level0 = 0;
@@ -1321,6 +1380,14 @@ namespace kernel::mm::radix {
         struct Attempt {
             ClaimSet<G, DetachBudget> claims;
 
+            // The root triple this attempt is working against, decoded ONCE
+            // from one bucket-word load inside this attempt's section. Every
+            // "is this the cluster root?" test below compares against THIS,
+            // not against a tree member: under growth the two can differ, and
+            // the answer that matters is the one the attempt's own descent was
+            // computed from.
+            RootBinding binding{};
+
             // ─── §11: "No irreversible step precedes the commit boundary" ───
             //
             // "Per-operation phase flag asserted at EVERY mark, slot write and
@@ -1469,7 +1536,8 @@ namespace kernel::mm::radix {
 
         ApplyStatus runAttempt(uint64_t lo, uint64_t hi, Mapping* value, Attempt& a) {
             // ─── Pass 1: read-only ─────────────────────────────────────────
-            const ReadOutcome rr = readPass(rootRef, level0, baseVA, lo, hi, value, a);
+            const ReadOutcome rr =
+                readPass(a.binding.root, a.binding.level, a.binding.base, lo, hi, value, a);
             if (rr.status != ApplyStatus::Ok) return rr.status;
 
             // ─── Acquire, top-down (§6.8) ──────────────────────────────────
@@ -1492,7 +1560,8 @@ namespace kernel::mm::radix {
             // words. A row that changed means the set the pass computed is
             // wrong; the answer is to discard and retry, never to extend the set
             // in place.
-            if (!redispatchAgrees(rootRef, level0, baseVA, lo, hi, value, a)) {
+            if (!redispatchAgrees(a.binding.root, a.binding.level, a.binding.base,
+                                  lo, hi, value, a)) {
                 // Both unwind paths release and return everything INSIDE the
                 // section (§7.3, D-024). They differ only in what the caller
                 // does next: a changed row is retried after a backoff, a record
@@ -1519,7 +1588,7 @@ namespace kernel::mm::radix {
             // The flag exists so that "nothing irreversible precedes this line"
             // is checked at every mark, publish and retire rather than argued.
             a.phase = Attempt::Phase::Committing;
-            commit(rootRef, level0, baseVA, lo, hi, value, a);
+            commit(a.binding.root, a.binding.level, a.binding.base, lo, hi, value, a);
 
             // §7.1: the drawn records are retired here, after every publish that
             // stopped a slot naming their `Mapping`. Each is its own retire
@@ -1651,7 +1720,7 @@ namespace kernel::mm::radix {
             // with no visible error.
             const unsigned observed =
                 state::countOf(node.stateWord().load(kAdvisoryOccupancyLoad));
-            const bool isRoot    = (node == rootRef);
+            const bool isRoot    = (node == a.binding.root);
             const bool candidate = !isRoot && clearsHere > 0 && observed == clearsHere;
 
             if (writeMask != 0 || candidate) {
@@ -2269,7 +2338,7 @@ namespace kernel::mm::radix {
             // word with no state word, so the interlock cannot be acquired there,
             // and reclaiming it anyway would leave that word naming freed memory
             // — an entire zone permanently unmappable, with no crash.
-            if (node == rootRef) return false;
+            if (node == a.binding.root) return false;
             return occupancyOf(node) == 0;
         }
 
