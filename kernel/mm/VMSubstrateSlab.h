@@ -74,9 +74,31 @@ static_assert(kSlabDescriptorMagicLeadByte != kDec024PoisonByte,
 // ============================================================
 
 inline constexpr ConstexprArray kSlabSizeClasses =
-    { 8ul, 16, 32, 64, 96, 128, 256, 512 };
+    { 8ul, 16, 32, 64, 96, 128, 192, 256, 320, 512 };
 inline constexpr size_t kNumSizeClasses = kSlabSizeClasses.size();
 
+// DEC-049: the contractual slot alignment of each class, 1:1 with
+// kSlabSizeClasses. Power-of-two classes align to their own size (DEC-001);
+// non-power-of-two classes take alignof(max_align_t) == 16 (DEC-022), with one
+// exception — the 192 B and 320 B classes added for the radix tree promise 64 B.
+//
+// That raise is free: it changes no layout at all. Both sizes are 64-multiples,
+// slabs are page-aligned, and DEC-001's slot-0 formula already lands every slot
+// of these classes on a 64 B boundary — the contract is being brought up to
+// match the layout, not the layout bent to fit the contract. The 96 B class
+// deliberately stays at 16 even though its realised layout would support 32
+// (DEC-025: "the 96 B class remains the 16 B case"); promising only what the
+// spec promises keeps a future schema retune from quietly breaking a caller who
+// relied on a derived-and-undocumented guarantee.
+//
+// The validateAllClasses static_assert below checks each entry against the
+// realised layout, so a schema change that invalidates one of these promises
+// fails the build rather than mis-aligning a make<T>.
+inline constexpr ConstexprArray kSlabSlotAlignments =
+    { 8ul, 16, 32, 64, 16, 128, 64, 256, 64, 512 };
+
+static_assert(kSlabSizeClasses.size() == kSlabSlotAlignments.size(),
+              "kSlabSlotAlignments must be 1:1 with kSlabSizeClasses (DEC-049)");
 static_assert(isArraySorted(kSlabSizeClasses),
               "kSlabSizeClasses must be sorted ascending for sizeClassFor");
 static_assert(kSlabSizeClasses[kNumSizeClasses - 1] <= arch::smallPageSize,
@@ -131,10 +153,12 @@ inline constexpr size_t slotSize(size_t c) {
     return kSlabSizeClasses[c];
 }
 
-// DEC-001 / DEC-022: power-of-two classes align to their own size;
-// non-power-of-two classes align to alignof(max_align_t) = 16.
+// DEC-001 / DEC-022, amended by DEC-049. Read from the contractual table rather
+// than recomputed from slotSize: the 192 B and 320 B classes promise 64 B, which
+// no size-derived rule produces without also changing what the 96 B class
+// promises. See kSlabSlotAlignments.
 inline constexpr size_t slotAlignment(size_t c) {
-    return (slotSize(c) & (slotSize(c) - 1)) == 0 ? slotSize(c) : size_t{16};
+    return kSlabSlotAlignments[c];
 }
 
 // ============================================================
@@ -223,6 +247,11 @@ namespace detail {
     constexpr bool validateAllClasses(index_sequence<Cs...>) {
         return ((slotCount(Cs) > 0) && ...)
             && ((slot0Offset(Cs) % slotAlignment(Cs) == 0) && ...)
+            // DEC-049: the promised alignment must be a power of two, and must
+            // divide the slot stride — otherwise slot 0 is aligned and slot 1 is
+            // not, which is the failure mode a slot0-only check cannot see.
+            && (((slotAlignment(Cs) & (slotAlignment(Cs) - 1)) == 0) && ...)
+            && ((slotSize(Cs) % slotAlignment(Cs) == 0) && ...)
             && ((slot0Offset(Cs) + slotCount(Cs) * slotSize(Cs) <= arch::smallPageSize) && ...)
             && ((slot0Offset(Cs) >= sizeof(SlabDescriptorBase) + bookkeeperSize(divideAndRoundUp(slotCount(Cs), size_t{64}))) && ...)
             && ((divideAndRoundUp(slotCount(Cs), size_t{64}) <= 8) && ...);

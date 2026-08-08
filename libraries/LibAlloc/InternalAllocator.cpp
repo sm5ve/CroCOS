@@ -23,8 +23,13 @@ namespace LibAlloc::InternalAllocator {
     constexpr bool AssumePowerOfTwoAlignment = false;
 #endif
 
-    constexpr ConstexprArray slabSizeClasses = {8ul, 16, 32, 64, 96, 128, 256, 512, };
-    constexpr ConstexprArray slabAllocatorBufferSizes = {1024ul, 1024, 1024, 2048, 2048, 2048, 2048, 8192, };
+    // vmsmalloc DEC-049: the 192 B and 320 B classes serve the radix tree's two
+    // node types (160 B / 288 B structural, realised at 192 / 320 with ITEM-055's
+    // 64 B-aligned state word in the headroom). Mirrored in
+    // kernel/mm/VMSubstrateSlab.h's kSlabSizeClasses — the two arrays must stay
+    // in lockstep.
+    constexpr ConstexprArray slabSizeClasses = {8ul, 16, 32, 64, 96, 128, 192, 256, 320, 512, };
+    constexpr ConstexprArray slabAllocatorBufferSizes = {1024ul, 1024, 1024, 2048, 2048, 2048, 2048, 2048, 4096, 8192, };
     static_assert(slabSizeClasses.size() == slabAllocatorBufferSizes.size(), "Size classes and buffer sizes must be the same size");
 
     struct alignas(alignof(max_align_t)) UnallocatedMemoryBlockHeader {

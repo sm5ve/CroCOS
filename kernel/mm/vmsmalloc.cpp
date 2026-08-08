@@ -194,14 +194,22 @@ inline auto dispatchOnClass(size_t c, SlabDescriptorBase* d, F&& f) {
         VMS_DISPATCH_CASE(5)
         VMS_DISPATCH_CASE(6)
         VMS_DISPATCH_CASE(7)
+        VMS_DISPATCH_CASE(8)
+        VMS_DISPATCH_CASE(9)
         default: PANIC("vmsmalloc: dispatchOnClass invalid class ", static_cast<uint64_t>(c));
     }
 #undef VMS_DISPATCH_CASE
     __builtin_unreachable();
 }
 
-static_assert(kNumSizeClasses == 8,
-              "vmsmalloc dispatch switches assume exactly 8 size classes (P5-DEC-001)");
+// DEC-049 grew the schema from 8 classes to 10 (192 B and 320 B for the radix
+// tree's two node types). Both dispatch switches above enumerate class indices
+// literally, so this assert is what forces them to be extended in lockstep with
+// any future retune rather than silently PANICing on the new class at runtime.
+static_assert(kNumSizeClasses == 10,
+              "vmsmalloc dispatch switches assume exactly 10 size classes "
+              "(P5-DEC-001, schema extended by DEC-049) — extend "
+              "dispatchOnClass and createFreshSlab together with the schema");
 
 inline uint8_t* slotZeroAddr(SlabDescriptorBase* d, size_t c) {
     return reinterpret_cast<uint8_t*>(d) + slot0Offset(c);
@@ -245,6 +253,8 @@ SlabDescriptorBase* createFreshSlab(arch::ProcessorID i, size_t c) {
         VMS_CREATE_CASE(5)
         VMS_CREATE_CASE(6)
         VMS_CREATE_CASE(7)
+        VMS_CREATE_CASE(8)
+        VMS_CREATE_CASE(9)
         default: PANIC("vmsmalloc: createFreshSlab invalid class ", static_cast<uint64_t>(c));
     }
 #undef VMS_CREATE_CASE

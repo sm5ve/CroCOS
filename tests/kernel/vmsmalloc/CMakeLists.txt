@@ -13,6 +13,7 @@ set(VMS_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/IntegrationTest.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ConcurrentTest.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/AssertionsTest.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/SizeClassTest.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/mocks/MockVMSubstrate.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/mocks/MockKernelEnv.cpp
     ${VMS_ROOT}/kernel/mm/vmsmalloc.cpp
