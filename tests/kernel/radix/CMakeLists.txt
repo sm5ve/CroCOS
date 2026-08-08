@@ -25,6 +25,7 @@ set(RDX_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/DispatchTest.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/CoreTreeTest.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ModelTest.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/OrderingSpellingTest.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/mocks/RadixOracle.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/RandomSource.cpp
     ${VMS_MOCKS}/MockVMSubstrate.cpp
@@ -51,7 +52,11 @@ set(RDX_INCLUDES
     ${CMAKE_CURRENT_SOURCE_DIR}/../..       # tests/ — assert_support.h, test.h, asan_poison.h
 )
 
+# The §11 ordering-spelling check is a SOURCE SCANNER — it needs the source.
+set(RDX_HEADER_DIR ${RDX_ROOT}/kernel/include/mem/radix)
+
 set(RDX_DEFINES
+    CROCOS_RADIX_HEADER_DIR="${RDX_HEADER_DIR}"
     CROCOS_TESTING
     CORE_LIBRARY_TESTING
     CORE_KERNEL_TESTING

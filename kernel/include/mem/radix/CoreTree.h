@@ -47,6 +47,7 @@
 #include <mem/VMSubstrate.h>
 
 #include <mem/radix/Geometry.h>
+#include <mem/radix/Ordering.h>
 #include <mem/radix/SlotCodec.h>
 #include <mem/radix/Node.h>
 #include <mem/radix/Mapping.h>
@@ -184,7 +185,7 @@ namespace kernel::mm::radix {
 
             for (;;) {
                 const unsigned idx = slotIndexFor(level, nodeBase, va);
-                const uint64_t word = node.slot(idx).load(RELAXED);
+                const uint64_t word = node.slot(idx).load(kSlotLoad);
                 const uint64_t slotBase = nodeBase + uint64_t{idx} * slotSpan(G, level);
 
                 switch (Codec::kindOf(word)) {
@@ -272,13 +273,13 @@ namespace kernel::mm::radix {
         static void bumpOccupancy(NodeRef node, int delta) {
             if (delta == 0) return;
             if (delta > 0) {
-                const uint64_t prior = node.stateWord().fetch_add(state::kCountUnit, RELEASE);
+                const uint64_t prior = node.stateWord().fetch_add(state::kCountUnit, kOccupancyPublish);
                 assert(state::countOf(prior) + 1 <= 32,
                        "radix: occupancy count exceeded the valence — over-counting is "
                        "undetectable in release and this assert is the only detector");
                 (void)prior;
             } else {
-                const uint64_t prior = node.stateWord().fetch_sub(state::kCountUnit, RELEASE);
+                const uint64_t prior = node.stateWord().fetch_sub(state::kCountUnit, kOccupancyClear);
                 assert(state::countOf(prior) > 0,
                        "radix: occupancy underflow — the borrow this catches propagates into "
                        "the spare bits, and with the mark placed above the count instead of "
@@ -288,7 +289,7 @@ namespace kernel::mm::radix {
         }
 
         static unsigned occupancyOf(NodeRef node) {
-            return state::countOf(node.stateWord().load(RELAXED));
+            return state::countOf(node.stateWord().load(kQuiescedRead));
         }
 
         // ─── Segment plan for a subdivision (§6.3's third row) ─────────────
@@ -352,7 +353,7 @@ namespace kernel::mm::radix {
                                            local.items[0].range.hi, sub)) {
                         node.slot(i).store(
                             Codec::encodeLeaf(local.items[0].mapping, sub, childLevel),
-                            RELEASE);
+                            kPrivateInit);
                         occupancy++;
                         continue;
                     }
@@ -372,7 +373,7 @@ namespace kernel::mm::radix {
                     destroyUnpublishedSubtree(node, childLevel);
                     return nullptr;
                 }
-                node.slot(i).store(Codec::encodeChild(grand), RELEASE);
+                node.slot(i).store(Codec::encodeChild(grand), kSlotPublish);
                 occupancy++;
             }
 
@@ -388,7 +389,7 @@ namespace kernel::mm::radix {
         static void destroyUnpublishedSubtree(NodeRef node, unsigned level) {
             const unsigned n = valence(G, level);
             for (unsigned i = 0; i < n; i++) {
-                const uint64_t w = node.slot(i).load(RELAXED);
+                const uint64_t w = node.slot(i).load(kQuiescedRead);
                 if (Codec::isChild(w)) {
                     destroyUnpublishedSubtree(NodeRef(Codec::decodeChild(w)), level + 1);
                 }
@@ -404,7 +405,7 @@ namespace kernel::mm::radix {
         static void takeSubtreeReferences(NodeRef node, unsigned level) {
             const unsigned n = valence(G, level);
             for (unsigned i = 0; i < n; i++) {
-                const uint64_t w = node.slot(i).load(RELAXED);
+                const uint64_t w = node.slot(i).load(kQuiescedRead);
                 if (Codec::isLeaf(w)) {
                     static_cast<Mapping*>(Codec::decodeLeaf(w))->acquireRef();
                 } else if (Codec::isChild(w)) {
@@ -420,7 +421,7 @@ namespace kernel::mm::radix {
         static void releaseSubtree(NodeRef node, unsigned level) {
             const unsigned n = valence(G, level);
             for (unsigned i = 0; i < n; i++) {
-                const uint64_t w = node.slot(i).load(RELAXED);
+                const uint64_t w = node.slot(i).load(kQuiescedRead);
                 if (Codec::isChild(w)) {
                     releaseSubtree(NodeRef(Codec::decodeChild(w)), level + 1);
                 } else if (Codec::isLeaf(w)) {
@@ -462,7 +463,7 @@ namespace kernel::mm::radix {
                 const uint64_t clipLo   = lo > slotBase ? lo : slotBase;
                 const uint64_t clipHi   = hi < slotEnd  ? hi : slotEnd;
 
-                const uint64_t word = node.slot(i).load(RELAXED);
+                const uint64_t word = node.slot(i).load(kClaimedSlotLoad);
                 const DispatchResult d =
                     dispatchSlot<G, Codec>(word, level, slotBase, clipLo, clipHi, writes);
 
@@ -473,14 +474,14 @@ namespace kernel::mm::radix {
 
                 case DispatchAction::WriteLeaf:
                     value->acquireRef();                                  // commit-phase +1
-                    node.slot(i).store(Codec::encodeLeaf(value, d.range, level), RELEASE);
+                    node.slot(i).store(Codec::encodeLeaf(value, d.range, level), kSlotPublish);
                     bumpOccupancy(node, +1);
                     break;
 
                 case DispatchAction::OverwriteLeaf: {
                     Mapping* displaced = static_cast<Mapping*>(Codec::decodeLeaf(word));
                     value->acquireRef();                                  // +1 before publish
-                    node.slot(i).store(Codec::encodeLeaf(value, d.range, level), RELEASE);
+                    node.slot(i).store(Codec::encodeLeaf(value, d.range, level), kSlotPublish);
                     releaseNamedMapping(displaced);                       // deferred -1
                     break;
                 }
@@ -490,12 +491,12 @@ namespace kernel::mm::radix {
                     // does not touch the count, and deliberately does not share
                     // a code path with the three rows that do.
                     node.slot(i).store(
-                        Codec::encodeLeaf(Codec::decodeLeaf(word), d.range, level), RELEASE);
+                        Codec::encodeLeaf(Codec::decodeLeaf(word), d.range, level), kSlotPublish);
                     break;
 
                 case DispatchAction::ClearSlot: {
                     Mapping* displaced = static_cast<Mapping*>(Codec::decodeLeaf(word));
-                    node.slot(i).store(0, RELEASE);
+                    node.slot(i).store(0, kSlotPublish);
                     bumpOccupancy(node, -1);
                     releaseNamedMapping(displaced);
                     break;
@@ -513,7 +514,7 @@ namespace kernel::mm::radix {
                         // live ones, and random-probe placement means a freed
                         // region is essentially never reused, so nothing would
                         // ever reclaim by reuse.
-                        node.slot(i).store(0, RELEASE);
+                        node.slot(i).store(0, kSlotPublish);
                         bumpOccupancy(node, -1);
                         Ops::destroy(level + 1, child);
                     }
@@ -534,7 +535,7 @@ namespace kernel::mm::radix {
                         value->acquireRef();
                         replacement = Codec::encodeLeaf(value, sub, level);
                     }
-                    node.slot(i).store(replacement, RELEASE);
+                    node.slot(i).store(replacement, kSlotPublish);
                     if (!writes) bumpOccupancy(node, -1);
                     // "A subtree detach is equivalent to clearing every slot and
                     // unlinking every node, executed as one parent-slot store" —
@@ -570,7 +571,7 @@ namespace kernel::mm::radix {
                     // whose survivors name the record it is displacing could
                     // take the count transiently to zero and destroy it.
                     takeSubtreeReferences(NodeRef(child), level + 1);
-                    node.slot(i).store(Codec::encodeChild(child), RELEASE);
+                    node.slot(i).store(Codec::encodeChild(child), kSlotPublish);
                     if (Codec::isEmpty(word)) bumpOccupancy(node, +1);
                     if (displaced) releaseNamedMapping(displaced);
                     break;
@@ -588,7 +589,7 @@ namespace kernel::mm::radix {
             const uint64_t span = slotSpan(G, level);
             fn(level, nodeBase, node);
             for (unsigned i = 0; i < n; i++) {
-                const uint64_t w = node.slot(i).load(RELAXED);
+                const uint64_t w = node.slot(i).load(kQuiescedRead);
                 if (Codec::isChild(w)) {
                     walkNode(NodeRef(Codec::decodeChild(w)), level + 1,
                              nodeBase + uint64_t{i} * span, fn);
@@ -600,7 +601,7 @@ namespace kernel::mm::radix {
             n++;
             const unsigned v = valence(G, level);
             for (unsigned i = 0; i < v; i++) {
-                const uint64_t w = node.slot(i).load(RELAXED);
+                const uint64_t w = node.slot(i).load(kQuiescedRead);
                 if (Codec::isChild(w)) countNodes(NodeRef(Codec::decodeChild(w)), level + 1, n);
             }
         }

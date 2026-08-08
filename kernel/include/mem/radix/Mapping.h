@@ -49,6 +49,8 @@
 #include <kassert.h>
 #include <core/atomic.h>
 
+#include <mem/radix/Ordering.h>
+
 namespace kernel::mm {
 
     // The sibling spec's object. This tree's business ends at naming the
@@ -136,7 +138,7 @@ namespace kernel::mm::radix {
               protection(prot), maxProtection(maxProt) {
             assert(withinCeiling(prot, maxProt),
                    "radix Mapping: initial protection exceeds its max-protection ceiling");
-            refcount.store(0, RELAXED);
+            refcount.store(0, kPrivateInit);
         }
 
         Mapping(const Mapping&)            = delete;
@@ -168,7 +170,7 @@ namespace kernel::mm::radix {
         // destroying CPU's free.
 
         void acquireRef() {
-            refcount.fetch_add(1, RELAXED);
+            refcount.fetch_add(1, kRefcountAcquire);
         }
 
         // Returns true when this release observed the count reach zero, i.e.
@@ -177,18 +179,18 @@ namespace kernel::mm::radix {
         // reference but must not traverse the referent beyond its refcount word
         // (RCU-DEC-045).
         [[nodiscard]] bool releaseRef() {
-            const uint64_t prior = refcount.fetch_sub(1, RELEASE);
+            const uint64_t prior = refcount.fetch_sub(1, kRefcountRelease);
             assert(prior != 0,
                    "radix Mapping: release below zero — the double-release half of the N:1 "
                    "rule, whose other half is a leak");
             if (prior == 1) {
-                thread_fence(ACQUIRE);
+                thread_fence(kRefcountZeroFence);
                 return true;
             }
             return false;
         }
 
-        [[nodiscard]] uint64_t refcountRelaxed() const { return refcount.load(RELAXED); }
+        [[nodiscard]] uint64_t refcountRelaxed() const { return refcount.load(kQuiescedRead); }
     };
 
 }  // namespace kernel::mm::radix

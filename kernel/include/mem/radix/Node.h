@@ -54,6 +54,7 @@
 #include <core/rcu/EpochDomain.h>   // Core::rcu::RetireHead
 
 #include <mem/radix/Geometry.h>
+#include <mem/radix/Ordering.h>
 
 namespace kernel::mm::radix {
 
@@ -159,11 +160,11 @@ namespace kernel::mm::radix {
         // cache's paired increment/release take it 0 -> 1 -> 0 and destroy a
         // live node.
         explicit Node(uint64_t initialRefcount) {
-            stateWord.store(0, RELAXED);
-            refcount.store(initialRefcount, RELAXED);
+            stateWord.store(0, kPrivateInit);
+            refcount.store(initialRefcount, kPrivateInit);
             head.next = nullptr;
             head.deleter = nullptr;
-            for (unsigned i = 0; i < Valence; i++) slots[i].store(0, RELAXED);
+            for (unsigned i = 0; i < Valence; i++) slots[i].store(0, kPrivateInit);
         }
 
         // §7.1 / invariant 24: **the destructor releases nothing at all, and
@@ -188,7 +189,7 @@ namespace kernel::mm::radix {
         // that already hold a claim, and for single-threaded Phase 1 use.
         uint64_t slotRelaxed(unsigned i) const {
             assert(i < Valence, "radix node: slot index out of range");
-            return slots[i].load(RELAXED);
+            return slots[i].load(kQuiescedRead);
         }
     };
 
