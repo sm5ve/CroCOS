@@ -310,3 +310,80 @@ TEST(radix_address_space_dying_flag_is_set_before_the_barrier) {
     rdx::destroyAddressSpace(freelist, block);
     assertNoLiveObjects("dying flag");
 }
+
+// ─── DEC-100's unit-decomposed walk ────────────────────────────────────────
+
+// The three properties that distinguish it from a synchronous post-order
+// release, driven by running §7.4's steps by hand so the window between the walk
+// and the drain is observable at all.
+//
+// The one that matters most for Phase 4 is the **marking**. §7.4: "Without any
+// marking at all, teardown would be the only unlink path setting no mark,
+// leaving a foreign CPU's surviving cache entry pointed at a node that is
+// unlinked, unmarked, alive, and holding slots that point at freed children."
+// There is no descent cache yet, so nothing observes it today — which is exactly
+// why it needs a test now rather than when the cache lands and the symptom is a
+// silent wrong mapping.
+TEST(radix_teardown_walk_marks_and_retires_rather_than_destroying) {
+    BareArena arena;
+    FreelistA freelist;
+    BlockA* block = nullptr;
+    ASSERT_TRUE(rdx::createAddressSpace(freelist, kernel::numa::DomainID{0}, 1,
+                                        kTestRecords, block)
+                == rdx::CreateStatus::Ok);
+
+    ASSERT_TRUE(block->clusters.ensureCovers(0, kPage - 1) == rdx::ClusterStatus::Ok);
+    TreeA t = block->clusters.treeFor(0);
+    // Two disjoint sub-ranges, so the cluster is a root plus a real child and
+    // the walk has more than one unit to run.
+    auto* a = makeMapping(0);
+    auto* b = makeMapping(4 * kPage);
+    ASSERT_TRUE(a != nullptr && b != nullptr);
+    ASSERT_TRUE(t.apply(0, kPage - 1, a) == rdx::ApplyStatus::Ok);
+    ASSERT_TRUE(t.apply(4 * kPage, 5 * kPage - 1, b) == rdx::ApplyStatus::Ok);
+    (void)kernel::rcu::drainAllQuiescent(block->domain);
+
+    const size_t nodesBefore = t.nodeCount();
+    ASSERT_TRUE(nodesBefore > 1);
+    rdx::NodeRef root = t.root();
+
+    // Capturing a node pointer across the walk is legal for the test for the
+    // same reason the walk itself carries one across its children's sections:
+    // by here nothing else is running.
+    ASSERT_TRUE(!rdx::state::isMarked(root.stateWord().load(RELAXED)));
+
+    // §7.4's steps, by hand, so the window is observable.
+    block->dying.store(1, rdx::kDyingFlagStore);
+    kernel::rcu::synchronize(block->domain);
+
+    const size_t liveNodesBeforeWalk = liveCountOf<rdx::Node<GA, 32>>()
+                                     + liveCountOf<rdx::Node<GA, 16>>();
+    block->clusters.tearDownClusters();
+
+    // 1. MARKED. The property with no symptom until Phase 4.
+    ASSERT_TRUE(rdx::state::isMarked(root.stateWord().load(RELAXED)));
+
+    // 2. RETIRED, not destroyed: the nodes are still live objects between the
+    //    walk and the drain. A synchronous walk destroys them in step, and this
+    //    count would already be zero.
+    ASSERT_EQ(liveNodesBeforeWalk,
+              liveCountOf<rdx::Node<GA, 32>>() + liveCountOf<rdx::Node<GA, 16>>());
+
+    // 3. The bucket word is cleared by the walk's final unit, inside its own
+    //    section — so the cluster is unreachable even though its nodes are not
+    //    yet destroyed.
+    ASSERT_TRUE(!block->clusters.bucketIsOccupied(0));
+
+    // ...and the drain is what actually destroys them.
+    (void)kernel::rcu::drainAllQuiescent(block->domain);
+    ASSERT_EQ(size_t{0}, liveCountOf<rdx::Node<GA, 32>>() + liveCountOf<rdx::Node<GA, 16>>());
+
+    block->clusters.freeRootPage();
+    block->pools.destroy();
+    (void)block->domain.deinit();
+    {
+        kernel::rcu::DomainManagementLockGuard guard;
+        freelist.returnLocked(block);
+    }
+    assertNoLiveObjects("unit-decomposed walk");
+}

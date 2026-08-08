@@ -265,20 +265,15 @@ namespace kernel::mm::radix {
         // 3. The barrier that gives the flag its meaning.
         kernel::rcu::synchronize(block->domain);
 
-        // 3b. **An extra drain, ahead of the walk, that §7.4 does not list** —
-        //     and it is forced by the walk not yet being DEC-100's. See D-032.
-        //     Under DEC-100 the walk RETIRES nodes, so every `Mapping` release
-        //     — the ones riding node deleters and the ones riding DeferredRelease
-        //     records alike — happens inside the single drain that follows, and
-        //     the count reaches zero exactly once. With a SYNCHRONOUS walk, a
-        //     record still sitting in a bag from an earlier operation would
-        //     release a `Mapping` the walk has already destroyed at count zero.
-        //     Draining first empties those bags while the tree is still whole.
-        //     Nothing runs between this and the walk — the threads are gone — so
-        //     no new record can appear.
-        (void)kernel::rcu::drainAllQuiescent(block->domain);
-
-        // 4. The walk. Every cluster's nodes released, its bucket word cleared.
+        // 4. The walk: unit-decomposed, marking, retiring (DEC-100). Note there
+        //    is deliberately NO drain between the barrier and here. An earlier
+        //    synchronous walk needed one — a `DeferredRelease` record still in a
+        //    bag would have released a `Mapping` the walk had already destroyed
+        //    at count zero — and the retire-based walk removes the need rather
+        //    than papering over it: every release, from records and node
+        //    deleters alike, now lands inside the ONE drain below, over disjoint
+        //    slot sets, so the count reaches zero exactly once whoever gets
+        //    there last.
         block->clusters.tearDownClusters();
 
         // 5. Everything retired by the walk, destroyed.

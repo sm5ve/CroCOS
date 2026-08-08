@@ -520,6 +520,128 @@ namespace kernel::mm::radix {
             }
         }
 
+        // ─── §7.4's unit-decomposed teardown walk (DEC-100) ────────────────
+        //
+        // The walk `destroyAddressSpace` runs, and the difference from
+        // `destroyTree` above is not tidiness. Each node is torn down as its own
+        // UNIT — one read section, claim, mark, unlink, **retire** — and three
+        // properties fall out that the synchronous form does not have:
+        //
+        //   - **Every node is MARKED before it is unlinked.** §7.4: "Without any
+        //     marking at all, teardown would be the only unlink path setting no
+        //     mark, leaving a foreign CPU's surviving cache entry pointed at a
+        //     node that is unlinked, unmarked, alive, and holding slots that
+        //     point at freed children." That entry is Phase 4's descent cache,
+        //     which is why the marking is a PREREQUISITE for it rather than a
+        //     nicety here.
+        //   - **Every release is deferred**, so a `DeferredRelease` record still
+        //     in a bag and a node deleter releasing the same `Mapping` both land
+        //     inside the one drain that follows, and the count reaches zero
+        //     exactly once. The synchronous walk had to be preceded by an extra
+        //     drain to avoid releasing through a record onto an already-destroyed
+        //     record (D-032).
+        //   - **The parent-slot bit is released at unit end**, while the node's
+        //     own whole-node mask never is. §7.4 is explicit: held to the
+        //     mark-and-retire, the parent-slot bit "would sit in the later unit's
+        //     `fetch_or` prior and fire the quiescence assert above on every
+        //     process exit" — assert erosion, from a mechanical mistake.
+        //
+        // The walk carries a node pointer across its children's section closes,
+        // which §7.3 forbids in general. It is sound HERE for a reason §7.4
+        // states rather than assumes: the walk runs after the dying flag,
+        // thread destruction and `synchronize`, so it is not merely uncontended
+        // but **unobserved** — there is no actor that could reclaim what we
+        // hold. Nothing else in the tree gets to make this argument.
+        void tearDownUnits() {
+            const RootBinding b = quiescedBinding();
+            if (!b) return;
+            tearDownUnitAt(b.root, b.level, NodeRef(), 0, /*isRoot=*/true);
+        }
+
+    private:
+        void tearDownUnitAt(NodeRef node, unsigned level,
+                            NodeRef parent, unsigned parentSlot, bool isRoot) {
+            // Children first: a node's unit unlinks it from ITS parent, so the
+            // parent must still be linked when the child's unit runs.
+            const unsigned n = valence(G, level);
+            for (unsigned i = 0; i < n; i++) {
+                const uint64_t w = node.slot(i).load(kQuiescedRead);
+                if (Codec::isChild(w)) {
+                    tearDownUnitAt(NodeRef(Codec::decodeChild(w)), level + 1, node, i, false);
+                }
+            }
+
+            Attempt a;
+            a.binding = RootBinding{node, level, 0};
+            kernel::rcu::ReadGuard guard(*domain);
+
+            // The whole-node claim. DEC-065's quiescence assert on the operand:
+            // by here the walk is unobserved, so ANY claim bit or mark already
+            // set means somebody else is still working — which is the failure
+            // this sequence exists to make impossible, and the assert is how a
+            // future reordering of it announces itself.
+            const uint64_t mask  = valenceMask(G, level);
+            const uint64_t prior = node.stateWord().fetch_or(mask, kClaimAcquire);
+            assert((prior & (mask | state::kMarkMask)) == 0,
+                   "radix teardown: a node was already claimed or marked when its unit ran — "
+                   "the walk is supposed to be unobserved by then (§7.4/DEC-065)");
+            (void)prior;
+            const bool added = a.claims.addOrMerge(node, level, 0, mask, true);
+            assert(added, "radix teardown: claim set capacity");
+            (void)added;
+            a.claims.entries[a.claims.count - 1].issued = true;
+            a.claims.entries[a.claims.count - 1].held   = true;
+
+            uint64_t parentMask = 0;
+            if (!isRoot) {
+                // The parent-slot bit, taken so the unlink store below is an
+                // ordinary claimed publish rather than an unprotected write.
+                parentMask = uint64_t{1} << parentSlot;
+                const uint64_t pprior =
+                    parent.stateWord().fetch_or(parentMask, kClaimAcquire);
+                assert((pprior & parentMask) == 0,
+                       "radix teardown: the parent slot was already claimed");
+                (void)pprior;
+                const bool padded =
+                    a.claims.addOrMerge(parent, level - 1, 0, parentMask, false);
+                assert(padded, "radix teardown: claim set capacity (parent)");
+                (void)padded;
+                a.claims.entries[a.claims.count - 1].issued = true;
+                a.claims.entries[a.claims.count - 1].held   = true;
+            }
+
+            a.phase = Attempt::Phase::Committing;
+            markUnderClaim(node, level, a);
+
+            if (isRoot) {
+                // DEC-100's final unit: the bucket word is cleared inside this
+                // unit's section, and the root is retired like any other node —
+                // since DEC-103 there is no descriptor object, so the bucket
+                // word's reference is released by the root's OWN deleter. One
+                // object, one releaser.
+                if (bucketTable != nullptr) {
+                    bucketTable->entries[bucketIndex].store(0, kBucketPublishSuccess);
+                } else {
+                    rootRef = NodeRef();
+                }
+            } else {
+                // §11's named exemption: a post-mark parent-slot store is not an
+                // acquisition after a mark.
+                publishAfterMark(parent, parentSlot, 0, a);
+                // Released at unit END — see the header comment. The node's own
+                // whole-node mask is deliberately NOT released.
+                releaseClaim(parent.stateWord(), parentMask);
+                if (auto* e = a.claims.find(parent)) e->held = false;
+            }
+
+            Ops::template retire<Codec>(*domain, level, node);
+            // The node's own claim is never released: it is marked and retired,
+            // and §7.4 scopes the never-release rule to exactly that.
+            if (auto* e = a.claims.find(node)) e->held = false;
+        }
+
+    public:
+
         // The binding, read WITHOUT a section. Legal only on a quiesced tree —
         // between operations, with no concurrent mutator — which is exactly the
         // condition every caller below already requires for its own reasons

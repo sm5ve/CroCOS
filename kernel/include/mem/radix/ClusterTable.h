@@ -130,7 +130,7 @@ namespace kernel::mm::radix {
                 const uint64_t w = table->entries[i].load(kQuiescedRead);
                 if (BucketCodecT::isEmpty(w)) continue;
                 Tree t = treeFor(i);
-                t.destroyTree();
+                t.tearDownUnits();
             }
         }
 

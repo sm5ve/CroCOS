@@ -1045,7 +1045,7 @@ catching two bugs that no assertion about mappings would have seen.
 
 ---
 
-## D-032 — GAP (2026-08-08, Phase 3) — the teardown walk is not yet DEC-100's
+## D-032 — RESOLVED 2026-08-08 (same session) — the teardown walk is now DEC-100's
 
 §7.4's SEQUENCE is implemented in its stated order (`destroyAddressSpace`), and
 the phase plan's warning that "every reordering reviewed was a fatal" was taken
@@ -1087,3 +1087,33 @@ make `Detached` double as the address-space-gone answer.
 work item that is *partially* complete, and it is a **hard prerequisite for Phase
 4**, not merely a tidy-up. Landing the descent cache over a non-marking teardown
 is the exact defect §7.4 spends a paragraph on.
+
+---
+
+**RESOLUTION (same session).** `CoreTree::tearDownUnits` implements the walk:
+each node is its own unit — one read section, whole-node claim, mark, unlink,
+**retire** — with the parent-slot bit released at unit end while the node's own
+whole-node mask never is (§7.4 is explicit that holding it "would sit in the
+later unit's `fetch_or` prior and fire the quiescence assert on every process
+exit"). The final unit clears the bucket word inside its own section and retires
+the root like any other node; since DEC-103 there is no descriptor, so the
+bucket's reference is released by the root's own deleter — one object, one
+releaser.
+
+Both consequences above are gone with it. **(a)** The extra pre-walk drain is
+removed: every release now lands inside the single drain that follows, over
+disjoint slot sets, so the count reaches zero exactly once whichever releaser
+gets there last. **(b)** Every node is marked before it is unlinked, which is
+the Phase 4 prerequisite.
+
+The walk carries a node pointer across its children's section closes, which §7.3
+forbids in general. Sound here for a reason §7.4 states rather than assumes: by
+then the dying flag, thread destruction and `synchronize` have made the walk not
+merely uncontended but **unobserved**. Nothing else in the tree gets to make that
+argument, and the comment at the site says so.
+
+Pinned by `radix_teardown_walk_marks_and_retires_rather_than_destroying`, which
+runs §7.4's steps by hand so the window between the walk and the drain is
+observable, and checks all three properties in it: the root is marked, the nodes
+are still live objects (retired, not destroyed), and the bucket word is already
+clear. A synchronous walk fails the second of those immediately.
