@@ -100,3 +100,112 @@ pools, the root page) arrives.
 now carry a `static_assert(kNumSizeClasses == 10)` so they cannot silently miss
 a class, which is the trap a failable-path edit would otherwise be layered on
 top of.
+
+---
+
+## D-004 — FINDING — §7.2's edge-subdivision row states a minimal-shape figure as general
+
+**Spec**: `radix-tree.md` §7.2, the naming-slot transition table:
+
+> | subdivision, **edge** (`mmap` at a leaf's start or end) — child holds
+> survivor + the *new* record | **0** for the old record |
+
+**Realised**: 0 only when the survivor fits in ONE child slot. When the survivor
+is wider — which is the common case — the delta is `+(k − 1)` where k is the
+survivor's leaf count, exactly as for the middle punch.
+
+**Worked case** (pinned by
+`CoreTreeTest.cpp::radix_tree_edge_mmap_wide_survivor_takes_the_per_transition_delta`):
+a C2-rooted tree, 64 KiB slots over sixteen 4 KiB C3 children. A full-span leaf
+edge-punched by one page leaves a survivor spanning fifteen C3 slots, so the old
+record's count goes 1 → 15, not 1 → 1.
+
+**Why this is a finding rather than a misreading**: §7.2's *middle-punch* row was
+given exactly this caveat by DEC-066 — "k = 2 only in the minimal shape; a wide
+punch through a coarse leaf builds DEC-066's spine and k is its survivor-leaf
+count". The edge row is the same dispatch row with the same wide-survivor
+behaviour and did not get the same treatment. §6.3's action text is correct and
+general ("A survivor wider than one child slot therefore becomes **many**
+leaves"); it is the §7.2 table cell that reads as a rule.
+
+**Taken**: the per-transition rule, which §7.2 itself calls the normative
+statement ("Everything else falls out, which is the point of stating it this
+way"). The implementation applies it literally — `+1` per new naming slot at
+publish, `−1` for the slot that stopped — and takes no special case for either
+subdivision shape.
+
+**Risk if the table is read as a rule**: an implementation that hard-codes 0 for
+the edge case under-counts by 14 in the worked case above and frees the record
+while fifteen slots still name it — the premature-free DEC-048 exists to prevent,
+reached through the row that was supposed to be the safe one.
+
+**Suggested spec repair**: give the edge row the DEC-066 caveat, e.g. "**0** in
+the minimal shape (survivor fits one child slot); in general +(k − 1) for the
+survivor's leaf count k, per the transition rule".
+
+---
+
+## D-005 — CHOICE — the two codec instances differ in base policy, not in arithmetic
+
+**Spec**: §5.2 / DEC-023 — "Each codec ... has two instances: an **uncompressed**
+one for the userspace harness, whose mock arena is in the low half where the
+kernel's pointer-compression assumptions are false, and a compressed one for the
+kernel."
+
+A *literally* uncompressed harness codec cannot exist: a 64-bit pointer plus a
+24-bit sub-range does not fit in 64 bits. What is actually false under test is
+the kernel's **base** (VMSubstrate at root[510]) and its canonical-bit pattern —
+which DEC-023's own framing anticipates: "it makes the pointer-compression
+assumptions **parameters** rather than baked-in facts".
+
+**Taken**: one `SlotCodec<G, BasePolicy>` with two policy instances. The
+arithmetic (field widths, in-place pointer storage, tag bits, the guard bit) is
+shared; the policies differ in where the base comes from and what each asserts.
+
+**Consequence, and why it is an improvement**: §10 lists "the harness is
+structurally blind to the kernel codec's compression arithmetic" as a hazard.
+Sharing the arithmetic narrows that blindness to the base and the canonical-bit
+fact — the parts that genuinely differ — instead of leaving the shift/mask logic
+untested until Phase 5.
+
+The harness policy additionally binds the arena's **real extent** (64 MiB) rather
+than the nominal 512 GiB window, so an address past the arena is rejected. Without
+that, an out-of-arena pointer encodes and decodes cleanly while naming memory the
+tree does not own, and the "assert your own base and range" requirement is a
+formality. The kernel policy lands with Phase 5, where a kernel build first exists
+to bind it.
+
+---
+
+## D-006 — CHOICE — empty-node reclamation is implemented in Phase 1
+
+**Spec**: §6.4; `radix-tree-phase-2.md` lists reclamation as Phase 2 work, and
+Phase 1's exit gate does not mention it.
+
+Reclamation is mandatory (DEC-017) and its *serialized* form is decidable without
+any of Phase 2's machinery. Leaving it out would have made every Phase 1 churn
+test grow monotonically, which in turn makes the memory-returns-to-baseline
+target untestable and the validator's "no empty non-root node survived" check
+unwritable.
+
+**Taken**: implemented, in the shape Phase 2 needs rather than the easy one — the
+emptiness decision is computed from the node's occupancy count after the
+operation's clears, bottom-up, which is the same computation DEC-064 specifies
+against claim-frozen priors. Phase 2 replaces *where the counts come from*, not
+the decision. The walk terminates at the cluster root, which is never a
+candidate.
+
+---
+
+## D-007 — GAP — Phase 1 releases are synchronous
+
+`§7.1`'s "every release is deferred" rule cannot be honoured before RCU
+integration exists, so Phase 1's `releaseNamedMapping` and subtree release run
+inline. This is the one place Phase 1 knowingly does the thing §10 flags as "the
+natural implementation, since the commit walk already visits every node".
+
+It is safe here only because Phase 1 is single-threaded with no readers. Phase 2
+replaces it with unlink → `retire` → deleter, and the structure is already shaped
+for that: `releaseSubtree` releases node by node, each node releasing only the
+Mapping references *its own* leaf slots hold, child-node slots releasing nothing
+— which is exactly the deleter's contract, running early.

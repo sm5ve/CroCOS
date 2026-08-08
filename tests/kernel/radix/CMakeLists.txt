@@ -20,6 +20,11 @@ set(VMS_MOCKS ${CMAKE_CURRENT_SOURCE_DIR}/../vmsmalloc/mocks)
 set(RDX_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/../../TestMain.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/OracleTest.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/GeometryTest.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/CodecTest.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/DispatchTest.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/CoreTreeTest.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/ModelTest.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/mocks/RadixOracle.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/RandomSource.cpp
     ${VMS_MOCKS}/MockVMSubstrate.cpp
