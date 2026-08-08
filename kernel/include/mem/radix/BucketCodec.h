@@ -268,24 +268,16 @@ namespace kernel::mm::radix {
         // `ensureTLBEntryFresh` is a no-op and it has no page tables — which is
         // the DEC-047 precedent exactly.
         //
-        // An accessor rather than a bare call at each site, because there are
-        // seven of them across two headers and the failure mode of missing one
-        // is silent. The reference it returns is for IMMEDIATE use: freshness is
-        // per-CPU and per-touch, so holding one across an operation and
+        // Consumers hold a `SafePtr<BucketTable>` rather than a raw pointer, so
+        // the entry access below is reached through `operator->` and the call is
+        // unskippable. The reference it yields is for IMMEDIATE use: freshness
+        // is per-CPU and per-touch, so holding one across an operation and
         // re-reading through it would defeat the point.
         //
         // See also the note in `AddressSpace.h`: DEC-082 moved the control block
         // into pinned storage precisely to keep a freshness call off this path,
         // and the root page is the one per-address-space allocation that did not
         // move with it.
-        [[nodiscard]] Atomic<uint64_t>& fresh(size_t i) {
-            VMSubstrate::ensureTLBEntryFresh(this);
-            return entries[i];
-        }
-        [[nodiscard]] const Atomic<uint64_t>& fresh(size_t i) const {
-            VMSubstrate::ensureTLBEntryFresh(const_cast<BucketTable*>(this));
-            return entries[i];
-        }
 
         BucketTable(const BucketTable&)            = delete;
         BucketTable& operator=(const BucketTable&) = delete;

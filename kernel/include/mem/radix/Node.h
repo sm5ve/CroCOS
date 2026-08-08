@@ -253,64 +253,53 @@ namespace kernel::mm::radix {
     inline constexpr size_t kNodeHeaderBytes = 32;
 
     class NodeRef {
-        void* p = nullptr;
+        VMSubstrate::SafePtr<void> p{};
     public:
         NodeRef() = default;
         explicit NodeRef(void* raw) : p(raw) {}
 
-        // ─── The freshness obligation on a derived node pointer ────────────
-        //
-        // Nodes are vmsmalloc allocations, so a node's VA is subject to the same
-        // reclaim-and-re-back cycle as any other arena page — and a CPU that
-        // used that VA under a PREVIOUS tenant can hold a stale mapping for it.
-        // DEC-073 already states the rule for this exact situation: a link load
-        // goes through `protectWord`, and "whatever pointer it derives carries
-        // the `SafePtr` freshness obligation exactly as with `protect`". A node
-        // pointer decoded from a slot word IS such a pointer.
-        //
-        // The call goes where the pointer is DERIVED rather than at each read,
-        // and that is one call per node per walk instead of one per field: the
-        // page cannot be recycled again while this operation is standing on the
-        // node, because a live node is reachable and a reachable node is not
-        // reclaimable, and a retired one is inside the section that observed it.
-        //
-        // **Found by the in-kernel stress at Release/LTO speeds**, where a
-        // teardown walk read a stale node's slots, decoded a child pointer out
-        // of the previous tenant's bytes, and page-faulted following it — and
-        // where the same shape one step later faulted INSIDE
-        // `ensureTLBEntryFresh`, on a garbage `Mapping*` from the same stale
-        // read. Neither is reachable in the userspace harness, whose
-        // `ensureTLBEntryFresh` is a no-op.
-        //
-        // NOTE the cost, because it is not small and it is not yet priced: this
-        // is one call per level on the descent, the spec's hottest path, and
-        // RCU P4-ITEM-002 measured a freshness call at ~40 instructions
-        // pre-LTO. Whether nodes should instead come from storage that never
-        // recycles — DEC-082's answer for the control block — is a design
-        // question, recorded in D-042 rather than decided here.
-        [[nodiscard]] static NodeRef fresh(void* raw) {
-            if (raw != nullptr) VMSubstrate::ensureTLBEntryFresh(raw);
-            return NodeRef(raw);
-        }
-
-        explicit operator bool() const { return p != nullptr; }
-        void* raw() const { return p; }
+        explicit operator bool() const { return static_cast<bool>(p); }
         bool operator==(const NodeRef& o) const { return p == o.p; }
 
-        Atomic<uint64_t>& stateWord() const {
-            return *reinterpret_cast<Atomic<uint64_t>*>(static_cast<unsigned char*>(p) + 0);
-        }
-        Atomic<uint64_t>& refcount() const {
-            return *reinterpret_cast<Atomic<uint64_t>*>(static_cast<unsigned char*>(p) + 8);
-        }
+        // ─── Access is through SafePtr, and that is load-bearing ───────────
+        //
+        // Nodes are vmsmalloc allocations, so a node's VA is subject to the same
+        // reclaim-and-re-back cycle as any other arena page and a CPU that used
+        // that VA under a PREVIOUS tenant holds a stale mapping for it. DEC-073
+        // states the rule for exactly this: a link load goes through
+        // `protectWord`, and "whatever pointer it derives carries the `SafePtr`
+        // freshness obligation exactly as with `protect`". A node pointer
+        // decoded from a slot word is such a pointer.
+        //
+        // `SafePtr<void>` rather than `SafePtr<Node<G, V>>` because a descent
+        // stands on nodes of mixed valence and cannot name the concrete type —
+        // DEC-062's level->type map exists so it does not have to — while the
+        // header is byte-identical across valences, which is what makes a
+        // level-agnostic view over it well-defined. The `static_assert`s below
+        // are what keep that true if ITEM-055 ever reorders the header.
+        //
+        // **Per access, not once per pointer.** An earlier version of this made
+        // the call where the pointer was DERIVED and argued that one call
+        // sufficed because the page cannot be recycled while an operation stands
+        // on the node. The argument is true and the discipline was still wrong:
+        // freshness is a property of one CPU's mapping, so it has to be
+        // re-established by whoever is doing the touching, and an argument in a
+        // comment is not a mechanism. Going through `at<>` makes the call
+        // unskippable.
+        Atomic<uint64_t>& stateWord() const { return p.at<Atomic<uint64_t>>(0); }
+        Atomic<uint64_t>& refcount()  const { return p.at<Atomic<uint64_t>>(8); }
         Core::rcu::RetireHead& retireHead() const {
-            return *reinterpret_cast<Core::rcu::RetireHead*>(
-                static_cast<unsigned char*>(p) + 16);
+            return p.at<Core::rcu::RetireHead>(16);
         }
         Atomic<uint64_t>& slot(unsigned i) const {
-            return *(reinterpret_cast<Atomic<uint64_t>*>(
-                         static_cast<unsigned char*>(p) + kNodeHeaderBytes) + i);
+            return p.at<Atomic<uint64_t>>(kNodeHeaderBytes + i * sizeof(uint64_t));
         }
+
+        // The address, discharging nothing — for identity, for encoding into a
+        // slot word, and for the concrete-type cast `retire` and `destroy` need.
+        // Reading bytes through it is the mistake this whole class exists to
+        // make hard, so it is spelled apart from every accessor above.
+        [[nodiscard]] void* raw() const { return p.address(); }
     };
 
     namespace detail {

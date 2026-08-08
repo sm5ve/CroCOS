@@ -333,7 +333,7 @@ TEST(radix_model_an_address_mapped_before_and_after_is_never_lost) {
 
             // Snapshot everything outside the operation's range.
             std::vector<rdx::Mapping*> before(units);
-            for (uint64_t u = 0; u < units; u++) before[u] = tree.lookup(u * unit).mapping();
+            for (uint64_t u = 0; u < units; u++) before[u] = tree.lookup(u * unit).mapping().address();
 
             ASSERT_TRUE(tree.apply(lo, hi, v) == rdx::ApplyStatus::Ok);
             model.apply(lo, hi, v);

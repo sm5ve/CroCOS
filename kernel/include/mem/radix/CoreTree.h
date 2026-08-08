@@ -109,20 +109,22 @@ namespace kernel::mm::radix {
         // are cross-CPU accesses to vmsmalloc-backed memory. Deleters run
         // wherever a pump runs, which under RCU-DEC-006 stealing is usually not
         // the CPU that allocated the node.
-        VMSubstrate::ensureTLBEntryFresh(n);
+        const VMSubstrate::SafePtr<Node<G, V>> node(n);
         for (unsigned i = 0; i < V; i++) {
-            const uint64_t w = n->slots[i].load(kQuiescedRead);
+            const uint64_t w = node->slots[i].load(kQuiescedRead);
             if (Codec::isLeaf(w)) {
                 // Each `Mapping` is its own allocation on its own page: this
-                // node being fresh says nothing about the records it names.
-                releaseMappingRefFromDeleter(static_cast<Mapping*>(Codec::decodeLeaf(w)));
+                // node being fresh says nothing about the records it names, so
+                // the SafePtr is rebuilt rather than borrowed.
+                releaseMappingRef(VMSubstrate::SafePtr<Mapping>(
+                    static_cast<Mapping*>(Codec::decodeLeaf(w))));
             }
         }
         // The self-release. At zero the counting mechanism destroys.
         // ACQ_REL rather than DEC-069's release-plus-acquire-fence, for the
         // reason spelled out at kRefcountReleaseAcquire: the fence form is
         // correct and invisible to the release gate (D-029).
-        const uint64_t prior = n->refcount.fetch_sub(1, kRefcountReleaseAcquire);
+        const uint64_t prior = node->refcount.fetch_sub(1, kRefcountReleaseAcquire);
         assert(prior != 0, "radix: node structural refcount released below zero");
         if (prior == 1) destroyNode<G, V>(n);
     }
@@ -334,8 +336,10 @@ namespace kernel::mm::radix {
     // use-after-poison, and silent without it.
     class LookupResult {
     public:
+        using Ref = VMSubstrate::SafePtr<Mapping>;
+
         LookupResult() = default;
-        LookupResult(Mapping* m, uint64_t va, uint64_t lo, uint64_t hi)
+        LookupResult(Ref m, uint64_t va, uint64_t lo, uint64_t hi)
             : mappingPtr(m), searchVA(va), rangeLo(lo), rangeHi(hi) {}
 
         LookupResult(const LookupResult&)            = delete;
@@ -344,21 +348,36 @@ namespace kernel::mm::radix {
         LookupResult(LookupResult&& o) noexcept
             : mappingPtr(o.mappingPtr), searchVA(o.searchVA),
               rangeLo(o.rangeLo), rangeHi(o.rangeHi) {
-            o.mappingPtr = nullptr;
+            o.mappingPtr = Ref{};
         }
         LookupResult& operator=(LookupResult&& o) noexcept {
             if (this != &o) {
                 reset();
                 mappingPtr = o.mappingPtr; searchVA = o.searchVA;
                 rangeLo = o.rangeLo; rangeHi = o.rangeHi;
-                o.mappingPtr = nullptr;
+                o.mappingPtr = Ref{};
             }
             return *this;
         }
 
         ~LookupResult() { reset(); }
 
-        [[nodiscard]] Mapping* mapping() const { return mappingPtr; }
+        // ─── Why this returns a SafePtr and not a `Mapping*` ───────────────
+        //
+        // DEC-015 exists so the fault path can close its section and block on a
+        // userspace pager, which means this object is DESIGNED to outlive a
+        // section and a round-trip — and therefore to be used on a CPU that is
+        // not the one that looked it up. Freshness is a property of one CPU's
+        // mapping, so a call made at acquisition guarantees nothing to whoever
+        // resumes: that CPU may hold a stale entry for the record's page from a
+        // previous tenant. Handing out a raw pointer here made the caller's
+        // `baseVA` and `objectOffset` reads unguarded on exactly the path the
+        // whole feature was built around.
+        //
+        // The counted reference stops the page being recycled AGAIN; it says
+        // nothing about what happened before this CPU last looked. Only a
+        // per-access call answers that, which is what the SafePtr is.
+        [[nodiscard]] Ref mapping() const { return mappingPtr; }
         [[nodiscard]] uint64_t va() const { return searchVA; }
         [[nodiscard]] uint64_t lo() const { return rangeLo; }
         [[nodiscard]] uint64_t hi() const { return rangeHi; }   // inclusive
@@ -389,10 +408,10 @@ namespace kernel::mm::radix {
         void reset() {
             if (mappingPtr) {
                 releaseMappingRef(mappingPtr);
-                mappingPtr = nullptr;
+                mappingPtr = Ref{};
             }
         }
-        Mapping* mappingPtr = nullptr;
+        Ref      mappingPtr{};
         uint64_t searchVA = 0;
         uint64_t rangeLo = 0;
         uint64_t rangeHi = 0;
@@ -623,7 +642,7 @@ namespace kernel::mm::radix {
             if (!b) return;
             releaseSubtree(b.root, b.level);
             if (bucketTable != nullptr) {
-                bucketTable->fresh(bucketIndex).store(0, kPrivateInit);
+                buckets()->entries[bucketIndex].store(0, kPrivateInit);
             } else {
                 rootRef = NodeRef();
             }
@@ -676,7 +695,7 @@ namespace kernel::mm::radix {
             for (unsigned i = 0; i < n; i++) {
                 const uint64_t w = node.slot(i).load(kQuiescedRead);
                 if (Codec::isChild(w)) {
-                    tearDownUnitAt(NodeRef::fresh(Codec::decodeChild(w)), level + 1, node, i, false);
+                    tearDownUnitAt(NodeRef(Codec::decodeChild(w)), level + 1, node, i, false);
                 }
             }
 
@@ -729,7 +748,7 @@ namespace kernel::mm::radix {
                 // word's reference is released by the root's OWN deleter. One
                 // object, one releaser.
                 if (bucketTable != nullptr) {
-                    bucketTable->fresh(bucketIndex).store(0, kBucketPublishSuccess);
+                    buckets()->entries[bucketIndex].store(0, kBucketPublishSuccess);
                 } else {
                     rootRef = NodeRef();
                 }
@@ -759,9 +778,9 @@ namespace kernel::mm::radix {
         // an operation would drop the protected-link-load primitive.
         [[nodiscard]] RootBinding quiescedBinding() const {
             if (bucketTable == nullptr) return RootBinding{rootRef, level0, baseVA};
-            const uint64_t w = bucketTable->fresh(bucketIndex).load(kQuiescedRead);
+            const uint64_t w = buckets()->entries[bucketIndex].load(kQuiescedRead);
             const auto d = BucketCodecT::decode(w, bucketIndex);
-            return RootBinding{NodeRef::fresh(d.root), d.level, d.base};
+            return RootBinding{NodeRef(d.root), d.level, d.base};
         }
 
         // Quiesced introspection, all of it. On a bucket-homed tree these read
@@ -953,27 +972,22 @@ namespace kernel::mm::radix {
                     // dereferencing the Mapping at all, which is the common
                     // unmapped-VA lookup (DEC-022).
                     if (!Codec::covers(word, va - slotBase, level)) return {};
-                    auto* m = static_cast<Mapping*>(Codec::decodeLeaf(word));
-                    // The reader's first touch of the record's body. The slot
-                    // word came through `protectWord`, and DEC-073 is explicit
-                    // that "whatever pointer it derives carries the SafePtr
-                    // freshness obligation exactly as with `protect`" — this is
-                    // the site where that obligation falls due on the READ path.
-                    //
-                    // One call covers everything the caller does through the
-                    // reference afterwards, and that is an argument rather than
-                    // an assumption: the counted reference is what stops the
-                    // record being destroyed and its page recycled, so nothing
-                    // can invalidate this CPU's mapping of it while the
-                    // reference is held.
-                    VMSubstrate::ensureTLBEntryFresh(m);
+                    // DEC-073: the slot word came through `protectWord`, and
+                    // "whatever pointer it derives carries the SafePtr freshness
+                    // obligation exactly as with `protect`". The obligation
+                    // travels WITH the reference from here — `LookupResult`
+                    // holds a `SafePtr`, so the caller's later reads are covered
+                    // even if it resumes on another CPU after a pager
+                    // round-trip, which a call made only here would not be.
+                    const VMSubstrate::SafePtr<Mapping> m(
+                        static_cast<Mapping*>(Codec::decodeLeaf(word)));
                     // §7.3's acquisition law: a counted reference is acquired
                     // ONLY inside the read section in which that link was
                     // observed. Taking it after the close would let the node be
                     // unlinked, retired, graced, released to zero and destroyed,
                     // and its slab slot handed to an unrelated allocation, before
                     // the fetch_add landed on a stranger.
-                    m->acquireRef();
+                    acquireMappingRef(m);
                     uint64_t lo = 0, hi = 0;
                     Codec::absoluteRange(word, slotBase, level, lo, hi);
                     return LookupResult{m, va, lo, hi};
@@ -982,7 +996,7 @@ namespace kernel::mm::radix {
                     assert(level < G.levelCount,
                            "radix: child pointer at the deepest level — the geometry says "
                            "there is nothing below it");
-                    node = NodeRef::fresh(Codec::decodeChild(word));
+                    node = NodeRef(Codec::decodeChild(word));
                     nodeBase = slotBase;
                     level++;
                     break;
@@ -1142,7 +1156,7 @@ namespace kernel::mm::radix {
                 }
 
                 case SlotKind::Child:
-                    node     = NodeRef::fresh(Codec::decodeChild(word));
+                    node     = NodeRef(Codec::decodeChild(word));
                     nodeBase = slotBase;
                     level++;
                     break;
@@ -1546,7 +1560,7 @@ namespace kernel::mm::radix {
                 // A leaf or an empty slot has no node beneath it to be the site.
                 if (!Codec::isChild(word)) return s;
                 s.nodeBase += uint64_t{first} * slotSpan(G, s.level);
-                s.node = NodeRef::fresh(Codec::decodeChild(word));
+                s.node = NodeRef(Codec::decodeChild(word));
                 s.level++;
             }
         }
@@ -1722,9 +1736,9 @@ namespace kernel::mm::radix {
             // "there is no exception". §7.3: one load, all three fields, and
             // nothing from it outlives the caller's section.
             const uint64_t w =
-                kernel::rcu::protectWord(*domain, bucketTable->fresh(bucketIndex));
+                kernel::rcu::protectWord(*domain, buckets()->entries[bucketIndex]);
             const auto d = BucketCodecT::decode(w, bucketIndex);
-            return RootBinding{NodeRef::fresh(d.root), d.level, d.base};
+            return RootBinding{NodeRef(d.root), d.level, d.base};
         }
 
     private:
@@ -1740,6 +1754,12 @@ namespace kernel::mm::radix {
         NodeRef  rootRef{};
         unsigned level0 = 0;
         uint64_t baseVA = 0;
+
+        // The root page, reached through a SafePtr so every bucket-word access
+        // discharges its freshness obligation (see BucketTable's own note).
+        [[nodiscard]] VMSubstrate::SafePtr<BucketTable> buckets() const {
+            return VMSubstrate::SafePtr<BucketTable>(bucketTable);
+        }
 
         BucketTable* bucketTable = nullptr;
         size_t       bucketIndex = 0;
@@ -1902,7 +1922,7 @@ namespace kernel::mm::radix {
             for (unsigned i = 0; i < n; i++) {
                 const uint64_t w = node.slot(i).load(kQuiescedRead);
                 if (Codec::isChild(w)) {
-                    destroyUnpublishedSubtree(NodeRef::fresh(Codec::decodeChild(w)), level + 1);
+                    destroyUnpublishedSubtree(NodeRef(Codec::decodeChild(w)), level + 1);
                 }
                 // Leaf slots hold no reference yet — that is the whole point of
                 // the commit-phase rule.
@@ -1930,11 +1950,10 @@ namespace kernel::mm::radix {
                     // Same obligation on the WRITER side: these records were
                     // read out of slot words and this CPU may never have touched
                     // them before.
-                    auto* m = static_cast<Mapping*>(Codec::decodeLeaf(w));
-                    VMSubstrate::ensureTLBEntryFresh(m);
-                    m->acquireRef();
+                    acquireMappingRef(VMSubstrate::SafePtr<Mapping>(
+                        static_cast<Mapping*>(Codec::decodeLeaf(w))));
                 } else if (Codec::isChild(w)) {
-                    takeSubtreeReferences(NodeRef::fresh(Codec::decodeChild(w)), level + 1);
+                    takeSubtreeReferences(NodeRef(Codec::decodeChild(w)), level + 1);
                 }
             }
         }
@@ -1958,7 +1977,7 @@ namespace kernel::mm::radix {
             for (unsigned i = 0; i < n; i++) {
                 const uint64_t w = node.slot(i).load(kQuiescedRead);
                 if (Codec::isChild(w)) {
-                    releaseSubtree(NodeRef::fresh(Codec::decodeChild(w)), level + 1);
+                    releaseSubtree(NodeRef(Codec::decodeChild(w)), level + 1);
                 }
             }
             Ops::template runDeleter<Codec>(level, node);
@@ -2507,7 +2526,7 @@ namespace kernel::mm::radix {
             for (unsigned i = 0; i < n; i++) {
                 const uint64_t w = node.slot(i).load(kSlotLoad);
                 if (Codec::isChild(w)) {
-                    const ApplyStatus st = planDetachment(NodeRef::fresh(Codec::decodeChild(w)),
+                    const ApplyStatus st = planDetachment(NodeRef(Codec::decodeChild(w)),
                                                           level + 1,
                                                           nodeBase + uint64_t{i} * span, a);
                     if (st != ApplyStatus::Ok) return st;
@@ -2797,7 +2816,7 @@ namespace kernel::mm::radix {
                 }
 
                 if (d.action == DispatchAction::DescendIntoChild) {
-                    if (!redispatchAgrees(NodeRef::fresh(Codec::decodeChild(word)), level + 1,
+                    if (!redispatchAgrees(NodeRef(Codec::decodeChild(word)), level + 1,
                                           slotBase, clipLo, clipHi, value, a)) {
                         return false;
                     }
@@ -2822,7 +2841,7 @@ namespace kernel::mm::radix {
                     // node this attempt does not hold leaves it permanently
                     // marked and still linked, and every later writer stalls on
                     // it forever.
-                    if (!detachmentIsFrozen(NodeRef::fresh(Codec::decodeChild(word)),
+                    if (!detachmentIsFrozen(NodeRef(Codec::decodeChild(word)),
                                             level + 1, a.claims)) {
                         return false;
                     }
@@ -2917,7 +2936,7 @@ namespace kernel::mm::radix {
             for (unsigned i = 0; i < n; i++) {
                 const uint64_t w = node.slot(i).load(kClaimedSlotLoad);
                 if (Codec::isChild(w)) {
-                    if (!detachmentIsFrozen(NodeRef::fresh(Codec::decodeChild(w)), level + 1, set)) {
+                    if (!detachmentIsFrozen(NodeRef(Codec::decodeChild(w)), level + 1, set)) {
                         return false;
                     }
                 }
@@ -3274,7 +3293,7 @@ namespace kernel::mm::radix {
             for (unsigned i = 0; i < n; i++) {
                 const uint64_t w = node.slot(i).load(kClaimedSlotLoad);
                 if (Codec::isChild(w)) {
-                    retireSubtree(NodeRef::fresh(Codec::decodeChild(w)), level + 1, a);
+                    retireSubtree(NodeRef(Codec::decodeChild(w)), level + 1, a);
                 }
             }
             retireNode(node, level, a);
@@ -3296,7 +3315,7 @@ namespace kernel::mm::radix {
             for (unsigned i = 0; i < n; i++) {
                 const uint64_t w = node.slot(i).load(kClaimedSlotLoad);
                 if (Codec::isChild(w)) {
-                    markSubtree(NodeRef::fresh(Codec::decodeChild(w)), level + 1, a);
+                    markSubtree(NodeRef(Codec::decodeChild(w)), level + 1, a);
                 }
             }
         }
@@ -3309,7 +3328,7 @@ namespace kernel::mm::radix {
             for (unsigned i = 0; i < n; i++) {
                 const uint64_t w = node.slot(i).load(kQuiescedRead);
                 if (Codec::isChild(w)) {
-                    walkNode(NodeRef::fresh(Codec::decodeChild(w)), level + 1,
+                    walkNode(NodeRef(Codec::decodeChild(w)), level + 1,
                              nodeBase + uint64_t{i} * span, fn);
                 }
             }
@@ -3320,7 +3339,7 @@ namespace kernel::mm::radix {
             const unsigned v = valence(G, level);
             for (unsigned i = 0; i < v; i++) {
                 const uint64_t w = node.slot(i).load(kQuiescedRead);
-                if (Codec::isChild(w)) countNodes(NodeRef::fresh(Codec::decodeChild(w)), level + 1, n);
+                if (Codec::isChild(w)) countNodes(NodeRef(Codec::decodeChild(w)), level + 1, n);
             }
         }
     };

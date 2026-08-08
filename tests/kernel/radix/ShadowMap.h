@@ -121,7 +121,7 @@ namespace CroCOSTest::radix {
                 std::snprintf(msg, sizeof(msg),
                               "%s: cover mismatch at VA %llu — tree says %p, model says %p",
                               what, static_cast<unsigned long long>(va),
-                              static_cast<const void*>(got.mapping()),
+                              static_cast<const void*>(got.mapping().address()),
                               static_cast<const void*>(want));
                 throw AssertionFailure(std::string(msg));
             }

@@ -241,6 +241,25 @@ namespace kernel::mm::radix {
     inline void noteMappingDestroyed() {}
 #endif
 
+    // ─── Releasing a reference (§7.1; RCU-DEC-006, the DEC-047 bug class) ──
+    //
+    // Takes a `SafePtr`, and **every** releaser takes one — deleters and
+    // readers alike. An earlier version split the two, with a
+    // `...FromDeleter` variant that made the freshness call and a plain one
+    // that did not, on the reasoning that §7.1 names deleters only and that
+    // putting the call on the reader's release would move an
+    // `ensureTLBEntryFresh` onto the fault path, which is the cost DEC-082
+    // rearranged a control block to avoid.
+    //
+    // **That split was wrong.** A release is an RMW on the record's count word,
+    // and freshness is a property of one CPU's mapping. DEC-015 exists so the
+    // fault path can close its section and block on a userspace pager, so the
+    // thread that took the reference and the thread that drops it can be on
+    // different CPUs — and the second one may hold a stale entry for the
+    // record's page from a previous tenant. The reader's release is therefore
+    // in exactly the position the deleter's is, and the only reason it looked
+    // different is that §7.1's list was written about deleters.
+    //
     // The counting mechanism owns destruction at zero — not the releaser
     // (§7.1 / RCU-DEC-045: a deleter may release a counted reference the retired
     // object holds, but must not traverse the referent beyond its refcount word;
@@ -248,43 +267,20 @@ namespace kernel::mm::radix {
     //
     // Lives here rather than in CoreTree.h because DeferredRelease's deleter
     // needs it and CoreTree.h is downstream of that header.
-    inline void releaseMappingRefs(Mapping* m, uint64_t n) {
+    inline void releaseMappingRefs(VMSubstrate::SafePtr<Mapping> m, uint64_t n) {
         if (m->releaseRefs(n)) {
             noteMappingDestroyed();
-            VMSubstrate::destroy(VMSubstrate::SafePtr<Mapping>(m));
+            VMSubstrate::destroy(m);
         }
     }
-    inline void releaseMappingRef(Mapping* m) { releaseMappingRefs(m, 1); }
+    inline void releaseMappingRef(VMSubstrate::SafePtr<Mapping> m) {
+        releaseMappingRefs(m, 1);
+    }
 
-    // ─── §7.1's deleter freshness (RCU-DEC-006; the DEC-047 bug class) ─────
-    //
-    // "**Deleters touch bodies, and freshness is not free there**: `onPreTouch`
-    // covers each retire subject's `RetireHead` fields and nothing else, so
-    // every access a deleter makes beyond the head — a node deleter reading its
-    // own slots, **either deleter RMW-ing a `Mapping`'s count word**, the record
-    // deleter reading its own fields — is a cross-CPU access to vmsmalloc-backed
-    // memory and goes through the `SafePtr` / `ensureTLBEntryFresh` discipline."
-    //
-    // A named entry point rather than a bare call at each site, because the
-    // distinction it encodes is invisible at the call site and structurally
-    // invisible to the userspace harness: the mock's `ensureTLBEntryFresh` is a
-    // no-op, so a build with every one of these calls deleted passes 150 tests
-    // on two sanitizers. **This exact omission was found by the first in-kernel
-    // run**, as a `Mapping` refcount reading zero through a stale mapping — the
-    // same shape, on the same allocator, as vmsmalloc's own DEC-047.
-    //
-    // Deliberately NOT folded into `releaseMappingRefs`: the reader-side release
-    // (a `LookupResult` going out of scope) is not a deleter and is not on
-    // §7.1's list, and putting the call there would move an `ensureTLBEntryFresh`
-    // onto the fault path — the cost DEC-082 rearranged an entire control block
-    // to avoid. Which sites owe it is a decision, so it is spelled as one.
-    inline void releaseMappingRefsFromDeleter(Mapping* m, uint64_t n) {
-        VMSubstrate::ensureTLBEntryFresh(m);
-        releaseMappingRefs(m, n);
-    }
-    inline void releaseMappingRefFromDeleter(Mapping* m) {
-        releaseMappingRefsFromDeleter(m, 1);
-    }
+    // The acquire side, for the same reason: `acquireRef` is an RMW on the same
+    // word, and a reader reaching a record it has never touched before is the
+    // first-touch case exactly.
+    inline void acquireMappingRef(VMSubstrate::SafePtr<Mapping> m) { m->acquireRef(); }
 
 }  // namespace kernel::mm::radix
 

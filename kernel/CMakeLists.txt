@@ -194,6 +194,14 @@ option(CROCOS_RADIX_STRESS "Run the radix-tree in-kernel stress instead of the R
 # path, so OFF by default.
 option(CROCOS_RADIX_NODE_CENSUS "Count live radix nodes and Mapping records" OFF)
 
+# Operations per CPU per stress cycle. The default keeps the CHURN the subject;
+# lowering it (24 is the calibrated value) makes the address-space LIFECYCLE the
+# subject instead, because cycles are bounded by wall clock — a debug build goes
+# from 4 cycles per boot to 1025. That is what turned D-041's Release-only
+# failures into a debug reproduction with every assert live, so it is a build
+# setting rather than a constant to edit and forget.
+set(CROCOS_RADIX_STRESS_OPS "" CACHE STRING "radix stress: ops per CPU per cycle (default 512; 24 stresses the lifecycle)")
+
 add_executable(Kernel ${KERNEL_SRC} ${GENERATED_INIT_CPP})
 if(CROCOS_FRESHNESS_STATS)
     target_compile_definitions(Kernel PRIVATE CROCOS_FRESHNESS_STATS)
@@ -206,6 +214,9 @@ if(CROCOS_RADIX_STRESS)
     # in live nodes, and without the counters the stress would report a bound it
     # never measured.
     target_compile_definitions(Kernel PRIVATE CROCOS_RADIX_STRESS CROCOS_RADIX_NODE_CENSUS)
+    if(CROCOS_RADIX_STRESS_OPS)
+        target_compile_definitions(Kernel PRIVATE CROCOS_RADIX_STRESS_OPS=${CROCOS_RADIX_STRESS_OPS})
+    endif()
 elseif(CROCOS_RADIX_NODE_CENSUS)
     target_compile_definitions(Kernel PRIVATE CROCOS_RADIX_NODE_CENSUS)
 endif()

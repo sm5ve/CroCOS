@@ -161,8 +161,8 @@ struct Pair {
             if (!dMapped) continue;
 
             // Identity, via the token each tree's record was built with.
-            const uint64_t dt = tokenOf.at(d.mapping());
-            const uint64_t ut = tokenOf.at(u.mapping());
+            const uint64_t dt = tokenOf.at(d.mapping().address());
+            const uint64_t ut = tokenOf.at(u.mapping().address());
             if (dt != ut) {
                 char msg[256];
                 std::snprintf(msg, sizeof(msg),
@@ -355,19 +355,19 @@ TEST(radix_decomposition_partial_child_edge_maps_the_tail_in_a_sparse_sibling) {
                           "the site predicate dropped it (§6.5)", (unsigned long long)va);
             throw AssertionFailure(std::string(msg));
         }
-        ASSERT_EQ(uint64_t{8888}, p.tokenOf.at(r.mapping()));
+        ASSERT_EQ(uint64_t{8888}, p.tokenOf.at(r.mapping().address()));
     }
     // ...and the part of the sparse sibling PAST the range is untouched.
     {
         const auto r = p.decomposed.lookup(104);
         ASSERT_TRUE(static_cast<bool>(r));
-        ASSERT_EQ(uint64_t{3000}, p.tokenOf.at(r.mapping()));
+        ASSERT_EQ(uint64_t{3000}, p.tokenOf.at(r.mapping().address()));
     }
     // ...as is the head of root slot 0, below the range's edge.
     {
         const auto r = p.decomposed.lookup(0);
         ASSERT_TRUE(static_cast<bool>(r));
-        ASSERT_EQ(uint64_t{2000}, p.tokenOf.at(r.mapping()));
+        ASSERT_EQ(uint64_t{2000}, p.tokenOf.at(r.mapping().address()));
     }
 }
 

@@ -166,8 +166,8 @@ namespace kernel::mm::radix {
                 // The record is vmsmalloc-backed and may have been last written
                 // by another CPU's deleter — this load of its `next` is the
                 // first touch, and it precedes the CAS that takes ownership.
-                VMSubstrate::ensureTLBEntryFresh(h);
-                DeferredRelease* n = h->next.load(kQuiescedRead);
+                DeferredRelease* n =
+                    VMSubstrate::SafePtr<DeferredRelease>(h)->next.load(kQuiescedRead);
                 if (head.compare_exchange(h, n, kPoolPop, kPoolPop)) {
                     depth.fetch_sub(1, kPoolAccounting);
                     return h;
@@ -188,20 +188,21 @@ namespace kernel::mm::radix {
     // allocating-`munmap` hazard one step removed).
     inline void deleteDeferredRelease(DeferredRelease* r) {
         // onPreTouch covered `head` and nothing else. Everything below is a
-        // cross-CPU access to the record's body.
-        VMSubstrate::ensureTLBEntryFresh(r);
+        // cross-CPU access to the record's body, so it goes through a SafePtr
+        // rather than through a bare freshness call and a raw pointer.
+        const VMSubstrate::SafePtr<DeferredRelease> rec(r);
 
-        Mapping* const m               = r->mapping;
-        const uint64_t delta           = r->delta;
-        DeferredReleasePool* const home = r->homePool;
+        Mapping* const m               = rec->mapping;
+        const uint64_t delta           = rec->delta;
+        DeferredReleasePool* const home = rec->homePool;
 
         assert(m != nullptr, "radix DeferredRelease: retired record names no Mapping");
         assert(home != nullptr, "radix DeferredRelease: retired record has no home pool — "
                                 "it can never be returned, which is a permanent shrink of "
                                 "the fixed population");
 
-        r->mapping = nullptr;
-        r->delta   = 0;
+        rec->mapping = nullptr;
+        rec->delta   = 0;
 
         // Release BEFORE the push. After the push the record belongs to its
         // owner again and may be re-drawn and rewritten at any moment; the
@@ -210,7 +211,7 @@ namespace kernel::mm::radix {
         // §7.1: "either deleter RMW-ing a `Mapping`'s count word". The record
         // was made fresh above; the RECORD IT NAMES is a separate allocation on
         // a separate page and owes its own call.
-        releaseMappingRefsFromDeleter(m, delta);
+        releaseMappingRefs(VMSubstrate::SafePtr<Mapping>(m), delta);
         home->push(r);
     }
 

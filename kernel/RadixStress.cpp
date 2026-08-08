@@ -84,12 +84,16 @@ namespace radix_stress {
     // probe loop over a claimed two-pass attempt — so the per-cycle count is
     // small and the cycle count is what accumulates coverage.
     // **Also the knob that makes the address-space LIFECYCLE the thing under test
-    // rather than the churn.** At 512 a debug build reaches 4 cycles inside the
-    // 20 s shutdown window; at **24** it reaches 1025, which is what turned
-    // D-041's rare Release-only failures into a debug-build reproduction with
-    // asserts live. Lower it before investigating anything create/teardown
-    // shaped; leave it here for ordinary runs, where the churn is the point.
-    constexpr unsigned kOpsPerCycle   = 512;
+    // rather than the churn**, which is why it is a build setting
+    // (`-DCROCOS_RADIX_STRESS_OPS=24`) and not a constant to edit. At the
+    // default a debug build reaches 4 cycles inside the 20 s shutdown window; at
+    // 24 it reaches 1025, which is what turned D-041's Release-only failures
+    // into a debug reproduction with every assert live. Lower it before
+    // investigating anything create/teardown shaped.
+#ifndef CROCOS_RADIX_STRESS_OPS
+#define CROCOS_RADIX_STRESS_OPS 512
+#endif
+    constexpr unsigned kOpsPerCycle   = CROCOS_RADIX_STRESS_OPS;
 
     // Live mappings a CPU keeps at once. Small enough that the unmap and
     // MAP_FIXED rows fire constantly rather than being crowded out by

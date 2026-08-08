@@ -397,13 +397,19 @@ TEST(radix_concurrent_subtree_replacement_is_atomic) {
             stop.store(true, std::memory_order_release);
             return;
         }
-        for (unsigned round = 0; round < 200000 && !stop.load(std::memory_order_acquire);
-             round++) {
+        // At least one full sweep before consulting `stop`. The replacer's 200
+        // whole-slot replacements can finish before a reader thread is even
+        // scheduled, and the loop as originally written then made zero
+        // observations and failed its own vacuity check — a start-order race in
+        // the test, not in the tree, but one that fires often enough to matter
+        // once anything shifts the timing.
+        for (unsigned round = 0; round < 200000; round++) {
             for (uint64_t va = 0; va < slot; va += kPage) {
                 const auto r = tree.lookup(va);
                 observations.fetch_add(1, std::memory_order_relaxed);
                 if (r) (void)r.mapping()->offsetFor(va);
             }
+            if (stop.load(std::memory_order_acquire)) break;
         }
     });
 

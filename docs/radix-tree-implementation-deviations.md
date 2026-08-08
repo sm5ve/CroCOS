@@ -1420,7 +1420,26 @@ direction — LTO is not only an optimisation, it is a diagnostic.
 
 ---
 
-## D-041 — OPEN (2026-08-08, Phase 5) — two rare Release-only failures, not yet diagnosed
+## D-041 — RESOLVED (page fault) / WATCH (record residue) — the two rare Release-only failures
+
+**RESOLUTION (same session).** The page fault was the **reader-side `Mapping`
+access on a migrated thread**, and it is gone: with `LookupResult` holding a
+`SafePtr<Mapping>` and every touch of a record's body going through it,
+Release/LTO is **8 runs out of 8 clean at 1025 cycles**, against 6 of 8 with
+D-042's node fix alone and roughly 4 of 8 before either. See D-044 for the
+mechanism — a freshness call made once at acquisition guarantees nothing to a CPU
+that did not make it, and DEC-015 exists precisely so the reference can cross to
+one.
+
+The `Mapping` residue of 2 has not recurred since and stays a **watch item**
+rather than a resolved one: it was seen once, the mechanism was never
+established, and one clean sweep is not evidence of absence.
+
+The original text follows.
+
+---
+
+## D-041 (original) — two rare Release-only failures, not yet diagnosed
 
 Both appear only in the **Release/LTO** build, which runs ~250x more cycles in the
 same 20 s window (1025 cycles vs 4), so they are rate-limited discoveries rather
@@ -1522,7 +1541,50 @@ Three answers, and choosing between them is Spencer's:
 
 ---
 
-## D-043 — OPEN (Phase 5) — a spinlock SELF-deadlock in the address-space lifecycle, with a reproduction
+## D-043 — DIAGNOSED (Phase 5) — `klog` is not reentrant, and an interrupt-context log can self-deadlock against one in progress
+
+**Not a radix defect.** A pre-existing kernel-wide hazard that the stress's klog
+rate makes likely, and the stack trace names it exactly:
+
+```
+Core::AtomicPrintStream::AtomicPrintStream(PrintStream&)      <- re-acquires
+kernel::enqueueShutdown()::lambda                             <- klog("Goodbye :)")
+kernel::timing::dispatchTimerEvent()
+arch::amd64::interrupts::LAPICTimer::executeCallback(...)
+kernel::interrupts::managed::dispatchInterrupt(...)
+```
+
+`AtomicPrintStream` holds **one global `Spinlock` for the whole lifetime of the
+temporary**, so a `klog()` expression is a critical section spanning every `<<`
+in it. The shutdown timer fires on a CPU that is mid-way through one — the log
+cuts off at `rcu: domain [radix-as] ready — 8 slots across 1 ` — its callback
+klogs, and the same CPU re-acquires a lock it already holds.
+
+So **any `klog` from interrupt context can self-deadlock against a `klog` in
+progress on the same CPU.** Nothing about this is specific to the radix tree; the
+stress merely makes it probable, by driving ~1025 address-space creations per
+boot and therefore ~1025 `Domain::init` log lines on CPU 0, which gives the 20 s
+shutdown timer a good chance of landing inside one.
+
+Two things worth noting beyond the fix:
+
+- **The detector saved this run.** `SUPPORTS_SPINLOCK_DEADLOCK_DETECTION` is
+  debug-only, so in a release build the same interleaving is a silent hard hang
+  with the print lock held — and the hang watchdog cannot report it, because the
+  watchdog is itself a timer event on a CPU that is now spinning in an ISR.
+- **The fix is not the radix tree's to choose.** The options are a per-CPU
+  reentrancy allowance on the print lock, masking interrupts for the duration of
+  a `klog` expression, or deferring interrupt-context logging to a ring the way
+  `HighReliabilityRingBuffer` already permits. **Flagged for Spencer.**
+
+Reproduction: `-DCROCOS_RADIX_STRESS=ON -DCROCOS_RADIX_STRESS_OPS=24`, debug,
+`-smp 8`, about one run in six.
+
+The original entry follows.
+
+---
+
+## D-043 (original) — a spinlock SELF-deadlock in the address-space lifecycle, with a reproduction
 
 Shrinking `kOpsPerCycle` from 512 to 24 turns the debug build's 4 cycles into
 1025 and makes D-041's Release-only failures reproducible **in a debug build with
@@ -1559,3 +1621,80 @@ The third is the cheapest to rule out and should go first.
 
 **Not diagnosed. Debug reproduction: `-DCROCOS_RADIX_STRESS=ON`, debug build,
 `kOpsPerCycle = 24`, `-smp 8`, about one run in four.**
+
+---
+
+## D-044 — CHOICE (2026-08-08, Phase 5, user-directed) — the freshness discipline is `SafePtr`, and the API grew to fit
+
+D-039 and D-042 fixed five freshness sites with **bare `ensureTLBEntryFresh`
+calls**. Spencer's correction, and it is the right one: DEC-028 says "every read
+of allocator-returned memory goes through `SafePtr<T>`", the VMM is `SafePtr`'s
+only consumer, and where the type could not express a site the answer was to
+widen the type rather than to reach past it.
+
+### What was wrong, not merely unidiomatic
+
+The bare calls at the deleter sites were ugly. **The one on the reader path was
+incorrect**, and it is what D-041's page fault was:
+
+`descendLocked` called `ensureTLBEntryFresh(m)` once, at reference acquisition,
+justified by "one call covers everything the caller does through the reference,
+because the reference stops the page being recycled". The second half is true and
+the first does not follow. **Freshness is a property of ONE CPU's mapping.**
+DEC-015 exists so the fault path can close its section and block on a userspace
+pager — after which the thread can resume on a *different* CPU, which may hold a
+stale entry for the record's page from a previous tenant and never made the call.
+`LookupResult::mapping()` then handed out a raw `Mapping*`, so the VMM's
+`baseVA` / `objectOffset` reads were unguarded on precisely the path the whole
+feature was built around.
+
+Measured: Release/LTO goes from 6-of-8 clean (D-042 alone) to **8-of-8 at 1025
+cycles**.
+
+### What the API gained
+
+- **`T* address()`** — the typed address, discharging nothing. Named apart from
+  every accessor so "this one genuinely reads no bytes" is sayable in the
+  vocabulary: identity comparison, encoding into a slot word, the concrete-type
+  cast `retire` and `destroy` need.
+- **`at<U>(byteOffset)`** — a typed sub-object reference, made fresh on **its
+  own** page rather than the base's, which matters for anything that can straddle
+  a page and costs nothing when it cannot.
+- **`SafePtr<void>`** — the type-erased form, whose motivating consumer is
+  `NodeRef`. A descent stands on nodes of mixed valence and cannot name a
+  concrete `Node<G, V>` (DEC-062's level→type map exists so it does not have to),
+  so `SafePtr<Node<...>>` cannot be formed — yet the obligation is identical.
+  Without this the only way to write the descent is a bare `ensureTLBEntryFresh`
+  plus a `reinterpret_cast`, which is exactly the unguarded shape the type exists
+  to prevent.
+- **Hidden-friend comparisons**, so a raw pointer on either side works. An
+  identity check that had to be spelled `a.address() == b` would push callers
+  towards holding raw pointers, which is the habit being broken.
+- A default constructor and a move assignment, so `LookupResult` can hold one.
+
+### The collapse this forced, which is the useful part
+
+`releaseMappingRefs` previously had a `...FromDeleter` variant that made the
+freshness call and a plain one that did not, split on the reasoning that §7.1
+names deleters only and that a call on the reader's release would land on the
+fault path. **The split is gone.** A release is an RMW on the record's count
+word, and by the migration argument above the reader's release is in exactly the
+position the deleter's is. The only reason it looked different is that §7.1's
+list was written about deleters. One entry point now, and `acquireMappingRef`
+alongside it for the same reason.
+
+### Cost, still unpriced
+
+Per-access rather than per-pointer means the descent pays one call per level
+(`NodeRef::slot`), the writer paths pay one per state-word touch, and the reader
+pays one per record access. D-042's three options are unchanged and this makes
+choosing between them more urgent, not less.
+
+### One test repaired in passing
+
+`radix_concurrent_subtree_replacement_is_atomic` had a start-order race of its
+own: the replacer's 200 whole-slot replacements can finish before a reader thread
+is scheduled, and the reader loop consulted `stop` before its first sweep, so it
+made zero observations and failed its own vacuity check. It now completes one
+full sweep before checking. A test bug, not a tree bug, but one that fires
+whenever anything shifts the timing — which this change did.
