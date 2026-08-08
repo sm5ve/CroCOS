@@ -34,6 +34,9 @@ std::atomic<size_t> gTypeCount{0};
 // property under test.
 std::atomic<size_t> gLive[kMaxTypes];
 
+// Phase 4's destroy observer (§7.5). Null unless a test is watching.
+std::atomic<CroCOSTest::radix::DestroyObserver> gDestroyObserver{nullptr};
+
 // The FIXTURE's own population, subtracted from every count a test reads.
 //
 // DEC-068's DeferredRelease records are the reason this exists. They are a
@@ -115,6 +118,8 @@ void noteDestroyed(size_t typeId) {
                              "(double destroy)\n", gTypes[typeId].display);
         std::abort();
     }
+    // Phase 4: the only way to observe WHERE a destroy happened. See the header.
+    if (auto fn = gDestroyObserver.load(std::memory_order_acquire)) fn(typeId);
 }
 
 bool shouldInjectFailure() {
@@ -218,6 +223,9 @@ void assertNoLiveObjects(const char* what) {
 }
 
 void resetAccounting() {
+    // Cleared here as well as by its owner, so a test that throws mid-watch
+    // cannot leave the next fixture's destroys reporting into it.
+    gDestroyObserver.store(nullptr, std::memory_order_release);
     const size_t n = gTypeCount.load(std::memory_order_acquire);
     for (size_t i = 0; i < n && i < kMaxTypes; i++) {
         gLive[i].store(0, std::memory_order_relaxed);
@@ -231,6 +239,14 @@ void setAccountingBaseline() {
         gBaseline[i].store(gLive[i].load(std::memory_order_relaxed),
                            std::memory_order_relaxed);
     }
+}
+
+void setDestroyObserver(DestroyObserver fn) {
+    gDestroyObserver.store(fn, std::memory_order_release);
+}
+
+void clearDestroyObserver() {
+    gDestroyObserver.store(nullptr, std::memory_order_release);
 }
 
 void injectNothing() {

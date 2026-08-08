@@ -46,6 +46,7 @@ const char* const kHeaders[] = {
     "Geometry.h", "Ordering.h", "SlotCodec.h", "Node.h",
     "Mapping.h", "DeferredRelease.h", "BucketCodec.h", "ClusterTable.h",
     "Placement.h", "AddressSpace.h", "Dispatch.h", "CoreTree.h",
+    "DescentCache.h",
 };
 
 std::string readHeader(const char* name) {

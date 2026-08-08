@@ -81,6 +81,27 @@ namespace CroCOSTest::radix {
     // correctly — as a double destroy.
     void setAccountingBaseline();
 
+    // ─── Destroy observer ──────────────────────────────────────────────────
+    //
+    // Called from `noteDestroyed`, i.e. from inside `VMSubstrate::destroy`,
+    // before the object's storage is poisoned. It exists for one Phase 4 claim
+    // that is otherwise unobservable: §7.5 says the descent cache's eviction may
+    // run a zero-observing `destroy<Node>` **inside the descent's open read
+    // section**, and argues at length that this is legal. Legality is a property
+    // of where the call happens, and "where" leaves no trace in any counter — so
+    // without a hook the test can only assert that a destroy happened, which is
+    // true on the illegal implementation too.
+    //
+    // The observer is the smallest thing that can answer it: at the moment of
+    // destruction, ask the RCU domain whether this CPU is in a section.
+    //
+    // Deliberately a single global function pointer with no locking. It is set
+    // and cleared by a single-threaded test around the operation it is watching,
+    // and anything richer would be a harness feature nothing needs.
+    using DestroyObserver = void (*)(size_t typeId);
+    void setDestroyObserver(DestroyObserver fn);
+    void clearDestroyObserver();
+
     // ─── Allocation fault injection ────────────────────────────────────────
     //
     // §9's allocation-failure rows and DEC-101's creation unwind need a
