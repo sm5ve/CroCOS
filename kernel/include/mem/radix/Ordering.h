@@ -96,7 +96,27 @@ namespace kernel::mm::radix {
     // freed. The zero-observing decrement additionally takes an ACQUIRE fence
     // before destroy<T>.
     inline constexpr MemoryOrder kRefcountRelease     = RELEASE;
-    inline constexpr MemoryOrder kRefcountZeroFence   = ACQUIRE;
+
+    // §6.6/DEC-069 spells the structural decrement as RELEASE with an acquire
+    // FENCE on the zero-observing one, and that is correct in the C++ model: the
+    // destroying RMW reads a value in the release sequence headed by the last
+    // holder's decrement, and an acquire fence sequenced after it completes the
+    // edge. It is also **invisible to ThreadSanitizer**, which does not model
+    // `atomic_thread_fence` — so on this project's default release gate the
+    // recycled-record edge does not exist, and a reader's last read of a record
+    // races the constructor of whatever lands in its recycled slab slot.
+    //
+    // Folding the acquire into the RMW says the same thing in a form the gate
+    // can see. It is never weaker (an acquire RMW at zero is exactly what the
+    // fence was there to provide), it costs one acquire on a decrement — no part
+    // of the descent — and the alternative is a release gate that cannot see the
+    // one edge whose absence is a use-after-free. See D-029.
+    //
+    // The former `kRefcountZeroFence = ACQUIRE` is deliberately GONE rather than
+    // kept for documentation: a named ordering constant that nothing spells is
+    // an invitation, and the §11 spelling check cannot tell an unused constant
+    // from a live one.
+    inline constexpr MemoryOrder kRefcountReleaseAcquire = ACQ_REL;
 
     // ─── Per-address-space control block (Phase 3) ─────────────────────────
 
@@ -150,6 +170,13 @@ namespace kernel::mm::radix {
     // a second popper.
     inline constexpr MemoryOrder kPoolPush = RELEASE;
     inline constexpr MemoryOrder kPoolPop  = ACQUIRE;
+
+    // Pool depth and the draw/shortfall counters. RELAXED and named so, because
+    // nothing reads them for a correctness decision: the depth drives only the
+    // replenish heuristic ("not at full population -> `barrier`"), and `barrier`
+    // is unconditionally safe to call. A stale depth costs at most one
+    // unnecessary barrier or one extra shortfall retry, never a wrong answer.
+    inline constexpr MemoryOrder kPoolAccounting = RELAXED;
 
 }  // namespace kernel::mm::radix
 

@@ -46,6 +46,7 @@
 #include <kassert.h>
 #include <mem/VMSubstrate.h>
 #include <rcu/RCU.h>
+#include <interrupts/InterruptContextDepths.h>   // the record-draw context assert
 
 #include <mem/radix/Geometry.h>
 #include <mem/radix/Ordering.h>
@@ -53,20 +54,14 @@
 #include <mem/radix/SlotCodec.h>
 #include <mem/radix/Node.h>
 #include <mem/radix/Mapping.h>
+#include <mem/radix/DeferredRelease.h>
 #include <mem/radix/Dispatch.h>
 #include <mem/radix/Claim.h>
 
 namespace kernel::mm::radix {
 
-    // The counting mechanism owns destruction at zero — not the releaser
-    // (§7.1 / RCU-DEC-045: a deleter may release a counted reference the retired
-    // object holds, but must not traverse the referent beyond its refcount word;
-    // destruction stays with the counting mechanism).
-    inline void releaseMappingRef(Mapping* m) {
-        if (m->releaseRef()) {
-            VMSubstrate::destroy(VMSubstrate::SafePtr<Mapping>(m));
-        }
-    }
+    // `releaseMappingRef` / `releaseMappingRefs` live in Mapping.h — the
+    // DeferredRelease deleter needs them and this header is downstream of it.
 
     // §7.1's deleter: **the retire callback at grace-period end, NOT the
     // destructor at refcount zero.**
@@ -104,10 +99,12 @@ namespace kernel::mm::radix {
             }
         }
         // The self-release. At zero the counting mechanism destroys.
-        const uint64_t prior = n->refcount.fetch_sub(1, kRefcountRelease);
+        // ACQ_REL rather than DEC-069's release-plus-acquire-fence, for the
+        // reason spelled out at kRefcountReleaseAcquire: the fence form is
+        // correct and invisible to the release gate (D-029).
+        const uint64_t prior = n->refcount.fetch_sub(1, kRefcountReleaseAcquire);
         assert(prior != 0, "radix: node structural refcount released below zero");
         if (prior == 1) {
-            thread_fence(kRefcountZeroFence);
             VMSubstrate::destroy(VMSubstrate::SafePtr<Node<G, V>>(n));
         }
     }
@@ -229,6 +226,13 @@ namespace kernel::mm::radix {
         // against never-null `make<T>` re-imports the userspace-triggerable
         // panic through the back door.
         OutOfMemory,
+        // §7.1 / DEC-068: this CPU's DeferredRelease pool could not satisfy the
+        // attempt. Never surfaced to the caller and NOT a failure — the records
+        // are in flight through this CPU's own earlier retires, and `barrier`
+        // brings them home deterministically. A distinct value from `Retry`
+        // because the remedy is a blocking call that must run between attempts
+        // and outside any section; retrying without it just re-fails.
+        NeedsRecords,
     };
 
     // A lookup returns a **counted reference** to a Mapping together with a
@@ -334,6 +338,14 @@ namespace kernel::mm::radix {
         // shape that decomposes when the geometry says it should not is a
         // budget-tuning signal, not a correctness one.
         Atomic<uint64_t> decompositions{0};
+        // §7.1 / ITEM-084: attempts abandoned because this CPU's DeferredRelease
+        // pool was short. The open question is whether the eager
+        // worst-case-per-operation sizing is right or a smaller reserve backed by
+        // the `barrier` fallback suffices, and this is half the evidence — the
+        // other half is the per-pool draw count. A steady zero under realistic
+        // churn is the argument for shrinking the reserve; anything else is the
+        // argument against.
+        Atomic<uint64_t> recordShortfalls{0};
 
         void reset() {
             attempts.store(0, kPrivateInit);
@@ -343,6 +355,7 @@ namespace kernel::mm::radix {
             redispatchChanges.store(0, kPrivateInit);
             unheldRowsSkipped.store(0, kPrivateInit);
             decompositions.store(0, kPrivateInit);
+            recordShortfalls.store(0, kPrivateInit);
         }
     };
 
@@ -366,9 +379,19 @@ namespace kernel::mm::radix {
         // precondition becomes unsatisfiable at process exit, the per-address-
         // space residue bounds become unreachable, and ONE stalled fault-path
         // reader in any process stalls reclamation for every process.
-        [[nodiscard]] bool init(unsigned rootLevel, uint64_t base, kernel::rcu::Domain& d) {
+        // `pools` is the per-address-space DeferredRelease population (§7.1,
+        // DEC-068). Required, not optional: a tree without it would have to fall
+        // back on the synchronous release, which is §10's named use-after-free
+        // and passes every single-threaded test.
+        [[nodiscard]] bool init(unsigned rootLevel, uint64_t base, kernel::rcu::Domain& d,
+                                DeferredReleasePools& pools) {
             assert(d.initialized(), "radix: the tree's RCU domain must be initialised first");
+            assert(pools.perCpu >= deferredReleaseBound(G),
+                   "radix: the DeferredRelease pool is shallower than this geometry's "
+                   "per-operation ceiling (§7.1's edge sum) — an operation could then "
+                   "exhaust it with no barrier able to help, which is a sizing error");
             domain = &d;
+            releasePools = &pools;
             assert(rootLevel >= 1 && rootLevel <= G.levelCount,
                    "radix: root level out of range");
             assert(base % nodeSpan(G, rootLevel) == 0,
@@ -536,6 +559,7 @@ namespace kernel::mm::radix {
         // somebody's decomposition.
         [[nodiscard]] ApplyStatus runToCompletion(uint64_t lo, uint64_t hi, Mapping* value) {
             unsigned retryCount = 0;
+            unsigned consecutiveShortfalls = 0;
             bool retiredAnything = false;
             for (;;) {
                 Attempt attempt;
@@ -562,6 +586,32 @@ namespace kernel::mm::radix {
                     // section that has ended (§3.2/§7.3).
                     assertNoClaimsHeld(attempt, "section close");
                 }
+                if (st == ApplyStatus::NeedsRecords) {
+                    // §7.1's abandon-then-replenish. The section closed when the
+                    // guard's scope ended above, which is the whole point: the
+                    // remedy is a blocking grace-period call, and calling one
+                    // from inside the attempt's own section waits on itself
+                    // forever.
+                    retiredAnything = retiredAnything || attempt.retired;
+                    abandon(attempt);
+                    replenishRecords();
+                    // A shortfall that survives a `barrier` is not contention
+                    // and no amount of retrying will fix it: `barrier` returns
+                    // only once every record this CPU retired is home, and the
+                    // pool's population is one operation's ceiling, so the
+                    // retried attempt must fit. Firing here means the ceiling
+                    // derivation is wrong — which would otherwise present as a
+                    // livelock with no output.
+                    ++consecutiveShortfalls;
+                    assert(consecutiveShortfalls <= 1,
+                           "radix: a DeferredRelease shortfall survived a barrier replenish "
+                           "— the per-CPU population is smaller than one operation's "
+                           "ceiling (§7.1's edge sum), which is a sizing error and not "
+                           "contention");
+                    continue;
+                }
+                consecutiveShortfalls = 0;
+
                 if (st == ApplyStatus::Retry) {
                     // §9: release EVERYTHING, discard, retry from a fresh read
                     // pass. The claim set is never extended in place — a
@@ -821,6 +871,10 @@ namespace kernel::mm::radix {
         unsigned level0 = 0;
         uint64_t baseVA = 0;
         kernel::rcu::Domain* domain = nullptr;
+        // §7.1's per-CPU DeferredRelease population. Per ADDRESS SPACE, not per
+        // tree: a tree is one cluster and an address space has many, so the
+        // pointer is bound at init and the storage belongs to the control block.
+        DeferredReleasePools* releasePools = nullptr;
         TreeStats counters{};
         // Jitter state for the retry backoff. Shared rather than per-CPU because
         // it only needs to decorrelate, and the CPU id is mixed in at use.
@@ -1032,9 +1086,138 @@ namespace kernel::mm::radix {
             Ops::template runDeleter<Codec>(level, node);
         }
 
-        // The counting mechanism owns destruction at zero, not the releaser
-        // (§7.1 / RCU-DEC-045).
-        static void releaseNamedMapping(Mapping* m) { releaseMappingRef(m); }
+        // ─── §7.1 / DEC-068: drawing, returning and retiring records ───────
+        //
+        // The draw happens during RE-DISPATCH, and the site is forced rather
+        // than chosen. It cannot be in commit: a draw can fail, and nothing
+        // after the commit boundary may (§6.1). It should not be in the read
+        // pass either: that pass runs unclaimed, so its rows are advisory and it
+        // would over-draw on every row a concurrent writer then changes.
+        // Re-dispatch is the one place that walks the frozen rows before the
+        // boundary — which is also why the accounting is COMPLETE there and
+        // commit does no counting of its own.
+        //
+        // Returns false ONLY on pool exhaustion, which the caller must not treat
+        // as an ordinary retry: the remedy is a blocking replenish that has to
+        // run between attempts and outside any section.
+        [[nodiscard]] bool deferMappingRelease(Mapping* m, Attempt& a) {
+            assert(m != nullptr, "radix: a deferred release of no record");
+            assert(a.phase == Attempt::Phase::Planning,
+                   "radix: a release record drawn after the commit boundary — the draw "
+                   "can fail, and nothing after the boundary may (§6.1)");
+            // §7.1: record-drawing operations are exactly the DISPLACEMENT
+            // operations (mmap into occupied ranges, munmap, mprotect splits),
+            // which run in syscall context and never in #PF. Asserted at the
+            // draw site because the remedy for a shortfall is `barrier`, whose
+            // context mask is the strict one — so a draw from a fault path is
+            // not merely unusual, it is a path with no legal way out.
+            assert(!kernel::interrupts::currentCpuInterruptDepths().inAnyInterruptContext(),
+                   "radix: a DeferredRelease draw from interrupt or #PF context — the "
+                   "shortfall remedy is `barrier`, which is illegal there (§7.1)");
+
+            // §7.1's "one record per DISTINCT Mapping ... carrying the aggregate
+            // deferred decrement". The linear walk is over the records THIS
+            // attempt holds, which is bounded by the edge sum and is one or two
+            // in every shape that occurs: the common `munmap` displaces one
+            // record from many slots.
+            for (DeferredRelease* r = a.heldReleases; r != nullptr;
+                 r = r->next.load(kPrivateInit)) {
+                if (r->mapping == m) { r->delta++; return true; }
+            }
+
+            DeferredReleasePool& pool = releasePools->forCpu(arch::getCurrentProcessorID());
+            DeferredRelease* r = pool.pop();
+            if (r == nullptr) {
+                pool.shortfalls.fetch_add(1, kPoolAccounting);
+                return false;
+            }
+            pool.draws.fetch_add(1, kPoolAccounting);
+
+            // `pop` paid the record's first-touch freshness, so these writes go
+            // through a fresh mapping (§7.1 — the draw is a cross-CPU first
+            // touch of possibly-recycled arena memory, with no deleter in
+            // sight).
+            r->mapping = m;
+            r->delta   = 1;
+            r->next.store(a.heldReleases, kPrivateInit);
+            a.heldReleases = r;
+            a.heldReleaseCount++;
+            assert(a.heldReleaseCount <= deferredReleaseBound(G),
+                   "radix: one attempt drew more DeferredRelease records than the edge sum "
+                   "allows — either the bound is wrong or the draw and the rows that "
+                   "justify it have come apart (§7.1)");
+            return true;
+        }
+
+        // Abandonment: every drawn record goes home, and it does so BEFORE the
+        // section closes (§7.3). Uniformity with the claim release rather than a
+        // necessity — the load-bearing edge for records is the thread's own
+        // destruction join — but it is free, and it keeps every record motion
+        // inside the protocol the validators watch.
+        static void returnHeldRecords(Attempt& a) {
+            DeferredRelease* r = a.heldReleases;
+            while (r != nullptr) {
+                DeferredRelease* const next = r->next.load(kPrivateInit);
+                r->mapping = nullptr;
+                r->delta   = 0;
+                r->next.store(nullptr, kPrivateInit);
+                r->homePool->push(r);
+                r = next;
+            }
+            a.heldReleases     = nullptr;
+            a.heldReleaseCount = 0;
+        }
+
+        // Commit: each record becomes its own retire subject. After the whole
+        // commit walk, so every publish that stopped a slot naming its `Mapping`
+        // has already happened — §6.1's phase order (all marks, then the +1s,
+        // then all publishes, then retires, then releases) with the record
+        // retires standing in for the releases.
+        void retireHeldRecords(Attempt& a) {
+            assert(a.phase == Attempt::Phase::Committing,
+                   "radix: a release record retired before the commit boundary (§11)");
+            DeferredRelease* r = a.heldReleases;
+            while (r != nullptr) {
+                DeferredRelease* const next = r->next.load(kPrivateInit);
+                r->next.store(nullptr, kPrivateInit);
+                assert(r->delta != 0,
+                       "radix: retiring a record with a zero delta — it was drawn and "
+                       "never charged, which leaks the record and loses nothing else, so "
+                       "nothing downstream would notice");
+                kernel::rcu::retire<DeferredRelease, &DeferredRelease::head,
+                                    &deleteDeferredRelease>(*domain, r);
+                a.retired = true;
+                r = next;
+            }
+            a.heldReleases     = nullptr;
+            a.heldReleaseCount = 0;
+        }
+
+        // §7.1's replenish, run BETWEEN attempts and outside any section.
+        //
+        // The primitive is **`barrier`, never `synchronize`**, and the reason is
+        // not stylistic: `synchronize` promises only that a grace period has
+        // elapsed and does NOT seal the caller's still-open bag — which is
+        // precisely where the missing records are. `barrier` seals, rotates and
+        // drives this CPU's own retirees, whose deleters push every one of them
+        // home; since only the owner draws from its own pool, the retried
+        // attempt's draw then succeeds deterministically.
+        //
+        // Calling either from inside the attempt's own section would wait on
+        // itself forever (§10's DEC-046 genre), which is why the caller abandons
+        // first and this is not an optimisation.
+        void replenishRecords() {
+            assert(!kernel::interrupts::currentCpuInterruptDepths().inAnyInterruptContext(),
+                   "radix: record replenish from interrupt or #PF context — `barrier` "
+                   "carries the strict mask");
+            DeferredReleasePool& pool = releasePools->forCpu(arch::getCurrentProcessorID());
+            (void)kernel::rcu::tryAdvance(*domain);
+            (void)kernel::rcu::drain(*domain);
+            // "If still short" — measured against the full population rather
+            // than against emptiness, because a pool holding three records when
+            // the operation needs five is not empty and is still short.
+            if (!pool.atFullPopulation()) kernel::rcu::barrier(*domain);
+        }
 
         // ─── One attempt (§3.2: one attempt is ONE read section) ───────────
         //
@@ -1131,6 +1314,28 @@ namespace kernel::mm::radix {
             // an operation that retired nothing has no bag to advance.
             bool retired = false;
 
+            // ─── §7.1 / DEC-068: the deferred releases this attempt holds ───
+            //
+            // An intrusive list through each record's `next` field rather than
+            // an array, and that is not a micro-optimisation: the ceiling is the
+            // EDGE SUM (≈230 under the kernel geometry), so an array would put
+            // ~1.8 KiB on the stack of every operation, on top of the claim set,
+            // for a worst case almost nothing reaches.
+            //
+            // Records are drawn during re-dispatch — before the commit boundary,
+            // because nothing after the boundary may fail — and are either
+            // retired (success) or returned to their home pool (abandonment).
+            DeferredRelease* heldReleases    = nullptr;
+            unsigned         heldReleaseCount = 0;
+
+            // Set only by a failed DRAW. `redispatchAgrees` returning false
+            // otherwise means the tree moved under the claim set, which is an
+            // ordinary retry; a shortfall is not, and its remedy is a blocking
+            // replenish that must run between attempts and outside any section.
+            // One setter, one reader — the flag exists so the recursive
+            // re-dispatch can stay a plain bool.
+            bool recordShortfall = false;
+
             [[nodiscard]] bool addPending(uint64_t base, unsigned level, unsigned slot,
                                           void* subtree, uint64_t builtFrom) {
                 if (pendingCount >= kMaxPending) return false;
@@ -1190,6 +1395,7 @@ namespace kernel::mm::radix {
                 // guard's scope ends — dereferences them outside the section that
                 // observed them. See D-024.
                 releaseAll(a.claims);
+                returnHeldRecords(a);
                 return ApplyStatus::Retry;
             }
 
@@ -1200,8 +1406,17 @@ namespace kernel::mm::radix {
             // wrong; the answer is to discard and retry, never to extend the set
             // in place.
             if (!redispatchAgrees(rootRef, level0, baseVA, lo, hi, value, a)) {
-                counters.redispatchChanges.fetch_add(1, kRefcountAcquire);
+                // Both unwind paths release and return everything INSIDE the
+                // section (§7.3, D-024). They differ only in what the caller
+                // does next: a changed row is retried after a backoff, a record
+                // shortfall after a blocking replenish that cannot run here.
                 releaseAll(a.claims);
+                returnHeldRecords(a);
+                if (a.recordShortfall) {
+                    counters.recordShortfalls.fetch_add(1, kRefcountAcquire);
+                    return ApplyStatus::NeedsRecords;
+                }
+                counters.redispatchChanges.fetch_add(1, kRefcountAcquire);
                 return ApplyStatus::Retry;
             }
 
@@ -1218,6 +1433,12 @@ namespace kernel::mm::radix {
             // is checked at every mark, publish and retire rather than argued.
             a.phase = Attempt::Phase::Committing;
             commit(rootRef, level0, baseVA, lo, hi, value, a);
+
+            // §7.1: the drawn records are retired here, after every publish that
+            // stopped a slot naming their `Mapping`. Each is its own retire
+            // subject — a `Mapping` cannot be one, because the relationship is
+            // N:1 and two CPUs would enqueue the same intrusive linkage twice.
+            retireHeldRecords(a);
 
             releaseAll(a.claims);
 
@@ -1709,6 +1930,32 @@ namespace kernel::mm::radix {
                     // wrong coverage.
                     if (!a.peekPending(nodeBase, level, i, word)) return false;
                 }
+
+                // ─── §7.1 / DEC-068: draw this row's deferred release ───────
+                //
+                // The three rows that displace a `Mapping` from a DIRECTLY
+                // WRITTEN slot. `DetachChild` is deliberately absent: a fully
+                // covered child's displaced values all ride node deleters, which
+                // is why §7.1 calls the PARTIAL cover the expensive shape.
+                // `ShrinkLeafInPlace` is absent because the slot still names the
+                // same record (±0), and `WriteLeaf` because nothing was there.
+                //
+                // The draw is here rather than in commit because it can fail and
+                // commit cannot; the row set is identical because commit acts
+                // only on rows this attempt holds a bit for, and every row it
+                // could skip was a NoOp or a descend here — neither of which
+                // draws.
+                Mapping* displaced = nullptr;
+                if (d.action == DispatchAction::OverwriteLeaf ||
+                    d.action == DispatchAction::ClearSlot) {
+                    displaced = static_cast<Mapping*>(Codec::decodeLeaf(word));
+                } else if (d.action == DispatchAction::Subdivide && Codec::isLeaf(word)) {
+                    displaced = static_cast<Mapping*>(Codec::decodeLeaf(word));
+                }
+                if (displaced != nullptr && !deferMappingRelease(displaced, a)) {
+                    a.recordShortfall = true;
+                    return false;
+                }
             }
             return true;
         }
@@ -1841,10 +2088,15 @@ namespace kernel::mm::radix {
                     break;
 
                 case DispatchAction::OverwriteLeaf: {
-                    Mapping* displaced = static_cast<Mapping*>(Codec::decodeLeaf(word));
+                    // The displaced record's −1 was charged to a DeferredRelease
+                    // record at re-dispatch and lands at grace-period end; there
+                    // is deliberately nothing to do here. The synchronous form
+                    // that used to sit on this line is §10's named
+                    // use-after-free: a reader inside the section that observed
+                    // the old slot word takes its counted reference after this
+                    // CPU has taken the count to zero.
                     value->acquireRef();                       // +1 BEFORE the publish
                     publish(node, i, Codec::encodeLeaf(value, d.range, level), a);
-                    releaseNamedMapping(displaced);
                     break;
                 }
 
@@ -1856,10 +2108,9 @@ namespace kernel::mm::radix {
                     break;
 
                 case DispatchAction::ClearSlot: {
-                    Mapping* displaced = static_cast<Mapping*>(Codec::decodeLeaf(word));
+                    // The −1 rides a DeferredRelease record drawn at re-dispatch.
                     publish(node, i, 0, a);
                     occupancyDelta--;
-                    releaseNamedMapping(displaced);
                     break;
                 }
 
@@ -1897,18 +2148,21 @@ namespace kernel::mm::radix {
                     assert(child, "radix: commit reached a subdivision with no prebuilt "
                                   "subtree — re-dispatch should have caught this before the "
                                   "boundary");
-                    Mapping* displaced =
-                        Codec::isLeaf(word) ? static_cast<Mapping*>(Codec::decodeLeaf(word))
-                                            : nullptr;
                     // Take every `+1` the new subtree's leaf slots imply, THEN
-                    // publish, THEN release the displaced reference. The
-                    // increments must precede the decrement, or a subdivision
-                    // whose survivors name the record it is displacing could take
-                    // the count transiently to zero and destroy it.
+                    // publish. The displaced record's −1 rides a DeferredRelease
+                    // record drawn at re-dispatch, so the "increments must
+                    // precede the decrement" hazard — a subdivision whose
+                    // survivors name the record it is displacing taking the count
+                    // transiently to zero — is now structural rather than a
+                    // matter of statement order: the decrement cannot land until
+                    // a grace period after these increments.
+                    //
+                    // Note the edge-subdivision shape is net zero on the old
+                    // record and STILL draws a record (§7.1): the +1s and the
+                    // deferred −1 are separate commit steps, not a cancellation.
                     takeSubtreeReferences(NodeRef(child), level + 1);
                     publish(node, i, Codec::encodeChild(child), a);
                     if (Codec::isEmpty(word)) occupancyDelta++;
-                    if (displaced) releaseNamedMapping(displaced);
                     break;
                 }
                 }
@@ -1948,6 +2202,15 @@ namespace kernel::mm::radix {
         // there — they are reachable by nothing and outside the protocol.
         void abandon(Attempt& a) {
             assertNoClaimsHeld(a, "abandon");
+            // Records go home inside the section, beside the claim release, so
+            // by here the attempt must hold none. Asserting rather than sweeping
+            // is deliberate: a sweep would silently paper over a return path that
+            // forgot, and the symptom of a leaked record is not a crash but a
+            // pool that runs a little drier after every operation.
+            assert(a.heldReleases == nullptr && a.heldReleaseCount == 0,
+                   "radix: a DeferredRelease record survived to `abandon` — records are "
+                   "returned to their home pool inside the section (§7.3), so one still "
+                   "held here has escaped the protocol");
             discardUnusedAllocations(a);
         }
 

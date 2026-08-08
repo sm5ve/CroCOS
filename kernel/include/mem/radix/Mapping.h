@@ -48,6 +48,7 @@
 #include <stdint.h>
 #include <kassert.h>
 #include <core/atomic.h>
+#include <mem/VMSubstrate.h>
 
 #include <mem/radix/Ordering.h>
 
@@ -178,20 +179,46 @@ namespace kernel::mm::radix {
         // the counting mechanism and is NOT done here — a deleter may release a
         // reference but must not traverse the referent beyond its refcount word
         // (RCU-DEC-045).
-        [[nodiscard]] bool releaseRef() {
-            const uint64_t prior = refcount.fetch_sub(1, kRefcountRelease);
-            assert(prior != 0,
+        [[nodiscard]] bool releaseRef() { return releaseRefs(1); }
+
+        // The aggregate form, for DEC-068's DeferredRelease records. One record
+        // carries the whole deferred decrement for one distinct Mapping (§7.1),
+        // so a munmap clearing fifteen slots that all name the same record
+        // returns ONE record carrying `delta == 15` rather than fifteen records
+        // carrying one each.
+        //
+        // A single fetch_sub rather than a loop of them, and that is not
+        // micro-optimisation: a loop passes transiently through every
+        // intermediate value, so a concurrent releaser could observe zero and
+        // destroy the record while this one still has decrements to issue. The
+        // count is only ever *observed* at zero by the actor that took it there.
+        [[nodiscard]] bool releaseRefs(uint64_t n) {
+            assert(n != 0, "radix Mapping: a zero-delta release is a drawn record that "
+                           "never recorded anything — a leak of the record, and a sign the "
+                           "draw and the row that justified it have come apart");
+            const uint64_t prior = refcount.fetch_sub(n, kRefcountReleaseAcquire);
+            assert(prior >= n,
                    "radix Mapping: release below zero — the double-release half of the N:1 "
                    "rule, whose other half is a leak");
-            if (prior == 1) {
-                thread_fence(kRefcountZeroFence);
-                return true;
-            }
-            return false;
+            return prior == n;
         }
 
         [[nodiscard]] uint64_t refcountRelaxed() const { return refcount.load(kQuiescedRead); }
     };
+
+    // The counting mechanism owns destruction at zero — not the releaser
+    // (§7.1 / RCU-DEC-045: a deleter may release a counted reference the retired
+    // object holds, but must not traverse the referent beyond its refcount word;
+    // destruction stays with the counting mechanism).
+    //
+    // Lives here rather than in CoreTree.h because DeferredRelease's deleter
+    // needs it and CoreTree.h is downstream of that header.
+    inline void releaseMappingRefs(Mapping* m, uint64_t n) {
+        if (m->releaseRefs(n)) {
+            VMSubstrate::destroy(VMSubstrate::SafePtr<Mapping>(m));
+        }
+    }
+    inline void releaseMappingRef(Mapping* m) { releaseMappingRefs(m, 1); }
 
 }  // namespace kernel::mm::radix
 

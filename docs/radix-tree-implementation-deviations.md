@@ -821,3 +821,128 @@ stress work is where it can be driven.
 `kernel/mm/vmsmalloc.cpp`, so its mock `tryMake<T>` now calls the production
 `vmsmallocTry` rather than the mock's own `vmsmalloc`. Every allocation the tree
 makes under test now goes through the production failable allocator.
+
+---
+
+## D-028 — DEC-068's `DeferredRelease` records landed; **D-011 is CLOSED**
+
+Phase 3's second work item, and the one the phase plan told us to do early rather
+than last. It closes D-011, re-enables the three disabled tests in
+`tests/kernel/radix/ConcurrentTest.cpp`, and with them gives the tree its **first
+reader-side concurrency coverage** — every concurrency test it had until now was
+writer-vs-writer.
+
+**Verified by mutation, not by a green run.** Restoring the synchronous release
+at the `OverwriteLeaf` row (and removing its draw, so the row is exactly the
+pre-Phase-3 shape rather than a double release) is caught by
+`radix_concurrent_readers_never_observe_a_torn_state` as an ASan use-after-poison
+inside `Mapping::offsetFor` — on a READER thread. So the re-enabled tests detect
+the defect they were disabled for, which a green run alone does not establish.
+
+Four decisions worth recording, none of them restatements of §7.1.
+
+**The draw happens in RE-DISPATCH, and the site is forced.** It cannot be in
+commit, because a draw can fail and §6.1 says nothing after the commit boundary
+may. It should not be in the read pass, which runs unclaimed and would over-draw
+on every row a concurrent writer then changes. Re-dispatch is the one pass that
+walks the *frozen* rows before the boundary. A consequence worth stating because
+it looks like an omission: the accounting is **complete** at re-dispatch and
+commit does no counting of its own. The two row sets are equal, not merely
+nested — commit acts only on rows the attempt holds a bit for, and every row it
+can skip (D-013's window) was a `NoOp` or a descend at re-dispatch, neither of
+which draws.
+
+**The held set is an intrusive list through the record's own `next` field**, not
+an array. A record has three non-overlapping lives — in a pool, held by an
+attempt, in flight through a retire (linked via `head` instead) — so one field
+serves the first two. The alternative is a `deferredReleaseBound(G)`-sized
+pointer array in every `Attempt`: ~1.8 KiB of stack per operation, on top of the
+claim set, for a worst case almost nothing reaches.
+
+**The replenish measures against the full population, not against emptiness.**
+§7.1 says "if still short, it calls `barrier`", and `empty()` cannot express
+that: a pool holding three records when the operation needs five is not empty and
+is still short. The pool therefore carries a depth counter (RELAXED — it drives
+only the heuristic, and `barrier` is unconditionally safe to call). With that,
+a shortfall surviving a barrier is a **sizing error and not contention**, which
+is now a forcing-function assert: `barrier` returns only once every record this
+CPU retired is home, and the population is one operation's ceiling.
+
+**The `≈230` ceiling is derived, and it is NOT the site bound.** §6.1's site
+bound is 11 and is already in the code, which makes it the number an implementer
+reaches for; the record ceiling is the **edge sum** — `valence(level 1)` plus
+`2*(valence−1)` per level below — and is 230 under the kernel geometry. Both the
+`static_assert` in `DeferredRelease.h` and a test recompute it from the
+descriptor rather than transcribing it, per DEC-093.
+
+**A harness change came with it, and it is not cosmetic.** The pool population is
+allocated by the fixture and freed by it, so it is live for the whole of every
+test — but a test asserting "this churn returned to zero live objects" means zero
+objects *the tree* created. The oracle grew a fixture baseline that every count
+is read relative to (`setAccountingBaseline`). It **subtracts at read time rather
+than zeroing the counters**, which is the difference between honest and
+convenient: zeroing would leave the fixture's own teardown destroying 230 objects
+the counters believe were never constructed, and `noteDestroyed` reports that —
+correctly — as a double destroy.
+
+**And a testing lesson that cost time twice.** Several existing tests began
+failing §7.2's naming-slot census with "structural count 2 but named by 1 leaf
+slot". Not a defect: a displaced reference now comes home at grace-period end, so
+between an operation and its grace period the counts *legitimately* exceed the
+census. `RadixHarness.h` already said so in a comment nobody had needed yet.
+Every count-checking validation now quiesces first.
+
+---
+
+## D-029 — WATCH ITEM — the refcount's acquire fence is invisible to the release gate
+
+Found by the newly re-enabled reader-side tests, and worth recording carefully
+because the remedy is a **spelling change against DEC-069** and the evidence for
+it is statistical rather than a clean reproduction.
+
+**The report.** `KernelRadixProgressAuditRunner` (TSan) intermittently reports a
+data race between `Mapping::Mapping` — a *constructor*, on one thread — and
+`Mapping::offsetFor` — a read, on another — at the same address, inside
+`radix_concurrent_subtree_replacement_is_atomic`. Same address plus
+constructor-after-read means the slab slot was **recycled**: a reader's last read
+of a record, then that record's destruction, then a new record built in its slot.
+
+**It is not a lifetime bug.** The reader holds a counted reference across the
+read (`LookupResult` acquires inside the descent's section, §7.3), so the record
+cannot be destroyed under it — and the ASan/oracle runner, which poisons on
+destroy and would report a genuine use-after-free here, never does. What TSan is
+reporting is a missing **happens-before edge**, not a missing guarantee.
+
+**Where the edge lives, and why the gate cannot see it.** §6.6/DEC-069 spells the
+structural decrement as RELEASE with an acquire **fence** on the zero-observing
+one. That is correct in the C++ model: the destroying RMW reads a value in the
+release sequence headed by the last holder's decrement, and an acquire fence
+sequenced after it completes the edge — the classic `shared_ptr` idiom. But
+**ThreadSanitizer does not model `atomic_thread_fence`**; it is a long-standing
+limitation, and libstdc++'s `shared_ptr` carries explicit annotations for exactly
+this. So on this project's default release gate the recycled-record edge simply
+does not exist.
+
+**Taken**: fold the acquire into the RMW — `fetch_sub(n, ACQ_REL)` — at both
+refcount release sites (`Mapping::releaseRefs` and `deleteRadixNode`'s node
+self-release), and delete the fence. New named constant
+`kRefcountReleaseAcquire`; the old `kRefcountZeroFence` is removed rather than
+left unused, since the §11 spelling check cannot tell a dead ordering constant
+from a live one. This is never weaker than the spec's form — an acquire RMW at
+zero is exactly what the fence was there to provide — and it costs one acquire on
+a refcount decrement, which is not on the descent.
+
+**Why this is a WATCH item and not a closed one.** The base rate is low: **2
+reports in 13 full audit-runner runs** (~15%), and the warning never reproduced
+in 8 full plain-TSan runs or in 10 isolated runs of the test alone. Sixteen
+post-change runs were clean, which is suggestive (p ≈ 0.07 of that outcome if the
+rate were unchanged) but is not proof. The honest statement is: the most likely
+cause has been removed and the strengthening is correct on its own merits, but a
+single further report would mean the diagnosis was wrong and there is a genuine
+missing edge to find. **If one appears, do not re-silence it — the alternative
+explanation is a real use-after-free that the oracle's poison window happens to
+miss.**
+
+**Spec follow-up owed**: DEC-069's "refcount release/acquire-at-zero" should
+record the fence form as correct-but-untestable and the ACQ_REL form as the
+implementation's, so the next reader of §6.6 does not "fix" it back.

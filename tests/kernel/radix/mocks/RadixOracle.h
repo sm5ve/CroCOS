@@ -64,10 +64,22 @@ namespace CroCOSTest::radix {
     // objects". Equivalent to assertBaseline over an all-zero snapshot.
     void assertNoLiveObjects(const char* what);
 
-    // Drop all accounting. Type registrations survive (their ids are magic
-    // statics inside the templates and cannot be un-assigned). Call between
-    // tests, not inside one.
+    // Drop all accounting, fixture baseline included. Type registrations survive
+    // (their ids are magic statics inside the templates and cannot be
+    // un-assigned). Call between tests, not inside one.
     void resetAccounting();
+
+    // Declare the CURRENT live population to be the fixture's, so every count a
+    // test reads is relative to it. The DEC-068 DeferredRelease pool is the
+    // reason: it is allocated by the fixture, lives for the whole test, and is
+    // freed by the fixture, so a test asserting "this churn returned to zero
+    // live objects" means zero objects the TREE created.
+    //
+    // Deliberately a subtraction at read time and not a zeroing of the counters:
+    // zeroing would leave the fixture's own teardown destroying objects the
+    // counters believe were never constructed, which noteDestroyed reports —
+    // correctly — as a double destroy.
+    void setAccountingBaseline();
 
     // ─── Allocation fault injection ────────────────────────────────────────
     //

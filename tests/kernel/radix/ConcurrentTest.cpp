@@ -107,7 +107,7 @@ TEST(radix_concurrent_disjoint_writers_do_not_interfere) {
     constexpr size_t kCpus = 4;
     Harness h(kCpus, 1);
     TreeA tree;
-    ASSERT_TRUE(tree.init(3, 0, h.domain));      // C0-rooted, 1 GiB
+    ASSERT_TRUE(tree.init(3, 0, h.domain, h.releasePools));      // C0-rooted, 1 GiB
 
     // Each CPU owns a disjoint C1 slot (1 MiB). This is the shape the whole
     // design exists for: disjoint keys touch disjoint memory as a STRUCTURAL
@@ -174,7 +174,7 @@ TEST(radix_concurrent_contended_writers_all_complete) {
     constexpr size_t kCpus = 4;
     Harness h(kCpus, 1);
     TreeA tree;
-    ASSERT_TRUE(tree.init(5, 0, h.domain));      // C2-rooted: 64 KiB, 16 pages
+    ASSERT_TRUE(tree.init(5, 0, h.domain, h.releasePools));      // C2-rooted: 64 KiB, 16 pages
 
     // Every CPU hammers the SAME small region, so conflicts are the point rather
     // than the exception.
@@ -235,10 +235,13 @@ TEST(radix_concurrent_contended_writers_all_complete) {
     assertNoLiveObjects("contended writers");
 }
 
-// ─── KNOWN GAP: reader-side Mapping references vs direct-slot releases ─────
+// ─── Reader-side Mapping references vs direct-slot releases (was D-011) ────
 //
-// The two tests below are DISABLED, and the reason is a real finding rather
-// than a flaky test — see docs/radix-tree-implementation-deviations.md D-011.
+// The three tests in this section were DISABLED through the whole of Phase 2,
+// and the reason was a real finding rather than a flaky test — D-011 in
+// docs/radix-tree-implementation-deviations.md. They are the tree's FIRST
+// reader-side concurrency coverage: with them off, every concurrency test here
+// was writer-vs-writer.
 //
 // §7.1: "Two reclamation authorities compose only because **every release is
 // deferred**. A synchronous release on a published node is a use-after-free with
@@ -246,37 +249,31 @@ TEST(radix_concurrent_contended_writers_all_complete) {
 // commit walk already visits every node, so releasing there costs nothing and
 // looks like tidiness."
 //
-// That is exactly what this implementation currently does for a Mapping
-// displaced from a DIRECTLY WRITTEN slot (the overwrite and clear rows): it
-// releases inline in the commit phase. A reader inside the section that observed
-// the old slot word can then take its counted reference AFTER the writer has
-// taken the count to zero and destroyed the record — resurrection, then a double
-// free. Driven by the tests below, it reports as vmsmalloc's "Double free: bit
-// already set in freeBitmap".
+// That is what the implementation did for a Mapping displaced from a DIRECTLY
+// WRITTEN slot (the overwrite, clear and subdivide rows): it released inline in
+// the commit phase. A reader inside the section that observed the old slot word
+// then took its counted reference AFTER the writer had taken the count to zero
+// and destroyed the record — resurrection, then a double free, reported as
+// vmsmalloc's "Double free: bit already set in freeBitmap".
 //
-// The fix is DEC-068's DeferredRelease records, which the phase plan schedules
-// for **Phase 3** — and that scheduling is itself the finding: a concurrent
-// reader taking a counted reference is Phase 2 functionality, so Phase 2 cannot
-// be correct without at least the record. Doing it by allocating a record per
-// release would work and is NOT taken here, because DEC-068 forbids exactly that
-// ("Allocating here would make munmap an ALLOCATING operation ... the one
-// operation that RELIEVES memory pressure the one that fails under it").
+// Phase 3 landed DEC-068's DeferredRelease records and these came back on. Note
+// what was NOT done, because it is the tempting shortcut: allocating a record
+// per release would also work, and DEC-068 forbids exactly that ("Allocating
+// here would make munmap an ALLOCATING operation ... the one operation that
+// RELIEVES memory pressure the one that fails under it").
 //
-// Note the DETACH path is already correct: those releases ride node deleters and
-// are deferred by construction, which is why the subtree-replacement test below
-// is NOT disabled. The gap is precisely the directly-written-slot rows.
+// The DETACH path never had the bug: those releases ride node deleters and are
+// deferred by construction. The gap was precisely the directly-written-slot rows
+// — which is worth remembering, because it is why the subtree-replacement test
+// below fails on its SECOND round and not its first.
 
 // ─── Readers against writers ───────────────────────────────────────────────
 
-TEST(DISABLED_radix_concurrent_readers_never_observe_a_torn_state) {
-    std::fprintf(stderr,
-        "[radix] SKIP readers-vs-writers: direct-slot Mapping releases are still "
-        "synchronous (D-011). Re-enable with DEC-068's DeferredRelease records.\n");
-    return;
+TEST(radix_concurrent_readers_never_observe_a_torn_state) {
     constexpr size_t kCpus = 4;
     Harness h(kCpus, 1);
     TreeA tree;
-    ASSERT_TRUE(tree.init(5, 0, h.domain));
+    ASSERT_TRUE(tree.init(5, 0, h.domain, h.releasePools));
 
     // One record covering the whole region, permanently. Writers repeatedly
     // replace a sub-range with a second record and put the first back; readers
@@ -358,29 +355,19 @@ TEST(DISABLED_radix_concurrent_readers_never_observe_a_torn_state) {
 
 // ─── Subtree replacement is atomic over its subtree ────────────────────────
 
-// DISABLED — and the reason is D-011, not a flake. This was recorded as
-// "intermittent (D-014)" on the suspicion that it shared the contended path with
-// D-013; it does not. With D-013 fixed it fails immediately and deterministically
-// as "Double free: bit already set in freeBitmap", with a use-after-poison READ
-// on a READER thread.
-//
-// The mechanism is D-011 exactly. Only the FIRST round replaces a populated
-// subtree (the detach path, which is correctly deferred). Every round after it
-// finds slot 0 already holding the coarse leaf, so it dispatches to
-// OverwriteLeaf — a DIRECTLY WRITTEN slot, whose displaced `Mapping` is released
-// synchronously in the commit walk while readers are taking counted references
-// to it. That is §7.1's named hazard, and it re-enables with DEC-068's
-// DeferredRelease records alongside the other two D-011 tests.
-TEST(DISABLED_radix_concurrent_subtree_replacement_is_atomic) {
-    std::fprintf(stderr,
-        "[radix] SKIP subtree-replacement: direct-slot Mapping releases are still "
-        "synchronous (D-011, was mis-filed as D-014). Re-enable with DEC-068's "
-        "DeferredRelease records.\n");
-    return;
+// The sharpest of the three, and the reason is its SECOND round. Only the first
+// replaces a populated subtree (the detach path, which was always correctly
+// deferred). Every round after it finds slot 0 already holding the coarse leaf,
+// so it dispatches to OverwriteLeaf — a directly-written slot. Under the old
+// synchronous release this failed immediately and deterministically as "Double
+// free: bit already set in freeBitmap", with a use-after-poison READ on a READER
+// thread. It is therefore the regression test for D-011 specifically: a change
+// that reintroduces a synchronous direct-slot release fails HERE first.
+TEST(radix_concurrent_subtree_replacement_is_atomic) {
     constexpr size_t kCpus = 3;
     Harness h(kCpus, 1);
     TreeA tree;
-    ASSERT_TRUE(tree.init(4, 0, h.domain));      // C1-rooted, 1 MiB slots
+    ASSERT_TRUE(tree.init(4, 0, h.domain, h.releasePools));      // C1-rooted, 1 MiB slots
 
     // A populated subtree under one C1 slot, then MAP_FIXED over the whole slot
     // from another CPU while readers hammer beneath it. §3.3 guarantee 5: every
@@ -433,15 +420,11 @@ TEST(DISABLED_radix_concurrent_subtree_replacement_is_atomic) {
 
 // ─── Expand-then-reclaim under a pinned reader ─────────────────────────────
 
-TEST(DISABLED_radix_concurrent_expansion_and_reclamation_are_invisible_to_a_reader) {
-    std::fprintf(stderr,
-        "[radix] SKIP expand-then-reclaim: direct-slot Mapping releases are still "
-        "synchronous (D-011). Re-enable with DEC-068's DeferredRelease records.\n");
-    return;
+TEST(radix_concurrent_expansion_and_reclamation_are_invisible_to_a_reader) {
     constexpr size_t kCpus = 2;
     Harness h(kCpus, 1);
     TreeA tree;
-    ASSERT_TRUE(tree.init(5, 0, h.domain));
+    ASSERT_TRUE(tree.init(5, 0, h.domain, h.releasePools));
 
     // §11: "Reader pinned mid-descent while a writer expands, then reclaims, the
     // exact slot it is about to load." The harness cannot suspend a thread
@@ -607,7 +590,7 @@ TEST(radix_progress_audit_classifies_real_contention) {
     rdx::auditReset();
 
     TreeA tree;
-    ASSERT_TRUE(tree.init(5, 0, h.domain));
+    ASSERT_TRUE(tree.init(5, 0, h.domain, h.releasePools));
 
     constexpr unsigned kOpsPerCpu = 300;
     onEachCpu(kCpus, [&](size_t cpu) {

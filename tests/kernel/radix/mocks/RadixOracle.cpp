@@ -34,6 +34,20 @@ std::atomic<size_t> gTypeCount{0};
 // property under test.
 std::atomic<size_t> gLive[kMaxTypes];
 
+// The FIXTURE's own population, subtracted from every count a test reads.
+//
+// DEC-068's DeferredRelease records are the reason this exists. They are a
+// per-address-space population allocated by the fixture and freed by it, so
+// they are live for the whole of every test — but they are not part of the
+// universe a test reasons about, and a test asserting "this churn returned to
+// zero live objects" means zero objects THE TREE created.
+//
+// Subtracting at read time rather than zeroing gLive at creation is the
+// difference between honest and convenient: zeroing would make the fixture's
+// own teardown destroy 230 objects the counters believe were never
+// constructed, and noteDestroyed reports that (correctly) as a double destroy.
+std::atomic<size_t> gBaseline[kMaxTypes];
+
 // ─── Fault injection ───────────────────────────────────────────────────────
 
 enum class Policy { None, All, ExactlyAt, AfterN };
@@ -127,14 +141,21 @@ bool shouldInjectFailure() {
 
 namespace CroCOSTest::radix {
 
+// Every read is fixture-relative. Saturating rather than wrapping: a count
+// BELOW the fixture baseline means the fixture's own objects were destroyed
+// under the test, which noteDestroyed's own double-destroy check is the right
+// detector for — reporting it here as a colossal unsigned number would only
+// obscure it.
 size_t liveCount(size_t typeId) {
-    return gLive[typeId].load(std::memory_order_relaxed);
+    const size_t live = gLive[typeId].load(std::memory_order_relaxed);
+    const size_t base = gBaseline[typeId].load(std::memory_order_relaxed);
+    return live > base ? live - base : 0;
 }
 
 size_t totalLive() {
     size_t sum = 0;
     const size_t n = gTypeCount.load(std::memory_order_acquire);
-    for (size_t i = 0; i < n; i++) sum += gLive[i].load(std::memory_order_relaxed);
+    for (size_t i = 0; i < n; i++) sum += liveCount(i);
     return sum;
 }
 
@@ -152,7 +173,7 @@ Baseline captureBaseline() {
     Baseline b{};
     b.types = gTypeCount.load(std::memory_order_acquire);
     for (size_t i = 0; i < b.types && i < kMaxTypes; i++) {
-        b.counts[i] = gLive[i].load(std::memory_order_relaxed);
+        b.counts[i] = liveCount(i);
     }
     return b;
 }
@@ -169,7 +190,7 @@ void assertBaseline(const Baseline& b, const char* what) {
 
     for (size_t i = 0; i < n && i < kMaxTypes; i++) {
         const size_t before = (i < b.types) ? b.counts[i] : 0;
-        const size_t now    = gLive[i].load(std::memory_order_relaxed);
+        const size_t now    = liveCount(i);
         if (now == before) continue;
         differs = true;
         if (used < sizeof(message) - 1) {
@@ -200,6 +221,15 @@ void resetAccounting() {
     const size_t n = gTypeCount.load(std::memory_order_acquire);
     for (size_t i = 0; i < n && i < kMaxTypes; i++) {
         gLive[i].store(0, std::memory_order_relaxed);
+        gBaseline[i].store(0, std::memory_order_relaxed);
+    }
+}
+
+void setAccountingBaseline() {
+    const size_t n = gTypeCount.load(std::memory_order_acquire);
+    for (size_t i = 0; i < n && i < kMaxTypes; i++) {
+        gBaseline[i].store(gLive[i].load(std::memory_order_relaxed),
+                           std::memory_order_relaxed);
     }
 }
 

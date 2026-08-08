@@ -17,6 +17,7 @@
 
 #include <MockCpuLocal.h>      // kernel::test::bindThreadToCpu (vmsmalloc mocks)
 #include <mem/radix/SlotCodec.h>
+#include <mem/radix/DeferredRelease.h>
 #include <rcu/RCU.h>
 #include <MockInterruptContext.h>
 #include <MockRcuEnv.h>
@@ -48,6 +49,18 @@ namespace CroCOSTest::radix {
         // handler sits on, and this consumer retires from the fault path.
         kernel::rcu::Domain domain;
 
+        // §7.1 / DEC-068's record population. Per ADDRESS SPACE in production —
+        // the DEC-082 control block owns it — so one per harness here, alongside
+        // the domain it shares a lifetime with.
+        //
+        // Sized at the amd64 geometry's ceiling for every fixture, including the
+        // tiny-geometry ones whose own ceiling is 16. Over-provisioning is the
+        // right default for a harness: an undersized pool does not fail, it just
+        // turns every operation into a shortfall-and-barrier round trip, which
+        // would read as a mysterious slowdown rather than as a bug. The tests
+        // that WANT the shortfall path arm it deliberately.
+        kernel::mm::radix::DeferredReleasePools releasePools{};
+
         explicit Harness(size_t cpus = 1, size_t domains = 1) {
             VS::test::initialize(cpus, domains);
             numa::test::configure(cpus, domains, &allToDomainZero);
@@ -68,6 +81,17 @@ namespace CroCOSTest::radix {
                 VS::test::shutdown();
                 throw AssertionFailure(std::string("radix Harness: domain init failed"));
             }
+            if (!releasePools.create(
+                    cpus, kernel::mm::radix::deferredReleaseBound(
+                              kernel::mm::radix::kAmd64Geometry))) {
+                (void)domain.deinit();
+                VS::test::shutdown();
+                throw AssertionFailure(
+                    std::string("radix Harness: DeferredRelease pool creation failed"));
+            }
+            // The pool population is fixture infrastructure, not something a
+            // test allocated — every count a test reads is relative to it.
+            setAccountingBaseline();
         }
 
         ~Harness() {
@@ -76,7 +100,12 @@ namespace CroCOSTest::radix {
             // the tests being single-threaded at this point, and by joined
             // threads in the concurrent ones), THEN deinit, THEN the arena.
             if (domain.initialized()) {
+                // §7.4's order: drainAllQuiescent FIRST, so every in-flight
+                // record's deleter has run and pushed it home, THEN free the
+                // pools, THEN deinit. Freeing the pools first would destroy
+                // records still linked into an undrained bag.
                 (void)kernel::rcu::drainAllQuiescent(domain);
+                releasePools.destroy();
                 (void)domain.deinit();
             }
             // The RCU block freelist is process-global while the arena is

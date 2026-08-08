@@ -107,8 +107,8 @@ struct Pair {
 
     Pair(Harness& h, unsigned rootLevel)
         : modelSmall(rootLevel, 0), modelUnit(rootLevel, 0) {
-        if (!decomposed.init(rootLevel, 0, h.domain) ||
-            !unitPath.init(rootLevel, 0, h.domain)) {
+        if (!decomposed.init(rootLevel, 0, h.domain, h.releasePools) ||
+            !unitPath.init(rootLevel, 0, h.domain, h.releasePools)) {
             throw AssertionFailure(std::string("Pair: root allocation failed"));
         }
     }
@@ -201,7 +201,17 @@ TEST(radix_decomposition_over_budget_subtree_converges_to_the_unit_path) {
     // level-2 node over four level-3 nodes: 5 nodes behind one root slot, well
     // over the budget of 1.
     populateByUnit(p, 0, 63, 1000);
+    // §7.1: displaced `Mapping` references are released by a DeferredRelease
+    // record at grace-period end, so between the operation and its grace period
+    // the structural counts legitimately exceed the naming-slot census.
+    // `validate` checks that census, so it needs a quiesced tree.
+    quiesce(h);
     ValidT::validate(p.decomposed, "case 1 populate (decomposed)");
+    // §7.1: displaced `Mapping` references are released by a DeferredRelease
+    // record at grace-period end, so between the operation and its grace period
+    // the structural counts legitimately exceed the naming-slot census.
+    // `validate` checks that census, so it needs a quiesced tree.
+    quiesce(h);
     ValidT::validate(p.unitPath, "case 1 populate (unit path)");
 
     const uint64_t before = p.decomposed.stats().decompositions.load(RELAXED);
@@ -217,7 +227,17 @@ TEST(radix_decomposition_over_budget_subtree_converges_to_the_unit_path) {
     p.assertConverged("case 1");
     assertMatchesModel(p.decomposed, p.modelSmall, "case 1 decomposed");
     assertMatchesModel(p.unitPath, p.modelUnit, "case 1 unit path");
+    // §7.1: displaced `Mapping` references are released by a DeferredRelease
+    // record at grace-period end, so between the operation and its grace period
+    // the structural counts legitimately exceed the naming-slot census.
+    // `validate` checks that census, so it needs a quiesced tree.
+    quiesce(h);
     ValidT::validate(p.decomposed, "case 1 (decomposed)");
+    // §7.1: displaced `Mapping` references are released by a DeferredRelease
+    // record at grace-period end, so between the operation and its grace period
+    // the structural counts legitimately exceed the naming-slot census.
+    // `validate` checks that census, so it needs a quiesced tree.
+    quiesce(h);
     ValidT::validate(p.unitPath, "case 1 (unit path)");
 
     // The terminal state: the site here is the level-1 node under root slot 0,
@@ -287,6 +307,11 @@ TEST(radix_decomposition_partial_child_edge_maps_the_tail_in_a_sparse_sibling) {
     // its untouched part is observable.
     p.apply(104, 107, 3000);
 
+    // §7.1: displaced `Mapping` references are released by a DeferredRelease
+    // record at grace-period end, so between the operation and its grace period
+    // the structural counts legitimately exceed the naming-slot census.
+    // `validate` checks that census, so it needs a quiesced tree.
+    quiesce(h);
     ValidT::validate(p.decomposed, "case 2 populate (decomposed)");
 
     const uint64_t before = p.decomposed.stats().decompositions.load(RELAXED);
@@ -303,7 +328,17 @@ TEST(radix_decomposition_partial_child_edge_maps_the_tail_in_a_sparse_sibling) {
     p.assertConverged("case 2");
     assertMatchesModel(p.decomposed, p.modelSmall, "case 2 decomposed");
     assertMatchesModel(p.unitPath, p.modelUnit, "case 2 unit path");
+    // §7.1: displaced `Mapping` references are released by a DeferredRelease
+    // record at grace-period end, so between the operation and its grace period
+    // the structural counts legitimately exceed the naming-slot census.
+    // `validate` checks that census, so it needs a quiesced tree.
+    quiesce(h);
     ValidT::validate(p.decomposed, "case 2 (decomposed)");
+    // §7.1: displaced `Mapping` references are released by a DeferredRelease
+    // record at grace-period end, so between the operation and its grace period
+    // the structural counts legitimately exceed the naming-slot census.
+    // `validate` checks that census, so it needs a quiesced tree.
+    quiesce(h);
     ValidT::validate(p.unitPath, "case 2 (unit path)");
 
     // The orphaned-tail assertion, stated directly rather than left to the
@@ -363,6 +398,11 @@ TEST(radix_decomposition_munmap_over_holes_touches_no_empty_slot) {
     populateByUnit(p, 0, 15, 4000);
     populateByUnit(p, 32, 47, 5000);
 
+    // §7.1: displaced `Mapping` references are released by a DeferredRelease
+    // record at grace-period end, so between the operation and its grace period
+    // the structural counts legitimately exceed the naming-slot census.
+    // `validate` checks that census, so it needs a quiesced tree.
+    quiesce(h);
     ValidT::validate(p.decomposed, "case 3 populate (decomposed)");
     assertMatchesModel(p.decomposed, p.modelSmall, "case 3 populate");
 
@@ -380,7 +420,17 @@ TEST(radix_decomposition_munmap_over_holes_touches_no_empty_slot) {
     // node's recorded occupancy to equal its live slot count, which a spurious
     // fetch_sub on an empty slot breaks — and which is otherwise invisible,
     // since cover is unaffected by a wrong count until reclamation reads it.
+    // §7.1: displaced `Mapping` references are released by a DeferredRelease
+    // record at grace-period end, so between the operation and its grace period
+    // the structural counts legitimately exceed the naming-slot census.
+    // `validate` checks that census, so it needs a quiesced tree.
+    quiesce(h);
     ValidT::validate(p.decomposed, "case 3 (decomposed)");
+    // §7.1: displaced `Mapping` references are released by a DeferredRelease
+    // record at grace-period end, so between the operation and its grace period
+    // the structural counts legitimately exceed the naming-slot census.
+    // `validate` checks that census, so it needs a quiesced tree.
+    quiesce(h);
     ValidT::validate(p.unitPath, "case 3 (unit path)");
 
     // Everything in the range is gone, and the tail of the partially-intersected
@@ -412,6 +462,11 @@ TEST(radix_decomposition_map_fixed_over_holes_fills_them) {
     p.assertConverged("map over holes");
     assertMatchesModel(p.decomposed, p.modelSmall, "map over holes decomposed");
     assertMatchesModel(p.unitPath, p.modelUnit, "map over holes unit path");
+    // §7.1: displaced `Mapping` references are released by a DeferredRelease
+    // record at grace-period end, so between the operation and its grace period
+    // the structural counts legitimately exceed the naming-slot census.
+    // `validate` checks that census, so it needs a quiesced tree.
+    quiesce(h);
     ValidT::validate(p.decomposed, "map over holes (decomposed)");
 
     // The holes are now mapped — the empty rows were WRITTEN, not skipped —

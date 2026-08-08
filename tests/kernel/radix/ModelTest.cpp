@@ -111,7 +111,7 @@ template <typename Tree, typename Valid, rdx::GeometryDescriptor G>
 void runSequence(Harness& h, unsigned rootLevel, const Op* ops, size_t count,
                  const char* what) {
     Tree tree;
-    if (!tree.init(rootLevel, 0, h.domain)) {
+    if (!tree.init(rootLevel, 0, h.domain, h.releasePools)) {
         throw AssertionFailure(std::string("runSequence: root allocation failed"));
     }
     ShadowMap<G> model(rootLevel, 0);
@@ -265,7 +265,7 @@ TEST(radix_model_randomized_sequences_real_geometry) {
     for (unsigned trial = 0; trial < 12; trial++) {
         auto rng = streamFor(5000 + trial);
         TreeA tree;
-        ASSERT_TRUE(tree.init(rootLevel, 0, h.domain));
+        ASSERT_TRUE(tree.init(rootLevel, 0, h.domain, h.releasePools));
         ShadowMap<GA> model(rootLevel, 0);
 
         // Confine the sweep to a window so the shadow map stays small and the
@@ -321,7 +321,7 @@ TEST(radix_model_an_address_mapped_before_and_after_is_never_lost) {
     auto rng = streamFor(77);
     for (unsigned trial = 0; trial < 100; trial++) {
         TreeT tree;
-        ASSERT_TRUE(tree.init(rootLevel, 0, h.domain));
+        ASSERT_TRUE(tree.init(rootLevel, 0, h.domain, h.releasePools));
         ShadowMap<GT> model(rootLevel, 0);
 
         for (unsigned k = 0; k < 30; k++) {

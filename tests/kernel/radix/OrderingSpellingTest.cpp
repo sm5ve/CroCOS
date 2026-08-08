@@ -44,7 +44,7 @@ namespace {
 
 const char* const kHeaders[] = {
     "Geometry.h", "Ordering.h", "SlotCodec.h", "Node.h",
-    "Mapping.h", "Dispatch.h", "CoreTree.h",
+    "Mapping.h", "DeferredRelease.h", "Dispatch.h", "CoreTree.h",
 };
 
 std::string readHeader(const char* name) {

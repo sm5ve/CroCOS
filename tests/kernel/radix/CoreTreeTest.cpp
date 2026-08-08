@@ -64,7 +64,7 @@ template <typename Tree>
 struct TreeFixture {
     Tree tree;
     explicit TreeFixture(Harness& h, unsigned level, uint64_t base = 0) {
-        if (!tree.init(level, base, h.domain)) {
+        if (!tree.init(level, base, h.domain, h.releasePools)) {
             throw AssertionFailure(std::string("TreeFixture: root allocation failed"));
         }
     }
