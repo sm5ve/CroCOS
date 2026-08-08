@@ -56,9 +56,17 @@ over-lock (DEC-086).
 
 ### 2.1 Buckets and clusters
 
-The root is **one 4 KiB page of 512 buckets**, indexed by the top 9 bits of the VA. Buckets tile
-the 47-bit user space at 256 GiB each and hold **at most one cluster apiece** — the index is a
-prefix, not a hash: no probing, no collisions (DEC-030/033).
+The root is **one small page of buckets**, with the count computed, never stated:
+`bucketCount = arch::smallPageSize / sizeof(BucketEntry)` as a `constexpr` the geometry
+descriptor derives its top-level index bits from (DEC-102) — an architecture with 16 KiB pages
+gets 2048 buckets over 64 GiB zones automatically. At the amd64 default (4 KiB page, 8 B entry)
+that is 512 buckets indexed by the top 9 bits, tiling the 47-bit user space at 256 GiB each;
+buckets hold **at most one cluster apiece** — the index is a prefix, not a hash: no probing, no
+collisions (DEC-030/033). The entry representation is the one open question here (ITEM-085):
+today it is an 8 B pointer to an out-of-line immutable descriptor {base, level, root}; a packed
+8 B inline word (33-bit compressed root pointer + 3-bit level + ≤8-bit span-aligned base offset
++ guard bit = 45 of 64 bits) would keep single-CAS growth while deleting the descriptor as an
+object class — no retire subject, no deleter, no dual-ownership teardown release.
 
 A **cluster** is a node of one conceptual full-depth tree, rooted at whatever level suits its
 current size. Its base is span-aligned by construction, and it grows by allocating a node
@@ -83,7 +91,7 @@ Italicised levels exist only for grown or large-rooted clusters:
 
 | Level | Bits | Slots | Span/slot | Node span | Structural | Realised |
 |---|---|---|---|---|---|---|
-| root bucket | 9 | 512 | 256 GiB | 128 TiB | 4096 B | 4096 B |
+| root bucket | 9 (derived) | 512 (derived) | 256 GiB | 128 TiB | one small page | one small page |
 | *G1* | 4 | 16 | 16 GiB | 256 GiB | 160 B | 192 B |
 | *G0* | 4 | 16 | 1 GiB | 16 GiB | 160 B | 192 B |
 | **C0** (default root) | 5 | 32 | 32 MiB | 1 GiB | 288 B | 320 B |
