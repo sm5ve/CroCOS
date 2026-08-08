@@ -238,6 +238,21 @@ namespace kernel::mm::radix {
         explicit operator bool() const { return static_cast<bool>(root); }
     };
 
+    // §5.6/DEC-007: "The verify pass IS the install pass, so a successful `mmap`
+    // costs one traversal." That fusion is a CORRECTNESS property before it is a
+    // performance one. A placement that verifies emptiness, then installs in a
+    // second traversal, can have a concurrent placement take the range in
+    // between — and the second install silently overwrites it, losing a mapping
+    // with no error anywhere. `OnlyIfEmpty` moves the verification inside the
+    // attempt, where the claims make it exact.
+    enum class ApplyMode : uint8_t {
+        // MAP_FIXED: whatever is there is displaced.
+        Overwrite,
+        // Probed placement: the operation fails as `Occupied` if any part of the
+        // range is already mapped, judged under the attempt's own claims.
+        OnlyIfEmpty,
+    };
+
     enum class ApplyStatus : uint8_t {
         Ok,
         // §6.1: a conflict, or a re-dispatch that changed the claim set. Never
@@ -266,6 +281,9 @@ namespace kernel::mm::radix {
         // because the remedy is a blocking call that must run between attempts
         // and outside any section; retrying without it just re-fails.
         NeedsRecords,
+        // `OnlyIfEmpty` found the range occupied. A normal placement outcome —
+        // the probe moves on — and never a failure.
+        Occupied,
     };
 
     // A lookup returns a **counted reference** to a Mapping together with a
@@ -838,6 +856,91 @@ namespace kernel::mm::radix {
             return total;
         }
 
+        // ─── The chunked free-run scan (§5.6, DEC-095) ─────────────────────
+        //
+        // DEC-095 is a correction to the original O(1)-probe claim, and the
+        // correction is the reason this exists at all: **the occupancy probing
+        // runs against is per-CLUSTER, not per-address-space.** A process with a
+        // few hundred MiB in a 1 GiB cluster probes at tens of percent
+        // occupancy, not the sub-0.1% the O(1) figure was computed for. So the
+        // scan is "a priced placement slow path, not a rare fallback".
+        //
+        // Chunked for the same reason the enumeration is, and it shares the same
+        // step primitive. **The chunking makes the output a CANDIDATE, not a
+        // reservation**: a section close discards everything but the VA cursor,
+        // so DEC-007's fused verify-is-install holds only *within* the
+        // installing attempt. The scan hands a candidate to a fresh
+        // `OnlyIfEmpty` attempt whose own read pass re-verifies it, and a
+        // candidate gone stale by then resumes the scan at the cursor.
+        //
+        // The cursor is monotonic over the cluster, so the loop terminates: at
+        // an install, or at the cluster's end with no run found. That end state
+        // is defined as **"no free run observed by THIS scan"** — a run freed
+        // *behind* the cursor by a concurrent `munmap` is invisible to it. An
+        // accepted false negative whose cost is an unnecessary growth or an
+        // extra cluster; placement still succeeds and nothing is unmapped
+        // wrongly.
+        struct FreeRunCursor {
+            uint64_t next     = 0;   // where the next chunk resumes
+            uint64_t end      = 0;   // inclusive
+            uint64_t runStart = 0;   // start of the empty run in progress
+            bool     inRun    = false;
+            bool     done     = true;
+
+            [[nodiscard]] bool finished() const { return done; }
+        };
+
+        [[nodiscard]] FreeRunCursor freeRunScanFrom(uint64_t lo, uint64_t hi) const {
+            FreeRunCursor c;
+            c.next = lo;
+            c.end  = hi;
+            c.done = (lo > hi);
+            return c;
+        }
+
+        // One chunk. Returns true having set `outVA` when a run of `bytes`
+        // aligned to `align` has been observed; otherwise advances the cursor.
+        //
+        // Every field of the cursor is an ADDRESS or a flag — §7.3 forbids
+        // uncounted pointers crossing a close, and `runStart` in particular is
+        // the state that would be tempting to keep as a node.
+        [[nodiscard]] bool findFreeRunChunk(FreeRunCursor& c, uint64_t bytes,
+                                            uint64_t align, uint64_t& outVA) const {
+            if (c.done) return false;
+            kernel::rcu::ReadGuard guard(*domain);
+            const RootBinding bind = currentBinding();
+            if (!bind) { c.done = true; return false; }
+
+            for (unsigned budget = 0; budget < kScanChunk; budget++) {
+                if (c.next > c.end) { c.done = true; return false; }
+
+                const ScanStep step = scanStepLocked(bind, c.next);
+                if (step.occupied) {
+                    c.inRun = false;
+                } else {
+                    if (!c.inRun) { c.inRun = true; c.runStart = c.next; }
+                    // The run so far, measured from its first ALIGNED address:
+                    // a run that starts mid-granule offers less than its length.
+                    const uint64_t aligned = (c.runStart + align - 1) & ~(align - 1);
+                    const uint64_t runEnd  = step.hi < c.end ? step.hi : c.end;
+                    if (runEnd >= aligned && (runEnd - aligned + 1) >= bytes) {
+                        outVA = aligned;
+                        // Resume AFTER what we are handing out, so a stale
+                        // candidate does not make the scan hand out the same VA
+                        // forever — which is the shape that turns a lost race
+                        // into a livelock.
+                        c.next     = aligned + bytes;
+                        c.inRun    = false;
+                        if (c.next > c.end) c.done = true;
+                        return true;
+                    }
+                }
+                if (step.hi >= UINT64_MAX - 1) { c.done = true; return false; }
+                c.next = step.hi + 1;
+            }
+            return false;
+        }
+
         // ─── Mutation (§6.1's two-pass shape) ──────────────────────────────
         //
         // Every mutation is:
@@ -867,7 +970,8 @@ namespace kernel::mm::radix {
         // whole-node claim.
         //
         // `value == nullptr` clears the range; otherwise it is placed over it.
-        [[nodiscard]] ApplyStatus apply(uint64_t lo, uint64_t hi, Mapping* value) {
+        [[nodiscard]] ApplyStatus apply(uint64_t lo, uint64_t hi, Mapping* value,
+                                        ApplyMode mode = ApplyMode::Overwrite) {
             assert(lo <= hi, "radix: empty operation range");
             if (bucketTable == nullptr) {
                 assert(rootRef, "radix: apply on an uninitialised tree");
@@ -886,7 +990,10 @@ namespace kernel::mm::radix {
                        "radix: operation range crosses a bucket boundary (DEC-080)");
             }
 
-            return applyOrDecompose(lo, hi, value, 0);
+            assert(mode == ApplyMode::Overwrite || value != nullptr,
+                   "radix: OnlyIfEmpty with a null value is a clear that refuses to clear "
+                   "anything — the caller means one of the two things, not neither");
+            return applyOrDecompose(lo, hi, value, mode, 0);
         }
 
         // One unit: the attempt/retry loop of §6.1, which is what §6.5 means by
@@ -894,12 +1001,14 @@ namespace kernel::mm::radix {
         // marks". Returns `NeedsDecomposition` rather than decomposing, so the
         // caller decides whether this range is a whole operation or one slot of
         // somebody's decomposition.
-        [[nodiscard]] ApplyStatus runToCompletion(uint64_t lo, uint64_t hi, Mapping* value) {
+        [[nodiscard]] ApplyStatus runToCompletion(uint64_t lo, uint64_t hi, Mapping* value,
+                                                  ApplyMode mode = ApplyMode::Overwrite) {
             unsigned retryCount = 0;
             unsigned consecutiveShortfalls = 0;
             bool retiredAnything = false;
             for (;;) {
                 Attempt attempt;
+                attempt.mode = mode;
                 ApplyStatus st;
                 {
                     // §3.2 / invariant 17: **one attempt is one read section.**
@@ -1010,9 +1119,22 @@ namespace kernel::mm::radix {
         // detachment count is summed and budget-checked, decomposing at its own
         // site if over".
         [[nodiscard]] ApplyStatus applyOrDecompose(uint64_t lo, uint64_t hi, Mapping* value,
-                                                   unsigned depth) {
-            const ApplyStatus st = runToCompletion(lo, hi, value);
+                                                   ApplyMode mode, unsigned depth) {
+            const ApplyStatus st = runToCompletion(lo, hi, value, mode);
             if (st != ApplyStatus::NeedsDecomposition) return st;
+            // A decomposed OnlyIfEmpty is deliberately NOT supported, and the
+            // assert is the forcing function rather than a silent downgrade to
+            // Overwrite. Decomposition applies the range in several independent
+            // units, so "the whole range was empty" stops being a property any
+            // one unit can establish — an early unit installs, a later one finds
+            // its slice occupied, and the operation has half-placed a mapping
+            // with no way back. Probed placement never needs it: it picks its own
+            // range into space it just observed empty, so there is no populated
+            // subtree to blow the detachment budget.
+            assert(mode == ApplyMode::Overwrite,
+                   "radix: an OnlyIfEmpty operation needed decomposition — placement picks "
+                   "its range into observed-empty space, so this means the range was not "
+                   "empty, or a caller used OnlyIfEmpty for something other than placement");
             return decompose(lo, hi, value, depth);
         }
 
@@ -1129,7 +1251,8 @@ namespace kernel::mm::radix {
                 const uint64_t clipLo   = lo > slotBase ? lo : slotBase;
                 const uint64_t clipHi   = hi < slotEnd  ? hi : slotEnd;
 
-                ApplyStatus st = runToCompletion(clipLo, clipHi, value);
+                ApplyStatus st = runToCompletion(clipLo, clipHi, value,
+                                                 ApplyMode::Overwrite);
                 if (st == ApplyStatus::NeedsDecomposition) {
                     // Recursing on the SAME range would not terminate. It cannot
                     // happen: the site is the deepest node containing the range,
@@ -1184,7 +1307,7 @@ namespace kernel::mm::radix {
                 // The site's slots now all name `value`, so the subtree behind
                 // this row is the site alone — one node, comfortably under the
                 // budget — and the row taken at the parent is DetachChild.
-                return applyOrDecompose(lo, hi, value, depth + 1);
+                return applyOrDecompose(lo, hi, value, ApplyMode::Overwrite, depth + 1);
             }
             return ApplyStatus::Ok;
         }
@@ -1725,6 +1848,13 @@ namespace kernel::mm::radix {
             // re-dispatch can stay a plain bool.
             bool recordShortfall = false;
 
+            // §5.6's fused verify-is-install. `mode` is the caller's; `occupied`
+            // is set by re-dispatch, under the claims, which is the only place
+            // the answer is exact — the read pass runs unclaimed, so a range it
+            // saw empty can fill before the claims land.
+            ApplyMode mode     = ApplyMode::Overwrite;
+            bool      occupied = false;
+
             [[nodiscard]] bool addPending(uint64_t base, unsigned level, unsigned slot,
                                           void* subtree, uint64_t builtFrom) {
                 if (pendingCount >= kMaxPending) return false;
@@ -1813,6 +1943,11 @@ namespace kernel::mm::radix {
                 // shortfall after a blocking replenish that cannot run here.
                 releaseAll(a.claims);
                 returnHeldRecords(a);
+                if (a.occupied) {
+                    // Not a retry: the answer is stable. Something is mapped
+                    // there, and retrying would only re-discover it.
+                    return ApplyStatus::Occupied;
+                }
                 if (a.recordShortfall) {
                     counters.recordShortfalls.fetch_add(1, kRefcountAcquire);
                     return ApplyStatus::NeedsRecords;
@@ -2330,6 +2465,42 @@ namespace kernel::mm::radix {
                     // different subtree, and reusing the old one publishes the
                     // wrong coverage.
                     if (!a.peekPending(nodeBase, level, i, word)) return false;
+                }
+
+                // ─── §5.6 / DEC-007: the fused emptiness verdict ────────────
+                //
+                // Judged HERE and nowhere else, because here is the only place
+                // it is exact: every slot this operation will write is claimed,
+                // so its word is frozen and cannot fill between this test and
+                // the commit. The read pass's view is advisory by construction.
+                //
+                // The question is whether **the requested range** is mapped, not
+                // whether the slot is untouched — and the difference is most of
+                // the cluster. A C1 slot holding a leaf over its first 64 KiB
+                // has 15 more granules free; the row there is `Subdivide`, which
+                // ADDS alongside the survivor rather than displacing it. Judging
+                // by "the word is non-empty" rejects all of them and caps a
+                // 512-granule cluster at 32 placements — one per slot, with the
+                // scan reporting the cluster full while 94% of it is empty.
+                //
+                // So: a leaf is occupancy only where it OVERLAPS. A child word
+                // that did not dispatch to a descend is a fully-covered subtree
+                // and is treated as occupied outright — conservative for
+                // D-030's stranded empty node, and conservative is the right
+                // direction here, since the cost is a probe that moves on.
+                if (a.mode == ApplyMode::OnlyIfEmpty &&
+                    d.action != DispatchAction::DescendIntoChild) {
+                    if (Codec::isLeaf(word)) {
+                        uint64_t leafLo = 0, leafHi = 0;
+                        Codec::absoluteRange(word, slotBase, level, leafLo, leafHi);
+                        if (!(leafHi < clipLo || leafLo > clipHi)) {
+                            a.occupied = true;
+                            return false;
+                        }
+                    } else if (!Codec::isEmpty(word)) {
+                        a.occupied = true;
+                        return false;
+                    }
                 }
 
                 // ─── §7.1 / DEC-068: draw this row's deferred release ───────

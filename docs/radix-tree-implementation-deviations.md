@@ -997,3 +997,48 @@ Pinned by `radix_growth_over_an_empty_cluster_leaves_the_old_root_behind`, which
 asserts the residue is exactly one node **and** that the ordinary path recovers
 it. If someone later teaches growth to reclaim, that test fails and gets deleted
 deliberately rather than drifting.
+
+---
+
+## D-031 — DEFECT (found by the placement histogram, fixed) — "empty" must mean the RANGE, not the slot
+
+DEC-007's fused verify-is-install needs an emptiness verdict, and the first
+implementation judged it over the slot **word**: any non-empty word meant
+occupied. That is the natural reading of "place only into empty space", it
+round-trips through every single-placement test, and it is wrong by a factor of
+sixteen.
+
+**The shape it rejects.** A C1 slot holding a leaf over its first 64 KiB has
+fifteen more granules free. The dispatch row for a placement into one of them is
+`Subdivide`, which builds a child holding the survivor *and* the new leaf — it
+ADDS alongside rather than displacing. The word is a leaf, so a word-based test
+calls it occupied.
+
+**How it presented**: the exit gate's probe-retry histogram filled **32 of 512
+granules** in a 32 MiB cluster — exactly one per C1 slot — and then reported
+`kNoSpaceInCluster` with 94% of the cluster empty. Note what that failure looks
+like from outside: not a crash, not a wrong mapping, just an address space that
+runs out of room early and grows more clusters than it needs. Without a test that
+counts fill against capacity it is invisible.
+
+**Fixed**: a leaf is occupancy only where it **overlaps** the requested range,
+compared against the decoded absolute range (never the raw word — §3.1's
+level-relative trap applies here as much as it does to the validity token). A
+child word that did not dispatch to a descend is a fully-covered subtree and is
+treated as occupied outright.
+
+That last clause is deliberately conservative and worth naming: D-030's stranded
+empty node would be judged occupied, so a placement can decline a range that is
+in fact free. Conservative is the right direction — the cost is one probe moving
+on, where the opposite error is a lost mapping.
+
+**Second defect, same test**: the scan loop conflated a chunk's two false
+returns. `findFreeRunChunk` returns false both for "no run within this chunk's
+64-slot budget, call again" and for "the scan reached the end", and only the
+cursor distinguishes them. Looping on the return value stopped every scan 64
+slots in — again presenting as a cluster reporting itself full. The loop now runs
+on `!cursor.finished()`.
+
+**Both were found by the same test, and neither by any correctness check.** The
+histogram exists because DEC-095 wanted a measurement; it earned its place by
+catching two bugs that no assertion about mappings would have seen.
