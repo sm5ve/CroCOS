@@ -207,7 +207,10 @@ namespace kernel::mm::radix {
         // owner again and may be re-drawn and rewritten at any moment; the
         // locals above are what make the order a matter of clarity rather than
         // of correctness, and stating it as an order keeps it that way.
-        releaseMappingRefs(m, delta);
+        // §7.1: "either deleter RMW-ing a `Mapping`'s count word". The record
+        // was made fresh above; the RECORD IT NAMES is a separate allocation on
+        // a separate page and owes its own call.
+        releaseMappingRefsFromDeleter(m, delta);
         home->push(r);
     }
 

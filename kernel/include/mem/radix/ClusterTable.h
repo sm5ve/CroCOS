@@ -127,7 +127,7 @@ namespace kernel::mm::radix {
         void tearDownClusters() {
             if (table == nullptr) return;
             for (size_t i = 0; i < kBucketCount; i++) {
-                const uint64_t w = table->entries[i].load(kQuiescedRead);
+                const uint64_t w = table->fresh(i).load(kQuiescedRead);
                 if (BucketCodecT::isEmpty(w)) continue;
                 Tree t = treeFor(i);
                 t.tearDownUnits();
@@ -162,7 +162,7 @@ namespace kernel::mm::radix {
         }
 
         [[nodiscard]] bool bucketIsOccupied(size_t bucketIndex) const {
-            return !BucketCodecT::isEmpty(table->entries[bucketIndex].load(kQuiescedRead));
+            return !BucketCodecT::isEmpty(table->fresh(bucketIndex).load(kQuiescedRead));
         }
 
         // ─── Creation (§5.6) ───────────────────────────────────────────────
@@ -197,7 +197,7 @@ namespace kernel::mm::radix {
 
             const uint64_t word = BucketCodecT::encode(root, rootLevel, base, idx);
             uint64_t expected = 0;
-            if (table->entries[idx].compare_exchange(
+            if (table->fresh(idx).compare_exchange(
                     expected, word, kBucketPublishSuccess, kBucketPublishFailure)) {
                 return ClusterStatus::Ok;
             }
@@ -238,7 +238,7 @@ namespace kernel::mm::radix {
                     // and the CAS that publishes it happens here too.
                     kernel::rcu::ReadGuard guard(*domain);
                     const uint64_t word =
-                        kernel::rcu::protectWord(*domain, table->entries[idx]);
+                        kernel::rcu::protectWord(*domain, table->fresh(idx));
                     if (BucketCodecT::isEmpty(word)) return ClusterStatus::AlreadyPresent;
                     cur = BucketCodecT::decode(word, idx);
 
@@ -273,7 +273,7 @@ namespace kernel::mm::radix {
                     const uint64_t newWord =
                         BucketCodecT::encode(parent, newLevel, newBase, idx);
                     uint64_t expected = word;
-                    if (table->entries[idx].compare_exchange(
+                    if (table->fresh(idx).compare_exchange(
                             expected, newWord, kBucketPublishSuccess,
                             kBucketPublishFailure)) {
                         continue;   // re-read: one growth may not be enough

@@ -16,6 +16,15 @@
 // block would put an `ensureTLBEntryFresh` on every descent-cache hit, which is
 // the spec's hottest path.
 //
+// **What did NOT move with it, and cost a Phase 5 debugging session**: the root
+// bucket page is still an ordinary `tryMake<BucketTable>` allocation, so it IS
+// vmsmalloc memory and its VA recycles like any other. Every descent opens by
+// loading a bucket word out of it, so it carries a per-touch
+// `ensureTLBEntryFresh` obligation on exactly the path this block was
+// rearranged to keep clear — see `BucketTable::fresh`. Whether the root page
+// should join the control block in pinned storage is a real design question and
+// is recorded as one; the current answer is the freshness call.
+//
 // Reservations are kernel-lifetime and never returned to VMSubstrate, so blocks
 // recycle through a freelist. **Zero-fill is a per-RESERVATION guarantee, not a
 // per-block one** (vmsmalloc DEC-051): a recycled block carries the previous
