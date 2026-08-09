@@ -2904,3 +2904,24 @@ only on the pathological shape D-054 measured at **zero occurrences** in a
 realistic workload, and it is a latency cost rather than a correctness one. If a
 workload ever shows it, the answer is not a bigger reserve — it is per-CPU
 promotion, which already exists and reacts to exactly this signal.
+
+### The test D-057 asked for
+
+`radix_concurrent_wide_draws_contend_for_the_reserve_and_both_finish`: two CPUs,
+disjoint level-6 children under one level-5 root — so they share an address space
+and therefore a reserve without fighting over the same slots — each running 24
+rounds of fill-sixteen-then-clear-fifteen against a two-record per-CPU pool.
+
+It asserts **liveness** (every round on both CPUs completed) and non-vacuity (the
+pools really did run short), because liveness is what a shared reserve puts at
+risk: a hang would be D-056's hoarding livelock and a thrown status would be the
+bound D-057 corrected.
+
+**Mutation-tested against the defect it exists for.** Restoring
+`consecutiveShortfalls <= 1` fails this test and **no other** — all 171 others,
+including every single-CPU reserve test, still pass. That is the proof the
+single-CPU tests could not have caught D-057, and it is the fourth time this
+subsystem has produced the same lesson: a test that cannot produce a shape
+reports success, and success looks like evidence.
+
+Green on both sanitizers (172x2).

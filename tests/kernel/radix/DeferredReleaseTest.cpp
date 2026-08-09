@@ -507,8 +507,8 @@ struct StarvedPools {
     rdx::DeferredReleasePool storage[arch::MAX_PROCESSOR_COUNT + 1];
     rdx::DeferredReleasePools pools{};
 
-    explicit StarvedPools(unsigned perCpu) {
-        if (!pools.create(storage, 1, perCpu, rdx::deferredReleaseBound(GA))) {
+    explicit StarvedPools(unsigned perCpu, size_t cpus = 1) {
+        if (!pools.create(storage, cpus, perCpu, rdx::deferredReleaseBound(GA))) {
             throw AssertionFailure(std::string("starved pool creation failed"));
         }
         // The record population is fixture infrastructure, exactly as the
@@ -588,4 +588,90 @@ TEST(radix_repeated_shortfalls_promote_the_per_cpu_population) {
     // `destroy()`'s conservation check counts them.
     sp.pools.destroy();
     assertNoLiveObjects("promotion");
+}
+
+TEST(radix_concurrent_wide_draws_contend_for_the_reserve_and_both_finish) {
+    // **The shape every other reserve test structurally cannot see.** The rest
+    // are single-CPU, and a single CPU never contends with itself for the
+    // shared reserve — which is exactly how D-057's broken bound slipped past
+    // them: `consecutiveShortfalls <= 1` was an invariant under the old
+    // per-CPU-ceiling design and became false the moment two CPUs could want a
+    // wide draw at once, and no single-CPU test could tell.
+    //
+    // What is asserted is LIVENESS, because that is what the shared reserve puts
+    // at risk: the first CPU to take the lock refills with the WHOLE reserve and
+    // its records then sit in RCU bags until a grace period ends, so the second
+    // CPU finds nothing and cannot be rescued by its own `barrier` — a barrier
+    // drives only the calling CPU's retirees. Progress comes from RCU's sweep
+    // being domain-wide (RCU-DEC-006 stealing), which lets the waiter's own
+    // drain run the borrower's deleters.
+    constexpr size_t   kCpus   = 2;
+    constexpr unsigned kRounds = 24;
+
+    Harness h(kCpus, 1);
+    StarvedPools sp{2, kCpus};                // both CPUs must reach the reserve
+    TreeA tree;
+    ASSERT_TRUE(tree.init(5, 0, h.domain, sp.pools));
+
+    std::atomic<unsigned> completed{0};
+    std::atomic<size_t>   failures{0};
+    std::string           firstError;
+    std::mutex            errorMutex;
+
+    // Disjoint level-6 children under the same level-5 root: the two CPUs share
+    // an address space — and therefore a reserve — without fighting over the
+    // same slots, so what this measures is reserve contention and not ordinary
+    // claim contention.
+    auto worker = [&](unsigned cpu, uint64_t basePage) {
+        kernel::test::bindThreadToCpu(cpu);
+        try {
+            for (unsigned round = 0; round < kRounds; round++) {
+                for (unsigned i = 0; i < 16; i++) {
+                    const uint64_t va = (basePage + i) * kPage;
+                    auto* m = makeMapping(va);
+                    if (m == nullptr) throw AssertionFailure(std::string("record alloc failed"));
+                    if (tree.apply(va, va + kPage - 1, m) != rdx::ApplyStatus::Ok) {
+                        throw AssertionFailure(std::string("dense fill got a non-Ok status"));
+                    }
+                }
+                // Fifteen of the sixteen: one attempt, fifteen distinct records
+                // displaced, against a two-record pool.
+                const uint64_t lo = basePage * kPage;
+                if (tree.apply(lo, lo + 15 * kPage - 1, nullptr) != rdx::ApplyStatus::Ok) {
+                    throw AssertionFailure(std::string("wide clear got a non-Ok status"));
+                }
+                if (tree.apply(lo, lo + 16 * kPage - 1, nullptr) != rdx::ApplyStatus::Ok) {
+                    throw AssertionFailure(std::string("cleanup clear got a non-Ok status"));
+                }
+                completed.fetch_add(1, std::memory_order_relaxed);
+            }
+        } catch (const std::exception& e) {
+            failures.fetch_add(1, std::memory_order_relaxed);
+            std::lock_guard<std::mutex> lock(errorMutex);
+            if (firstError.empty()) firstError = e.what();
+        }
+    };
+
+    std::vector<std::thread> workers;
+    workers.emplace_back([&] { worker(0, 0); });
+    workers.emplace_back([&] { worker(1, 16); });
+    for (auto& w : workers) w.join();
+    kernel::test::bindThreadToCpu(0);
+
+    if (failures.load() != 0) throw AssertionFailure("worker failure: " + firstError);
+
+    // **Liveness**: every round on both CPUs finished. A hang here would be the
+    // livelock D-056's `returnSurplus` exists to prevent; a thrown status would
+    // be the bound D-057 corrected.
+    ASSERT_EQ(kRounds * 2, completed.load());
+
+    // Non-vacuity: if the pools never ran short, the two CPUs never met at the
+    // reserve and this ran the ordinary path twice.
+    ASSERT_TRUE(sp.pools.shortfallCount() > 0);
+
+    quiesce(h);
+    tree.destroyTree();
+    quiesce(h);
+    sp.pools.destroy();
+    assertNoLiveObjects("concurrent wide draws");
 }
