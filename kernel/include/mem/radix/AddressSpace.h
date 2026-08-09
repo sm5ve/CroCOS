@@ -61,6 +61,7 @@
 #include <kassert.h>
 #include <mem/MemTypes.h>
 #include <mem/NUMA.h>
+#include <mem/PinnedBlockPool.h>
 #include <mem/VMSubstrate.h>
 #include <rcu/RCU.h>
 
@@ -126,25 +127,6 @@ namespace kernel::mm::radix {
         // value its next tenant will use.
         uint64_t generation;
 
-        // Freelist linkage for recycled blocks. Pinned storage is never returned
-        // to VMSubstrate, so this is how the high-water mark stays at "maximum
-        // concurrent address spaces" instead of growing with process churn.
-        //
-        // Reuse costs nothing and is worth understanding rather than assuming:
-        // handing this block to a different process does not touch a PTE at all.
-        // The VA -> physical mapping is unchanged and only the bytes differ, so
-        // a CPU's cached translation stays *correct* and there is nothing to
-        // invalidate. DEC-051b's write-once-PTE invariant is what buys that —
-        // it is in tension with RETURNING pages to the allocator, never with
-        // reusing them.
-        ControlBlock* freelistNext;
-
-        // How many CPUs' worth of pool storage the trailing array was reserved
-        // for. Survives the zero-fill on reuse, like `generation`, because it
-        // describes the RESERVATION rather than the tenant — and the freelist
-        // needs it to refuse a block that is too small.
-        size_t reservedCpus;
-
         // Where the pages actually are, which is not necessarily the `home` any
         // given tenant asked for: reservations are kernel-lifetime, so a block's
         // placement is fixed at its FIRST reservation and every later tenant
@@ -164,83 +146,43 @@ namespace kernel::mm::radix {
         }
     };
 
-    // ─── The freelist ──────────────────────────────────────────────────────
+    // ─── The block store ───────────────────────────────────────────────────
     //
-    // Deliberately not lock-free: DEC-101 puts every acquisition here behind the
-    // domain-management lock, address-space creation and teardown are rare, and
-    // rcu.md's cross-spec correction was explicit that these operations are
-    // *allowed to lock*.
+    // Was a hand-rolled freelist over whole `reservePerDomainStaticBuffer`
+    // reservations. It is now a `PinnedBlockPool` plus a generation counter, and
+    // the three things that disappeared with it are the point:
+    //
+    //   - **the per-domain partitioning**, which this had to grow after a block
+    //     recycled onto the wrong NUMA node (D-045);
+    //   - **the size check**, which existed because variable-sized blocks made
+    //     an undersized reuse an out-of-bounds write — the pool is fixed-stride,
+    //     so the whole class of bug is gone rather than guarded;
+    //   - **the page minimum**. Every block used to cost a 4 KiB page; at
+    //     `sizeof(ControlBlock)` + 8 CPUs of pools = 768 B, five now share one.
+    //
+    // What stays here is the part that is genuinely radix's: the **generation**,
+    // which is an address-space identity concept (DEC-082) that the descent
+    // cache compares against, not a property of the storage.
     template <GeometryDescriptor G, typename Codec, unsigned DetachBudget = kDetachBudget>
-    struct ControlBlockFreelist {
+    struct ControlBlockStore {
         using Block = ControlBlock<G, Codec, DetachBudget>;
 
-        // ─── Partitioned by NUMA domain ────────────────────────────────────
-        //
-        // One list per domain, because a single list silently discards the
-        // placement its blocks were reserved with. `createAddressSpace` takes a
-        // `home` domain and `tryReservePerDomainStaticBuffer` honours it — but
-        // only on the FIRST reservation; a recycled block came from wherever the
-        // last tenant happened to be. On a multi-socket machine that hands a
-        // process a control block on a remote node, and this block holds the
-        // generation and the pool heads that every CPU reads on hot paths, which
-        // is the entire reason DEC-082 moved them into pinned storage.
-        //
-        // Not urgent on the stated target (single-NUMA consumer desktops, where
-        // there is one list and this is a no-op), but multi-domain correctness is
-        // preserved architecturally rather than aspirationally, and "the NUMA
-        // placement is right until the second process" is not that.
-        //
-        // The fallback is deliberate: a block from the wrong domain still beats
-        // burning window on a fresh reservation, since the window is the scarce
-        // resource and remote-but-present is a performance answer where
-        // exhaustion is a correctness one.
-        Block*   heads[numa::kMaxDomains] = {};
-        uint64_t nextGeneration = 1;
+        PinnedBlockPool pool;
+        uint64_t        nextGeneration = 1;
 
-        // Caller holds the domain-management lock.
-        //
-        // Size-aware, because blocks became variable-sized when the pool array
-        // moved into their reservation. In the kernel every block is the same
-        // size — `cpus` is `arch::processorCount()`, fixed after boot — so the
-        // scan never advances past the head; it exists so a caller that varies
-        // the count (the harness does) cannot silently be handed a block whose
-        // trailing array is too short, which would be an out-of-bounds write
-        // with no diagnostic.
-        [[nodiscard]] Block* takeFromListLocked(Block*& listHead, size_t cpus) {
-            Block** link = &listHead;
-            while (Block* b = *link) {
-                if (b->reservedCpus >= cpus) {
-                    *link = b->freelistNext;
-                    b->freelistNext = nullptr;
-                    return b;
-                }
-                link = &b->freelistNext;
-            }
-            return nullptr;
-        }
+        // `cpus` fixes the block stride for this store's lifetime. In the kernel
+        // that is `arch::processorCount()`, constant after boot; the harness
+        // varies it per fixture and gets one store per fixture.
+        void init(size_t cpus) { pool.init(Block::reservationBytes(cpus)); }
 
-        [[nodiscard]] Block* takeLocked(numa::DomainID home, size_t cpus) {
-            const size_t h = domainIndex(home);
-            if (Block* b = takeFromListLocked(heads[h], cpus)) return b;
-            // Wrong-domain fallback — see the note above.
-            for (size_t d = 0; d < numa::kMaxDomains; d++) {
-                if (d == h) continue;
-                if (Block* b = takeFromListLocked(heads[d], cpus)) return b;
-            }
-            return nullptr;
+        // Caller holds the domain-management lock — the pool's contract, which
+        // is in turn `reserveStaticBufferImpl`'s.
+        [[nodiscard]] PinnedBlock takeLocked(numa::DomainID home) {
+            return pool.allocateLocked(home);
         }
 
         void returnLocked(Block* b) {
-            const size_t h = domainIndex(b->homeDomain);
-            b->freelistNext = heads[h];
-            heads[h] = b;
-        }
-
-        static size_t domainIndex(numa::DomainID d) {
-            const size_t i = static_cast<size_t>(d.value);
-            assert(i < numa::kMaxDomains,
-                   "radix: NUMA domain id outside the freelist's partition");
-            return i;
+            pool.freeLocked(PinnedBlock{static_cast<void*>(b), b->homeDomain});
         }
     };
 
@@ -253,35 +195,38 @@ namespace kernel::mm::radix {
     // impossible to skip without deleting a visible line.
     template <GeometryDescriptor G, typename Codec, unsigned DetachBudget>
     [[nodiscard]] CreateStatus createAddressSpace(
-            ControlBlockFreelist<G, Codec, DetachBudget>& freelist,
+            ControlBlockStore<G, Codec, DetachBudget>& store,
             numa::DomainID home, size_t cpuCount, unsigned perCpuRecords,
             ControlBlock<G, Codec, DetachBudget>*& outBlock) {
         using Block = ControlBlock<G, Codec, DetachBudget>;
         outBlock = nullptr;
 
         // ─── 1. The control block, under the domain-management lock ────────
-        Block* block = nullptr;
-        bool   recycled = false;
-        size_t reserved = cpuCount;
-        // Captured BEFORE the zero-fill below, which does not spare them.
+        Block*         block = nullptr;
         numa::DomainID placedOn = home;
+        uint64_t       generation = 0;
         {
             kernel::rcu::DomainManagementLockGuard guard;
-            block = freelist.takeLocked(home, cpuCount);
-            if (block != nullptr) {
-                recycled = true;
-                reserved = block->reservedCpus;
-                placedOn = block->homeDomain;
-            } else {
-                // The reservation covers the block AND its trailing pool array,
-                // sized at this machine's CPU count — see ControlBlock's note on
-                // why the array is here rather than allocated separately.
-                void* raw = VMSubstrate::tryReservePerDomainStaticBuffer(
-                    Block::reservationBytes(cpuCount), home);
-                if (raw == nullptr) return CreateStatus::OutOfMemory;
-                block = static_cast<Block*>(raw);
-            }
-            block->generation = freelist.nextGeneration++;
+            // The store's stride is fixed by its first caller and covers the
+            // block AND its trailing pool array — see ControlBlock's note on why
+            // the array is in the same storage rather than allocated separately.
+            //
+            // This assert replaces the size-checking scan the hand-rolled
+            // freelist needed. A fixed-stride pool cannot hand back an
+            // undersized block, so the only remaining way to get one is to ask a
+            // store for more CPUs than it was built for — which is a caller
+            // error and fails loudly here rather than becoming an out-of-bounds
+            // write into the next block. Unreachable in the kernel, where
+            // `processorCount()` is constant after boot.
+            if (!store.pool.ready()) store.init(cpuCount);
+            assert(Block::reservationBytes(cpuCount) <= store.pool.blockStride(),
+                   "radix: this ControlBlockStore was built for fewer CPUs than this "
+                   "address space needs — its blocks' trailing pool arrays are too short");
+            const PinnedBlock got = store.takeLocked(home);
+            if (!got) return CreateStatus::OutOfMemory;
+            block      = static_cast<Block*>(got.ptr);
+            placedOn   = got.domain;
+            generation = store.nextGeneration++;
         }
         // The lock is RELEASED here, deliberately and visibly: `Domain::init`
         // takes it itself, so holding it across the next step self-deadlocks.
@@ -291,8 +236,8 @@ namespace kernel::mm::radix {
         // (vmsmalloc DEC-051). `generation` survives because it was written
         // above, after the wipe would have happened — so the order here is not
         // arbitrary either.
-        if (recycled) {
-            // The whole RESERVATION, not just the block.
+        {
+            // Unconditionally, whatever the block's provenance.
             //
             // **Defence in depth, and honestly not load-bearing today**:
             // `pools.destroy()` already drains every record and resets each
@@ -307,25 +252,29 @@ namespace kernel::mm::radix {
             // thorough is what stops a field added to the pool later — and not
             // reset there — from becoming a live record list handed to a process
             // that does not own it.
-            const uint64_t generation = block->generation;
-            memset(static_cast<void*>(block), 0, Block::reservationBytes(reserved));
-            block->generation = generation;
+            //
+            // Unconditional now that the pool owns reuse: the caller cannot tell
+            // a recycled block from a fresh one and should not have to. That is
+            // RCU-DEC-043(i)'s formulation — zeroing at the consumer "makes every
+            // init valid regardless of block provenance, which is the only form
+            // of the rule that does not depend on how the caller obtained its
+            // storage" — and it is also what a fresh page's zero-fill makes free.
+            memset(static_cast<void*>(block), 0, store.pool.blockStride());
         }
-        // Both describe the RESERVATION rather than the tenant, so they are
-        // written after the wipe on both paths, from the values captured before
-        // it.
-        block->reservedCpus = reserved;
-        block->homeDomain   = placedOn;
+        // Written after the wipe. `homeDomain` is where the pages actually are,
+        // which the pool reports because a preferred-domain request can be
+        // satisfied from another domain's free list.
+        block->generation = generation;
+        block->homeDomain = placedOn;
         new (&block->domain)   kernel::rcu::Domain();
         new (&block->clusters) typename Block::Table();
         new (&block->pools)    DeferredReleasePools();
         block->dying.store(0, kPrivateInit);
-        block->freelistNext = nullptr;
 
         // ─── 2. The domain ─────────────────────────────────────────────────
         if (!block->domain.init("radix-as", kDrainBatchBound)) {
             kernel::rcu::DomainManagementLockGuard guard;
-            freelist.returnLocked(block);
+            store.returnLocked(block);
             return CreateStatus::OutOfMemory;
         }
 
@@ -333,7 +282,7 @@ namespace kernel::mm::radix {
         if (!block->clusters.init(block->domain, block->pools)) {
             (void)block->domain.deinit();
             kernel::rcu::DomainManagementLockGuard guard;
-            freelist.returnLocked(block);
+            store.returnLocked(block);
             return CreateStatus::OutOfMemory;
         }
 
@@ -342,7 +291,7 @@ namespace kernel::mm::radix {
             block->clusters.destroy();
             (void)block->domain.deinit();
             kernel::rcu::DomainManagementLockGuard guard;
-            freelist.returnLocked(block);
+            store.returnLocked(block);
             return CreateStatus::OutOfMemory;
         }
 
@@ -394,7 +343,7 @@ namespace kernel::mm::radix {
     // that here. Stated in the signature's contract rather than asserted,
     // because a false assurance is worse than none.
     template <GeometryDescriptor G, typename Codec, unsigned DetachBudget>
-    void destroyAddressSpace(ControlBlockFreelist<G, Codec, DetachBudget>& freelist,
+    void destroyAddressSpace(ControlBlockStore<G, Codec, DetachBudget>& store,
                              ControlBlock<G, Codec, DetachBudget>* block) {
         assert(block != nullptr, "radix: teardown of no address space");
 
@@ -434,7 +383,7 @@ namespace kernel::mm::radix {
         // 8. The control block, last, because everything above lived in it.
         {
             kernel::rcu::DomainManagementLockGuard guard;
-            freelist.returnLocked(block);
+            store.returnLocked(block);
         }
     }
 

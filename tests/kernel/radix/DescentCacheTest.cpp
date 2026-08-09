@@ -50,7 +50,7 @@ namespace {
 constexpr auto GA = rdx::kAmd64Geometry;
 using CodecA    = rdx::HarnessSlotCodec<GA>;
 using BlockA    = rdx::ControlBlock<GA, CodecA>;
-using FreelistA = rdx::ControlBlockFreelist<GA, CodecA>;
+using StoreA    = rdx::ControlBlockStore<GA, CodecA>;
 using TreeA     = rdx::CoreTree<GA, CodecA>;
 using CacheA    = rdx::DescentCache<GA, CodecA>;
 // The concrete node type at the deepest level, for the accounting assertions —
@@ -118,11 +118,11 @@ struct BareArena {
 
 // An address space with one cluster covering [0, span), ready to be mapped into.
 struct Space {
-    FreelistA freelist;
+    StoreA    store;
     BlockA*   block = nullptr;
 
     explicit Space(size_t cpus = 1, uint64_t span = uint64_t{1} << 30) {
-        if (rdx::createAddressSpace(freelist, kernel::numa::DomainID{0}, cpus,
+        if (rdx::createAddressSpace(store, kernel::numa::DomainID{0}, cpus,
                                     kTestRecords, block) != rdx::CreateStatus::Ok) {
             throw AssertionFailure("descent cache: address-space creation failed");
         }
@@ -130,7 +130,7 @@ struct Space {
             throw AssertionFailure("descent cache: cluster creation failed");
         }
     }
-    ~Space() { if (block) rdx::destroyAddressSpace(freelist, block); }
+    ~Space() { if (block) rdx::destroyAddressSpace(store, block); }
 
     [[nodiscard]] TreeA treeFor(uint64_t va) {
         return block->clusters.treeFor(rdx::bucketIndexFor<GA>(va));
@@ -504,9 +504,9 @@ TEST(radix_cache_candidate_survives_reclamation_of_its_node) {
 TEST(radix_cache_teardown_survivor_observes_the_mark) {
     constexpr size_t kCpus = 2;
     BareArena arena(kCpus);
-    FreelistA freelist;
+    StoreA    store;
     BlockA*   block = nullptr;
-    ASSERT_TRUE(rdx::createAddressSpace(freelist, kernel::numa::DomainID{0}, kCpus,
+    ASSERT_TRUE(rdx::createAddressSpace(store, kernel::numa::DomainID{0}, kCpus,
                                         kTestRecords, block) == rdx::CreateStatus::Ok);
     auto cache = std::make_unique<CacheA>();
 
@@ -568,7 +568,7 @@ TEST(radix_cache_teardown_survivor_observes_the_mark) {
     (void)block->domain.deinit();
     {
         kernel::rcu::DomainManagementLockGuard guard;
-        freelist.returnLocked(block);
+        store.returnLocked(block);
     }
     assertNoLiveObjects("teardown survivor");
 }
@@ -582,7 +582,7 @@ TEST(radix_cache_teardown_survivor_observes_the_mark) {
 // than a leak.
 TEST(radix_cache_generation_mismatch_evicts_dead_residue) {
     BareArena arena;
-    FreelistA freelist;
+    StoreA    store;
     auto      cache = std::make_unique<CacheA>();
     const uint64_t va = 6 * kLeafNodeSpan;
 
@@ -590,7 +590,7 @@ TEST(radix_cache_generation_mismatch_evicts_dead_residue) {
     const BlockA* firstAddress = nullptr;
     {
         BlockA* block = nullptr;
-        ASSERT_TRUE(rdx::createAddressSpace(freelist, kernel::numa::DomainID{0}, 1,
+        ASSERT_TRUE(rdx::createAddressSpace(store, kernel::numa::DomainID{0}, 1,
                                             kTestRecords, block) == rdx::CreateStatus::Ok);
         firstGeneration = block->generation;
         firstAddress    = block;
@@ -604,14 +604,14 @@ TEST(radix_cache_generation_mismatch_evicts_dead_residue) {
         fill(*cache, *block, va);
         ASSERT_TRUE(stat(cache->stats().installs) == 1);
 
-        rdx::destroyAddressSpace(freelist, block);
+        rdx::destroyAddressSpace(store, block);
     }
     // The entry survives its address space. Nothing invalidated it, by design.
     ASSERT_TRUE(cache->entryOccupied(cache->indexFor(va)));
 
     {
         BlockA* reused = nullptr;
-        ASSERT_TRUE(rdx::createAddressSpace(freelist, kernel::numa::DomainID{0}, 1,
+        ASSERT_TRUE(rdx::createAddressSpace(store, kernel::numa::DomainID{0}, 1,
                                             kTestRecords, reused) == rdx::CreateStatus::Ok);
         // The freelist handed the same storage back with a fresh generation —
         // which is the whole reason the identity check is a monotonic counter
@@ -635,7 +635,7 @@ TEST(radix_cache_generation_mismatch_evicts_dead_residue) {
         ASSERT_TRUE(!cache->entryOccupied(cache->indexFor(va)) ||
                     cache->entryGeneration(cache->indexFor(va)) == reused->generation);
 
-        rdx::destroyAddressSpace(freelist, reused);
+        rdx::destroyAddressSpace(store, reused);
     }
     cache->evictAllOnThisCpu();
     assertNoLiveObjects("generation mismatch");

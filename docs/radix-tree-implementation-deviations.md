@@ -1926,3 +1926,77 @@ over these blocks (`kernel::rcu::gFreeSlotBlocks` and radix's
 `ControlBlockFreelist`), and the radix one needed NUMA partitioning and a size
 check the RCU one does not. A third consumer will write it again and get a
 different subset right.
+
+---
+
+## D-047 — `PinnedBlockPool`: the allocator layer D-046 asked for (user-directed)
+
+Spencer's call, and the framing was his: an allocator layer on top of
+`reserveStaticBufferImpl` for handing out control-block-shaped memory, which
+"doesn't need to be very fast — really it can just be a big linked list of
+control blocks with a lock, if need be."
+
+`kernel/include/mem/PinnedBlockPool.h`. A fixed-stride, per-NUMA-domain,
+intrusive freelist over page-granular reservations, carving each page into as
+many blocks as it holds.
+
+### What it bought
+
+| | before pools fix | after pools fix | with the pool |
+|---|---|---|---|
+| radix block, window cost | 20,480 B (5 pages) | 4,096 B (1 page) | **819 B** (5 blocks/page) |
+| RCU reader slots | 4,096 B | 4,096 B | 4,096 B (unchanged) |
+| **total per address space** | 24,576 B | 8,192 B | **4,915 B** |
+| ceiling (concurrent) | ~43,700 | ~131,000 | **~218,000** |
+
+Radix's hand-rolled `ControlBlockFreelist` is gone, and three things went with it:
+the per-domain partitioning it had to grow after D-045, the size check that
+existed only because variable-sized blocks made an undersized reuse an
+out-of-bounds write, and the page minimum. What stayed behind is the
+**generation**, which is an address-space identity concept (DEC-082) rather than
+a property of the storage.
+
+### Two decisions worth reading
+
+**The pool never zeroes.** RCU-DEC-043(i) already states the rule better than a
+new one could: zeroing at the consumer "makes every init valid regardless of
+block provenance, which is the only form of the rule that does not depend on how
+the caller obtained its storage." Zeroing here would make consumers' correctness
+depend on which allocator they happened to use. Both existing consumers already
+re-zero; radix's is now unconditional rather than only-when-recycled, because
+with the pool owning reuse the caller cannot tell the difference and should not
+have to.
+
+**The cross-domain fallback is the LAST resort, not the second choice — and a
+test caught that it was written the wrong way round.** The obvious ordering is
+preferred list, then other domains, then carve, on the reasoning that reusing a
+remote block beats burning window. That is wrong once blocks are packed: a carve
+yields five blocks at once, so the very first request for a second domain finds
+the first domain's spares and takes one, and the machine **never carves on its
+second domain at all** — every address space after the first page is remotely
+placed. It is not even a saving, since that domain gets carved eventually
+regardless. Correct order: preferred, carve on preferred, then other domains,
+which is reached only when the window is genuinely exhausted.
+
+That reordering is why the fallback test now arms a scripted reservation failure
+rather than merely emptying a domain's list: the fallback is only reachable at
+the condition it exists for.
+
+### Mutation-tested
+
+| Mutation | Caught by |
+|---|---|
+| carve yields one block instead of packing the page | `..._store_packs_blocks_into_a_page` |
+| no cross-domain fallback at all | `..._store_falls_back_across_domains_only_when_exhausted` |
+| (earlier, D-045) pool every domain onto one list | `..._preserves_numa_placement` |
+
+### Still owed
+
+**RCU's reader-slot block is now the dominant term by 5x** and is deliberately
+untouched. It does not fit this pool as written, for two reasons that are worth
+recording rather than rediscovering: it places page `p` on the domain of the CPUs
+whose slots that page holds, and it **depends on consecutive reservations
+returning consecutive VAs** — a property of the bump allocator that a shared pool
+breaks by interleaving carves. A single-page slot block (any machine up to 32
+CPUs) has neither problem and could use a pool; the multi-page case needs either
+a contiguous-extent request or for the contiguity dependency to be removed first.

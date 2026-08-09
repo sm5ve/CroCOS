@@ -103,7 +103,7 @@ namespace kernel::mm::radix {
     using KernelTree    = CoreTree<kAmd64Geometry, KernelCodec>;
     using KernelTable   = ClusterTable<kAmd64Geometry, KernelCodec>;
     using KernelBlock   = ControlBlock<kAmd64Geometry, KernelCodec>;
-    using KernelBlocks  = ControlBlockFreelist<kAmd64Geometry, KernelCodec>;
+    using KernelBlocks  = ControlBlockStore<kAmd64Geometry, KernelCodec>;
     using KernelCache   = DescentCache<kAmd64Geometry, KernelCodec>;
     using KernelPin     = PinnedNode<kAmd64Geometry>;
 

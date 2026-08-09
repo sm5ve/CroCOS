@@ -48,7 +48,7 @@ namespace {
 constexpr auto GA = rdx::kAmd64Geometry;
 using CodecA    = rdx::HarnessSlotCodec<GA>;
 using BlockA    = rdx::ControlBlock<GA, CodecA>;
-using FreelistA = rdx::ControlBlockFreelist<GA, CodecA>;
+using StoreA    = rdx::ControlBlockStore<GA, CodecA>;
 using TreeA     = rdx::CoreTree<GA, CodecA>;
 using ValidA    = TreeValidator<GA, CodecA>;
 
@@ -96,10 +96,10 @@ struct BareArena {
 
 TEST(radix_address_space_creation_publishes_a_usable_block) {
     BareArena arena;
-    FreelistA freelist;
+    StoreA    store;
     BlockA* block = nullptr;
 
-    ASSERT_TRUE(rdx::createAddressSpace(freelist, kernel::numa::DomainID{0}, 1,
+    ASSERT_TRUE(rdx::createAddressSpace(store, kernel::numa::DomainID{0}, 1,
                                         kTestRecords, block)
                 == rdx::CreateStatus::Ok);
     ASSERT_TRUE(block != nullptr);
@@ -119,7 +119,7 @@ TEST(radix_address_space_creation_publishes_a_usable_block) {
     ASSERT_TRUE(t.apply(0, kPage - 1, m) == rdx::ApplyStatus::Ok);
     ASSERT_TRUE(static_cast<bool>(t.lookup(0)));
 
-    rdx::destroyAddressSpace(freelist, block);
+    rdx::destroyAddressSpace(store, block);
     assertNoLiveObjects("creation and teardown");
 }
 
@@ -127,9 +127,9 @@ TEST(radix_address_space_creation_publishes_a_usable_block) {
 
 TEST(radix_address_space_teardown_returns_to_baseline) {
     BareArena arena;
-    FreelistA freelist;
+    StoreA    store;
     BlockA* block = nullptr;
-    ASSERT_TRUE(rdx::createAddressSpace(freelist, kernel::numa::DomainID{0}, 1,
+    ASSERT_TRUE(rdx::createAddressSpace(store, kernel::numa::DomainID{0}, 1,
                                         kTestRecords, block)
                 == rdx::CreateStatus::Ok);
 
@@ -153,7 +153,7 @@ TEST(radix_address_space_teardown_returns_to_baseline) {
     ASSERT_TRUE(block->clusters.growToCover(0, rdx::nodeSpan(GA, GA.defaultRootLevel))
                 == rdx::ClusterStatus::Ok);
 
-    rdx::destroyAddressSpace(freelist, block);
+    rdx::destroyAddressSpace(store, block);
 
     // Nodes, Mappings, DeferredRelease records, the bucket page — all of it. The
     // record pools in particular are NOT retire subjects, so a literal "retire
@@ -173,7 +173,7 @@ TEST(radix_address_space_teardown_returns_to_baseline) {
 // sweeping rather than testing one failure.
 TEST(radix_address_space_creation_unwinds_at_every_step) {
     BareArena arena;
-    FreelistA freelist;
+    StoreA    store;
 
     // How many allocations a full creation makes, measured rather than assumed:
     // the sequence's shape is what is under test, so hard-coding the count would
@@ -183,11 +183,11 @@ TEST(radix_address_space_creation_unwinds_at_every_step) {
         resetInjection();
         injectFailuresAfter(1u << 30);   // effectively never
         BlockA* block = nullptr;
-        ASSERT_TRUE(rdx::createAddressSpace(freelist, kernel::numa::DomainID{0}, 1,
+        ASSERT_TRUE(rdx::createAddressSpace(store, kernel::numa::DomainID{0}, 1,
                                             kTestRecords, block)
                     == rdx::CreateStatus::Ok);
         fullCount = injectionObservedCalls();
-        rdx::destroyAddressSpace(freelist, block);
+        rdx::destroyAddressSpace(store, block);
         resetInjection();
         assertNoLiveObjects("sweep baseline");
     }
@@ -198,7 +198,7 @@ TEST(radix_address_space_creation_unwinds_at_every_step) {
         injectFailureAt(n);
 
         BlockA* block = nullptr;
-        const auto st = rdx::createAddressSpace(freelist, kernel::numa::DomainID{0}, 1,
+        const auto st = rdx::createAddressSpace(store, kernel::numa::DomainID{0}, 1,
                                                 kTestRecords, block);
         resetInjection();
 
@@ -207,7 +207,7 @@ TEST(radix_address_space_creation_unwinds_at_every_step) {
             // there is no such site today, but a future step with a retry would
             // make this reachable, and silently skipping it would hide it.
             ASSERT_TRUE(block != nullptr);
-            rdx::destroyAddressSpace(freelist, block);
+            rdx::destroyAddressSpace(store, block);
         } else {
             // The contract: nothing published, and nothing left behind.
             ASSERT_EQ(nullptr, block);
@@ -223,11 +223,11 @@ TEST(radix_address_space_creation_unwinds_at_every_step) {
 // nothing, because nothing was taken".
 TEST(radix_address_space_creation_handles_a_failed_reservation) {
     BareArena arena;
-    FreelistA freelist;
+    StoreA    store;
 
     VS::test::setStaticReservationFailAt(0);
     BlockA* block = nullptr;
-    ASSERT_TRUE(rdx::createAddressSpace(freelist, kernel::numa::DomainID{0}, 1,
+    ASSERT_TRUE(rdx::createAddressSpace(store, kernel::numa::DomainID{0}, 1,
                                         kTestRecords, block)
                 == rdx::CreateStatus::OutOfMemory);
     ASSERT_EQ(nullptr, block);
@@ -236,10 +236,10 @@ TEST(radix_address_space_creation_handles_a_failed_reservation) {
     assertNoLiveObjects("failed reservation");
 
     // ...and the path recovers: the next creation succeeds.
-    ASSERT_TRUE(rdx::createAddressSpace(freelist, kernel::numa::DomainID{0}, 1,
+    ASSERT_TRUE(rdx::createAddressSpace(store, kernel::numa::DomainID{0}, 1,
                                         kTestRecords, block)
                 == rdx::CreateStatus::Ok);
-    rdx::destroyAddressSpace(freelist, block);
+    rdx::destroyAddressSpace(store, block);
     assertNoLiveObjects("recovery");
 }
 
@@ -257,9 +257,9 @@ TEST(radix_address_space_creation_handles_a_failed_reservation) {
 
 TEST(radix_address_space_pool_array_lies_inside_the_reservation) {
     BareArena arena(8);
-    FreelistA freelist;
+    StoreA    store;
     BlockA*   block = nullptr;
-    ASSERT_TRUE(rdx::createAddressSpace(freelist, kernel::numa::DomainID{0}, 8,
+    ASSERT_TRUE(rdx::createAddressSpace(store, kernel::numa::DomainID{0}, 8,
                                         kTestRecords, block) == rdx::CreateStatus::Ok);
 
     const auto base    = reinterpret_cast<uintptr_t>(block);
@@ -281,7 +281,7 @@ TEST(radix_address_space_pool_array_lies_inside_the_reservation) {
         ASSERT_TRUE(slot + sizeof(rdx::DeferredReleasePool) <= end);
     }
 
-    rdx::destroyAddressSpace(freelist, block);
+    rdx::destroyAddressSpace(store, block);
     assertNoLiveObjects("pool array layout");
 }
 
@@ -292,7 +292,7 @@ TEST(radix_address_space_pool_array_lies_inside_the_reservation) {
 // at teardown, which is the detector for a record drawn and never returned.
 TEST(radix_address_space_recycled_block_pools_carry_record_traffic) {
     BareArena arena;
-    FreelistA freelist;
+    StoreA    store;
 
     const auto churn = [](BlockA& b) {
         ASSERT_TRUE(b.clusters.ensureCovers(0, (uint64_t{1} << 30) - 1)
@@ -314,14 +314,14 @@ TEST(radix_address_space_recycled_block_pools_carry_record_traffic) {
     };
 
     BlockA* first = nullptr;
-    ASSERT_TRUE(rdx::createAddressSpace(freelist, kernel::numa::DomainID{0}, 1,
+    ASSERT_TRUE(rdx::createAddressSpace(store, kernel::numa::DomainID{0}, 1,
                                         kTestRecords, first) == rdx::CreateStatus::Ok);
     const auto* firstAddress = first;
     churn(*first);
-    rdx::destroyAddressSpace(freelist, first);
+    rdx::destroyAddressSpace(store, first);
 
     BlockA* second = nullptr;
-    ASSERT_TRUE(rdx::createAddressSpace(freelist, kernel::numa::DomainID{0}, 1,
+    ASSERT_TRUE(rdx::createAddressSpace(store, kernel::numa::DomainID{0}, 1,
                                         kTestRecords, second) == rdx::CreateStatus::Ok);
     // Same pinned storage, so the pools below are the previous tenant's bytes.
     ASSERT_EQ(firstAddress, second);
@@ -332,53 +332,43 @@ TEST(radix_address_space_recycled_block_pools_carry_record_traffic) {
               reinterpret_cast<uintptr_t>(second->pools.poolsBase()));
 
     churn(*second);
-    rdx::destroyAddressSpace(freelist, second);
+    rdx::destroyAddressSpace(store, second);
     assertNoLiveObjects("recycled block record traffic");
 }
 
-// The guard that has no other detector. Blocks became variable-sized, so a
-// freelist that handed back a block whose trailing array is shorter than the
-// caller asked for would write past the reservation — and per the note above,
-// the harness's page-granular bump allocator would not notice.
+// The guard that replaced a whole class of bug.
 //
-// Unreachable in the kernel, where `processorCount()` is a boot constant and
-// every block is the same size. Reachable here, which is the point: the
-// invariant is enforced rather than argued.
-TEST(radix_address_space_freelist_refuses_an_undersized_block) {
+// Blocks used to be variable-sized, so a freelist handing back one whose
+// trailing pool array was too short would write past the reservation — and the
+// harness's page-granular bump allocator would not notice. That needed a
+// size-checking scan on every take.
+//
+// A fixed-stride pool cannot produce an undersized block at all, so the scan is
+// gone and the only remaining route is a caller asking one store for more CPUs
+// than it was built for. That is caller error, and it now fails loudly at the
+// boundary instead of being quietly accommodated. Unreachable in the kernel,
+// where `processorCount()` is constant after boot.
+TEST(radix_address_space_store_rejects_more_cpus_than_it_was_built_for) {
     BareArena arena(8);
-    FreelistA freelist;
+    StoreA    store;
 
     BlockA* narrow = nullptr;
-    ASSERT_TRUE(rdx::createAddressSpace(freelist, kernel::numa::DomainID{0}, 1,
+    ASSERT_TRUE(rdx::createAddressSpace(store, kernel::numa::DomainID{0}, 1,
                                         kTestRecords, narrow) == rdx::CreateStatus::Ok);
-    ASSERT_TRUE(narrow->reservedCpus == 1);
-    const auto* narrowAddress = narrow;
-    rdx::destroyAddressSpace(freelist, narrow);
+    rdx::destroyAddressSpace(store, narrow);
 
-    // The freelist holds exactly one block, reserved for a single CPU. An
-    // 8-CPU request must NOT take it.
+    // The store's stride was fixed at one CPU by that first call.
     BlockA* wide = nullptr;
-    ASSERT_TRUE(rdx::createAddressSpace(freelist, kernel::numa::DomainID{0}, 8,
-                                        kTestRecords, wide) == rdx::CreateStatus::Ok);
-    ASSERT_TRUE(wide != narrowAddress);
-    ASSERT_TRUE(wide->reservedCpus == 8);
-
-    // ...and the narrow block is still available to a request it does fit.
-    BlockA* again = nullptr;
-    ASSERT_TRUE(rdx::createAddressSpace(freelist, kernel::numa::DomainID{0}, 1,
-                                        kTestRecords, again) == rdx::CreateStatus::Ok);
-    ASSERT_EQ(narrowAddress, again);
-
-    rdx::destroyAddressSpace(freelist, wide);
-    rdx::destroyAddressSpace(freelist, again);
-    assertNoLiveObjects("undersized block refusal");
+    EXPECT_ASSERT_FAILURE(
+        (void)rdx::createAddressSpace(store, kernel::numa::DomainID{0}, 8,
+                                      kTestRecords, wide));
 }
 
 // ─── The freelist keeps each block on its own NUMA domain ──────────────────
 //
 // `createAddressSpace` takes a `home` domain and `tryReservePerDomainStaticBuffer`
 // honours it — but only on the FIRST reservation. With one undifferentiated
-// freelist, every reuse afterwards handed back whatever was at the head, so the
+// store, every reuse afterwards handed back whatever was at the head, so the
 // placement was a suggestion obeyed exactly once. On a multi-socket machine that
 // puts a process's control block on a remote node, and this block holds the
 // generation and the pool heads every CPU reads on hot paths — which is the
@@ -389,71 +379,114 @@ TEST(radix_address_space_freelist_refuses_an_undersized_block) {
 // hand the block back to a tenant that wants that domain.
 TEST(radix_address_space_freelist_preserves_numa_placement) {
     BareArena arena(2, 2);
-    FreelistA freelist;
+    StoreA    store;
 
     BlockA* onZero = nullptr;
     BlockA* onOne  = nullptr;
-    ASSERT_TRUE(rdx::createAddressSpace(freelist, kernel::numa::DomainID{0}, 1,
+    ASSERT_TRUE(rdx::createAddressSpace(store, kernel::numa::DomainID{0}, 1,
                                         kTestRecords, onZero) == rdx::CreateStatus::Ok);
-    ASSERT_TRUE(rdx::createAddressSpace(freelist, kernel::numa::DomainID{1}, 1,
+    ASSERT_TRUE(rdx::createAddressSpace(store, kernel::numa::DomainID{1}, 1,
                                         kTestRecords, onOne) == rdx::CreateStatus::Ok);
     ASSERT_TRUE(onZero != onOne);
 
     // Both go back. Order matters to the test: domain 1's block is returned
     // LAST, so a single-list freelist would hand it to the next request whatever
     // domain that request asked for.
-    rdx::destroyAddressSpace(freelist, onZero);
-    rdx::destroyAddressSpace(freelist, onOne);
+    rdx::destroyAddressSpace(store, onZero);
+    rdx::destroyAddressSpace(store, onOne);
 
     BlockA* wantZero = nullptr;
-    ASSERT_TRUE(rdx::createAddressSpace(freelist, kernel::numa::DomainID{0}, 1,
+    ASSERT_TRUE(rdx::createAddressSpace(store, kernel::numa::DomainID{0}, 1,
                                         kTestRecords, wantZero) == rdx::CreateStatus::Ok);
     // The block placed on domain 0, not the one most recently freed.
     ASSERT_EQ(onZero, wantZero);
     ASSERT_TRUE(wantZero->homeDomain == kernel::numa::DomainID{0});
 
     BlockA* wantOne = nullptr;
-    ASSERT_TRUE(rdx::createAddressSpace(freelist, kernel::numa::DomainID{1}, 1,
+    ASSERT_TRUE(rdx::createAddressSpace(store, kernel::numa::DomainID{1}, 1,
                                         kTestRecords, wantOne) == rdx::CreateStatus::Ok);
     ASSERT_EQ(onOne, wantOne);
     ASSERT_TRUE(wantOne->homeDomain == kernel::numa::DomainID{1});
 
-    rdx::destroyAddressSpace(freelist, wantZero);
-    rdx::destroyAddressSpace(freelist, wantOne);
+    rdx::destroyAddressSpace(store, wantZero);
+    rdx::destroyAddressSpace(store, wantOne);
 }
 
-// The fallback, which is deliberate rather than incidental: a block from the
-// wrong domain still beats burning static-buffer window on a fresh reservation.
-// The window is the scarce resource — it is a bounded 1 GiB region with no free
-// path — so remote-but-present is a performance answer where exhaustion is a
-// correctness one.
-TEST(radix_address_space_freelist_falls_back_across_domains) {
+// The cross-domain fallback, tested at the condition it exists for.
+//
+// It is deliberately the LAST resort, not the second choice. An earlier version
+// of the pool scanned other domains before carving, on the reasoning that
+// reusing a remote block beats burning window — and the placement test above
+// caught why that is wrong: a carve yields several blocks at once, so the very
+// first request for a second domain would find the first domain's spares and
+// take one, and the machine would never carve on its second domain at all.
+//
+// So reaching the fallback requires the window to be genuinely exhausted, which
+// is what the scripted reservation failure below produces. At that point
+// remote-but-present clearly beats ENOMEM.
+TEST(radix_address_space_store_falls_back_across_domains_only_when_exhausted) {
     BareArena arena(2, 2);
-    FreelistA freelist;
+    StoreA    store;
 
     BlockA* onZero = nullptr;
-    ASSERT_TRUE(rdx::createAddressSpace(freelist, kernel::numa::DomainID{0}, 1,
+    ASSERT_TRUE(rdx::createAddressSpace(store, kernel::numa::DomainID{0}, 1,
                                         kTestRecords, onZero) == rdx::CreateStatus::Ok);
-    rdx::destroyAddressSpace(freelist, onZero);
+    const auto* zeroAddress = onZero;
+    rdx::destroyAddressSpace(store, onZero);
 
-    // Domain 1's list is empty; the block on domain 0 is taken rather than a
-    // fresh reservation made.
+    // No window left. The pool cannot carve for domain 1, and RCU's slot block
+    // recycles through its own freelist, so creation can still succeed — if the
+    // fallback takes the block sitting on domain 0.
+    VS::test::setStaticReservationFailAt(0);
+
     BlockA* wantOne = nullptr;
-    ASSERT_TRUE(rdx::createAddressSpace(freelist, kernel::numa::DomainID{1}, 1,
+    ASSERT_TRUE(rdx::createAddressSpace(store, kernel::numa::DomainID{1}, 1,
                                         kTestRecords, wantOne) == rdx::CreateStatus::Ok);
-    ASSERT_EQ(onZero, wantOne);
-    // ...and it still reports where it actually IS, not where it was wanted.
+    ASSERT_EQ(zeroAddress, wantOne);
+    // ...and it reports where it actually IS, not where it was wanted. A caller
+    // that believed the request would misplace every later decision made from it.
     ASSERT_TRUE(wantOne->homeDomain == kernel::numa::DomainID{0});
 
-    rdx::destroyAddressSpace(freelist, wantOne);
+    VS::test::setStaticReservationFailAt(-1);
+    rdx::destroyAddressSpace(store, wantOne);
 }
 
-TEST(radix_address_space_blocks_recycle_through_the_freelist) {
+// Sub-page packing — the reason this layer exists at all. A control block for
+// 8 CPUs is 768 B against a 4 KiB page, so five address spaces should share one
+// page of the window instead of taking five.
+TEST(radix_address_space_store_packs_blocks_into_a_page) {
+    BareArena arena(8);
+    StoreA    store;
+
+    BlockA* blocks[5] = {};
+    for (auto& b : blocks) {
+        ASSERT_TRUE(rdx::createAddressSpace(store, kernel::numa::DomainID{0}, 8,
+                                            kTestRecords, b) == rdx::CreateStatus::Ok);
+    }
+
+    ASSERT_TRUE(store.pool.blocksPerPage() >= 5);
+    // One page for all five, where the old whole-reservation-per-block scheme
+    // took five.
+    ASSERT_EQ(size_t{1}, store.pool.pagesReserved());
+
+    // Distinct, and each cache-line aligned so two address spaces never share a
+    // line — these blocks hold the generation and pool heads every CPU reads.
+    for (unsigned i = 0; i < 5; i++) {
+        ASSERT_EQ(uintptr_t{0},
+                  reinterpret_cast<uintptr_t>(blocks[i]) % arch::CACHE_LINE_SIZE);
+        for (unsigned j = i + 1; j < 5; j++) ASSERT_TRUE(blocks[i] != blocks[j]);
+    }
+
+    for (auto& b : blocks) rdx::destroyAddressSpace(store, b);
+    assertNoLiveObjects("sub-page packing");
+}
+
+TEST(radix_address_space_blocks_recycle_through_the_store) {
     BareArena arena;
-    FreelistA freelist;
+    StoreA    store;
 
     BlockA* first = nullptr;
-    ASSERT_TRUE(rdx::createAddressSpace(freelist, kernel::numa::DomainID{0}, 1,
+    ASSERT_TRUE(rdx::createAddressSpace(store, kernel::numa::DomainID{0}, 1,
                                         kTestRecords, first)
                 == rdx::CreateStatus::Ok);
     const uint64_t gen1 = first->generation;
@@ -461,10 +494,10 @@ TEST(radix_address_space_blocks_recycle_through_the_freelist) {
     // Mark it dying and tear it down, so the block goes back to the freelist
     // carrying a set flag — which is precisely the state a recycled block must
     // not inherit.
-    rdx::destroyAddressSpace(freelist, first);
+    rdx::destroyAddressSpace(store, first);
 
     BlockA* second = nullptr;
-    ASSERT_TRUE(rdx::createAddressSpace(freelist, kernel::numa::DomainID{0}, 1,
+    ASSERT_TRUE(rdx::createAddressSpace(store, kernel::numa::DomainID{0}, 1,
                                         kTestRecords, second)
                 == rdx::CreateStatus::Ok);
 
@@ -488,7 +521,7 @@ TEST(radix_address_space_blocks_recycle_through_the_freelist) {
     ASSERT_TRUE(t.apply(0, kPage - 1, m) == rdx::ApplyStatus::Ok);
     ASSERT_TRUE(static_cast<bool>(t.lookup(0)));
 
-    rdx::destroyAddressSpace(freelist, second);
+    rdx::destroyAddressSpace(store, second);
     assertNoLiveObjects("recycling");
 }
 
@@ -496,9 +529,9 @@ TEST(radix_address_space_blocks_recycle_through_the_freelist) {
 
 TEST(radix_address_space_dying_flag_is_set_before_the_barrier) {
     BareArena arena;
-    FreelistA freelist;
+    StoreA    store;
     BlockA* block = nullptr;
-    ASSERT_TRUE(rdx::createAddressSpace(freelist, kernel::numa::DomainID{0}, 1,
+    ASSERT_TRUE(rdx::createAddressSpace(store, kernel::numa::DomainID{0}, 1,
                                         kTestRecords, block)
                 == rdx::CreateStatus::Ok);
 
@@ -510,7 +543,7 @@ TEST(radix_address_space_dying_flag_is_set_before_the_barrier) {
     ASSERT_TRUE(rdx::isDying(*block));
     block->dying.store(0, rdx::kPrivateInit);
 
-    rdx::destroyAddressSpace(freelist, block);
+    rdx::destroyAddressSpace(store, block);
     assertNoLiveObjects("dying flag");
 }
 
@@ -529,9 +562,9 @@ TEST(radix_address_space_dying_flag_is_set_before_the_barrier) {
 // silent wrong mapping.
 TEST(radix_teardown_walk_marks_and_retires_rather_than_destroying) {
     BareArena arena;
-    FreelistA freelist;
+    StoreA    store;
     BlockA* block = nullptr;
-    ASSERT_TRUE(rdx::createAddressSpace(freelist, kernel::numa::DomainID{0}, 1,
+    ASSERT_TRUE(rdx::createAddressSpace(store, kernel::numa::DomainID{0}, 1,
                                         kTestRecords, block)
                 == rdx::CreateStatus::Ok);
 
@@ -586,7 +619,7 @@ TEST(radix_teardown_walk_marks_and_retires_rather_than_destroying) {
     (void)block->domain.deinit();
     {
         kernel::rcu::DomainManagementLockGuard guard;
-        freelist.returnLocked(block);
+        store.returnLocked(block);
     }
     assertNoLiveObjects("unit-decomposed walk");
 }

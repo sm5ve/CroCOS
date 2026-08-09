@@ -116,12 +116,12 @@ namespace radix_stress {
     // non-trivial constructor is placement-newed at stress start instead. The
     // descent cache in particular is ~64 KiB of per-CPU rows whose default
     // constructor is a loop.
-    alignas(rdx::KernelBlocks) unsigned char gFreelistStorage[sizeof(rdx::KernelBlocks)];
+    alignas(rdx::KernelBlocks) unsigned char gStoreStorage[sizeof(rdx::KernelBlocks)];
     alignas(rdx::KernelCache)  unsigned char gCacheStorage[sizeof(rdx::KernelCache)];
     alignas(rdx::PerCpuAssignment)
         unsigned char gAssignStorage[sizeof(rdx::PerCpuAssignment)];
 
-    rdx::KernelBlocks*      gFreelist = nullptr;
+    rdx::KernelBlocks*      gStore    = nullptr;
     rdx::KernelCache*       gCache    = nullptr;
     rdx::PerCpuAssignment*  gAssign   = nullptr;
 
@@ -510,7 +510,7 @@ namespace radix_stress {
     [[nodiscard]] rdx::KernelBlock* createSpace() {
         rdx::KernelBlock* block = nullptr;
         const auto st = rdx::createAddressSpace(
-            *gFreelist, numa::DomainID{0}, arch::processorCount(),
+            *gStore, numa::DomainID{0}, arch::processorCount(),
             rdx::deferredReleaseBound(rdx::kAmd64Geometry), block);
         if (st != rdx::CreateStatus::Ok) {
             klog() << "\nradixStress: address-space creation failed (ENOMEM)\n";
@@ -545,7 +545,7 @@ namespace radix_stress {
         // vas-layout.md to stay true."
         rdx::verifyKernelCodecBase();
 
-        st::gFreelist = new (st::gFreelistStorage) rdx::KernelBlocks();
+        st::gStore = new (st::gStoreStorage) rdx::KernelBlocks();
         st::gAssign   = new (st::gAssignStorage) rdx::PerCpuAssignment();
         st::gCache    = new (st::gCacheStorage) rdx::KernelCache();
         klog() << "radixStress: cache row is " << sizeof(rdx::KernelCache) / arch::processorCount()
@@ -576,7 +576,7 @@ namespace radix_stress {
         // it would take exactly the cross-CPU IPI the project bars from
         // correctness duty (DEC-096).
         if (me == 0) {
-            rdx::destroyAddressSpace(*st::gFreelist, block);
+            rdx::destroyAddressSpace(*st::gStore, block);
 #ifdef CROCOS_RADIX_NODE_CENSUS
             st::gResiduePinned.store(rdx::gNodeCensus.liveQuiesced(), RELAXED);
 #endif
