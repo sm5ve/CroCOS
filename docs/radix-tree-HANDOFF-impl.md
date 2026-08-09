@@ -11,7 +11,7 @@ Read in this order:
 1. **§0** — state, and how the two design questions were settled.
 2. **§1** — what changed outside the radix tree.
 3. **§2** — the last item closed (RCU slot-block packing) and what is left.
-4. `docs/radix-tree-implementation-deviations.md` — D-001..D-054. **Live:
+4. `docs/radix-tree-implementation-deviations.md` — D-001..D-055. **Live:
    D-004, D-010, D-029, D-030 (older); D-033/034/036/046 owe the spec text.**
    The freshness debt (D-039/042/044/049/050/051/053) was discharged 2026-08-09:
    §7.1 rewritten over the right axis, DEC-082 extended to the root page.
@@ -28,10 +28,10 @@ Read in this order:
 |---|---|
 | 0–3 | Complete. See §0.1 and §4 below. |
 | **4** | **Complete.** DEC-078 seam (`PinnedNode`, `pinLocked`, `resumeDescent`, `release`) and DEC-079's cache: per-CPU direct-mapped set of 4, VA-range-deferred install, generation check, `Detached`/generation eviction. All four §13 gate properties tested; the calibration report runs in the suite. |
-| **5** | **Partly landed.** Kernel codec instance, node/`Mapping` censuses, the in-kernel stress, the whole freshness family, and the pinned-memory work through D-048 (radix control block AND RCU slot block both sub-page packed). Debug **and** Release/LTO boot clean on `run`, `run_numa`, `run_numa_hmat`. **Calibration untouched.** |
+| **5** | **COMPLETE (2026-08-09).** Exit gate met: six clean boots, residue at/below the DEC-096 bound, every Provisional constant measured (D-055) or consciously retained. Formerly: Kernel codec instance, node/`Mapping` censuses, the in-kernel stress, the whole freshness family, and the pinned-memory work through D-048 (radix control block AND RCU slot block both sub-page packed). Debug **and** Release/LTO boot clean on `run`, `run_numa`, `run_numa_hmat`. **Calibration untouched.** |
 
 Full suite, sequential: Core 441 + 425 TSan, Kernel 177, LibAlloc 38×2, vmsmalloc
-31×2, RCU 64×2, **radix 168×3** (ASan, TSan, progress audit). The default kernel
+31×2, RCU 64×2, **radix 169×3** (ASan, TSan, progress audit). The default kernel
 (stress off) builds and boots.
 
 ```
@@ -75,35 +75,26 @@ vmsmalloc guarantee) are not foreclosed — D-051's backend seam is where the fi
 would now be built — merely not paid for on the strength of a cost that measured
 small.
 
-### Phase 5's remaining work
+### What Phase 5 left open
 
-- **Calibration, largely untouched**: `detachBudget`, `drainBatchBound`,
-  ITEM-084's draw-count histogram, ITEM-055's state-word placement, DEC-095's K
-  and `scanChunk`, DEC-079's entry count. `-icount` per RCU P4-DEC-010, **not**
-  TCG block counts. D-034 records what the Phase 4 harness could and could not
-  settle. **The harness now exists**: `make run_icount` plus
-  `CROCOS_RADIX_INSN_PROBE` (D-053), and the two traps it cost to find are that
-  icount forces `thread=single`, and that single-threaded TCG reports a 74%
-  descent-cache hit rate where MTTCG reports 7% — so any locality-sensitive
-  figure read under `-icount` is a best case.
-- **ITEM-084 now has its distribution** (D-054): max 2 draws per attempt over
-  1.9M attempts, against a 230 ceiling — but the finding that matters is *why*.
-  The stress could not produce the expensive shape at all (it unmapped exactly
-  what it placed, which §7.1 says is the CHEAP row), and even after a bulk-unmap
-  row was added the max stayed at 2, because DEC-032's guard-gap placement
-  **actively avoids** the dense arrangement the edge sum assumes. Constructed
-  harness shapes reach it exactly (16 records, 15 cleared, 15 drawn; one slot
-  wider draws zero). **Still not decided** — and D-054 records the constraint any
-  answer must respect, plus the question it surfaces: whether DEC-077's unit
-  decomposition already bounds one attempt below the edge sum.
-- ~~Finish the freshness audit deliberately~~ — **done, D-049; its two gaps
-  closed by D-050.** Every class of memory the tree touches has a verdict, both
-  `Mapping` boundaries now pass `SafePtr`, and — the durable half — **the harness
-  can finally see this bug class**: the mock records freshness calls per thread
-  and `FreshnessTest.cpp` asserts against it. What remains from the audit is one
-  requirement that cannot be asserted (**the descent cache must live in `.bss` or
-  pinned storage** — in vmsmalloc memory every probe gains a freshness call on
-  the hottest path in the system) and the §7.1 spec text.
+- **ITEM-084 is the one genuinely open item**: it has its distribution (D-054/055)
+  and a recorded argument, and what it needs is a decision, not a measurement.
+- **ITEM-055 / ITEM-002 / ITEM-031 are consciously retained** — false-sharing and
+  bit-split questions that TCG cannot answer, each recorded with the hardware
+  measurement that would settle it. Note `-icount` is the WRONG method for these
+  and the spec used to say otherwise.
+- **The descent cache must live in `.bss` or pinned storage** — a requirement no
+  `static_assert` can express.
+
+### The lesson worth carrying out of this phase
+
+**A workload that cannot produce a shape reports zero, and zero looks like
+evidence.** It happened three times: the freshness sites were invisible to a
+harness whose `ensureTLBEntryFresh` is a no-op; the draw histogram read "max 2"
+from a stress that only ever unmapped what it placed; the detach histogram read
+"zero" twice — once because no row fully covered a child, and again because
+granule-sized records are stored as leaves and subdivide nothing. Every figure in
+D-055 is recorded together with the workload that produced it for this reason.
 
 ---
 
