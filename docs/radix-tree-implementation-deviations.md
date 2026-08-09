@@ -2085,3 +2085,126 @@ checked only slot 7 of the neighbouring domain, while a half-stride lands the
 corruption on a **different slot index** than the writer's; it now checks every
 slot. Both were reordered/widened until the mutation killed the check it was
 supposed to kill.
+
+---
+
+## D-049 — the freshness audit, walked deliberately
+
+§7.1's freshness paragraph names four sites and two exemptions. §1.1 of the
+handoff found **four more the hard way**, one per in-kernel stress boot, each
+invisible to 150 userspace tests on two sanitizers. This is the deliberate walk
+that should have preceded them: every class of memory the tree touches, checked
+against the code and given a verdict rather than a defect report.
+
+**Method.** A site is *covered* if the access goes through `SafePtr` (which
+discharges per access, so no argument is required), *exempt* if the memory's
+mapping cannot change under it, and a *gap* otherwise. Two exemptions rest on
+arguments rather than on mechanism; both are listed with the fact they depend on,
+because an argument in a comment is not a mechanism (D-044's own words).
+
+### The classes
+
+| Memory | Backing | Verdict |
+|---|---|---|
+| Node bodies — state word, refcount, slots | vmsmalloc | **Covered.** Every access is `NodeRef`, i.e. `SafePtr<void>::at<>`. There is no raw path: the only escapes (`raw()`) are identity, encoding, and the concrete-type cast `retire`/`destroy` need. |
+| `Mapping` decoded from a slot word (lookup) | vmsmalloc | **Covered.** `SafePtr` at the decode site, and `LookupResult` *holds* it, so a result that crosses a pager round-trip and resumes elsewhere is covered too. |
+| `Mapping` count word, deleter side | vmsmalloc | **Covered.** `releaseMappingRefs`/`acquireMappingRef` take `SafePtr` and every releaser has one. |
+| **`Mapping` handed IN to `apply`** | vmsmalloc | **GAP — see below.** |
+| **`Mapping` handed OUT by `enumerateChunk`** | vmsmalloc | **GAP — see below.** |
+| `DeferredRelease` record body | vmsmalloc | **Covered**, first touch paid by `pool.pop()`; raw thereafter — *conditional exemption 1*. |
+| Record's `next` written by `push` | vmsmalloc | **Covered** transitively: every caller has just made that record fresh (the deleter through `rec`, the draw through `pop`, creation through the allocator). |
+| Root bucket page / bucket words | vmsmalloc, whole page | **Covered** per access through `buckets()`. This is exactly the cost **D-039** asks whether to keep paying — on the tree's hottest read. |
+| `RetireHead` fields | vmsmalloc | **Exempt** — RCU's `onPreTouch` covers the head and only the head (RCU-DEC-006), which is why everything past it in this table is a live obligation. |
+| Freshly allocated object, before publication | vmsmalloc | **Exempt** — *conditional exemption 2*. |
+| Control block: generation, `dying`, pool heads | pinned | **Exempt** — DEC-082 round 4 put them there for this reason. Write-once PTEs never change, so no CPU's translation can go stale. |
+| `ClusterTable` / `DeferredReleasePools` objects | pinned (control block) | **Exempt**, same reason. Only the *records* and the *bucket page* are vmsmalloc. |
+| RCU slot block | pinned | **Exempt**, same reason (and now packed — D-048). |
+| Descent-cache rows | `.bss` today | **Exempt by placement, not by construction — see the requirement below.** |
+| Claim sets, attempts, cursors, segment plans | stack | **Exempt.** They hold node/`Mapping` pointers but dereference none. |
+
+### GAP 1 — the `Mapping` handed IN to `apply`
+
+`CoreTree::apply(lo, hi, Mapping* value, …)` takes a **raw pointer** and RMWs its
+count word raw at three commit-phase sites (`WriteLeaf`, `OverwriteLeaf`, and
+`DetachChild` when it writes a replacement): `value->acquireRef()`.
+
+It works today for a reason nobody wrote down: the caller creates the `Mapping`
+and applies it in the same syscall on the same CPU, so conditional exemption 2
+covers it. That is an **unstated, unenforced precondition on a public API**, and
+it is precisely the shape D-044 ruled on when the same argument was made about
+`LookupResult` — "a freshness call made once at acquisition guarantees nothing to
+a CPU that did not make it". Any caller that hands in a record created elsewhere
+— fork-shaped work is the obvious candidate — gets a stale RMW on a count word,
+which corrupts a refcount rather than faulting.
+
+### GAP 2 — the `Mapping` handed OUT by `enumerateChunk`
+
+`enumerateChunk` calls `fn(step.mapping, lo, hi)` with a **raw `Mapping*`**
+decoded from a slot word, to an arbitrary consumer callback, with no freshness
+obligation attached and nothing said about it in the API comment. Every real
+consumer of an enumeration — `/proc/maps`, an `mprotect` range walk, a fork copy
+loop — dereferences that pointer to read `baseVA`, `objectOffset` or the
+protection, and it may be the first touch of that page on that CPU.
+
+The lookup path had this exact defect and was fixed by making the *result carry*
+the obligation. The enumeration path is the same shape and was missed — because
+**the tests compare the emitted pointers by identity and never dereference them**
+(`EnumerationTest.cpp`'s `collect` coalesces on `out.back().m == m`). Third time
+the harness has been structurally incapable of seeing a member of this class.
+
+**Both gaps are the same fix**: hand `SafePtr<Mapping>` across the boundary
+instead of `Mapping*`, in and out. Mechanical — the encode path wants `address()`,
+which discharges nothing and says so. It changes a **consumer-contract signature**
+(§3), so it is Spencer's call rather than a silent repair.
+
+### Conditional exemption 1 — records are raw after their first draw
+
+`pop()` pays the first-touch call; every later access to that record (the dedup
+walk, the field writes, the return-home walk) is raw on the same CPU. Legal
+because a drawn record is owned, is never freed, and **nothing between the draw
+and the last touch blocks or migrates** — the replenish that *does* block runs
+between attempts, after `returnHeldRecords`. It depends on writers being
+CPU-pinned. A scheduler that can migrate a writer mid-attempt invalidates it, and
+this is the entry to revisit when one lands (DEC-030's predicates go live at the
+same moment).
+
+### Conditional exemption 2 — freshly allocated memory is fresh on the allocator
+
+Raw writes immediately after `tryMake` (record initialisation, `BucketTable`
+construction, `constructInto`'s placement-new itself) are covered because
+vmsmalloc's allocation path already paid the call: it makes the slab
+**descriptor** fresh before reading it, and slots live at `descriptor +
+slot0Offset(c)` — the *same page*, so freshness for one is freshness for both.
+The whole-page bypass is covered separately by DEC-046 (`allocPage` invalidates
+this CPU's entry). It depends on slabs staying one page and the descriptor
+staying on it. Worth knowing, because it is what makes every constructor in the
+system legal.
+
+### A requirement, not a site — where the descent cache lives
+
+The cache's `rows[MAX_PROCESSOR_COUNT]` array is exempt only because it currently
+sits in `.bss` (`RadixStress.cpp`'s `gCacheStorage`). Nothing enforces that. If
+the eventual VMM allocates the cache from vmsmalloc, **every probe gains a
+freshness call on the hottest path in the system** — the same trap DEC-082's
+round-4 amendment avoided for the control block, one structure over. The cache
+must live in `.bss` or pinned storage. Recorded here because it cannot be
+`static_assert`ed.
+
+### The testability finding
+
+The harness's `ensureTLBEntryFresh` is `inline bool … { return false; }` — it
+does not merely no-op, it **records nothing**, so no test can assert that a path
+discharged its obligation. That is why every member of this class has been found
+by an in-kernel stress boot, one at a time. Making the radix mock *count* calls
+(and ideally the pages they name) would turn "reading an enumerated `Mapping`
+discharges freshness for its page" into an ordinary assertion, and would have
+caught both gaps above. Proposed, not done — it is a harness change with its own
+design question (what granularity to assert at).
+
+### Owed to the spec
+
+§7.1's paragraph should carry the complete list: its four sites, §1.1's four, and
+this entry's two, plus the two conditional exemptions with their dependencies
+named. The reader-vs-deleter framing the paragraph implies is not the axis —
+**the axis is whether the pointer crosses a boundary that a per-access mechanism
+does not follow**, which is what all six unlisted sites have in common.

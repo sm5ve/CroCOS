@@ -8,10 +8,10 @@ read §0 and §1 before anything else.
 
 Read in this order:
 
-1. **§0** — state, and the two things waiting on Spencer.
+1. **§0** — state, and the three things waiting on Spencer.
 2. **§1** — what changed outside the radix tree.
 3. **§2** — the last item closed (RCU slot-block packing) and what is left.
-4. `docs/radix-tree-implementation-deviations.md` — D-001..D-048. **Live:
+4. `docs/radix-tree-implementation-deviations.md` — D-001..D-049. **Live:
    D-004, D-010, D-029, D-030 (older); D-033/034/036/039/042/044/046 owe the
    spec text.**
 5. `specs/radix-tree-phase-5.md` — the remaining phase work (calibration).
@@ -51,7 +51,7 @@ both of Phase 5's defects became reproducible. Current reach in a 20 s window:
 2,049 cycles debug, 8,193 Release/LTO (was 1,025 debug before D-048; the stress
 reports at cycle 1–4 then every 1,024, so read these as bands, not exact counts).
 
-### The two things waiting on Spencer
+### The three things waiting on Spencer
 
 Design questions, not bugs; options are in the deviations log.
 
@@ -67,6 +67,11 @@ Design questions, not bugs; options are in the deviations log.
    answer one level down) / a stronger vmsmalloc guarantee. Needs a cache-miss
    measurement, not `-icount`: the instruction count is small and the extra cache
    line per node is not.
+3. **The two `Mapping` boundaries D-049 found** — `apply`'s incoming `Mapping*`
+   and `enumerateChunk`'s outgoing one. Both are uncovered, both are the shape
+   D-044 already ruled on for `LookupResult`, and both are fixed the same
+   mechanical way: pass `SafePtr<Mapping>` instead. It changes a §3
+   consumer-contract signature, which is why it is here and not already done.
 
 ### Phase 5's remaining work
 
@@ -75,15 +80,18 @@ Design questions, not bugs; options are in the deviations log.
   and `scanChunk`, DEC-079's entry count. `-icount` per RCU P4-DEC-010, **not**
   TCG block counts. D-034 records what the Phase 4 harness could and could not
   settle.
-- **Finish the freshness audit deliberately** rather than by defect: walk §7.1's
-  list against the code and record each site as covered or exempt. Six were found
-  the hard way (§1.1).
+- ~~Finish the freshness audit deliberately~~ — **done, D-049.** Every class of
+  memory the tree touches now has a verdict. It found **two more uncovered
+  sites**, both the same shape and both needing a signature change Spencer should
+  rule on (see §0's list below), plus one requirement (where the descent cache
+  may live) and one testability finding (the harness cannot observe the
+  discipline at all, which is why this class keeps being found by stress boots).
 
 ---
 
 ## 1. What changed outside the radix tree
 
-### 1.1 The freshness family — six sites, four of them unlisted
+### 1.1 The freshness family — eight sites, six of them unlisted
 
 **The in-kernel stress found a real freshness defect on its first boot** — the
 vmsmalloc DEC-047 precedent repeating exactly: a stale-TLB bug class the
@@ -105,8 +113,12 @@ fault: a freshness call made once at acquisition guarantees nothing to a CPU tha
 did not make it, and DEC-015 exists precisely so a `LookupResult` can close its
 section, block on a pager, and resume on another CPU.
 
-**§7.1's list is incomplete in four places, and the reader-vs-deleter distinction
-it implies is not sound.** Spec amendment owed (D-039, D-042, D-044).
+**D-049's deliberate walk then found two more** — `apply`'s incoming `Mapping*`
+and `enumerateChunk`'s outgoing one, both still uncovered and both gated on
+Spencer (§0). So §7.1's list is incomplete in **six** places, and the
+reader-vs-deleter distinction it implies is not the axis: the axis is whether the
+pointer crosses a boundary a per-access mechanism does not follow, which is what
+all six have in common. Spec amendment owed (D-039, D-042, D-044, D-049).
 
 ### 1.2 `SafePtr` grew, and everything routes through it
 
