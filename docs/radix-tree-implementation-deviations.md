@@ -1394,12 +1394,17 @@ escalating rather than merely recording:
    `SafePtr` freshness obligation exactly as with `protect`" — so this is §7.1's
    list being incomplete rather than the design being wrong.
 
-### Spec follow-ups owed
+### Spec follow-ups — DISCHARGED 2026-08-09 (Spencer-approved)
 
-- §7.1's freshness list should gain the reader/writer reference-acquisition site
-  and the root bucket page, or state why each is exempt.
-- DEC-082 should either extend to the root page or record why the root page's
-  freshness obligation is acceptable where the control block's was not.
+Both landed in `specs/radix-tree.md`:
+
+- §7.1's freshness clause was **rewritten rather than extended**, because the
+  list was not merely missing entries — the reader-vs-deleter axis it implied was
+  the wrong one. It now states the rule over the MEMORY, enumerates the eight
+  sites that owe the call and the five exemptions, and gives each exemption the
+  fact it depends on.
+- DEC-082's record now **extends to the root bucket page**, with why it takes its
+  own pool rather than being folded into the control block.
 
 ---
 
@@ -1570,7 +1575,8 @@ cost is ever shown to matter, and D-051's `BlockPool` backend seam is where
 option 2 would now be built. Nothing about this decision blocks them; it declines
 to pay their complexity on the strength of a cost that measured small.
 
-The §7.1 spec text is still owed, now including this entry's resolution.
+The §7.1 spec text landed 2026-08-09 and carries this resolution, including the
+measured price and what about it stays unmeasured.
 
 ---
 
@@ -2234,13 +2240,14 @@ discharges freshness for its page" into an ordinary assertion, and would have
 caught both gaps above. Proposed, not done — it is a harness change with its own
 design question (what granularity to assert at).
 
-### Owed to the spec
+### Owed to the spec — DISCHARGED 2026-08-09 (Spencer-approved)
 
-§7.1's paragraph should carry the complete list: its four sites, §1.1's four, and
-this entry's two, plus the two conditional exemptions with their dependencies
-named. The reader-vs-deleter framing the paragraph implies is not the axis —
-**the axis is whether the pointer crosses a boundary that a per-access mechanism
-does not follow**, which is what all six unlisted sites have in common.
+§7.1 now carries the complete list — its four sites, §1.1's four and this entry's
+two — with the conditional exemptions and their dependencies named, and it is
+stated over the right axis: the obligation attaches to the MEMORY, not to the
+caller, and the enumerable cases are the exemptions. The corollary D-050 turned
+into signatures is stated there too: a pointer to this memory crossing an API
+boundary is a `SafePtr`, in both directions.
 
 ---
 

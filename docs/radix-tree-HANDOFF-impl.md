@@ -12,8 +12,9 @@ Read in this order:
 2. **§1** — what changed outside the radix tree.
 3. **§2** — the last item closed (RCU slot-block packing) and what is left.
 4. `docs/radix-tree-implementation-deviations.md` — D-001..D-054. **Live:
-   D-004, D-010, D-029, D-030 (older); D-033/034/036/039/042/044/046 owe the
-   spec text.**
+   D-004, D-010, D-029, D-030 (older); D-033/034/036/046 owe the spec text.**
+   The freshness debt (D-039/042/044/049/050/051/053) was discharged 2026-08-09:
+   §7.1 rewritten over the right axis, DEC-082 extended to the root page.
 5. `specs/radix-tree-phase-5.md` — the remaining phase work (calibration).
 6. §3 for traps, §0.1 onwards for background.
 
