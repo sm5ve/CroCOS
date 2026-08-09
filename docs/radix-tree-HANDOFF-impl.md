@@ -6,6 +6,11 @@ partly landed.** This session went well beyond the radix tree — it changed
 `SafePtr`, the kernel's logging rules, and added a pinned-memory allocator — so
 read §0 and §1 before anything else.
 
+**The branch is now in REVIEW, not implementation.** If you are here to referee
+it before merge, read `docs/radix-tree-REVIEW-HANDOFF.md` instead — it ranks
+where the risk is concentrated, records what is settled, and lists the two things
+I already suspect in my own work. This file remains the implementation reference.
+
 Read in this order:
 
 1. **§0** — state, and how the two design questions were settled.
