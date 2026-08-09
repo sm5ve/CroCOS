@@ -56,6 +56,34 @@ add_custom_target(run
         USES_TERMINAL
 )
 
+# ─── The instruction-count harness (RCU P4-DEC-010, radix D-052) ───────────
+#
+# `-icount shift=0` ties the guest TSC to instructions retired, which is what
+# makes an rdtsc delta inside a probe proportional to instruction count. Two
+# things about it are load-bearing rather than incidental:
+#
+#   * **`thread=single` is forced, not chosen.** icount and MTTCG are mutually
+#     exclusive in QEMU, so the alternative to writing it here is an error at
+#     start-up or a silent fallback, depending on version.
+#   * **`-smp 2`, not 8.** Deterministic single-threaded TCG replays every vCPU
+#     on one host thread, so the wall-clock budget buys ~1/8 the guest progress
+#     at 8 CPUs. The probes want SAMPLES, not concurrency — they are minima over
+#     a single CPU's path — and the cross-CPU behaviour they measure is
+#     unaffected by how many CPUs are idle.
+#
+# Sampling until the run ends is fine: this target exists to read a number off
+# the last liveness line, not to gate anything.
+add_custom_target(run_icount
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+        DEPENDS Kernel
+        COMMAND time qemu-system-x86_64 -kernel kernel/Kernel -no-reboot -nographic
+                -accel tcg,thread=single -icount shift=0
+                -smp 2 -m 256M ${CROCOS_QEMU_EXIT_DEVICE}
+                -d int,cpu_reset,guest_errors -D guestErrors.log -cpu qemu64,+fsgsbase
+        COMMENT "Running QEMU under -icount (instruction probes)"
+        USES_TERMINAL
+)
+
 add_custom_target(qmon
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         DEPENDS Kernel

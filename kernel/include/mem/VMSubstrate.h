@@ -164,6 +164,14 @@ namespace kernel::mm::VMSubstrate {
     // from any context after VMSubstrate::init returns.
     void* cpuLocalPageFor(arch::ProcessorID i);
 
+#if defined(CROCOS_RADIX_INSN_PROBE) && CROCOS_RADIX_INSN_PROBE == 3
+    // D-052 mode 3 only: total `ensureTLBEntryFresh` calls since boot. Exists so
+    // an operation's freshness-call COUNT can be measured on target, where the
+    // descent cache makes it differ from the harness's structural per-level
+    // figure. Compiled out of every other build.
+    uint64_t freshnessCallCount();
+#endif
+
     // ─── SafePtr ───────────────────────────────────────────────────────────
     //
     // A pointer into VMSubstrate-backed memory that discharges its freshness

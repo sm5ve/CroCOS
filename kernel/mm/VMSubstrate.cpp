@@ -1215,7 +1215,23 @@ namespace kernel::mm::VMSubstrate {
         return reserveStaticBufferImpl(byteSize, d, /*failable=*/true);
     }
 
+#if defined(CROCOS_RADIX_INSN_PROBE) && CROCOS_RADIX_INSN_PROBE == 3
+    // D-052 mode 3: how many freshness calls does one operation make ON TARGET?
+    // The userspace harness answers this structurally, but the kernel's descent
+    // is SHORTER than a full walk whenever the descent cache hits, so the
+    // harness's per-level count does not transfer to a per-lookup one. Counting
+    // here is the only way to get the multiplier the ratio needs.
+    //
+    // A plain relaxed counter, and it perturbs the very thing modes 1 and 2
+    // measure — which is why this is a THIRD mode and not an addition to them.
+    Atomic<uint64_t> gFreshnessCallCount{0};
+    uint64_t freshnessCallCount() { return gFreshnessCallCount.load(RELAXED); }
+#endif
+
     bool ensureTLBEntryFresh(void* ptr) {
+#if defined(CROCOS_RADIX_INSN_PROBE) && CROCOS_RADIX_INSN_PROBE == 3
+        gFreshnessCallCount.fetch_add(1, RELAXED);
+#endif
         const auto ptrAddr = reinterpret_cast<uint64_t>(ptr);
         const auto tableBase = roundDownToNearestMultiple(ptrAddr, arch::bigPageSize);
         const size_t k_abs = (ptrAddr - tableBase) / arch::smallPageSize;

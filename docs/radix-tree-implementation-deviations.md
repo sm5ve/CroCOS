@@ -2453,3 +2453,63 @@ matters: one call per level descended, on a walk the descent cache already
 short-circuits ~97% of the time (DEC-079's calibration report). The remaining
 input is what one call costs when it misses, which `-icount` cannot answer and
 this harness cannot either.
+
+---
+
+## D-053 — D-042's per-call cost, measured on target under `-icount`
+
+D-052 measured the descent's freshness call COUNT in the harness and could say
+nothing about what a call costs, having no page tables. This is the other half,
+on the real toolchain: RCU P4-ITEM-002's probe machinery applied one subsystem
+over, deliberately the same shape so the two subsystems' figures are comparable.
+
+`CROCOS_RADIX_INSN_PROBE` = 1 (bracket one freshness call), 2 (bracket a whole
+`lookup`), 3 (COUNT the calls one lookup makes). Never combined — mode 1's probes
+inside a mode-2 bracket would inflate the denominator by their own cost, and mode
+3's counter perturbs both. `run_icount` is the new target: `-icount shift=0` with
+`-accel tcg,thread=single` (icount and MTTCG are mutually exclusive) and `-smp 2`,
+since deterministic single-threaded TCG replays every vCPU on one host thread and
+the probes want samples rather than concurrency.
+
+Release/LTO, minima over the sample counts shown:
+
+| Measurement | Ticks | Net of probe | Samples |
+|---|---|---|---|
+| empty probe (baseline) | 3 | — | — |
+| **one freshness call, hit path** | 27 | **24** | 293,368 |
+| **one `lookup`** (min / mean) | 519 / 800 | **516 / 797** | 521,709 |
+| **calls per `lookup`** (min / mean) | 1 / 3 | — | 391,056 |
+
+### What it comes to
+
+**The freshness calls are ~10–20% of a lookup's instructions**, and ≤23% even
+if every lookup paid a full cache-missing descent (5 calls: 4 levels from the
+default root level 3, plus the record). The range is honest rather than coy: the
+mean lookup ticks are interrupt-contaminated upward while the mean call count is
+not, so pairing mean-with-mean understates and min-with-mean overstates.
+
+For scale, RCU P4-ITEM-002 measured the same call at **51–59% of a retire**. The
+descent is not freshness-dominated the way the retire path is — it does far more
+other work per call.
+
+### Two things the numbers say that the setup nearly hid
+
+- **24 instructions, not the ~40 D-042 quotes.** That figure was pre-LTO; this is
+  a Release/LTO build, and the same LTO effect P4-ITEM-007 measured on the retire
+  path applies here.
+- **The `-icount` config reports a 74% descent-cache hit rate against MTTCG's
+  7%**, because single-threaded TCG gives each vCPU long uninterrupted bursts and
+  therefore far better locality than real interleaving would. So the measured 3
+  calls per lookup is a LOW estimate of what an 8-CPU machine does; the ceiling
+  is the full-descent 5. Both bracket ends are given above rather than a single
+  number that would quietly depend on the harness's scheduling.
+
+### What is still not measured, and cannot be here
+
+The **cost of a call that misses**. `ensureTLBEntryFresh` loads a per-CPU
+dirty-bitmap word and `invlpg`s only if the bit is set; TCG models neither the
+cache miss on that word nor `invlpg`'s pipeline cost. Every figure above is an
+instruction count on the hit path. D-052's finding that a descent's calls
+concentrate on 2–3 pages bounds how many misses are even possible, but the price
+of one remains a question for real silicon — exactly as D-042 said when it asked
+for a cache-miss measurement rather than `-icount`.

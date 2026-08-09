@@ -175,6 +175,15 @@ option(CROCOS_FRESHNESS_STATS "Count RCU freshness hits and slab-page reclaims (
 # would inflate the denominator by the inner probe's own cost.
 set(CROCOS_INSN_PROBE "" CACHE STRING "RCU retire-path instruction probe: unset, 1 (freshness call) or 2 (whole retire)")
 
+# D-042/D-052: instruction cost of the descent's per-level freshness call. OFF,
+# and only meaningful under `-icount shift=0` (the `run_icount` target), which
+# ties the guest TSC to instructions retired. 1 = bracket ONE freshness call on
+# a pointer the descent just walked to; 2 = bracket the whole `lookup` so 1 can
+# be stated as a fraction of it. Never both: nesting them would inflate the
+# denominator by the inner probe's own cost. Deliberately the same shape as
+# CROCOS_INSN_PROBE above, so the two subsystems' figures are comparable.
+set(CROCOS_RADIX_INSN_PROBE "" CACHE STRING "radix descent instruction probe: unset, 1 (freshness call) or 2 (whole lookup)")
+
 # radix-tree Phase 5. Selects which in-kernel stress the smp_bringup slot runs:
 # RCU Phase 4's by default, the radix tree's when this is ON. **One at a time is
 # the shape** (RCU P4-DEC-013) — two per-CPU stress routines in one phase means
@@ -208,6 +217,9 @@ if(CROCOS_FRESHNESS_STATS)
 endif()
 if(CROCOS_INSN_PROBE)
     target_compile_definitions(Kernel PRIVATE CROCOS_INSN_PROBE=${CROCOS_INSN_PROBE})
+endif()
+if(CROCOS_RADIX_INSN_PROBE)
+    target_compile_definitions(Kernel PRIVATE CROCOS_RADIX_INSN_PROBE=${CROCOS_RADIX_INSN_PROBE})
 endif()
 if(CROCOS_RADIX_STRESS)
     # The census is not optional under the stress: §11's residue gate is stated

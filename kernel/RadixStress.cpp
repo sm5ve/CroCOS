@@ -149,6 +149,63 @@ namespace radix_stress {
     Atomic<uint64_t> gResiduePinned{0};   // last cycle's, with caches held
     Atomic<uint64_t> gResidueEvicted{0};  // ...and after every CPU evicted
 
+
+    // ── D-052/D-042: the descent's instruction cost ────────────────────────
+    //
+    // The userspace harness measured the freshness call COUNT exactly (1.00 per
+    // level on the read path, D-052) and can say nothing about what a call
+    // costs, having no page tables. This is the other half, and it is RCU
+    // P4-ITEM-002's machinery applied one subsystem over — same reasoning,
+    // deliberately the same shape, so the two numbers are comparable.
+    //
+    // Under `-icount shift=0` QEMU derives the guest TSC from a virtual clock
+    // that advances per instruction retired, so an rdtsc delta is proportional
+    // to instructions. The constant of proportionality does not matter: the
+    // headline is the RATIO of mode 1 to mode 2, measured in the same units.
+    //
+    // Two modes, never both, because they would nest: mode 1 brackets one
+    // freshness call, mode 2 brackets a whole `lookup`. Mode 1's probes live
+    // inside a mode-2 bracket would inflate the denominator by their own cost.
+#ifdef CROCOS_RADIX_INSN_PROBE
+    inline uint64_t insnCounter() noexcept {
+        uint32_t lo, hi;
+        asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
+        return (static_cast<uint64_t>(hi) << 32) | lo;
+    }
+
+    // MINIMA, not means, for the reason P4-ITEM-002 records: interrupts are
+    // enabled in the stress loop, so a timer landing inside a bracket inflates
+    // that sample by the whole handler, and the contamination does not average
+    // out — it dilutes with sample count. The minimum over hundreds of thousands
+    // of samples is the uncontaminated path. Totals and counts are kept so a
+    // mean is still readable and the sample size is visible.
+    Atomic<uint64_t> gProbeFreshMin{0};
+    Atomic<uint64_t> gProbeFreshTicks{0};
+    Atomic<uint64_t> gProbeFreshCount{0};
+    Atomic<uint64_t> gProbeStaleMin{0};
+    Atomic<uint64_t> gProbeStaleCount{0};
+    Atomic<uint64_t> gProbeLookupMin{0};
+    Atomic<uint64_t> gProbeLookupTicks{0};
+    Atomic<uint64_t> gProbeLookupCount{0};
+    // An empty back-to-back rdtsc pair, so every figure can be stated net of the
+    // probe itself rather than including it.
+    Atomic<uint64_t> gProbeBaseMin{0};
+    Atomic<uint64_t> gProbeBaseCount{0};
+
+    void recordMin(Atomic<uint64_t>& slot, uint64_t sample) noexcept {
+        uint64_t cur = slot.load(RELAXED);
+        while ((cur == 0 || sample < cur) &&
+               !slot.compare_exchange_weak(cur, sample, RELAXED, RELAXED)) {}
+    }
+
+    void calibrateProbe() noexcept {
+        const uint64_t c0 = insnCounter();
+        const uint64_t c1 = insnCounter();
+        recordMin(gProbeBaseMin, c1 - c0);
+        gProbeBaseCount.fetch_add(1, RELAXED);
+    }
+#endif
+
     // ── Heartbeat and watchdog ─────────────────────────────────────────────
     //
     // Same mechanism as RCU Phase 4's, and needed for the same reason: the
@@ -395,7 +452,31 @@ namespace radix_stress {
                 } else {
                     va = clusterLo + ((r >> 45) % 4096) * kGranule;
                 }
+#if defined(CROCOS_RADIX_INSN_PROBE) && CROCOS_RADIX_INSN_PROBE == 3
+                // Mode 3: the multiplier. Calls made by one lookup, counted
+                // rather than inferred, because the descent cache shortens the
+                // walk and the harness's per-level figure cannot know by how
+                // much on any given lookup.
+                const uint64_t c0 = VMS::freshnessCallCount();
                 auto result = gCache->lookup(block, va);
+                const uint64_t calls = VMS::freshnessCallCount() - c0;
+                recordMin(gProbeLookupMin, calls);
+                gProbeLookupTicks.fetch_add(calls, RELAXED);
+                gProbeLookupCount.fetch_add(1, RELAXED);
+#elif defined(CROCOS_RADIX_INSN_PROBE) && CROCOS_RADIX_INSN_PROBE == 2
+                // Mode 2: the whole descent, so mode 1 can be stated as a
+                // fraction of it. The cache is live here on purpose — this is
+                // the cost a fault actually pays, not the cost of a cold walk.
+                calibrateProbe();
+                const uint64_t l0 = insnCounter();
+                auto result = gCache->lookup(block, va);
+                const uint64_t l1 = insnCounter();
+                recordMin(gProbeLookupMin, l1 - l0);
+                gProbeLookupTicks.fetch_add(l1 - l0, RELAXED);
+                gProbeLookupCount.fetch_add(1, RELAXED);
+#else
+                auto result = gCache->lookup(block, va);
+#endif
                 if (result) {
                     // Touch the record through the reference, which is what
                     // makes this a freshness test and not a pointer-shuffling
@@ -403,6 +484,33 @@ namespace radix_stress {
                     // have been another CPU's a moment ago.
                     const uint64_t off = result.mapping()->offsetFor(result.lo());
                     (void)off;
+#if defined(CROCOS_RADIX_INSN_PROBE) && CROCOS_RADIX_INSN_PROBE == 1
+                    // Mode 1: ONE call, on a pointer the descent just walked to,
+                    // bracketed as tightly as the call site allows. Nothing else
+                    // is in the bracket, so the delta is the call plus one
+                    // rdtsc, and gProbeBase carries the latter away.
+                    //
+                    // This prices the HIT path deliberately: the page was
+                    // touched a moment ago, so its dirty-bitmap word is warm and
+                    // the bit is clear. That is the case D-052 shows dominates —
+                    // a descent's calls land on 2-3 pages, so all but the first
+                    // per page are hits — and it is the one an instruction count
+                    // can speak to at all, since a miss is a cache event TCG
+                    // does not model.
+                    calibrateProbe();
+                    const uint64_t f0 = insnCounter();
+                    const bool stale =
+                        VMS::ensureTLBEntryFresh(result.mapping().address());
+                    const uint64_t f1 = insnCounter();
+                    if (stale) {
+                        recordMin(gProbeStaleMin, f1 - f0);
+                        gProbeStaleCount.fetch_add(1, RELAXED);
+                    } else {
+                        recordMin(gProbeFreshMin, f1 - f0);
+                        gProbeFreshTicks.fetch_add(f1 - f0, RELAXED);
+                        gProbeFreshCount.fetch_add(1, RELAXED);
+                    }
+#endif
                 }
                 gLookups.fetch_add(1, RELAXED);
             }
@@ -502,6 +610,26 @@ namespace radix_stress {
                << " residueEvicted=" << gResidueEvicted.load(RELAXED)
 #else
                << " [census=off]"
+#endif
+#ifdef CROCOS_RADIX_INSN_PROBE
+               // D-042/D-052. Ticks are -icount virtual-clock ticks; only the
+               // RATIO between modes 1 and 2 is meaningful, and `base` is the
+               // empty-probe cost every figure should be read net of.
+               << " probeBase=" << gProbeBaseMin.load(RELAXED)
+               << " freshMin=" << gProbeFreshMin.load(RELAXED)
+               << " freshMean=" << (gProbeFreshCount.load(RELAXED) == 0
+                                        ? uint64_t{0}
+                                        : gProbeFreshTicks.load(RELAXED) /
+                                              gProbeFreshCount.load(RELAXED))
+               << " freshN=" << gProbeFreshCount.load(RELAXED)
+               << " staleMin=" << gProbeStaleMin.load(RELAXED)
+               << " staleN=" << gProbeStaleCount.load(RELAXED)
+               << " lookupMin=" << gProbeLookupMin.load(RELAXED)
+               << " lookupMean=" << (gProbeLookupCount.load(RELAXED) == 0
+                                         ? uint64_t{0}
+                                         : gProbeLookupTicks.load(RELAXED) /
+                                               gProbeLookupCount.load(RELAXED))
+               << " lookupN=" << gProbeLookupCount.load(RELAXED)
 #endif
                << "\n";
     }
