@@ -11,7 +11,7 @@ Read in this order:
 1. **§0** — state, and how the two design questions were settled.
 2. **§1** — what changed outside the radix tree.
 3. **§2** — the last item closed (RCU slot-block packing) and what is left.
-4. `docs/radix-tree-implementation-deviations.md` — D-001..D-053. **Live:
+4. `docs/radix-tree-implementation-deviations.md` — D-001..D-054. **Live:
    D-004, D-010, D-029, D-030 (older); D-033/034/036/039/042/044/046 owe the
    spec text.**
 5. `specs/radix-tree-phase-5.md` — the remaining phase work (calibration).
@@ -30,7 +30,7 @@ Read in this order:
 | **5** | **Partly landed.** Kernel codec instance, node/`Mapping` censuses, the in-kernel stress, the whole freshness family, and the pinned-memory work through D-048 (radix control block AND RCU slot block both sub-page packed). Debug **and** Release/LTO boot clean on `run`, `run_numa`, `run_numa_hmat`. **Calibration untouched.** |
 
 Full suite, sequential: Core 441 + 425 TSan, Kernel 177, LibAlloc 38×2, vmsmalloc
-31×2, RCU 64×2, **radix 165×3** (ASan, TSan, progress audit). The default kernel
+31×2, RCU 64×2, **radix 168×3** (ASan, TSan, progress audit). The default kernel
 (stress off) builds and boots.
 
 ```
@@ -85,6 +85,16 @@ small.
   icount forces `thread=single`, and that single-threaded TCG reports a 74%
   descent-cache hit rate where MTTCG reports 7% — so any locality-sensitive
   figure read under `-icount` is a best case.
+- **ITEM-084 now has its distribution** (D-054): max 2 draws per attempt over
+  1.9M attempts, against a 230 ceiling — but the finding that matters is *why*.
+  The stress could not produce the expensive shape at all (it unmapped exactly
+  what it placed, which §7.1 says is the CHEAP row), and even after a bulk-unmap
+  row was added the max stayed at 2, because DEC-032's guard-gap placement
+  **actively avoids** the dense arrangement the edge sum assumes. Constructed
+  harness shapes reach it exactly (16 records, 15 cleared, 15 drawn; one slot
+  wider draws zero). **Still not decided** — and D-054 records the constraint any
+  answer must respect, plus the question it surfaces: whether DEC-077's unit
+  decomposition already bounds one attempt below the edge sum.
 - ~~Finish the freshness audit deliberately~~ — **done, D-049; its two gaps
   closed by D-050.** Every class of memory the tree touches has a verdict, both
   `Mapping` boundaries now pass `SafePtr`, and — the durable half — **the harness
