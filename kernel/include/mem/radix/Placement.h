@@ -110,7 +110,10 @@ namespace kernel::mm::radix {
         const uint64_t hi = (va + span - 1 + guard < clusterHi) ? va + span - 1 + guard
                                                                 : clusterHi;
         bool clear = true;
-        tree.enumerate(lo, hi, [&](Mapping*, uint64_t, uint64_t) { clear = false; });
+        // The record is never named, let alone read — occupancy is the whole
+        // question — so this callback is the one shape that owes nothing.
+        tree.enumerate(lo, hi,
+                       [&](VMSubstrate::SafePtr<Mapping>, uint64_t, uint64_t) { clear = false; });
         return clear;
     }
 
@@ -129,7 +132,7 @@ namespace kernel::mm::radix {
     template <GeometryDescriptor G, typename Codec, unsigned DetachBudget, typename Entropy>
     [[nodiscard]] PlacementResult placeInCluster(
             CoreTree<G, Codec, DetachBudget>& tree,
-            uint64_t bytes, Mapping* value, Entropy&& entropy) {
+            uint64_t bytes, VMSubstrate::SafePtr<Mapping> value, Entropy&& entropy) {
         assert(value != nullptr, "radix placement: a placement with no record to place");
         assert(bytes > 0, "radix placement: zero-length placement");
 

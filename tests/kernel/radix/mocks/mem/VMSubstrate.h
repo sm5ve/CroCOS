@@ -60,7 +60,33 @@ namespace kernel::mm::VMSubstrate {
     void  reclaimSlabPage(void* p);
     void* mapMMIOPage(phys_addr paddr);
 
-    inline bool ensureTLBEntryFresh(void*) noexcept { return false; }  // userspace: never stale
+    // ─── Freshness accounting (D-049) ──────────────────────────────────────
+    //
+    // Userspace has no TLB, so this can only ever answer "not stale". What it
+    // CAN do is record that it was called — and that is the difference between
+    // a harness that finds this bug class and one that cannot.
+    //
+    // Every member of the class so far (§1.1's six sites, D-049's two) was
+    // found by an in-kernel stress boot, one per boot, because a no-op that
+    // records nothing makes "did this path discharge its obligation?"
+    // unaskable: the tests pass identically with every call present or absent.
+    // With a record, it becomes an ordinary assertion.
+    //
+    // **Per thread, and armed explicitly.** Per thread because freshness IS a
+    // per-CPU property — "this thread discharged freshness for this page" is
+    // the exact proposition, and a global counter would answer a weaker one
+    // while adding cross-thread contention to every SafePtr access in the
+    // torture suite. Armed explicitly because disarmed it costs one
+    // thread-local bool test, so the concurrent and soak runs are unperturbed.
+    namespace test {
+        extern thread_local bool freshnessRecordingArmed;
+        void recordFreshnessCall(const void* p);
+    }
+
+    inline bool ensureTLBEntryFresh(void* p) noexcept {
+        if (test::freshnessRecordingArmed) test::recordFreshnessCall(p);
+        return false;                                      // userspace: never stale
+    }
 
     void* reservePerDomainStaticBuffer(size_t byteSize, numa::DomainID d);
     // vmsmalloc DEC-050/051: the failable, runtime-callable variant. The mock
@@ -278,6 +304,33 @@ namespace kernel::mm::VMSubstrate {
         // this one fails the ALLOCATOR beneath tryMake rather than tryMake
         // itself, so it also drives vmsmalloc's slow-path unwind.
         void   setPageAllocFailAt(long n);
+
+        // ─── Freshness accounting (D-049) ──────────────────────────────────
+        //
+        // Arm, drive the path under test, then ask whether the page a pointer
+        // names was made fresh BY THIS THREAD. The usual shape is to clear
+        // immediately before the access being audited, so the assertion names
+        // one access rather than "something, somewhere, touched this page":
+        //
+        //     VS::test::armFreshnessRecording();
+        //     ...reach the pointer...
+        //     VS::test::clearFreshnessRecord();
+        //     (void)m->baseVA;                       // the access under audit
+        //     ASSERT_TRUE(VS::test::pageWasMadeFresh(m.address()));
+        //
+        // A `RAII` arm/disarm guard lives in the test file rather than here —
+        // the mock stays a mock.
+        void     armFreshnessRecording();
+        void     disarmFreshnessRecording();
+        // Forget every page and zero the counter; stays armed.
+        void     clearFreshnessRecord();
+        uint64_t freshnessCalls();
+        bool     pageWasMadeFresh(const void* p);
+        // The page record is a small fixed array — no allocation, so the
+        // harness's per-test leak accounting stays honest. This says whether it
+        // filled up, so a test can never pass on a TRUNCATED record, which is
+        // the one way this instrumentation could lie in the safe direction.
+        bool     freshnessRecordOverflowed();
     }
 }
 

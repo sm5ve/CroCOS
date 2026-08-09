@@ -36,7 +36,9 @@ set(RDX_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/PlacementTest.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/AddressSpaceTest.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/DescentCacheTest.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/FreshnessTest.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/mocks/RadixOracle.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/mocks/MockFreshness.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/RandomSource.cpp
     ${VMS_MOCKS}/MockVMSubstrate.cpp
     ${VMS_MOCKS}/MockKernelEnv.cpp

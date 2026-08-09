@@ -8,10 +8,10 @@ read §0 and §1 before anything else.
 
 Read in this order:
 
-1. **§0** — state, and the three things waiting on Spencer.
+1. **§0** — state, and the two things waiting on Spencer.
 2. **§1** — what changed outside the radix tree.
 3. **§2** — the last item closed (RCU slot-block packing) and what is left.
-4. `docs/radix-tree-implementation-deviations.md` — D-001..D-049. **Live:
+4. `docs/radix-tree-implementation-deviations.md` — D-001..D-050. **Live:
    D-004, D-010, D-029, D-030 (older); D-033/034/036/039/042/044/046 owe the
    spec text.**
 5. `specs/radix-tree-phase-5.md` — the remaining phase work (calibration).
@@ -30,7 +30,7 @@ Read in this order:
 | **5** | **Partly landed.** Kernel codec instance, node/`Mapping` censuses, the in-kernel stress, the whole freshness family, and the pinned-memory work through D-048 (radix control block AND RCU slot block both sub-page packed). Debug **and** Release/LTO boot clean on `run`, `run_numa`, `run_numa_hmat`. **Calibration untouched.** |
 
 Full suite, sequential: Core 441 + 425 TSan, Kernel 177, LibAlloc 38×2, vmsmalloc
-31×2, RCU 64×2, **radix 156×3** (ASan, TSan, progress audit). The default kernel
+31×2, RCU 64×2, **radix 163×3** (ASan, TSan, progress audit). The default kernel
 (stress off) builds and boots.
 
 ```
@@ -51,7 +51,7 @@ both of Phase 5's defects became reproducible. Current reach in a 20 s window:
 2,049 cycles debug, 8,193 Release/LTO (was 1,025 debug before D-048; the stress
 reports at cycle 1–4 then every 1,024, so read these as bands, not exact counts).
 
-### The three things waiting on Spencer
+### The two things waiting on Spencer
 
 Design questions, not bugs; options are in the deviations log.
 
@@ -67,11 +67,6 @@ Design questions, not bugs; options are in the deviations log.
    answer one level down) / a stronger vmsmalloc guarantee. Needs a cache-miss
    measurement, not `-icount`: the instruction count is small and the extra cache
    line per node is not.
-3. **The two `Mapping` boundaries D-049 found** — `apply`'s incoming `Mapping*`
-   and `enumerateChunk`'s outgoing one. Both are uncovered, both are the shape
-   D-044 already ruled on for `LookupResult`, and both are fixed the same
-   mechanical way: pass `SafePtr<Mapping>` instead. It changes a §3
-   consumer-contract signature, which is why it is here and not already done.
 
 ### Phase 5's remaining work
 
@@ -80,12 +75,14 @@ Design questions, not bugs; options are in the deviations log.
   and `scanChunk`, DEC-079's entry count. `-icount` per RCU P4-DEC-010, **not**
   TCG block counts. D-034 records what the Phase 4 harness could and could not
   settle.
-- ~~Finish the freshness audit deliberately~~ — **done, D-049.** Every class of
-  memory the tree touches now has a verdict. It found **two more uncovered
-  sites**, both the same shape and both needing a signature change Spencer should
-  rule on (see §0's list below), plus one requirement (where the descent cache
-  may live) and one testability finding (the harness cannot observe the
-  discipline at all, which is why this class keeps being found by stress boots).
+- ~~Finish the freshness audit deliberately~~ — **done, D-049; its two gaps
+  closed by D-050.** Every class of memory the tree touches has a verdict, both
+  `Mapping` boundaries now pass `SafePtr`, and — the durable half — **the harness
+  can finally see this bug class**: the mock records freshness calls per thread
+  and `FreshnessTest.cpp` asserts against it. What remains from the audit is one
+  requirement that cannot be asserted (**the descent cache must live in `.bss` or
+  pinned storage** — in vmsmalloc memory every probe gains a freshness call on
+  the hottest path in the system) and the §7.1 spec text.
 
 ---
 
@@ -114,8 +111,8 @@ did not make it, and DEC-015 exists precisely so a `LookupResult` can close its
 section, block on a pager, and resume on another CPU.
 
 **D-049's deliberate walk then found two more** — `apply`'s incoming `Mapping*`
-and `enumerateChunk`'s outgoing one, both still uncovered and both gated on
-Spencer (§0). So §7.1's list is incomplete in **six** places, and the
+and `enumerateChunk`'s outgoing one, both closed by D-050. So §7.1's list is
+incomplete in **six** places, and the
 reader-vs-deleter distinction it implies is not the axis: the axis is whether the
 pointer crosses a boundary a per-access mechanism does not follow, which is what
 all six have in common. Spec amendment owed (D-039, D-042, D-044, D-049).

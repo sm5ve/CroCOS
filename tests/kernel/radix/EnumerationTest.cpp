@@ -64,11 +64,16 @@ struct Range {
 // consumer does, and what makes the per-leaf emission below readable as spans.
 std::vector<Range> collect(const TreeA& t, uint64_t lo, uint64_t hi) {
     std::vector<Range> out;
-    t.enumerate(lo, hi, [&](rdx::Mapping* m, uint64_t a, uint64_t b) {
-        if (!out.empty() && out.back().m == m && out.back().hi + 1 == a) {
+    // The callback takes a `SafePtr` (D-049): the pointer leaves the tree, and a
+    // consumer dereferencing it may be making its CPU's first touch of that page.
+    // Identity comparison goes through `address()`, which discharges nothing and
+    // says so — which is exactly why an identity-only test proves nothing about
+    // the discipline. `FreshnessTest.cpp` is where the dereference is asserted.
+    t.enumerate(lo, hi, [&](VS::SafePtr<rdx::Mapping> m, uint64_t a, uint64_t b) {
+        if (!out.empty() && out.back().m == m.address() && out.back().hi + 1 == a) {
             out.back().hi = b;
         } else {
-            out.push_back(Range{m, a, b});
+            out.push_back(Range{m.address(), a, b});
         }
     });
     return out;
@@ -182,8 +187,8 @@ TEST(radix_enumerate_resumes_across_chunk_boundaries) {
     auto c = tree.scanFrom(0, hi);
     unsigned chunks = 0;
     while (!c.finished()) {
-        tree.enumerateChunk(c, [&](rdx::Mapping* m, uint64_t a, uint64_t b) {
-            stepped.push_back(Range{m, a, b});
+        tree.enumerateChunk(c, [&](VS::SafePtr<rdx::Mapping> m, uint64_t a, uint64_t b) {
+            stepped.push_back(Range{m.address(), a, b});
         });
         chunks++;
         ASSERT_TRUE(chunks < 10000);   // a cursor that never advances is a hang
@@ -232,7 +237,7 @@ TEST(radix_enumerate_skips_sparse_regions_in_whole_slots) {
     unsigned chunks = 0;
     size_t emitted = 0;
     while (!c.finished()) {
-        emitted += tree.enumerateChunk(c, [](rdx::Mapping*, uint64_t, uint64_t) {});
+        emitted += tree.enumerateChunk(c, [](VS::SafePtr<rdx::Mapping>, uint64_t, uint64_t) {});
         chunks++;
         ASSERT_TRUE(chunks < 1000);
     }
@@ -266,8 +271,8 @@ TEST(radix_enumerate_emits_a_multi_slot_mapping_as_adjacent_pieces) {
     ASSERT_EQ(uint64_t{4}, m->refcountRelaxed());   // four naming slots
 
     std::vector<Range> raw;
-    tree.enumerate(0, 8 * kPage - 1, [&](rdx::Mapping* mm, uint64_t a, uint64_t b) {
-        raw.push_back(Range{mm, a, b});
+    tree.enumerate(0, 8 * kPage - 1, [&](VS::SafePtr<rdx::Mapping> mm, uint64_t a, uint64_t b) {
+        raw.push_back(Range{mm.address(), a, b});
     });
     ASSERT_EQ(size_t{4}, raw.size());
     for (size_t i = 0; i < raw.size(); i++) {

@@ -2208,3 +2208,86 @@ this entry's two, plus the two conditional exemptions with their dependencies
 named. The reader-vs-deleter framing the paragraph implies is not the axis —
 **the axis is whether the pointer crosses a boundary that a per-access mechanism
 does not follow**, which is what all six unlisted sites have in common.
+
+---
+
+## D-050 — D-049's two gaps closed, and the harness taught to see the class
+
+Spencer approved both signature changes; they landed with the instrumentation
+that makes them assertable, which is the more durable half.
+
+### The signatures
+
+`Mapping*` became `VMSubstrate::SafePtr<Mapping>` at both boundaries the audit
+found — in through `apply`/`runToCompletion`/`applyOrDecompose`/`decompose`/
+`runAttempt`/`readPass`/`redispatch`/`commit` and `placeInCluster`, out through
+`ScanStep::mapping` and therefore the `enumerateChunk` callback. Encode sites
+take `.address()`, which discharges nothing and says so; that is the entire diff
+besides the types.
+
+The two directions behave differently at the call site, and the difference is
+worth knowing:
+
+- **Inbound is source-compatible**, because `SafePtr`'s converting constructor is
+  not explicit — every existing caller still compiles. That is not a weakness:
+  the caller's own pointer is fresh on its own CPU by construction, and what was
+  broken was the *access*, which now discharges wherever the record came from.
+- **Outbound is a hard break**, and deliberately: a callback taking `Mapping*`
+  no longer compiles, so the four in the suite had to be looked at. That is the
+  forcing function the raw signature never provided.
+
+`guardIsClear`'s callback is the one shape that owes nothing — it never names the
+record, because occupancy is the whole question.
+
+### The instrumentation, which is the part that lasts
+
+`tests/kernel/radix/mocks/MockFreshness.cpp`. The mock's `ensureTLBEntryFresh`
+now records, per thread, which pages it was called for; `VMSubstrate::test`
+exposes `armFreshnessRecording`, `clearFreshnessRecord`, `freshnessCalls`,
+`pageWasMadeFresh` and `freshnessRecordOverflowed`. `FreshnessTest.cpp` (six
+tests) asserts against it.
+
+Three decisions:
+
+- **Per thread, not global.** Freshness is a property of one CPU's mapping —
+  D-044's whole content — so "this thread discharged freshness for this page" is
+  the proposition. A global record answers the weaker "somebody did", which is
+  precisely the weaker claim that let a `Mapping` acquired on one CPU be read on
+  another. `radix_freshness_record_is_per_thread` pins that down.
+- **Armed explicitly.** Disarmed it is one thread-local bool test per access, so
+  the concurrent, torture and soak runs are unperturbed and nobody has to wonder
+  whether the instrumentation moved a race.
+- **A fixed array, not a set.** No allocation on the recording path, so the
+  harness's per-test byte accounting keeps meaning what it says. The bound is
+  reported rather than hidden — `freshnessRecordOverflowed()` exists so a test
+  cannot pass on a truncated record, the only way this could lie in the direction
+  that matters.
+
+**What it still cannot see: whether a call was NEEDED.** No page tables, so a
+superfluous call is invisible and stays a question for `-icount` and D-042. The
+tests are one-directional by construction, catching the absent call — the
+direction that corrupts memory.
+
+### Two tests that had to be rewritten before they meant anything
+
+- The descent test first asserted a **call count** (`>= 3`) and passed at 2 for a
+  reason that had nothing to do with the discipline: the fixture was not deep.
+  Nor was the fix "use a bigger span" — a single record over two pages is stored
+  as ONE leaf carrying a sub-range, so a wide root slot holds it without
+  subdividing at all. It takes **two distinct records** to force a subdivision.
+  It is now stated as a comparison — a deeper descent must discharge *more* than
+  a shallow one — because the absolute count is an implementation detail and the
+  per-level property is not. Counting distinct *pages* would not work either:
+  two nodes of one size class can share a slab page.
+- The first test asserts what `address()` must NOT do. If it ever starts
+  recording, every other assertion in the file goes vacuous.
+
+### Mutation-tested
+
+| Mutation | Caught by |
+|---|---|
+| `value.address()->acquireRef()` — the pre-fix raw RMW | `..._apply_discharges_freshness_on_the_incoming_record` |
+| consumers read through `.address()->` — the pre-fix world | `..._lookup_result_...`, `..._enumerate_hands_out_a_pointer_...` |
+| `NodeRef::slot` reads through `address()` instead of `at<>` | `..._descent_pays_the_discipline_at_every_level` |
+
+Suite 163×2 (was 156), kernel clean on all three configs, debug and Release/LTO.

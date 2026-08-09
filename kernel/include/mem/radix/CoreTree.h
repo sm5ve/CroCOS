@@ -1104,8 +1104,14 @@ namespace kernel::mm::radix {
         // and under-reporting costs an extra step while over-reporting would
         // skip a live mapping.
         struct ScanStep {
-            bool     occupied = false;
-            Mapping* mapping  = nullptr;    // occupied only
+            bool occupied = false;
+            // A `SafePtr`, not a `Mapping*`, and for the reason D-044 settled for
+            // `LookupResult`: this pointer LEAVES the tree, and a consumer that
+            // dereferences it — every real one does, to read a base VA or a
+            // protection — may be making its CPU's first touch of that page.
+            // The obligation therefore travels with the pointer rather than
+            // being an unwritten precondition on the callback (D-049).
+            VMSubstrate::SafePtr<Mapping> mapping{};   // occupied only
             uint64_t lo = 0;
             uint64_t hi = 0;                // inclusive; the range, or the hole
         };
@@ -1193,8 +1199,10 @@ namespace kernel::mm::radix {
         // EBR-stalling work — the exact cost DEC-077 bounds at 64 for
         // detachment, and DEC-095 does not get to reintroduce it at 16x.
         //
-        // `fn(Mapping*, lo, hi)` is called for each occupied range in ascending
-        // VA order. Ranges are emitted PER LEAF: a mapping named by four slots
+        // `fn(SafePtr<Mapping>, lo, hi)` is called for each occupied range in
+        // ascending VA order. A `SafePtr` because the callback's reads are
+        // cross-CPU first touches of vmsmalloc memory (D-049) — the same reason
+        // `LookupResult` holds one. Ranges are emitted PER LEAF: a mapping named by four slots
         // produces four adjacent pairs naming the same record, because coalescing
         // across a chunk boundary would need state that outlives the section.
         // Consumers that want merged spans coalesce on the way out.
@@ -1353,7 +1361,7 @@ namespace kernel::mm::radix {
         // whole-node claim.
         //
         // `value == nullptr` clears the range; otherwise it is placed over it.
-        [[nodiscard]] ApplyStatus apply(uint64_t lo, uint64_t hi, Mapping* value,
+        [[nodiscard]] ApplyStatus apply(uint64_t lo, uint64_t hi, VMSubstrate::SafePtr<Mapping> value,
                                         ApplyMode mode = ApplyMode::Overwrite) {
             assert(lo <= hi, "radix: empty operation range");
             if (bucketTable == nullptr) {
@@ -1384,7 +1392,7 @@ namespace kernel::mm::radix {
         // marks". Returns `NeedsDecomposition` rather than decomposing, so the
         // caller decides whether this range is a whole operation or one slot of
         // somebody's decomposition.
-        [[nodiscard]] ApplyStatus runToCompletion(uint64_t lo, uint64_t hi, Mapping* value,
+        [[nodiscard]] ApplyStatus runToCompletion(uint64_t lo, uint64_t hi, VMSubstrate::SafePtr<Mapping> value,
                                                   ApplyMode mode = ApplyMode::Overwrite) {
             unsigned retryCount = 0;
             unsigned consecutiveShortfalls = 0;
@@ -1501,7 +1509,7 @@ namespace kernel::mm::radix {
         // §6.5's "the sub-range inside that child is a sub-operation whose own
         // detachment count is summed and budget-checked, decomposing at its own
         // site if over".
-        [[nodiscard]] ApplyStatus applyOrDecompose(uint64_t lo, uint64_t hi, Mapping* value,
+        [[nodiscard]] ApplyStatus applyOrDecompose(uint64_t lo, uint64_t hi, VMSubstrate::SafePtr<Mapping> value,
                                                    ApplyMode mode, unsigned depth) {
             const ApplyStatus st = runToCompletion(lo, hi, value, mode);
             if (st != ApplyStatus::NeedsDecomposition) return st;
@@ -1604,7 +1612,7 @@ namespace kernel::mm::radix {
         // that FIRE ON LEGAL EXECUTIONS — a fitting sub-range's several small
         // subtrees are legitimately one unit. The budget is cumulative per
         // attempt, and the claim set's fixed capacity is the structural check.
-        [[nodiscard]] ApplyStatus decompose(uint64_t lo, uint64_t hi, Mapping* value,
+        [[nodiscard]] ApplyStatus decompose(uint64_t lo, uint64_t hi, VMSubstrate::SafePtr<Mapping> value,
                                             unsigned depth) {
             // The per-slot recursion strictly descends, so tree depth bounds it.
             // The final unit below can re-enter at the same range if a concurrent
@@ -2292,7 +2300,7 @@ namespace kernel::mm::radix {
             bool        willEmpty = false;
         };
 
-        ApplyStatus runAttempt(uint64_t lo, uint64_t hi, Mapping* value, Attempt& a) {
+        ApplyStatus runAttempt(uint64_t lo, uint64_t hi, VMSubstrate::SafePtr<Mapping> value, Attempt& a) {
             assert(a.binding,
                    "radix: an attempt against a bucket holding no cluster — creation is "
                    "the caller's to do first (§5.6), and it publishes an EMPTY root "
@@ -2390,7 +2398,7 @@ namespace kernel::mm::radix {
 
         // ─── Pass 1 ────────────────────────────────────────────────────────
         ReadOutcome readPass(NodeRef node, unsigned level, uint64_t nodeBase,
-                             uint64_t lo, uint64_t hi, Mapping* value, Attempt& a) {
+                             uint64_t lo, uint64_t hi, VMSubstrate::SafePtr<Mapping> value, Attempt& a) {
             const bool     writes = (value != nullptr);
             const uint64_t span   = slotSpan(G, level);
             const unsigned first  = slotIndexFor(level, nodeBase, lo);
@@ -2455,7 +2463,7 @@ namespace kernel::mm::radix {
                                 plan.add(d.survivors[k], displaced);
                             }
                         }
-                        if (writes) plan.add(d.opRange, value);
+                        if (writes) plan.add(d.opRange, value.address());
 
                         void* built = buildSubtree(level + 1, slotBase, plan, a);
                         if (!built) return ReadOutcome{ApplyStatus::OutOfMemory, false};
@@ -2770,7 +2778,7 @@ namespace kernel::mm::radix {
         // not on a value comparison, because a slot can change in a way a value
         // comparison notices while the row is unchanged, and vice versa.
         bool redispatchAgrees(NodeRef node, unsigned level, uint64_t nodeBase,
-                              uint64_t lo, uint64_t hi, Mapping* value, Attempt& a) {
+                              uint64_t lo, uint64_t hi, VMSubstrate::SafePtr<Mapping> value, Attempt& a) {
             const bool     writes = (value != nullptr);
             const uint64_t span   = slotSpan(G, level);
             const unsigned first  = slotIndexFor(level, nodeBase, lo);
@@ -2953,7 +2961,7 @@ namespace kernel::mm::radix {
         // computes the same answer, since everything is frozen, and the static
         // form is the normative one.
         bool commit(NodeRef node, unsigned level, uint64_t nodeBase,
-                    uint64_t lo, uint64_t hi, Mapping* value, Attempt& a) {
+                    uint64_t lo, uint64_t hi, VMSubstrate::SafePtr<Mapping> value, Attempt& a) {
             const bool     writes = (value != nullptr);
             const uint64_t span   = slotSpan(G, level);
             const unsigned first  = slotIndexFor(level, nodeBase, lo);
@@ -3048,7 +3056,7 @@ namespace kernel::mm::radix {
 
                 case DispatchAction::WriteLeaf:
                     value->acquireRef();                       // commit-phase +1
-                    publish(node, i, Codec::encodeLeaf(value, d.range, level), a);
+                    publish(node, i, Codec::encodeLeaf(value.address(), d.range, level), a);
                     occupancyDelta++;
                     break;
 
@@ -3061,7 +3069,7 @@ namespace kernel::mm::radix {
                     // the old slot word takes its counted reference after this
                     // CPU has taken the count to zero.
                     value->acquireRef();                       // +1 BEFORE the publish
-                    publish(node, i, Codec::encodeLeaf(value, d.range, level), a);
+                    publish(node, i, Codec::encodeLeaf(value.address(), d.range, level), a);
                     break;
                 }
 
@@ -3090,7 +3098,7 @@ namespace kernel::mm::radix {
                                    "whole span, which is always expressible");
                         (void)ok;
                         value->acquireRef();
-                        replacement = Codec::encodeLeaf(value, sub, level);
+                        replacement = Codec::encodeLeaf(value.address(), sub, level);
                     }
                     // Phase two of §6.5: mark the WHOLE subtree, once it is held
                     // exclusively and nothing can fail. Recursive marking alone
