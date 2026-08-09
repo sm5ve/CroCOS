@@ -2385,3 +2385,71 @@ run_numa_hmat, debug and Release/LTO; debug 2,049 cycles, Release 8,193.
 address space is unbounded — so per-level descent freshness stands until either a
 reclaiming backend can back them (this design's roadmap, and D-042's option 2) or
 vmsmalloc's guarantee is strengthened (option 3).
+
+---
+
+## D-052 — D-042's multiplier, measured (and D-042's own estimate vindicated on the read path)
+
+D-042 prices per-level node freshness as *"one `ensureTLBEntryFresh` per level on
+the descent"*. That number dated from when the call sat where a node pointer was
+DERIVED — seventeen sites, one per node per walk — and D-044 then moved it to per
+ACCESS, which is strictly more calls. Nothing re-measured it. The D-050
+instrumentation makes it a two-minute question, so:
+
+```
+  freshness calls per LOOKUP, by tree depth (two adjacent single-page records)
+      root level | depth | total | on nodes | on the record | distinct pages | per level
+               6 |     1 |     2 |        1 |             1 |              2 |      1.00
+               5 |     2 |     3 |        2 |             1 |              2 |      1.00
+               4 |     3 |     4 |        3 |             1 |              3 |      1.00
+               3 |     4 |     5 |        4 |             1 |              3 |      1.00
+               2 |     5 |     6 |        5 |             1 |              3 |      1.00
+               1 |     6 |     7 |        6 |             1 |              3 |      1.00
+
+  freshness calls per APPLY (overwrite of one page), by tree depth
+      root level | depth | total | distinct pages | per level
+               6 |     1 |    10 |              2 |     10.00
+               5 |     2 |    22 |              2 |     11.00
+               4 |     3 |    27 |              3 |      9.00
+               3 |     4 |    32 |              3 |      8.00
+               2 |     5 |    37 |              3 |      7.40
+               1 |     6 |    42 |              3 |      7.00
+```
+
+### What it says
+
+- **The read path is exactly 1.00 calls per level, plus one for the record.**
+  D-042's estimate survives the move to per-access unchanged, because a lookup
+  touches exactly one field per node — the slot it descends through. The state
+  word and refcount are write-path fields. The worry that D-044 had silently
+  inflated the fault path was wrong, and worth writing down as wrong.
+- **The write path pays 7–11 per level** — an order of magnitude more, because
+  acquisition, the claim, re-dispatch and commit each re-read through the node.
+  That is `mmap`/`munmap`, which already allocates and locks; it is not the path
+  D-042's cost argument is about, but it is where per-access actually bit.
+- **The calls concentrate on 2–3 distinct pages even at depth 6**, because
+  same-size-class nodes share a slab page. `ensureTLBEntryFresh` checks a per-CPU
+  dirty-bitmap word for the page and `invlpg`s only if set, so **only the first
+  call per page can miss**; the rest hit a line already in L1. This is the
+  measurement that most weakens D-042's cache-miss worry.
+
+### What it does NOT say, and the distinction is load-bearing
+
+**The call COUNT is structural** — it falls out of how many fields a walk reads,
+so the harness measures it exactly and the number transfers to the kernel.
+
+**The page SPREAD is allocator state**, and the harness's is a best case: a fresh
+mmap'd arena packs a descent's nodes into 2 pages. A long-running kernel with a
+fragmented arena will spread the same descent across more, and every additional
+page is another candidate first-touch miss. So "2–3 pages" is a floor, not an
+estimate, and the cache-miss question D-042 asks still needs real silicon or a
+model — which is exactly why the entry asked for a cache-miss measurement rather
+than `-icount`.
+
+### Owed to D-042
+
+Option 1 (keep and price) is cheaper than the entry implies for the path that
+matters: one call per level descended, on a walk the descent cache already
+short-circuits ~97% of the time (DEC-079's calibration report). The remaining
+input is what one call costs when it misses, which `-icount` cannot answer and
+this harness cannot either.

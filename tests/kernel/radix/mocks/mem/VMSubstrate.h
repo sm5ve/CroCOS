@@ -326,6 +326,11 @@ namespace kernel::mm::VMSubstrate {
         void     clearFreshnessRecord();
         uint64_t freshnessCalls();
         bool     pageWasMadeFresh(const void* p);
+        // Calls naming ONE page, and how many distinct pages were named. The
+        // breakdown is what separates a descent's per-node cost from the single
+        // call its result costs — a total alone cannot.
+        uint64_t freshnessCallsForPage(const void* p);
+        size_t   freshnessPagesRecorded();
         // The page record is a small fixed array — no allocation, so the
         // harness's per-test leak accounting stays honest. This says whether it
         // filled up, so a test can never pass on a TRUNCATED record, which is

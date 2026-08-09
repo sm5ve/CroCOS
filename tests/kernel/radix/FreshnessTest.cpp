@@ -34,6 +34,7 @@
 #include <mem/radix/ClusterTable.h>
 #include <mem/radix/CoreTree.h>
 
+#include <cstdio>
 #include <vector>
 
 using namespace CroCOSTest;
@@ -350,4 +351,106 @@ TEST(radix_root_bucket_page_is_exempt) {
     table.destroy();
     quiesce(h);
     assertNoLiveObjects("root page exempt");
+}
+
+// ─── D-042's missing multiplier ────────────────────────────────────────────
+
+TEST(radix_freshness_calibration_report) {
+    // D-042 prices per-level node freshness as "one `ensureTLBEntryFresh` per
+    // level on the descent". That was true when the call sat where a node
+    // pointer was DERIVED — seventeen sites, one per node per walk. D-044 then
+    // moved it to per ACCESS (NodeRef holds a `SafePtr<void>`; every field goes
+    // through `at<>`), which is correct and strictly more expensive, and nothing
+    // has re-measured the multiplier since.
+    //
+    // This measures it. Not a cost in time — the harness has no page tables, so
+    // what a call COSTS is a question for `-icount` and for cache-miss counters
+    // on real silicon. What it can answer exactly is **how many calls a descent
+    // makes, and against how many distinct pages**, which is the multiplier every
+    // other estimate needs.
+    std::printf("\n  freshness calls per LOOKUP, by tree depth "
+                "(two adjacent single-page records, lookup of the first)\n");
+    std::printf("      root level | depth | total | on nodes | on the record | "
+                "distinct pages | per level\n");
+
+    for (unsigned rootLevel = 6; rootLevel >= 1; rootLevel--) {
+        Harness h;
+        TreeA   tree;
+        ASSERT_TRUE(tree.init(rootLevel, 0, h.domain, h.releasePools));
+
+        // Two records, so the tree genuinely subdivides to the floor rather than
+        // storing one sub-ranged leaf in the root's slot.
+        rdx::Mapping* first = nullptr;
+        for (unsigned k = 0; k < 2; k++) {
+            auto* m = makeMapping(k * kPage);
+            ASSERT_TRUE(m != nullptr);
+            if (k == 0) first = m;
+            ASSERT_TRUE(tree.apply(k * kPage, (k + 1) * kPage - 1, m) == rdx::ApplyStatus::Ok);
+        }
+
+        uint64_t total = 0, onRecord = 0;
+        size_t   pages = 0;
+        {
+            FreshnessRecorder rec;
+            VS::test::clearFreshnessRecord();
+            auto result = tree.lookup(0);
+            ASSERT_TRUE(static_cast<bool>(result));
+            total    = VS::test::freshnessCalls();
+            onRecord = VS::test::freshnessCallsForPage(first);
+            pages    = VS::test::freshnessPagesRecorded();
+            ASSERT_FALSE(VS::test::freshnessRecordOverflowed());
+        }
+        const unsigned depth    = GA.levelCount - rootLevel + 1;
+        const uint64_t onNodes  = total - onRecord;
+        std::printf("      %10u | %5u | %5llu | %8llu | %13llu | %14zu | %9.2f\n",
+                    rootLevel, depth, (unsigned long long)total,
+                    (unsigned long long)onNodes, (unsigned long long)onRecord,
+                    pages, double(onNodes) / double(depth));
+
+        ASSERT_TRUE(tree.apply(0, tree.span() - 1, nullptr) == rdx::ApplyStatus::Ok);
+        quiesce(h);
+        tree.destroyTree();
+        quiesce(h);
+        assertNoLiveObjects("freshness calibration");
+    }
+
+    // The same walk on the write side, where a node's state word and its slots
+    // are both touched — the descent cost D-042 quotes is the READ path's, and
+    // an mmap pays more per level than a fault does.
+    std::printf("\n  freshness calls per APPLY (overwrite of one page), by tree depth\n");
+    std::printf("      root level | depth | total | distinct pages | per level\n");
+    for (unsigned rootLevel = 6; rootLevel >= 1; rootLevel--) {
+        Harness h;
+        TreeA   tree;
+        ASSERT_TRUE(tree.init(rootLevel, 0, h.domain, h.releasePools));
+        for (unsigned k = 0; k < 2; k++) {
+            auto* m = makeMapping(k * kPage);
+            ASSERT_TRUE(m != nullptr);
+            ASSERT_TRUE(tree.apply(k * kPage, (k + 1) * kPage - 1, m) == rdx::ApplyStatus::Ok);
+        }
+        auto* replacement = makeMapping(0);
+        ASSERT_TRUE(replacement != nullptr);
+
+        uint64_t total = 0;
+        size_t   pages = 0;
+        {
+            FreshnessRecorder rec;
+            VS::test::clearFreshnessRecord();
+            ASSERT_TRUE(tree.apply(0, kPage - 1, replacement) == rdx::ApplyStatus::Ok);
+            total = VS::test::freshnessCalls();
+            pages = VS::test::freshnessPagesRecorded();
+            ASSERT_FALSE(VS::test::freshnessRecordOverflowed());
+        }
+        const unsigned depth = GA.levelCount - rootLevel + 1;
+        std::printf("      %10u | %5u | %5llu | %14zu | %9.2f\n",
+                    rootLevel, depth, (unsigned long long)total, pages,
+                    double(total) / double(depth));
+
+        ASSERT_TRUE(tree.apply(0, tree.span() - 1, nullptr) == rdx::ApplyStatus::Ok);
+        quiesce(h);
+        tree.destroyTree();
+        quiesce(h);
+        assertNoLiveObjects("freshness calibration (write)");
+    }
+    std::printf("\n");
 }

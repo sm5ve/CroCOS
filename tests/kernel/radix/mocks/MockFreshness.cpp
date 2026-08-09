@@ -46,6 +46,7 @@ namespace kernel::mm::VMSubstrate::test {
         constexpr size_t kMaxRecordedPages = 128;
 
         thread_local uintptr_t gPages[kMaxRecordedPages] = {};
+        thread_local uint64_t  gPageCalls[kMaxRecordedPages] = {};
         thread_local size_t    gPageCount = 0;
         thread_local uint64_t  gCalls     = 0;
         thread_local bool      gOverflow  = false;
@@ -62,10 +63,11 @@ namespace kernel::mm::VMSubstrate::test {
         if (p == nullptr) return;              // a null SafePtr deref is a bug elsewhere
         const uintptr_t page = pageOf(p);
         for (size_t i = 0; i < gPageCount; i++) {
-            if (gPages[i] == page) return;
+            if (gPages[i] == page) { gPageCalls[i]++; return; }
         }
         if (gPageCount == kMaxRecordedPages) { gOverflow = true; return; }
-        gPages[gPageCount++] = page;
+        gPageCalls[gPageCount] = 1;
+        gPages[gPageCount++]   = page;
     }
 
     void armFreshnessRecording() {
@@ -79,6 +81,7 @@ namespace kernel::mm::VMSubstrate::test {
     }
 
     void clearFreshnessRecord() {
+        for (size_t i = 0; i < gPageCount; i++) gPageCalls[i] = 0;
         gPageCount = 0;
         gCalls     = 0;
         gOverflow  = false;
@@ -94,6 +97,17 @@ namespace kernel::mm::VMSubstrate::test {
         }
         return false;
     }
+
+    uint64_t freshnessCallsForPage(const void* p) {
+        if (p == nullptr) return 0;
+        const uintptr_t page = pageOf(p);
+        for (size_t i = 0; i < gPageCount; i++) {
+            if (gPages[i] == page) return gPageCalls[i];
+        }
+        return 0;
+    }
+
+    size_t freshnessPagesRecorded() { return gPageCount; }
 
     bool freshnessRecordOverflowed() { return gOverflow; }
 
