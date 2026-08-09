@@ -367,3 +367,109 @@ TEST(radix_deferred_release_a_shortfall_is_replenished_and_the_retry_succeeds) {
     quiesce(h);
     assertNoLiveObjects("shortfall recovery");
 }
+
+// ─── ITEM-084: what a partial cover actually draws ─────────────────────────
+//
+// DEC-068 sizes every (CPU x address space) pool at the edge sum — 230 records,
+// ~14.4 KiB realised per CPU per address space — and ITEM-084 asks whether that
+// eager sizing is right. The in-kernel stress cannot answer it: it unmaps
+// exactly the span it placed, a FULL cover of one record, so its whole
+// 1.5-million-unmap workload never draws more than two. The expensive shape has
+// to be built on purpose, and these build it.
+//
+// They also test §7.1's dispatch claim, which nothing else does: the partial
+// cover is the expensive row and the FULL cover is free, so an operation's cost
+// is not monotonic in how much it unmaps. §7.1 states it exactly — "Cover all
+// sixteen and the parent's dispatch row is fully-covered child: the subtree
+// detaches and every release rides a node deleter — zero records. The partial
+// cover is the expensive shape, which is easy to invert."
+
+TEST(radix_partial_cover_draws_one_record_per_distinct_displaced_mapping) {
+    Harness h;
+    TreeA   tree;
+    // Root at level 5, so the 16 page-sized slots below live in a level-6 CHILD
+    // that has a parent to be detached from — which the fully-covered case needs
+    // and a floor-level root could not provide.
+    ASSERT_TRUE(tree.init(5, 0, h.domain, h.releasePools));
+
+    constexpr unsigned kSlots = 16;
+    std::vector<rdx::Mapping*> made;
+    for (unsigned i = 0; i < kSlots; i++) {
+        auto* m = makeMapping(i * kPage);
+        ASSERT_TRUE(m != nullptr);
+        made.push_back(m);
+        ASSERT_TRUE(tree.apply(i * kPage, (i + 1) * kPage - 1, m) == rdx::ApplyStatus::Ok);
+    }
+
+    // Fifteen of the sixteen — §7.1's own example. Each cleared slot names a
+    // DISTINCT record, so each needs its own record: the dedup that makes a
+    // fifteen-slot munmap of ONE mapping cost one record does nothing here.
+    rdx::gDrawHistogram.reset();
+    ASSERT_TRUE(tree.apply(0, (kSlots - 1) * kPage - 1, nullptr) == rdx::ApplyStatus::Ok);
+    ASSERT_EQ(uint64_t{kSlots - 1}, rdx::gDrawHistogram.max());
+
+    quiesce(h);
+    ASSERT_TRUE(tree.apply(0, tree.span() - 1, nullptr) == rdx::ApplyStatus::Ok);
+    quiesce(h);
+    tree.destroyTree();
+    quiesce(h);
+    assertNoLiveObjects("partial cover draws");
+}
+
+TEST(radix_a_full_cover_draws_nothing_where_a_partial_one_draws_fifteen) {
+    Harness h;
+    TreeA   tree;
+    ASSERT_TRUE(tree.init(5, 0, h.domain, h.releasePools));
+
+    constexpr unsigned kSlots = 16;
+    for (unsigned i = 0; i < kSlots; i++) {
+        auto* m = makeMapping(i * kPage);
+        ASSERT_TRUE(m != nullptr);
+        ASSERT_TRUE(tree.apply(i * kPage, (i + 1) * kPage - 1, m) == rdx::ApplyStatus::Ok);
+    }
+
+    // The SAME node, unmapped one slot wider. Every release now rides a node
+    // deleter through the detach, so the operation draws nothing at all — the
+    // inversion §7.1 warns about, and the reason a sizing argument cannot be
+    // read off "how big is the munmap".
+    rdx::gDrawHistogram.reset();
+    ASSERT_TRUE(tree.apply(0, kSlots * kPage - 1, nullptr) == rdx::ApplyStatus::Ok);
+    ASSERT_EQ(uint64_t{0}, rdx::gDrawHistogram.max());
+
+    quiesce(h);
+    tree.destroyTree();
+    quiesce(h);
+    assertNoLiveObjects("full cover draws nothing");
+}
+
+TEST(radix_draw_count_report) {
+    // ITEM-084's harness-side evidence: the worst case is REACHABLE and scales
+    // the way the edge sum says, which is what stops the observed max of 2 in
+    // the kernel stress being read as "230 is over-provisioned by 100x".
+    std::printf("\n  DeferredRelease draws for a partial cover of one node "
+                "(ITEM-084; ceiling %u)\n", rdx::deferredReleaseBound(GA));
+    std::printf("      distinct records in the node | cleared | drawn\n");
+
+    for (unsigned filled : {2u, 4u, 8u, 16u}) {
+        Harness h;
+        TreeA   tree;
+        ASSERT_TRUE(tree.init(5, 0, h.domain, h.releasePools));
+        for (unsigned i = 0; i < filled; i++) {
+            auto* m = makeMapping(i * kPage);
+            ASSERT_TRUE(m != nullptr);
+            ASSERT_TRUE(tree.apply(i * kPage, (i + 1) * kPage - 1, m) == rdx::ApplyStatus::Ok);
+        }
+        rdx::gDrawHistogram.reset();
+        ASSERT_TRUE(tree.apply(0, (filled - 1) * kPage - 1, nullptr) == rdx::ApplyStatus::Ok);
+        std::printf("      %28u | %7u | %5llu\n", filled, filled - 1,
+                    (unsigned long long)rdx::gDrawHistogram.max());
+
+        quiesce(h);
+        ASSERT_TRUE(tree.apply(0, tree.span() - 1, nullptr) == rdx::ApplyStatus::Ok);
+        quiesce(h);
+        tree.destroyTree();
+        quiesce(h);
+        assertNoLiveObjects("draw count report");
+    }
+    std::printf("\n");
+}

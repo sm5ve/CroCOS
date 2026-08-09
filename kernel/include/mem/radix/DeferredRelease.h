@@ -215,6 +215,75 @@ namespace kernel::mm::radix {
         home->push(r);
     }
 
+    // ─── ITEM-084's evidence: the draw-count histogram ─────────────────────
+    //
+    // DEC-068 sizes every (CPU x address space) pool at the PER-OPERATION
+    // ceiling — the edge sum, 230 records under the kernel geometry, ~14.4 KiB
+    // realised per CPU per address space. ITEM-084 asks whether that eager
+    // sizing is right or whether a smaller reserve behind the abandon-and-
+    // `barrier` replenish would do, and says the answer "cannot be answered from
+    // first principles — it needs the draw and shortfall distribution from a
+    // realistic workload".
+    //
+    // This is that distribution. What it records is the count an attempt HELD
+    // when it committed, which is the quantity the pool must actually cover:
+    // records are returned on abandonment, so an operation's peak demand is per
+    // attempt, not per operation.
+    //
+    // Buckets are exponential above 4 because the interesting question is the
+    // shape of the TAIL — §7.1 predicts "most operations draw one or two", and
+    // whether the rest is a thin tail out to the ceiling or a wall at some
+    // middle value is exactly what distinguishes ITEM-084's two answers. The top
+    // bucket is open-ended and its own assertion: a draw above the derived
+    // ceiling would mean the edge-sum bound is wrong, which is a different and
+    // much worse finding than a badly chosen reserve.
+    struct DrawHistogram {
+        static constexpr unsigned kBuckets = 12;
+        // 0, 1, 2, 3, 4, 5-8, 9-16, 17-32, 33-64, 65-128, 129-230, >230
+        Atomic<uint64_t> counts[kBuckets] = {};
+        Atomic<uint64_t> maxHeld{0};
+        Atomic<uint64_t> operations{0};
+
+        static unsigned bucketFor(uint64_t held) {
+            if (held <= 4)   return static_cast<unsigned>(held);
+            if (held <= 8)   return 5;
+            if (held <= 16)  return 6;
+            if (held <= 32)  return 7;
+            if (held <= 64)  return 8;
+            if (held <= 128) return 9;
+            if (held <= 230) return 10;
+            return 11;
+        }
+
+        void note(uint64_t held) {
+            counts[bucketFor(held)].fetch_add(1, kCensusAccounting);
+            operations.fetch_add(1, kCensusAccounting);
+            uint64_t cur = maxHeld.load(kCensusAccounting);
+            while (held > cur &&
+                   !maxHeld.compare_exchange_weak(cur, held, kCensusAccounting,
+                                                  kCensusAccounting)) {}
+        }
+
+        void reset() {
+            for (unsigned i = 0; i < kBuckets; i++) counts[i].store(0, kCensusAccounting);
+            maxHeld.store(0, kCensusAccounting);
+            operations.store(0, kCensusAccounting);
+        }
+
+        [[nodiscard]] uint64_t bucket(unsigned i) const {
+            return counts[i].load(kCensusAccounting);
+        }
+        [[nodiscard]] uint64_t max() const { return maxHeld.load(kCensusAccounting); }
+        [[nodiscard]] uint64_t total() const { return operations.load(kCensusAccounting); }
+    };
+
+#ifdef CROCOS_RADIX_DRAW_HISTOGRAM
+    inline DrawHistogram gDrawHistogram;
+    inline void noteDrawCount(uint64_t held) { gDrawHistogram.note(held); }
+#else
+    inline void noteDrawCount(uint64_t) {}
+#endif
+
     // ─── The per-address-space pool array ──────────────────────────────────
     //
     // §7.1 puts the heads in the DEC-082 control block's pinned storage, which

@@ -52,6 +52,12 @@ set(RDX_SOURCES
     ${RDX_ROOT}/libraries/Core/atomic/AtomicBitPool.cpp
 )
 
+# ITEM-084's draw histogram is ON here, and that is the point: the in-kernel
+# stress unmaps exactly the span it placed — a FULL cover of one record — so it
+# structurally cannot produce the multi-record partial cover ITEM-084 asks about.
+# The harness can construct that shape deliberately.
+add_compile_definitions(CROCOS_RADIX_DRAW_HISTOGRAM)
+
 set(RDX_INCLUDES
     ${CMAKE_CURRENT_SOURCE_DIR}/mocks       # <mem/VMSubstrate.h> — MUST precede VMS_MOCKS
     ${VMS_MOCKS}                            # <mem/NUMA.h>, <kassert.h>, MockCpuLocal.h, ...

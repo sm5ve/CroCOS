@@ -2082,6 +2082,10 @@ namespace kernel::mm::radix {
         void retireHeldRecords(Attempt& a) {
             assert(a.phase == Attempt::Phase::Committing,
                    "radix: a release record retired before the commit boundary (§11)");
+            // ITEM-084's sample, taken at the commit boundary because that is
+            // the peak an attempt actually held — abandonment returns records,
+            // so a retried operation's demand is per attempt, not cumulative.
+            noteDrawCount(a.heldReleaseCount);
             DeferredRelease* r = a.heldReleases;
             while (r != nullptr) {
                 DeferredRelease* const next = r->next.load(kPrivateInit);

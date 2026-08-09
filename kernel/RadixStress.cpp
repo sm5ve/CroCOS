@@ -142,6 +142,7 @@ namespace radix_stress {
     Atomic<uint64_t> gUnmaps{0};          // load-bearing: no unmaps, no reclamation
     Atomic<uint64_t> gFixed{0};           // load-bearing: no MAP_FIXED, no detachment
     Atomic<uint64_t> gLookups{0};
+    Atomic<uint64_t> gBulkUnmaps{0};
     Atomic<uint64_t> gOom{0};
     Atomic<uint64_t> gGrowths{0};
     Atomic<uint64_t> gClusters{0};        // D-030's stranded-root allowance is 2x this
@@ -413,7 +414,7 @@ namespace radix_stress {
                     live.count--;
                 }
                 gUnmaps.fetch_add(1, RELAXED);
-            } else if (row < 14) {
+            } else if (row < 13) {
                 // ── MAP_FIXED over a live range (§6.5's detachment) ────────
                 const unsigned k = static_cast<unsigned>((r >> 41) % live.count);
                 const uint64_t va = live.va[k];
@@ -438,6 +439,27 @@ namespace radix_stress {
                     VMS::destroy(VMS::SafePtr<rdx::Mapping>(m));
                     gOom.fetch_add(1, RELAXED);
                 }
+            } else if (row == 14) {
+                // ── Bulk unmap: a range covering SEVERAL distinct records ──
+                //
+                // Every other unmap row clears exactly the span it placed — a
+                // full cover of ONE record — which is why the whole workload
+                // never drew more than two `DeferredRelease` records and
+                // ITEM-084 could not be answered from it. §7.1's expensive shape
+                // is a PARTIAL cover displacing many distinct records at once,
+                // and this is the row that produces it.
+                //
+                // It is also the more realistic `munmap`: a process tearing down
+                // a region unmaps a RANGE, not one mapping at a time, and
+                // whatever mappings lie in it — this CPU's or another's — go
+                // with it. Live-set entries for records destroyed by another
+                // CPU's bulk unmap are left to age out: the later unmap of an
+                // already-empty range is a no-op that draws nothing, so a stale
+                // entry costs a wasted operation and nothing else.
+                const uint64_t span = (1 + ((r >> 37) % 32)) * kGranule;
+                const uint64_t lo   = clusterLo + ((r >> 45) % 4096) * kGranule;
+                (void)tree.apply(lo, lo + span - 1, nullptr);
+                gBulkUnmaps.fetch_add(1, RELAXED);
             } else {
                 // ── Lookup, through the descent cache ──────────────────────
                 //
@@ -590,6 +612,7 @@ namespace radix_stress {
                << " cycles=" << gCycles.load(RELAXED)
                << " place=" << gPlacements.load(RELAXED)
                << " unmap=" << gUnmaps.load(RELAXED)
+               << " bulk=" << gBulkUnmaps.load(RELAXED)
                << " fixed=" << gFixed.load(RELAXED)
                << " lookup=" << gLookups.load(RELAXED)
                << " grow=" << gGrowths.load(RELAXED)
@@ -633,6 +656,26 @@ namespace radix_stress {
 #endif
                << "\n";
     }
+
+    // ── ITEM-084's histogram (CPU 0, once per liveness print) ──────────────
+    //
+    // Its own statement rather than fields on the liveness line, because a
+    // twelve-bucket distribution is a table and the liveness line is already at
+    // the width where a reader stops parsing it. One `klog` statement, so it
+    // cannot interleave with another CPU's.
+#ifdef CROCOS_RADIX_DRAW_HISTOGRAM
+    void drawHistogram() {
+        const auto& h = rdx::gDrawHistogram;
+        klog() << "radixStress: DeferredRelease draws/attempt (ITEM-084) — n="
+               << h.total() << " max=" << h.max()
+               << " ceiling=" << static_cast<uint64_t>(rdx::deferredReleaseBound(rdx::kAmd64Geometry))
+               << "\n  0:" << h.bucket(0) << " 1:" << h.bucket(1) << " 2:" << h.bucket(2)
+               << " 3:" << h.bucket(3) << " 4:" << h.bucket(4) << " 5-8:" << h.bucket(5)
+               << " 9-16:" << h.bucket(6) << " 17-32:" << h.bucket(7) << " 33-64:" << h.bucket(8)
+               << " 65-128:" << h.bucket(9) << " 129-230:" << h.bucket(10)
+               << " OVER-CEILING:" << h.bucket(11) << "\n";
+    }
+#endif
 
     // ── One-time setup, CPU 0 ──────────────────────────────────────────────
     [[nodiscard]] rdx::KernelBlock* createSpace() {
@@ -730,7 +773,12 @@ namespace radix_stress {
             st::gAssign = new (st::gAssignStorage) rdx::PerCpuAssignment();
             st::gSpace.store(st::createSpace(), RELEASE);
             const uint64_t cycle = st::gCycles.fetch_add(1, RELAXED) + 1;
-            if ((cycle & st::kLivenessMask) == 1 || cycle <= 4) st::liveness(me);
+            if ((cycle & st::kLivenessMask) == 1 || cycle <= 4) {
+                st::liveness(me);
+#ifdef CROCOS_RADIX_DRAW_HISTOGRAM
+                st::drawHistogram();
+#endif
+            }
         }
         st::barrierWait(cpus, me, localSense, beat);
     }

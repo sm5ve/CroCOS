@@ -197,6 +197,13 @@ set(CROCOS_RADIX_INSN_PROBE "" CACHE STRING "radix descent instruction probe: un
 # stay green through a target-only break in the tree.
 option(CROCOS_RADIX_STRESS "Run the radix-tree in-kernel stress instead of the RCU one" OFF)
 
+# ITEM-084's evidence: the per-attempt DeferredRelease draw-count histogram.
+# Implied by the stress for the same reason the census is — the item asks for a
+# distribution "from a realistic workload", and the stress is the only realistic
+# workload there is — and separately selectable so a future consumer can measure
+# without running it. One relaxed RMW per committing attempt, so OFF by default.
+option(CROCOS_RADIX_DRAW_HISTOGRAM "Histogram DeferredRelease draws per attempt (ITEM-084)" OFF)
+
 # The node and Mapping censuses (§11's residue gate). Implied by the stress,
 # which cannot state its gate without them, and separately selectable so a future
 # consumer can measure without running the stress. Counters on the allocation
@@ -225,12 +232,16 @@ if(CROCOS_RADIX_STRESS)
     # The census is not optional under the stress: §11's residue gate is stated
     # in live nodes, and without the counters the stress would report a bound it
     # never measured.
-    target_compile_definitions(Kernel PRIVATE CROCOS_RADIX_STRESS CROCOS_RADIX_NODE_CENSUS)
+    target_compile_definitions(Kernel PRIVATE CROCOS_RADIX_STRESS CROCOS_RADIX_NODE_CENSUS
+                                            CROCOS_RADIX_DRAW_HISTOGRAM)
     if(CROCOS_RADIX_STRESS_OPS)
         target_compile_definitions(Kernel PRIVATE CROCOS_RADIX_STRESS_OPS=${CROCOS_RADIX_STRESS_OPS})
     endif()
 elseif(CROCOS_RADIX_NODE_CENSUS)
     target_compile_definitions(Kernel PRIVATE CROCOS_RADIX_NODE_CENSUS)
+endif()
+if(CROCOS_RADIX_DRAW_HISTOGRAM AND NOT CROCOS_RADIX_STRESS)
+    target_compile_definitions(Kernel PRIVATE CROCOS_RADIX_DRAW_HISTOGRAM)
 endif()
 add_dependencies(Kernel generate_idt_macros generate_init_registry create_linker_script create_linker_script)
 target_compile_options(Kernel PRIVATE -gdwarf-4)

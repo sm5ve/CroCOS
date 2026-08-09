@@ -2546,3 +2546,102 @@ instruction count on the hit path. D-052's finding that a descent's calls
 concentrate on 2–3 pages bounds how many misses are even possible, but the price
 of one remains a question for real silicon — exactly as D-042 said when it asked
 for a cache-miss measurement rather than `-icount`.
+
+---
+
+## D-054 — ITEM-084's evidence: the draw-count distribution, and why the workload could not produce it
+
+ITEM-084 asks whether DEC-068's eager sizing is right — every (CPU × address
+space) pool at the per-operation ceiling, **230 records, ≈14.4 KiB realised per
+CPU per address space** — or whether a smaller reserve behind the abandon-and-
+`barrier` replenish would do. The item says the answer "cannot be answered from
+first principles — it needs the draw and shortfall distribution from a realistic
+workload". So: a histogram, sampled at the commit boundary (the peak an attempt
+actually held, since abandonment returns records).
+
+### The realistic workload
+
+Release/LTO, 8 CPUs, **1,912,936 committing attempts**:
+
+```
+n=1912936 max=2 ceiling=230
+  0:1.42M  1:0.49M  2:9  3:0  4:0  5-8:0  9-16:0  17-32:0
+  33-64:0  65-128:0  129-230:0  OVER-CEILING:0
+```
+
+**Max 2. The pool is provisioned at 115× the observed peak, and 0 shortfalls.**
+
+### Why that number is nearly worthless on its own, and what fixed it
+
+The first run of this histogram was a trap of exactly the kind §1.1 keeps
+producing: **the stress cannot generate the expensive shape.** Every unmap row
+cleared precisely the span it had placed — a FULL cover of one record — and §7.1
+is explicit that the full cover is the *cheap* row (the subtree detaches and
+every release rides a node deleter, drawing nothing). The expensive shape is a
+**partial** cover displacing many distinct records at once. A histogram over a
+workload that structurally cannot produce it says "this workload is cheap", not
+"the ceiling is over-provisioned", and reporting the first as the second would
+have been the whole point of the measurement thrown away.
+
+Two things were added rather than one, because either alone is misleading:
+
+1. **A bulk-unmap row in the stress** — a range covering whatever mappings lie in
+   it, which is also the more realistic `munmap`: a process tearing down a region
+   unmaps a RANGE, not one mapping at a time. 124,823 of them in the run above.
+2. **Constructed shapes in the harness**, since even with bulk unmaps the max
+   stayed at 2 (see below). These build the shape on purpose:
+
+```
+  DeferredRelease draws for a partial cover of one node (ceiling 230)
+      distinct records in the node | cleared | drawn
+                                 2 |       1 |     1
+                                 4 |       3 |     3
+                                 8 |       7 |     7
+                                16 |      15 |    15
+```
+
+**One record per distinct displaced mapping, exactly as §7.1 models it** — and
+the same node unmapped one slot wider draws **zero**, because the full cover
+detaches. §7.1's inversion is now tested rather than asserted, which it never was.
+
+### Why the workload still does not reach it, which is the actual finding
+
+Even with bulk unmaps the max stayed at 2, and the reason is not that the shape
+is unreachable but that **the placement policy actively avoids it**: DEC-032
+probes with random guard gaps precisely so mappings are not adjacent, so a node
+holding many DISTINCT records is rare by construction. The edge sum assumes a
+fully-populated tree with a distinct record in every slot — the arrangement the
+allocator is designed not to produce.
+
+That reframes ITEM-084. The question is not "is 230 too big for the average
+case" (it plainly is, by 115×) but **"what produces the arrangement the ceiling
+assumes, and does anything realistic do it?"** Candidates the current stress does
+not model: `MAP_FIXED` packing by a userspace allocator that manages its own
+adjacency, and `fork`, whose per-mapping copy is inherently dense.
+
+### The constraint any answer has to respect
+
+Shrinking the reserve is not simply a memory/latency trade. §7.1's replenish
+terminates because the pool's population is **at least one operation's worst
+case**: a draw short of that abandons, `barrier`s (which brings every record
+home), and retries — and the retry succeeds *because* the full population
+suffices. A pool smaller than the operation needs turns that into a livelock, not
+a slow path.
+
+So the live options are:
+
+1. **Keep eager 230.** Costs ≈14.4 KiB per CPU per address space (≈115 KiB per
+   process on an 8-CPU desktop, per [[project_crocos_target_hardware]]).
+2. **Shrink to a measured per-attempt bound**, only if the true per-attempt
+   maximum is provably smaller than the edge sum — which is a question about
+   DEC-077's unit decomposition, not about this histogram: **if one attempt can
+   never span the whole edge sum because §6.5 decomposes first, the bound is
+   already smaller than 230 and nobody has computed it.** That is the open
+   question this measurement surfaces and does not answer.
+3. **A global emergency reserve** under the domain-management lock for the rare
+   operation that exceeds a small per-CPU pool, restoring termination without the
+   per-CPU cost. Not proposed anywhere yet; recorded so the option is not lost.
+
+**Not decided.** The distribution is now measurable on demand
+(`CROCOS_RADIX_DRAW_HISTOGRAM`, implied by the stress) and the worst case is
+reproducible in the harness, which is what the item asked for.
