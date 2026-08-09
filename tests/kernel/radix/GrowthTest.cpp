@@ -71,7 +71,12 @@ struct Fixture {
     TableA  table;
 
     explicit Fixture(size_t cpus = 1) : h(cpus, 1) {
-        if (!table.init(h.domain, h.releasePools)) {
+        // The pool contract is "caller holds the domain-management lock"; a
+        // single-threaded fixture takes it for form rather than for safety, so
+        // the call shape here matches the kernel's.
+        kernel::rcu::DomainManagementLockGuard guard;
+        if (!table.initLocked(h.domain, h.releasePools, h.rootPages,
+                              kernel::numa::DomainID{0})) {
             throw AssertionFailure(std::string("cluster table init failed"));
         }
     }

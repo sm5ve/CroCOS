@@ -563,7 +563,10 @@ TEST(radix_cache_teardown_survivor_observes_the_mark) {
     ASSERT_TRUE(stat(cache->stats().releasesThatDestroyed) == 1);
 
     // The rest of §7.4.
-    block->clusters.freeRootPage();
+    {
+        kernel::rcu::DomainManagementLockGuard guard;
+        block->clusters.freeRootPageLocked();
+    }
     block->pools.destroy();
     (void)block->domain.deinit();
     {

@@ -60,6 +60,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <kassert.h>
+#include <mem/BlockPool.h>
 #include <mem/VMSubstrate.h>
 #include <rcu/RCU.h>
 
@@ -105,14 +106,29 @@ namespace kernel::mm::radix {
         ClusterTable(const ClusterTable&)            = delete;
         ClusterTable& operator=(const ClusterTable&) = delete;
 
-        // The table is one small page and is allocated through the failable
-        // path like everything else — it is reached from address-space creation,
-        // which untrusted userspace drives.
-        [[nodiscard]] bool init(kernel::rcu::Domain& d, DeferredReleasePools& pools) {
+        // The table is one small page, drawn from a PINNED pool (D-051) rather
+        // than from vmsmalloc, and it still fails cleanly — this is reached from
+        // address-space creation, which untrusted userspace drives.
+        //
+        // **The caller holds the domain-management lock**, which is the pool's
+        // contract and in turn `reserveStaticBufferImpl`'s. It must not be the
+        // same hold that spans `Domain::init` (that self-deadlocks, RCU-DEC-043),
+        // which is why creation takes it again here in its own scope.
+        //
+        // The pool reports where the page actually landed; that domain is kept
+        // because a block must be returned to the list it came from, or the
+        // pool's idea of where its memory is quietly rots (D-048's lesson, one
+        // structure over).
+        [[nodiscard]] bool initLocked(kernel::rcu::Domain& d, DeferredReleasePools& pools,
+                                      PinnedBlockPool& rootPagePool, numa::DomainID home) {
             assert(d.initialized(), "radix: the cluster table's domain must be initialised");
-            auto p = VMSubstrate::tryMake<BucketTable>();
-            if (!p) return false;
-            table   = static_cast<BucketTable*>(p.raw());
+            const PoolBlock got = rootPagePool.allocateLocked(home);
+            if (!got) return false;
+            // The pool never zeroes (RCU-DEC-043(i)); the constructor does, which
+            // is what makes a recycled page indistinguishable from a fresh one.
+            table   = new (got.ptr) BucketTable();
+            rootPool   = &rootPagePool;
+            rootDomain = got.domain;
             domain  = &d;
             release = &pools;
             return true;
@@ -134,17 +150,23 @@ namespace kernel::mm::radix {
             }
         }
 
-        void freeRootPage() {
+        // Caller holds the domain-management lock, as at creation.
+        void freeRootPageLocked() {
             if (table == nullptr) return;
-            VMSubstrate::destroy(VMSubstrate::SafePtr<BucketTable>(table));
-            table = nullptr;
+            table->~BucketTable();
+            rootPool->freeLocked(PoolBlock{static_cast<void*>(table), rootDomain});
+            table    = nullptr;
+            rootPool = nullptr;
         }
 
         // The two together, for callers outside the §7.4 sequence (the growth
-        // tests, which have no address space around them).
+        // tests, which have no address space around them). Takes the
+        // domain-management lock itself, since such a caller holds no part of
+        // the address-space creation sequence.
         void destroy() {
             tearDownClusters();
-            freeRootPage();
+            kernel::rcu::DomainManagementLockGuard guard;
+            freeRootPageLocked();
         }
 
         [[nodiscard]] bool valid() const { return table != nullptr; }
@@ -305,11 +327,27 @@ namespace kernel::mm::radix {
             return growToCover(lo, hi);
         }
 
-        // See BucketTable's note: the root page is vmsmalloc memory read by
-        // every CPU, so it is reached through a SafePtr rather than raw. This
-        // replaces a `BucketTable&` accessor that handed out the page itself.
-        [[nodiscard]] VMSubstrate::SafePtr<BucketTable> buckets() const {
-            return VMSubstrate::SafePtr<BucketTable>(table);
+        // ─── Raw, and the static_assert is the justification (D-051) ───────
+        //
+        // This returned a `SafePtr` while the root page was vmsmalloc memory: its
+        // VA recycled with every address-space lifecycle, so every descent's
+        // opening bucket read owed a freshness call, and a real stale-read bug
+        // came out of that (D-039). The page now comes from a PINNED pool, whose
+        // page-table entries transition not-present -> present exactly once and
+        // never change (DEC-051b) — so there is nothing for a freshness call to
+        // do, on the hottest read in the tree.
+        //
+        // The assert is what keeps that an argument about the *storage* rather
+        // than about this comment: point the pool at a backend whose mappings are
+        // not immutable and this stops compiling, instead of silently
+        // reintroducing the bug class.
+        [[nodiscard]] BucketTable* buckets() const {
+            static_assert(PinnedBlockPool::blocksAreImmutablyMapped,
+                          "the root bucket page is read raw because its pool's backend "
+                          "guarantees an immutable mapping — a backend that recycles VAs "
+                          "puts every descent's opening read back under the SafePtr "
+                          "discipline (D-039/D-051)");
+            return table;
         }
 
     private:
@@ -324,6 +362,12 @@ namespace kernel::mm::radix {
         }
 
         BucketTable*          table   = nullptr;
+        // Where the page came from and where it must go back. A block returned
+        // to the wrong domain's list corrupts the pool's idea of where its
+        // memory is, which is why the pool reports placement rather than
+        // assuming the request was honoured.
+        PinnedBlockPool*      rootPool   = nullptr;
+        numa::DomainID        rootDomain = numa::DomainID{0};
         kernel::rcu::Domain*  domain  = nullptr;
         DeferredReleasePools* release = nullptr;
     };

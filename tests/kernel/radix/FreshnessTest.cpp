@@ -31,6 +31,7 @@
 
 #include "RadixHarness.h"
 
+#include <mem/radix/ClusterTable.h>
 #include <mem/radix/CoreTree.h>
 
 #include <vector>
@@ -44,6 +45,7 @@ namespace {
 constexpr auto GA = rdx::kAmd64Geometry;
 using CodecA = rdx::HarnessSlotCodec<GA>;
 using TreeA  = rdx::CoreTree<GA, CodecA>;
+using TableA = rdx::ClusterTable<GA, CodecA>;
 
 constexpr uint64_t kPage = 4096;
 
@@ -299,4 +301,53 @@ TEST(radix_pinned_storage_stays_exempt) {
     ASSERT_FALSE(VS::test::pageWasMadeFresh(&pool));
     ASSERT_TRUE(VS::test::pageWasMadeFresh(r));    // the record IS vmsmalloc-backed
     pool.push(r);
+}
+
+TEST(radix_root_bucket_page_is_exempt) {
+    // D-051's whole point, and the reason it is worth 4,096 B of window per
+    // address space. Every descent opens by loading a bucket word; while the
+    // root page was vmsmalloc memory that read owed a freshness call, and the
+    // recycling it implied produced a real stale-read bug (D-039). The page now
+    // comes from a pinned pool whose mapping never changes, so the call is gone
+    // from the hottest read in the tree.
+    //
+    // Asserted as a NEGATIVE against a live positive in the same recording
+    // window: the record's page must be made fresh (proving the recorder was
+    // armed and the descent really ran) while the bucket page's must not. A
+    // negative on its own would pass just as well with the instrumentation
+    // switched off.
+    Harness h;
+    TableA  table;
+    {
+        kernel::rcu::DomainManagementLockGuard guard;
+        ASSERT_TRUE(table.initLocked(h.domain, h.releasePools, h.rootPages,
+                                     kernel::numa::DomainID{0}));
+    }
+
+    const uint64_t va  = 2 * rdx::slotSpan(GA, 0);
+    const size_t   idx = rdx::bucketIndexFor<GA>(va);
+    ASSERT_TRUE(table.createCluster(va, GA.defaultRootLevel) == rdx::ClusterStatus::Ok);
+
+    TreeA t = table.treeFor(idx);
+    auto* m = makeMapping(va);
+    ASSERT_TRUE(m != nullptr);
+    ASSERT_TRUE(t.apply(va, va + kPage - 1, m) == rdx::ApplyStatus::Ok);
+
+    {
+        FreshnessRecorder rec;
+        VS::test::clearFreshnessRecord();
+        auto result = t.lookup(va);
+        ASSERT_TRUE(static_cast<bool>(result));
+        (void)result.mapping()->baseVA;
+
+        ASSERT_TRUE(VS::test::pageWasMadeFresh(m));                  // the live positive
+        ASSERT_FALSE(VS::test::pageWasMadeFresh(table.buckets()));   // the exemption
+    }
+
+    ASSERT_TRUE(t.apply(va, va + rdx::nodeSpan(GA, GA.defaultRootLevel) - 1, nullptr)
+                == rdx::ApplyStatus::Ok);
+    quiesce(h);
+    table.destroy();
+    quiesce(h);
+    assertNoLiveObjects("root page exempt");
 }

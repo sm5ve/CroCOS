@@ -1763,11 +1763,12 @@ namespace kernel::mm::radix {
         unsigned level0 = 0;
         uint64_t baseVA = 0;
 
-        // The root page, reached through a SafePtr so every bucket-word access
-        // discharges its freshness obligation (see BucketTable's own note).
-        [[nodiscard]] VMSubstrate::SafePtr<BucketTable> buckets() const {
-            return VMSubstrate::SafePtr<BucketTable>(bucketTable);
-        }
+        // Raw since D-051 moved the root page to pinned storage, whose mapping
+        // never changes and so owes no freshness call — on what is the hottest
+        // read in the tree. `ClusterTable::buckets` carries the `static_assert`
+        // that keeps this an argument about the storage rather than about this
+        // comment; the page reaching a tree is always one that table handed out.
+        [[nodiscard]] BucketTable* buckets() const { return bucketTable; }
 
         BucketTable* bucketTable = nullptr;
         size_t       bucketIndex = 0;

@@ -33,7 +33,7 @@
 #include <CpuLocal.h>
 #include <interrupts/InterruptContextDepths.h>
 #include <mem/NUMA.h>
-#include <mem/PinnedBlockPool.h>
+#include <mem/BlockPool.h>
 #include <mem/VMSubstrate.h>
 #include <timing/timing.h>
 #include <core/math.h>
@@ -418,7 +418,7 @@ namespace {
         const numa::DomainID home =
             numa::numaPolicy().homeDomain(static_cast<arch::ProcessorID>(0));
 
-        const mm::PinnedBlock got = gSlotBlockPool.allocateLocked(home);
+        const mm::PoolBlock got = gSlotBlockPool.allocateLocked(home);
         if (!got) return {};
 
         // A slot must not straddle a cache line differently than it would in a
@@ -614,7 +614,7 @@ bool Domain::deinit() CROCOS_RCU_NOEXCEPT {
         if (home == numa::DomainID{}) {
             pushFreeSlotBlockLocked(block);
         } else {
-            gSlotBlockPool.freeLocked(mm::PinnedBlock{block, home});
+            gSlotBlockPool.freeLocked(mm::PoolBlock{block, home});
         }
     }
     return true;
@@ -921,8 +921,11 @@ namespace test {
         // both a fresh freelist, which it needs because the arena it points into
         // is about to be munmapped, and a fresh STRIDE, which it needs because
         // fixtures vary processorCount() and the stride is fixed at first use.
-        gSlotBlockPool.~PinnedBlockPool();
-        new (&gSlotBlockPool) mm::PinnedBlockPool();
+        // Spelled through the alias's underlying type, because a destructor
+        // name cannot be an alias.
+        using SlotPool = mm::PinnedBlockPool;
+        gSlotBlockPool.~SlotPool();
+        new (&gSlotBlockPool) SlotPool();
     }
 }
 #endif // CROCOS_RCU_TEST_HARNESS

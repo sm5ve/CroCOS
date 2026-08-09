@@ -61,7 +61,7 @@
 #include <kassert.h>
 #include <mem/MemTypes.h>
 #include <mem/NUMA.h>
-#include <mem/PinnedBlockPool.h>
+#include <mem/BlockPool.h>
 #include <mem/VMSubstrate.h>
 #include <rcu/RCU.h>
 
@@ -168,21 +168,42 @@ namespace kernel::mm::radix {
         using Block = ControlBlock<G, Codec, DetachBudget>;
 
         PinnedBlockPool pool;
+        // ─── The root bucket page's pool (D-051) ───────────────────────────
+        //
+        // A SECOND instance rather than a bigger stride on the first, and the
+        // difference is 2x of the window: folding the page into the control
+        // block makes the stride 4,864 B — larger than a page, so it cannot
+        // sub-page pack AND loses 41% to page rounding, 8,192 B per address
+        // space. At its own stride the page packs exactly: 4,096 B.
+        //
+        // What the move buys is not packing but the **mapping**. On vmsmalloc
+        // the root page's VA recycles with every address-space lifecycle, so
+        // every descent's opening bucket read owed a freshness call and a real
+        // stale-read bug came out of it (D-039). Pinned, that obligation is gone
+        // at the source — which is DEC-082's own argument for the control block,
+        // applied to the one per-address-space allocation that did not move with
+        // it and is read more often than anything that did.
+        PinnedBlockPool rootPages;
         uint64_t        nextGeneration = 1;
 
-        // `cpus` fixes the block stride for this store's lifetime. In the kernel
-        // that is `arch::processorCount()`, constant after boot; the harness
-        // varies it per fixture and gets one store per fixture.
-        void init(size_t cpus) { pool.init(Block::reservationBytes(cpus)); }
+        // `cpus` fixes the control-block stride for this store's lifetime. In
+        // the kernel that is `arch::processorCount()`, constant after boot; the
+        // harness varies it per fixture and gets one store per fixture. The root
+        // page's stride is a constant — it is exactly one page by construction
+        // (DEC-102 derives the bucket count from the page size).
+        void init(size_t cpus) {
+            pool.init(Block::reservationBytes(cpus));
+            rootPages.init(sizeof(BucketTable));
+        }
 
         // Caller holds the domain-management lock — the pool's contract, which
         // is in turn `reserveStaticBufferImpl`'s.
-        [[nodiscard]] PinnedBlock takeLocked(numa::DomainID home) {
+        [[nodiscard]] PoolBlock takeLocked(numa::DomainID home) {
             return pool.allocateLocked(home);
         }
 
         void returnLocked(Block* b) {
-            pool.freeLocked(PinnedBlock{static_cast<void*>(b), b->homeDomain});
+            pool.freeLocked(PoolBlock{static_cast<void*>(b), b->homeDomain});
         }
     };
 
@@ -222,7 +243,7 @@ namespace kernel::mm::radix {
             assert(Block::reservationBytes(cpuCount) <= store.pool.blockStride(),
                    "radix: this ControlBlockStore was built for fewer CPUs than this "
                    "address space needs — its blocks' trailing pool arrays are too short");
-            const PinnedBlock got = store.takeLocked(home);
+            const PoolBlock got = store.takeLocked(home);
             if (!got) return CreateStatus::OutOfMemory;
             block      = static_cast<Block*>(got.ptr);
             placedOn   = got.domain;
@@ -279,7 +300,20 @@ namespace kernel::mm::radix {
         }
 
         // ─── 3. The root page ──────────────────────────────────────────────
-        if (!block->clusters.init(block->domain, block->pools)) {
+        //
+        // Its own lock scope, and that is forced rather than tidy: the page now
+        // comes from a pinned pool, whose contract is that the caller holds the
+        // domain-management lock — but step 2's `Domain::init` takes that lock
+        // ITSELF, so a hold spanning both self-deadlocks (RCU-DEC-043). Placed on
+        // the domain the control block actually landed on, so an address space's
+        // pinned storage stays together.
+        bool rootPageOk = false;
+        {
+            kernel::rcu::DomainManagementLockGuard guard;
+            rootPageOk = block->clusters.initLocked(block->domain, block->pools,
+                                                    store.rootPages, block->homeDomain);
+        }
+        if (!rootPageOk) {
             (void)block->domain.deinit();
             kernel::rcu::DomainManagementLockGuard guard;
             store.returnLocked(block);
@@ -373,7 +407,14 @@ namespace kernel::mm::radix {
         //    can begin the descent that would read either, and so every record
         //    is home, which is when §11's population-conservation check is
         //    meaningful. Neither is a retire subject.
-        block->clusters.freeRootPage();
+        //    The root page goes back to a pinned pool, so it takes the
+        //    domain-management lock — and NOT the same hold as step 8's control
+        //    block return, because `Domain::deinit` sits between them and takes
+        //    that lock itself.
+        {
+            kernel::rcu::DomainManagementLockGuard guard;
+            block->clusters.freeRootPageLocked();
+        }
         block->pools.destroy();
 
         // 7. The domain. Skipping this leaks its pinned reservation permanently

@@ -8,10 +8,10 @@ read §0 and §1 before anything else.
 
 Read in this order:
 
-1. **§0** — state, and the two things waiting on Spencer.
+1. **§0** — state, and the one thing still waiting on Spencer.
 2. **§1** — what changed outside the radix tree.
 3. **§2** — the last item closed (RCU slot-block packing) and what is left.
-4. `docs/radix-tree-implementation-deviations.md` — D-001..D-050. **Live:
+4. `docs/radix-tree-implementation-deviations.md` — D-001..D-051. **Live:
    D-004, D-010, D-029, D-030 (older); D-033/034/036/039/042/044/046 owe the
    spec text.**
 5. `specs/radix-tree-phase-5.md` — the remaining phase work (calibration).
@@ -30,7 +30,7 @@ Read in this order:
 | **5** | **Partly landed.** Kernel codec instance, node/`Mapping` censuses, the in-kernel stress, the whole freshness family, and the pinned-memory work through D-048 (radix control block AND RCU slot block both sub-page packed). Debug **and** Release/LTO boot clean on `run`, `run_numa`, `run_numa_hmat`. **Calibration untouched.** |
 
 Full suite, sequential: Core 441 + 425 TSan, Kernel 177, LibAlloc 38×2, vmsmalloc
-31×2, RCU 64×2, **radix 163×3** (ASan, TSan, progress audit). The default kernel
+31×2, RCU 64×2, **radix 164×3** (ASan, TSan, progress audit). The default kernel
 (stress off) builds and boots.
 
 ```
@@ -51,22 +51,23 @@ both of Phase 5's defects became reproducible. Current reach in a 20 s window:
 2,049 cycles debug, 8,193 Release/LTO (was 1,025 debug before D-048; the stress
 reports at cycle 1–4 then every 1,024, so read these as bands, not exact counts).
 
-### The two things waiting on Spencer
+### The one thing still waiting on Spencer
 
 Design questions, not bugs; options are in the deviations log.
 
-1. **The root bucket page** (D-039). The only per-address-space structure whose
-   *mapping* churns — `tryMake` at creation, `freePage` at teardown, VA re-backed
-   for something else — and that churn produced a real stale-read bug. Folding it
-   into the control block deletes the hazard at source instead of paying a
-   per-access freshness check on the tree's hottest read. Cost: +4 KiB against a
-   768 B block, so it becomes 84% of the reservation. **Decide against current
-   numbers, not the ones in D-045's first table.**
-2. **Per-level node freshness** (D-042). One `ensureTLBEntryFresh` per level on
-   the descent. Keep and price it / nodes from never-recycling storage (DEC-082's
-   answer one level down) / a stronger vmsmalloc guarantee. Needs a cache-miss
-   measurement, not `-icount`: the instruction count is small and the extra cache
-   line per node is not.
+1. ~~The root bucket page~~ — **settled by D-051**: Spencer's second pinned
+   allocator. The page moved to its own `PinnedBlockPool` at stride 4,096 (which
+   packs exactly, where folding it into the control block would have cost
+   8,192 B), so every descent's opening bucket read is now obligation-free.
+   Window per address space 1,843 -> 5,939 B, ceiling ~580,000 -> ~180,000.
+2. **Per-level node freshness** (D-042) — the one still open. One
+   `ensureTLBEntryFresh` per level on the descent. Keep and price it / nodes from
+   never-recycling storage / a stronger vmsmalloc guarantee. **D-051 changed the
+   options rather than the question**: nodes cannot be pinned (their count per
+   address space is unbounded), but the `BlockPool` backend seam is where a
+   VA-reclaiming allocator would go, and that is option 2 made buildable. Needs a
+   cache-miss measurement, not `-icount`: the instruction count is small and the
+   extra cache line per node is not.
 
 ### Phase 5's remaining work
 

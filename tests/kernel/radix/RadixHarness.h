@@ -17,6 +17,8 @@
 
 #include <MockCpuLocal.h>      // kernel::test::bindThreadToCpu (vmsmalloc mocks)
 #include <mem/radix/SlotCodec.h>
+#include <mem/BlockPool.h>
+#include <mem/radix/BucketCodec.h>
 #include <mem/radix/DeferredRelease.h>
 #include <rcu/RCU.h>
 #include <MockInterruptContext.h>
@@ -70,6 +72,13 @@ namespace CroCOSTest::radix {
         alignas(arch::CACHE_LINE_SIZE)
         kernel::mm::radix::DeferredReleasePool poolStorage[arch::MAX_PROCESSOR_COUNT];
 
+        // The root bucket page's pinned pool (D-051). Per ADDRESS-SPACE STORE in
+        // production; a fixture that constructs a `ClusterTable` directly needs
+        // one of its own. Per fixture rather than process-global, because the
+        // arena it carves from is re-mmapped per fixture — the trap D-048 hit
+        // when RCU's slot pool outlived one.
+        kernel::mm::PinnedBlockPool rootPages;
+
         explicit Harness(size_t cpus = 1, size_t domains = 1) {
             VS::test::initialize(cpus, domains);
             numa::test::configure(cpus, domains, &allToDomainZero);
@@ -78,6 +87,7 @@ namespace CroCOSTest::radix {
             // Every slot word is encoded relative to the arena base, which mmap
             // chose a moment ago — so the codec must be re-bound per fixture,
             // not once per process.
+            rootPages.init(sizeof(kernel::mm::radix::BucketTable));
             kernel::mm::radix::HarnessSlotBase::bind(
                 static_cast<uintptr_t>(VS::arenaVirtualBase(0).value), kMockArenaBytes);
             // Accounting and injection are process-global (they must be — the

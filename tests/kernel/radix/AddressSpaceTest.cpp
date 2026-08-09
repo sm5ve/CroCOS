@@ -614,7 +614,10 @@ TEST(radix_teardown_walk_marks_and_retires_rather_than_destroying) {
     (void)kernel::rcu::drainAllQuiescent(block->domain);
     ASSERT_EQ(size_t{0}, liveCountOf<rdx::Node<GA, 32>>() + liveCountOf<rdx::Node<GA, 16>>());
 
-    block->clusters.freeRootPage();
+    {
+        kernel::rcu::DomainManagementLockGuard guard;
+        block->clusters.freeRootPageLocked();
+    }
     block->pools.destroy();
     (void)block->domain.deinit();
     {

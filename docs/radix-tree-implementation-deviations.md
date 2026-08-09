@@ -2291,3 +2291,97 @@ direction that corrupts memory.
 | `NodeRef::slot` reads through `address()` instead of `at<>` | `..._descent_pays_the_discipline_at_every_level` |
 
 Suite 163×2 (was 156), kernel clean on all three configs, debug and Release/LTO.
+
+---
+
+## D-051 — the pinned allocator became a template over its backend, and the root bucket page moved into it (Spencer-directed)
+
+Spencer's framing, and it settles **D-039**: a second allocator for the root
+bucket page, alongside the control-block one, both backed by pinned memory — and
+the allocator itself templated so the *backend* can later become something that
+reclaims virtual addresses lazily (a VA cannot be handed out again until every
+CPU has flushed its entry for it), with NUMA-awareness built in from the start.
+
+### One collapse, recorded because it is the design
+
+**The template parameter is the BACKEND, not the consumer.** There are three
+pool instances in the kernel now — radix control blocks, radix root pages, RCU
+slot blocks — and they differ only in stride, which has to stay a runtime value
+since two of the three derive it from `arch::processorCount()`. Templating over
+the consumer would buy nothing; they are three `init()` calls on three objects.
+NUMA likewise stays in the *layer*, where it already was: per-domain freelists,
+preferred-domain allocation, carve-before-cross-domain-fallback, and a block that
+reports where it actually landed. A backend only has to answer "give me pages on
+domain D".
+
+### The trait is the seam's real payload
+
+Backends differ in something more important than where pages come from: **whether
+a page's mapping can change under a consumer**. `PinnedBackend`'s cannot
+(DEC-051b: not-present -> present exactly once, never changes), which is the
+whole reason pinned storage carries no freshness obligation. A VA-recycling
+backend's does, and every block it hands out re-enters the `SafePtr` discipline —
+the class this subsystem has now shipped eight instances of.
+
+So `BlockPool` exports `blocksAreImmutablyMapped`, and a consumer that reads its
+blocks raw is expected to `static_assert` on it. `ClusterTable::buckets` does.
+DEC-082's argument — "the generation check, the `dying` load and the pool heads
+carry no freshness obligation at all" — stops being a paragraph and becomes a
+compile error if a backend is ever swapped under a consumer that is not ready.
+
+### What the seam does NOT buy, stated before it is discovered
+
+Swapping the backend is necessary but not sufficient for whole-page reclaim: to
+return a page, something must know no live block remains on it, and a flat
+per-domain freelist knows *blocks*, not *pages*. A reclaiming backend also needs
+the LAYER to grow per-page occupancy plus a return policy (immediately at zero,
+or with hysteresis — alternating alloc/free at a page boundary would otherwise
+thrash the quarantine). Deliberately not built: no consumer, and the policy is a
+real design question rather than a mechanical one. The seam is still useful
+without it, since a reclaiming backend can enforce deferred reuse on its own side
+from day one.
+
+### The root page: a second pool, not a bigger stride
+
+| | root page in its own pool | folded into the control block |
+|---|---|---|
+| stride | 4,096 B — exactly one page | 4,864 B — *larger* than a page |
+| packing | perfect | impossible; 41% lost to page rounding |
+| window per address space | **4,096 B** | 8,192 B |
+| total per address space | **5,939 B** | 9,216 B |
+| ceiling | **~180,000** | ~116,000 |
+
+A second instance is worth 2x here, which is why the fold was the wrong shape for
+the same idea. ~180,000 concurrent address spaces against a consumer-desktop
+target is not a constraint.
+
+What it buys is not packing but the **mapping**: `ClusterTable::buckets` and
+`CoreTree::buckets` return raw pointers again, so **every descent's opening
+bucket read no longer discharges a freshness call** — the hottest read in the
+tree. It also takes a whole-page vmsmalloc alloc/free out of every address-space
+lifecycle, which is the exact churn that produced D-039's stale-read bug.
+
+### Lock discipline, which is where this could have gone wrong
+
+The pool's contract is that the caller holds the domain-management lock, and
+`Domain::init`/`deinit` take that lock *themselves* (RCU-DEC-043). So the root
+page's draw sits in its **own** scope after step 2 rather than sharing step 1's
+hold, and its return sits in its own scope before `deinit` rather than sharing
+step 8's. Both are one-line scopes whose absence would be a self-deadlock, so
+both say why.
+
+### Verified
+
+Suite 164x2 (one new test). `radix_root_bucket_page_is_exempt` asserts the
+negative against a live positive in the same recording window — the record's page
+made fresh, the bucket page not — because a bare negative would pass just as well
+with the instrumentation switched off. **Mutation-tested**: restoring
+`CoreTree::buckets`'s `SafePtr` fails it. Kernel clean on run/run_numa/
+run_numa_hmat, debug and Release/LTO; debug 2,049 cycles, Release 8,193.
+
+### Still open
+
+**D-042 is not settled by this.** Nodes cannot be pinned — their count per
+address space is unbounded — so per-level descent freshness stands until either a
+reclaiming backend can back them (this design's roadmap, and D-042's option 2) or
+vmsmalloc's guarantee is strengthened (option 3).

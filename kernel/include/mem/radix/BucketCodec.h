@@ -252,32 +252,36 @@ namespace kernel::mm::radix {
             for (size_t i = 0; i < kBucketCount; i++) entries[i].store(0, kPrivateInit);
         }
 
-        // ─── The root page is vmsmalloc memory, and every CPU reads it ─────
+        // ─── The root page is PINNED, and that is why it is read raw ───────
         //
-        // The table is a whole-page `tryMake<BucketTable>` allocation, so its VA
-        // is subject to the same reclaim-and-re-back cycle as any other arena
-        // page — and a CPU that read this VA under a PREVIOUS tenant can hold a
-        // stale mapping for it. Every descent starts here (`currentBinding()`
-        // loads a bucket word), so the obligation falls on the hottest read in
-        // the tree.
+        // It was a whole-page `tryMake<BucketTable>` allocation, and its VA was
+        // therefore subject to the same reclaim-and-re-back cycle as any other
+        // arena page — so a CPU that read this VA under a PREVIOUS tenant could
+        // hold a stale mapping for it. Every descent starts here
+        // (`currentBinding()` loads a bucket word), so the obligation fell on
+        // the hottest read in the tree.
         //
         // **Found by the in-kernel stress, not by review**: address-space
         // creation and teardown recycle the root page, and by the fifth cycle a
         // CPU decoded a bucket word out of a stale page and tripped the codec's
-        // own guard-bit assert. The userspace harness cannot see this — its
+        // own guard-bit assert. The userspace harness could not see it — its
         // `ensureTLBEntryFresh` is a no-op and it has no page tables — which is
         // the DEC-047 precedent exactly.
         //
-        // Consumers hold a `SafePtr<BucketTable>` rather than a raw pointer, so
-        // the entry access below is reached through `operator->` and the call is
-        // unskippable. The reference it yields is for IMMEDIATE use: freshness
-        // is per-CPU and per-touch, so holding one across an operation and
-        // re-reading through it would defeat the point.
+        // D-051 removed the hazard rather than paying for it: the page comes
+        // from a pinned `BlockPool`, whose page-table entries transition
+        // not-present -> present exactly once and never change (DEC-051b). That
+        // is DEC-082's argument for the control block, applied to the one
+        // per-address-space allocation that had not moved with it — and it costs
+        // 4,096 B of the static-buffer window per address space, which is what a
+        // second pool at its own stride buys over folding the page into the
+        // control block's (8,192 B, since a 4,864 B stride cannot sub-page pack).
         //
-        // See also the note in `AddressSpace.h`: DEC-082 moved the control block
-        // into pinned storage precisely to keep a freshness call off this path,
-        // and the root page is the one per-address-space allocation that did not
-        // move with it.
+        // `ClusterTable::buckets` returns this raw, under a `static_assert` on
+        // the pool's immutability trait. A backend that recycles VAs puts every
+        // descent's opening read back under the `SafePtr` discipline, and the
+        // assert is what makes that a compile error rather than a silent
+        // regression.
 
         BucketTable(const BucketTable&)            = delete;
         BucketTable& operator=(const BucketTable&) = delete;
