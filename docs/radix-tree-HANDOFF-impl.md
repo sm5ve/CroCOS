@@ -1,127 +1,310 @@
-# radix-tree — implementation handoff (Phase 4 complete, Phase 5 in flight)
+# radix-tree — implementation handoff
 
-**UPDATED 2026-08-08 at `17f3589`.** Branch `radix-tree`. **Phases 0-4 are
-complete and green. Phase 5 is partly landed; both of its defects are FIXED, and
-two design questions are open for Spencer.** §0 is
-the current state; §0.1 below it is the Phase 3 note it superseded, kept because
-its "what Phase 4 needs to know" list is still accurate background.
+**Written 2026-08-08 at `be2681c`.** Branch `radix-tree`, local-only, unmerged
+(16 commits ahead of `1d448e0`). **Phases 0–4 complete and green; Phase 5 partly
+landed.** This session went well beyond the radix tree — it changed `SafePtr`,
+the kernel's logging rules, and added a pinned-memory allocator — so read §0 and
+§1 before anything else.
 
 Read in this order:
 
-1. §0 of this note.
-2. `docs/radix-tree-implementation-deviations.md` — **D-039, D-041, D-042 and
-   D-043 are the live ones**, and D-039/D-042 owe the spec two amendments.
-3. `specs/radix-tree-phase-5.md` — the remaining work items.
+1. **§0** — state, and the two things waiting on Spencer.
+2. **§1** — what changed outside the radix tree.
+3. **§2** — the next work item, fully specified (the RCU reader-slot block).
+4. `docs/radix-tree-implementation-deviations.md` — D-001..D-047. **Live:
+   D-004, D-010, D-029, D-030 (older); D-033/034/036/039/042/044/046 owe the
+   spec text.**
+5. `specs/radix-tree-phase-5.md` — the remaining phase work (calibration).
+6. §3 for traps, §0.1 onwards for background.
 
 ---
 
-## 0. Where things stand
+## 0. State
 
-### Complete and green
+### Green
 
 | Phase | State |
 |---|---|
-| 0-3 | Complete. See §0.1. |
-| **4** | **Complete.** The DEC-078 seam (`PinnedNode`, `pinLocked`, `resumeDescent`, `release`) and DEC-079's cache: per-CPU direct-mapped set of 4, VA-range-deferred install, generation check, `Detached`/generation eviction. All four §13 gate properties tested. Calibration report runs in the suite. |
-| **5** | **Partly landed.** The kernel instance, the node/`Mapping` censuses and the in-kernel stress exist, and the freshness work is done. **Debug and Release/LTO both boot clean on `run`, `run_numa` and `run_numa_hmat`; Release is 8 of 8 at 1025 cycles per boot.** Calibration is untouched. |
+| 0–3 | Complete. See §0.1 and §4 below. |
+| **4** | **Complete.** DEC-078 seam (`PinnedNode`, `pinLocked`, `resumeDescent`, `release`) and DEC-079's cache: per-CPU direct-mapped set of 4, VA-range-deferred install, generation check, `Detached`/generation eviction. All four §13 gate properties tested; the calibration report runs in the suite. |
+| **5** | **Partly landed.** Kernel codec instance, node/`Mapping` censuses, the in-kernel stress, and the whole freshness family. Debug **and** Release/LTO boot clean on `run`, `run_numa`, `run_numa_hmat`; Release reaches 1025 cycles/boot, 8-of-8. **Calibration untouched.** |
 
-Full suite, sequential: Core 441 + 425 TSan, Kernel 177, LibAlloc 38x2, vmsmalloc
-31x2, RCU 61x2, **radix 150x2** plus the progress audit.
+Full suite, sequential: Core 441 + 425 TSan, Kernel 177, LibAlloc 38×2, vmsmalloc
+31×2, RCU 61×2, **radix 156×3** (ASan, TSan, progress audit). The default kernel
+(stress off) builds and boots.
 
-### What Phase 5 has already produced — read this first
+```
+cmake -B cmake-build-debug -DCMAKE_BUILD_TYPE=Debug -DCROCOS_RADIX_STRESS=ON
+cmake --build cmake-build-debug --target run        # or run_numa / run_numa_hmat
+```
 
-**The in-kernel stress found a real, four-site freshness defect on its first
-boot**, which is the vmsmalloc DEC-047 precedent repeating exactly: a stale-TLB
-bug class the userspace harness is *structurally* incapable of seeing, because
-its `ensureTLBEntryFresh` is a no-op and it has no page tables. 150 tests on two
-sanitizers pass with every one of these calls absent.
+`CROCOS_RADIX_STRESS` **selects** the smp_bringup stress rather than adding one —
+it takes RCU Phase 4's slot by tail-call from `rcuStress`, because two per-CPU
+routines in one phase means the first one's infinite loop silently starves the
+second, which looks exactly like a healthy boot. `RadixStress.cpp` compiles
+either way on purpose: it is the only TU that type-checks the tree against the
+real freestanding toolchain and `-Werror`.
+
+`-DCROCOS_RADIX_STRESS_OPS=24` turns a debug boot's 4 cycles into 1025 with every
+assert live. **That is the most useful debugging lever here** — it is how both of
+Phase 5's defects became reproducible.
+
+### The two things waiting on Spencer
+
+Design questions, not bugs; options are in the deviations log.
+
+1. **The root bucket page** (D-039). The only per-address-space structure whose
+   *mapping* churns — `tryMake` at creation, `freePage` at teardown, VA re-backed
+   for something else — and that churn produced a real stale-read bug. Folding it
+   into the control block deletes the hazard at source instead of paying a
+   per-access freshness check on the tree's hottest read. Cost: +4 KiB against a
+   768 B block, so it becomes 84% of the reservation. **Decide against current
+   numbers, not the ones in D-045's first table.**
+2. **Per-level node freshness** (D-042). One `ensureTLBEntryFresh` per level on
+   the descent. Keep and price it / nodes from never-recycling storage (DEC-082's
+   answer one level down) / a stronger vmsmalloc guarantee. Needs a cache-miss
+   measurement, not `-icount`: the instruction count is small and the extra cache
+   line per node is not.
+
+### Phase 5's remaining work
+
+- **Calibration, entirely untouched**: `detachBudget`, `drainBatchBound`,
+  ITEM-084's draw-count histogram, ITEM-055's state-word placement, DEC-095's K
+  and `scanChunk`, DEC-079's entry count. `-icount` per RCU P4-DEC-010, **not**
+  TCG block counts. D-034 records what the Phase 4 harness could and could not
+  settle.
+- **Finish the freshness audit deliberately** rather than by defect: walk §7.1's
+  list against the code and record each site as covered or exempt. Six were found
+  the hard way (§1.1).
+
+---
+
+## 1. What changed outside the radix tree
+
+### 1.1 The freshness family — six sites, four of them unlisted
+
+**The in-kernel stress found a real freshness defect on its first boot** — the
+vmsmalloc DEC-047 precedent repeating exactly: a stale-TLB bug class the
+userspace harness is *structurally* incapable of seeing, because its
+`ensureTLBEntryFresh` is a no-op and it has no page tables. 150 tests on two
+sanitizers passed with every one of these calls absent.
 
 | Site | Named by §7.1? | Fixed in |
 |---|---|---|
-| Node deleter's slot reads + its own refcount RMW | yes | `ae23572` |
+| Node deleter's slot reads + own refcount RMW | yes | `ae23572` |
 | Either deleter RMW-ing a `Mapping`'s count word | yes | `ae23572` |
 | The root bucket page (read by EVERY descent) | **no** | `ae23572` |
 | Reader's/writer's first touch of a `Mapping` body | **no** | `ae23572` |
 | A node pointer decoded from a slot word | **no** | `06a3d8f` |
 | **A `Mapping` accessed on a CPU that did not look it up** | **no** | `a2fc4e5` |
 
-**All of them now go through `SafePtr`, per access, and `SafePtr` grew to make
-that expressible** (`address()`, `at<U>(offset)`, `SafePtr<void>` for `NodeRef`'s
-cross-valence access, symmetric comparisons). The last row is the one that was
-*wrong* rather than unidiomatic: a call made once at acquisition guarantees
-nothing to a CPU that did not make it, and DEC-015 exists precisely so a
-`LookupResult` can cross a pager round-trip to one. `LookupResult` now holds and
-returns a `SafePtr<Mapping>`. D-044.
+The last row was *wrong*, not merely unidiomatic, and it was the residual page
+fault: a freshness call made once at acquisition guarantees nothing to a CPU that
+did not make it, and DEC-015 exists precisely so a `LookupResult` can close its
+section, block on a pager, and resume on another CPU.
 
-Two of those are **design questions rather than missing calls**, and both are
-flagged for Spencer rather than decided:
+**§7.1's list is incomplete in four places, and the reader-vs-deleter distinction
+it implies is not sound.** Spec amendment owed (D-039, D-042, D-044).
 
-- **The root page** is the one per-address-space allocation DEC-082 did *not*
-  move into pinned storage, and DEC-082's own rationale rejects "an
-  `ensureTLBEntryFresh` on every descent-cache hit" — yet the root page is read
-  more often than anything that did move (D-039).
-- **Node pointers** now cost one freshness call *per level* on the descent, the
-  spec's hottest path, where P4-ITEM-002 measured ~40 instructions per call. Keep
-  and price it; put nodes in never-recycling storage (DEC-082's answer one level
-  down); or strengthen a vmsmalloc guarantee (D-042).
+### 1.2 `SafePtr` grew, and everything routes through it
 
-### The two open defects
+Spencer's direction: *"the VMM is the only consumer of SafePtr, let's not
+calcify the API."* Bare `ensureTLBEntryFresh` calls are gone from the radix
+headers.
 
-- **D-043 — FIXED, and never a radix bug: `klog` is not reentrant.** The stack
-  was `dispatchInterrupt` → LAPIC timer → `dispatchTimerEvent` →
-  `enqueueShutdown`'s lambda → `klog()` → `AtomicPrintStream` ctor →
-  `Spinlock::acquire`, on a lock the same CPU already held for the line it was
-  mid-way through. `AtomicPrintStream` holds one global spinlock for the whole
-  lifetime of the temporary, so **any `klog` from interrupt context
-  self-deadlocks against a `klog` in progress on the same CPU**. Six sites moved
-  to `emergencyLog()` (the two timer messages, both stress watchdogs, and four
-  lines inside `dispatchInterrupt` itself), and the rule is documented at
-  `klog()`, at `emergencyLog()` and at `AtomicPrintStream`. Note the detector is
-  debug-only — in release the same interleaving is a silent hang the watchdog
-  cannot report, because the watchdog is a timer event on the wedged CPU.
-  12 of 12 clean on the repro that used to fail ~1 in 6.
-- **D-041 — the page fault is FIXED** by D-044 (Release/LTO is now 8-of-8 clean
-  at 1025 cycles, from 6-of-8 and before that ~4-of-8). The **`Mapping` residue
-  of 2 seen once** has not recurred and stays a watch item — one clean sweep is
-  not evidence of absence.
+Added: `address()` (typed, discharges nothing — identity, encoding, and the
+concrete-type cast `retire`/`destroy` need); `at<U>(byteOffset)` (a typed
+sub-object made fresh on *its own* page); **`SafePtr<void>`** (type-erased, whose
+motivating consumer is `NodeRef` — a descent stands on nodes of mixed valence and
+cannot name a concrete `Node<G,V>`); hidden-friend comparisons so a raw pointer
+works on either side; a default ctor and move assignment so `LookupResult` can
+hold one.
 
-**The instinct to resist**: both look like they might be the stress's fault. That
-was checked and is not the case for the freshness family — the stress's own
-discard paths were *disabled* (`leaked=0`, `oom=0`, neither had ever run) and
-concurrent growth was disabled, and the failures were unchanged. Classify before
-reasoning; that is D-013's lesson and it paid twice here.
+`LookupResult` holds and returns `SafePtr<Mapping>`. The `...FromDeleter` split
+collapsed — by the migration argument the reader's release sits exactly where the
+deleter's does.
 
-### Phase 5's remaining work items
+**Three copies of `SafePtr` exist** (real + radix mock + vmsmalloc mock) and must
+be kept in sync. Collapsing them is worth doing.
 
-- The **freshness audit** is effectively what D-039/D-042 did, but it should be
-  finished deliberately rather than by defect: walk §7.1's list against the code
-  and record each site as covered or exempt.
-- **Calibration** is entirely untouched: `detachBudget`, `drainBatchBound`,
-  ITEM-084's draw-count histogram, ITEM-055's state-word placement, DEC-095's K
-  and `scanChunk`, and DEC-079's entry count. Use `-icount` per RCU P4-DEC-010,
-  **not** TCG block counts. The Phase 4 calibration harness already reports hit
-  rate, atomic counts and per-entry thrash, and D-034 records what it could and
-  could not settle.
+### 1.3 `klog` is not safe from interrupt context
 
-### Running it
+`AtomicPrintStream` holds a **global spinlock for the whole lifetime of the
+temporary**, so `klog() << a << b;` is one critical section. An interrupt whose
+handler logs on a CPU that is mid-statement re-acquires a lock it already holds.
+Debug catches it (self-deadlock detector); **release compiles the detector out and
+the same interleaving is a silent hard hang with the log lock held** — which the
+hang watchdog cannot report, because the watchdog is itself a timer event on the
+wedged CPU.
 
-```
-cmake -B cmake-build-debug -DCMAKE_BUILD_TYPE=Debug -DCROCOS_RADIX_STRESS=ON
-cmake --build cmake-build-debug --target run          # or run_numa / run_numa_hmat
-```
+Six sites moved to `emergencyLog()`: `enqueueShutdown`'s `Goodbye :)`, smp.cpp's
+"All N processors up!", both stress watchdogs' `reportHangAndExit`, and four lines
+inside `dispatchInterrupt` itself. Documented at `klog()` in `kernel.h`, at
+`emergencyLog()` in `panic.h`, and at `AtomicPrintStream`. `emergencyLog`'s useful
+property is **lock-free**, not "for crashes" — the panic path was merely its first
+consumer.
 
-`CROCOS_RADIX_STRESS` **selects** the smp_bringup stress rather than adding one —
-it takes RCU Phase 4's slot by tail-call, because two per-CPU routines in one
-phase means the first one's infinite loop silently starves the second, which
-looks exactly like a healthy boot. `RadixStress.cpp` compiles either way on
-purpose: it is the only translation unit that type-checks the tree against the
-real freestanding toolchain and `-Werror`.
+### 1.4 `PinnedBlockPool` — pinned memory got an allocator
+
+`kernel/include/mem/PinnedBlockPool.h`. Fixed-stride, per-NUMA-domain intrusive
+freelist over page-granular reservations, carving each page into as many blocks as
+it holds. Spencer's framing: *"it can just be a big linked list of control blocks
+with a lock."*
+
+| | before | after pools fix | with the pool |
+|---|---|---|---|
+| radix block, window cost | 20,480 B | 4,096 B | **819 B** (5/page) |
+| total per address space | 24,576 B | 8,192 B | **4,915 B** |
+| ceiling (concurrent AS) | ~43,700 | ~131,000 | **~218,000** |
+
+Three facts that are load-bearing and easy to get wrong:
+
+- **Reservations round up to whole pages.** `staticBufferNextVA += pages *
+  smallPageSize`. **Measure the window, not the request** — D-045 got this wrong
+  and D-046 corrects it.
+- **Reuse of a pinned block is free and needs no shootdown.** It touches no PTE:
+  the VA→physical mapping is unchanged and only the bytes differ, so a CPU's
+  cached translation stays *correct*. DEC-051b's write-once-PTE invariant buys
+  that; it fights *returning pages to the allocator*, never reuse.
+- **The pool never zeroes.** RCU-DEC-043(i) is the rule: zeroing at the consumer
+  "makes every init valid regardless of block provenance, which is the only form
+  of the rule that does not depend on how the caller obtained its storage."
+
+The cross-domain fallback is the **last** resort, after carving. Writing it as the
+second choice means a carve's spare blocks are handed to the first request for a
+*second* domain, so the machine never carves on that domain at all — caught by a
+test, recorded in D-047.
+
+`numa::kMaxDomains` was **promoted**, not invented: it lived in vmsmalloc's
+internal `VMSubstrateSlab.h`, and a cap on `DomainID` belongs with `DomainID` once
+a second subsystem needs it. vmsmalloc keeps its spelling as an alias.
 
 ---
 
+## 2. NEXT: the RCU reader-slot block
+
+**Now the dominant per-address-space cost by 5×** — 4,096 B against the radix
+block's 819 B — and the highest-value remaining item on this thread. Deliberately
+not done, for reasons worth having up front.
+
+### The situation
+
+`Domain::init` → `acquireSlotBlockLocked` → `reserveFreshSlotBlockLocked`
+(`kernel/rcu/RCU.cpp` ~276–350):
+
+```cpp
+const size_t pages = divideAndRoundUp(cpuCount, kSlotsPerPage);
+for (size_t p = 0; p < pages; p++) {
+    const auto firstCpu = static_cast<arch::ProcessorID>(p * kSlotsPerPage);
+    const numa::DomainID d = numa::numaPolicy().homeDomain(firstCpu);
+    void* got = tryReservePerDomainStaticBuffer(arch::smallPageSize, d);
+    ...
+}
+```
+
+`sizeof(ReaderSlot)` is **128 B**, so `kSlotsPerPage` is **32**. An 8-CPU machine
+needs 1,024 B and takes a whole 4 KiB page — **75% wasted, on every address
+space**. Blocks recycle through `gFreeSlotBlocks`
+(`popFreeSlotBlockLocked`/`pushFreeSlotBlockLocked`), pushed by `Domain::deinit`.
+
+### Already checked — do not redo
+
+- **`gFreeSlotBlocks` does NOT have the NUMA bug radix's freelist had.** RCU
+  derives placement from the fixed CPU topology (`homeDomain(p * kSlotsPerPage)`),
+  so every block has identical per-page placement and blocks are interchangeable.
+  Radix's differed only because `home` is a caller-supplied per-address-space
+  parameter.
+- **RCU already re-zeroes on reuse** (`memset(block, 0, blockBytes)` in
+  `Domain::init`, RCU-DEC-043(i)) — so the pool's no-zeroing contract already
+  suits it.
+- **Reserving less saves nothing.** The bump pointer advances by whole pages, so a
+  1,024 B request consumes the same 4 KiB. The saving exists only via sub-page
+  packing, i.e. `PinnedBlockPool`.
+
+### The two obstacles
+
+1. **Per-page NUMA placement.** Page `p` is deliberately placed on the domain of
+   the CPUs whose slots it holds. A fixed-stride pool hands out blocks, not
+   page-aligned runs with per-page placement.
+2. **A contiguity dependency.** `reserveFreshSlotBlockLocked` asserts consecutive
+   reservations return consecutive VAs, because the slot array must be dense — and
+   says so: *"CONTIGUITY DEPENDENCY: consecutive reservations returning consecutive
+   VAs is a property of VMSubstrate's bump allocator, not a documented contract."*
+   A shared pool **breaks that** by interleaving carves from other consumers.
+
+### The shape of the answer
+
+**The single-page case has neither problem, and it is every machine up to 32
+CPUs** — the entire consumer-desktop target. For `cpuCount <= kSlotsPerPage`
+there is one page (so per-page placement already degrades to "pick one domain" —
+it picks `homeDomain(cpu 0)`) and one reservation (so contiguity is vacuous).
+
+A `PinnedBlockPool` with stride `cpuCount * sizeof(ReaderSlot)` serves it
+directly: 1,024 B → **4 slot blocks per page**, taking the per-address-space cost
+from 4,915 B to **~2,048 B** and the ceiling from ~218,000 to **~520,000**.
+
+Suggested shape, leaving the multi-page path untouched:
+
+```
+cpuCount <= kSlotsPerPage  -> PinnedBlockPool, stride cpuCount*sizeof(ReaderSlot)
+otherwise                  -> the existing page-per-group path, unchanged
+```
+
+The branch is honest rather than ugly: the cases genuinely differ in whether
+per-page placement means anything. Put the `if` where the reason is visible and
+say why.
+
+**Watch for**: `Domain::deinit` must return the block to whichever source gave it
+out, so `slotBlock` alone is no longer enough. `PinnedBlock` carries the domain
+for exactly this reason — storing one in `Domain` beside `slotBlock` is the
+obvious move.
+
+**Do not** simply retire the multi-page path: it exists for >32-CPU machines and
+its per-page placement is real. Unifying would need a contiguous-extent request
+from the pool, which is a bigger change than this item requires.
+
+### Gate
+
+RCU's own suite (`KernelRcuIntegrationTestRunner{,TSan}`, 61×2) plus the radix
+stress, whose ~1025 domain create/destroy pairs per boot is the only thing that
+exercises this path at volume. Add a packing test mirroring
+`radix_address_space_store_packs_blocks_into_a_page`, and **mutation-test it** — a
+packing test that passes vacuously tells you nothing.
+
 ---
 
-## 0.1. Phase 3 — COMPLETE (superseded by §0, kept for its background)
+## 3. Traps worth not rediscovering
+
+- **`-DCROCOS_RADIX_STRESS_OPS=24`** turns 4 debug cycles into 1025 with asserts
+  live. Use it before investigating anything create/teardown shaped.
+- **Release/LTO is ~250× more informative than debug** in the same 20 s window;
+  both Phase 5 defects only ever appeared there. A hang shows as no `Goodbye :)`
+  and the full timeout — grep the verdict line, not the exit code, since `timeout`
+  masks the difference.
+- **A single page does not make a deep tree** (D-038). At level 4 the range unit
+  is already 4 KiB, so one mapping lands two nodes down. Fixtures wanting a
+  floor-level node map a **pair** of adjacent pages.
+- **Any count-checking validation must `quiesce(h)` first** — releases are
+  deferred.
+- **Every destroy path routes through `destroyNode`** so the census is one pair of
+  counters, not a set that must agree.
+- **D-029 stays a WATCH item** — do not re-silence a `Mapping`-ctor-vs-`offsetFor`
+  race; the alternative explanation is a real use-after-free.
+- **Mutation-test anything whose failure mode is passing vacuously.** It paid off
+  four times this session, including catching that the pool's cross-domain
+  fallback was written as the second choice rather than the last.
+- Ranges are floor-unit granular; a misaligned `hi` trips "subdivision ran past
+  the resolution floor".
+- `CROCOS_SKIP_TSAN_STRESS` defaults ON — see the Core TSan starvation note.
+- **Run cmake from `tests/`**, not the repo root, for the unit tests; the root
+  `cmake-build-debug` is the kernel build. `run_all_tests` at the end of a phase
+  (D-021).
+- New radix headers must be added to `OrderingSpellingTest.cpp`'s header list, or
+  their atomics are invisible to §11's spelling check.
+
+---
+
+## A. Historical: the Phase 3 handoff (superseded by §0–§1, kept for background)
 
 **All nine work items have landed.** Full suite green, sequential on a quiet
 machine: Core 441 + 425 TSan, Kernel 177, LibAlloc 38x2, vmsmalloc 31x2, RCU
@@ -187,7 +370,7 @@ that the exemption is positional).
 
 ---
 
-## 1. Where things stand
+### A.1 Where things stood at Phase 3's close
 
 ### Complete and green
 
@@ -233,7 +416,7 @@ Public surface: `init(rootLevel, base, domain)`, `apply(lo, hi, Mapping*)`
 
 ---
 
-## 2. Prerequisites Phase 3 must land first
+### A.2 Prerequisites Phase 3 landed
 
 Both are listed in `radix-tree-phase-3.md` and **neither exists yet**:
 
@@ -251,7 +434,7 @@ Both are listed in `radix-tree-phase-3.md` and **neither exists yet**:
 
 ---
 
-## 3. Obligations carried into Phase 3
+### A.3 Obligations carried into Phase 3
 
 ### 3.1 D-011 — three disabled tests, and Phase 2's last gate item
 
@@ -303,7 +486,7 @@ text needs the caveat. Cheap, and worth doing before it traps someone.
 
 ---
 
-## 4. What Phase 2 learned that Phase 3 will need
+### A.4 What Phase 2 learned — still the best list of lessons in this file
 
 These are the things that cost time. They are not restatements of the spec.
 
@@ -354,7 +537,7 @@ runner does not notice a target it broke.
 
 ---
 
-## 5. Known flakes — not your bug
+### A.5 Known flakes
 
 - **Core/RCU TSan after a full parallel rebuild**: `run_all_tests` reports ~16
   timeouts (AtomicBitPool, TreiberStack, `rcuConcurrent*`). All pass when re-run
@@ -367,7 +550,7 @@ runner does not notice a target it broke.
 
 ---
 
-## 6. Conventions worth not rediscovering
+### A.6 Conventions
 
 - No STL, no `std::` in kernel code; use the Core library. Unit tests are the
   exception and may use the host standard library.
@@ -389,7 +572,7 @@ runner does not notice a target it broke.
 
 ---
 
-## 7. Suggested Phase 3 order
+### A.7 Phase 3's build order (historical)
 
 `radix-tree-phase-3.md` lists the work items; this is a build order that keeps
 something testable at each step.
@@ -419,7 +602,7 @@ close** on abandonment.
 
 ---
 
-## 8. Commit history for context
+### A.8 Commit history through Phase 2
 
 ```
 e3b82bd  Phase 2 (7/n): the four gate asserts
