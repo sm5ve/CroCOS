@@ -292,9 +292,21 @@ namespace kernel::mm::radix {
         // above, after the wipe would have happened — so the order here is not
         // arbitrary either.
         if (recycled) {
-            // The whole RESERVATION, not just the block: the trailing pool array
-            // carries the previous tenant's heads, and a stale head is a live
-            // record list handed to a process that does not own it.
+            // The whole RESERVATION, not just the block.
+            //
+            // **Defence in depth, and honestly not load-bearing today**:
+            // `pools.destroy()` already drains every record and resets each
+            // pool's head, population, depth and counters before the block is
+            // returned, so the trailing array is clean on arrival. Shrinking
+            // this to `sizeof(Block)` was mutation-tested and no test noticed.
+            //
+            // Kept anyway, and the reason is vmsmalloc DEC-051's: zero-fill is a
+            // per-RESERVATION guarantee, not a per-block one, so a recycled
+            // block's contents are the caller's problem. Making cleanliness a
+            // property of CREATION rather than of `destroy()` happening to stay
+            // thorough is what stops a field added to the pool later — and not
+            // reset there — from becoming a live record list handed to a process
+            // that does not own it.
             const uint64_t generation = block->generation;
             memset(static_cast<void*>(block), 0, Block::reservationBytes(reserved));
             block->generation = generation;

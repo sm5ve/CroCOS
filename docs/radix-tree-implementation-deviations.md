@@ -1807,11 +1807,45 @@ vmsmalloc's implementation-internal `VMSubstrateSlab.h`, and a cap on `DomainID`
 belongs with `DomainID` once a second subsystem needs it. vmsmalloc keeps its own
 spelling as an alias, so no call site there changed.
 
-**Mutation-tested** per D-022's rule, because a placement test's failure mode is
-passing vacuously: pooling every domain onto one list makes
-`radix_address_space_freelist_preserves_numa_placement` fail on the assertion
-that the domain-0 request gets the domain-0 block rather than the most recently
-freed one.
+### Confirming release + reuse, rather than assuming it
+
+Reuse was only ever covered *incidentally* — the recycle test asserts the same
+address comes back, and the in-kernel stress does ~1025 create/destroy cycles a
+boot. Neither touches the mechanics this change introduced. Worse, **the harness
+is structurally unable to catch the failure**: the mock's static-buffer
+reservation is a page-granular bump pointer into one mmap region, so a 768-byte
+reservation occupies a whole 4 KiB page and an overrun of up to 3.3 KiB lands
+inside it — invisible to ASan, and silent until the day it reaches the next
+block. Sanitizer trust is not available here; assertions are.
+
+Three tests, each mutation-tested per D-022's rule:
+
+| Test | Mutation | Caught |
+|---|---|---|
+| `..._freelist_preserves_numa_placement` | pool every domain onto one list | **yes** — the domain-0 request gets the most recently freed block instead |
+| `..._freelist_refuses_an_undersized_block` | drop the `reservedCpus >= cpus` guard | **yes** — an 8-CPU request takes the 1-CPU block |
+| `..._pool_array_lies_inside_the_reservation` + `..._recycled_block_pools_carry_record_traffic` | place the array overlapping the block's tail instead of after it | **yes**, by 7 tests — the overlap corrupts `reservedCpus` and `freelistNext`, which is exactly the silent-corruption mode |
+
+The recycled-block test is the one that matters most: it drives real record
+traffic (24 map/unmap pairs, each displacement drawing a `DeferredRelease` record)
+through pools that live in the previous tenant's storage, and leans on
+`pools.destroy()`'s population-conservation assert as the detector for a record
+drawn and never returned.
+
+**One mutation was NOT caught, and it is recorded rather than fixed**: shrinking
+the reuse zero-fill from the whole reservation to `sizeof(Block)` changes nothing
+observable, because `pools.destroy()` already drains every record and resets each
+pool's head, population, depth and counters before the block is returned. So the
+trailing array is clean on arrival and the wider `memset` is **defence in depth,
+not currently load-bearing**.
+
+It is kept for vmsmalloc DEC-051's reason — zero-fill is a per-RESERVATION
+guarantee, not a per-block one — and because making cleanliness a property of
+*creation* rather than of `destroy()` happening to stay thorough is what stops a
+field added to the pool later, and not reset there, from becoming a live record
+list handed to a process that does not own it. A test for it would have to poke
+the array directly, which tests the `memset` rather than a behaviour; the comment
+at the site says all of this so nobody later "simplifies" it back.
 
 ### What this does NOT fix
 

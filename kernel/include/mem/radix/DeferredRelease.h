@@ -353,6 +353,11 @@ namespace kernel::mm::radix {
             pools    = nullptr;
         }
 
+        // Where the array actually is. Exists so a test can assert the pools
+        // point at the block's own tail rather than at a previous tenant's —
+        // a stale base would be a live record list belonging to a dead process.
+        [[nodiscard]] const DeferredReleasePool* poolsBase() const { return pools; }
+
         [[nodiscard]] DeferredReleasePool& forCpu(arch::ProcessorID i) {
             assert(static_cast<size_t>(i) < cpuCount,
                    "radix DeferredReleasePools: CPU index outside the created range");

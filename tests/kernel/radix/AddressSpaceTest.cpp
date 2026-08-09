@@ -245,6 +245,135 @@ TEST(radix_address_space_creation_handles_a_failed_reservation) {
 
 // ─── Recycling: the block comes back, and it comes back CLEAN ──────────────
 
+// ─── The trailing pool array: layout, reuse, and the undersized-block guard ─
+//
+// The pool array moved out of `ControlBlock` and into the tail of the block's own
+// reservation (D-045), which turns three implicit facts into things worth
+// asserting — **especially here, because the harness cannot catch them for us**:
+// the mock's static-buffer reservation is a page-granular bump pointer into one
+// mmap region, so a 768-byte reservation occupies a whole 4 KiB page and an
+// overrun of up to 3.3 KiB lands inside it, invisible to ASan and scribbling on
+// nothing until the day it scribbles on the next block.
+
+TEST(radix_address_space_pool_array_lies_inside_the_reservation) {
+    BareArena arena(8);
+    FreelistA freelist;
+    BlockA*   block = nullptr;
+    ASSERT_TRUE(rdx::createAddressSpace(freelist, kernel::numa::DomainID{0}, 8,
+                                        kTestRecords, block) == rdx::CreateStatus::Ok);
+
+    const auto base    = reinterpret_cast<uintptr_t>(block);
+    const auto storage = reinterpret_cast<uintptr_t>(block->poolStorage());
+
+    // Immediately after the block, with no overlap and no gap.
+    ASSERT_EQ(base + sizeof(BlockA), storage);
+    // Cache-line aligned, which `create` asserts for a reason: every CPU's
+    // deleters push into every CPU's head, and unaligned heads reintroduce the
+    // false sharing the `alignas` exists to prevent.
+    ASSERT_EQ(uintptr_t{0}, storage % arch::CACHE_LINE_SIZE);
+
+    // Every pool the tree can address lies inside what was actually reserved.
+    const uintptr_t end = base + BlockA::reservationBytes(8);
+    for (unsigned c = 0; c < 8; c++) {
+        const auto slot = reinterpret_cast<uintptr_t>(
+            &block->pools.forCpu(static_cast<arch::ProcessorID>(c)));
+        ASSERT_TRUE(slot >= storage);
+        ASSERT_TRUE(slot + sizeof(rdx::DeferredReleasePool) <= end);
+    }
+
+    rdx::destroyAddressSpace(freelist, block);
+    assertNoLiveObjects("pool array layout");
+}
+
+// The point of the whole exercise: a RECYCLED block's pools have to work, and
+// they live in storage the previous tenant used. Record traffic is what proves
+// it — a map/unmap cycle draws a DeferredRelease record per displaced Mapping,
+// and `pools.destroy()` asserts each pool holds exactly its creation population
+// at teardown, which is the detector for a record drawn and never returned.
+TEST(radix_address_space_recycled_block_pools_carry_record_traffic) {
+    BareArena arena;
+    FreelistA freelist;
+
+    const auto churn = [](BlockA& b) {
+        ASSERT_TRUE(b.clusters.ensureCovers(0, (uint64_t{1} << 30) - 1)
+                    == rdx::ClusterStatus::Ok);
+        TreeA t = b.clusters.treeFor(0);
+        for (unsigned k = 0; k < 24; k++) {
+            const uint64_t va = uint64_t{k} * 64 * 1024;
+            auto* m = makeMapping(va);
+            ASSERT_TRUE(m != nullptr);
+            ASSERT_TRUE(t.apply(va, va + kPage - 1, m) == rdx::ApplyStatus::Ok);
+        }
+        // Displacement: each clear defers a Mapping release through a record
+        // drawn from this block's pools.
+        for (unsigned k = 0; k < 24; k++) {
+            const uint64_t va = uint64_t{k} * 64 * 1024;
+            ASSERT_TRUE(t.apply(va, va + kPage - 1, nullptr) == rdx::ApplyStatus::Ok);
+        }
+        (void)kernel::rcu::drainAllQuiescent(b.domain);
+    };
+
+    BlockA* first = nullptr;
+    ASSERT_TRUE(rdx::createAddressSpace(freelist, kernel::numa::DomainID{0}, 1,
+                                        kTestRecords, first) == rdx::CreateStatus::Ok);
+    const auto* firstAddress = first;
+    churn(*first);
+    rdx::destroyAddressSpace(freelist, first);
+
+    BlockA* second = nullptr;
+    ASSERT_TRUE(rdx::createAddressSpace(freelist, kernel::numa::DomainID{0}, 1,
+                                        kTestRecords, second) == rdx::CreateStatus::Ok);
+    // Same pinned storage, so the pools below are the previous tenant's bytes.
+    ASSERT_EQ(firstAddress, second);
+    ASSERT_TRUE(second->pools.perCpu == kTestRecords);
+    ASSERT_TRUE(second->pools.cpuCount == 1);
+    // The array is still the block's own tail, not a stale pointer carried over.
+    ASSERT_EQ(reinterpret_cast<uintptr_t>(second) + sizeof(BlockA),
+              reinterpret_cast<uintptr_t>(second->pools.poolsBase()));
+
+    churn(*second);
+    rdx::destroyAddressSpace(freelist, second);
+    assertNoLiveObjects("recycled block record traffic");
+}
+
+// The guard that has no other detector. Blocks became variable-sized, so a
+// freelist that handed back a block whose trailing array is shorter than the
+// caller asked for would write past the reservation — and per the note above,
+// the harness's page-granular bump allocator would not notice.
+//
+// Unreachable in the kernel, where `processorCount()` is a boot constant and
+// every block is the same size. Reachable here, which is the point: the
+// invariant is enforced rather than argued.
+TEST(radix_address_space_freelist_refuses_an_undersized_block) {
+    BareArena arena(8);
+    FreelistA freelist;
+
+    BlockA* narrow = nullptr;
+    ASSERT_TRUE(rdx::createAddressSpace(freelist, kernel::numa::DomainID{0}, 1,
+                                        kTestRecords, narrow) == rdx::CreateStatus::Ok);
+    ASSERT_TRUE(narrow->reservedCpus == 1);
+    const auto* narrowAddress = narrow;
+    rdx::destroyAddressSpace(freelist, narrow);
+
+    // The freelist holds exactly one block, reserved for a single CPU. An
+    // 8-CPU request must NOT take it.
+    BlockA* wide = nullptr;
+    ASSERT_TRUE(rdx::createAddressSpace(freelist, kernel::numa::DomainID{0}, 8,
+                                        kTestRecords, wide) == rdx::CreateStatus::Ok);
+    ASSERT_TRUE(wide != narrowAddress);
+    ASSERT_TRUE(wide->reservedCpus == 8);
+
+    // ...and the narrow block is still available to a request it does fit.
+    BlockA* again = nullptr;
+    ASSERT_TRUE(rdx::createAddressSpace(freelist, kernel::numa::DomainID{0}, 1,
+                                        kTestRecords, again) == rdx::CreateStatus::Ok);
+    ASSERT_EQ(narrowAddress, again);
+
+    rdx::destroyAddressSpace(freelist, wide);
+    rdx::destroyAddressSpace(freelist, again);
+    assertNoLiveObjects("undersized block refusal");
+}
+
 // ─── The freelist keeps each block on its own NUMA domain ──────────────────
 //
 // `createAddressSpace` takes a `home` domain and `tryReservePerDomainStaticBuffer`
