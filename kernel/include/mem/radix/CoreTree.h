@@ -594,10 +594,12 @@ namespace kernel::mm::radix {
         [[nodiscard]] bool init(unsigned rootLevel, uint64_t base, kernel::rcu::Domain& d,
                                 DeferredReleasePools& pools) {
             assert(d.initialized(), "radix: the tree's RCU domain must be initialised first");
-            assert(pools.perCpu >= deferredReleaseBound(G),
-                   "radix: the DeferredRelease pool is shallower than this geometry's "
-                   "per-operation ceiling (§7.1's edge sum) — an operation could then "
-                   "exhaust it with no barrier able to help, which is a sizing error");
+            assert(pools.reserveDepth() >= deferredReleaseBound(G),
+                   "radix: the DeferredRelease RESERVE is shallower than this geometry's "
+                   "per-ATTEMPT ceiling (§7.1's edge sum) — the reserve is what carries the "
+                   "replenish loop's termination argument now that the per-CPU pools are "
+                   "sized for the common case, so a short reserve is a livelock, not a "
+                   "slow path (ITEM-084)");
             domain = &d;
             releasePools = &pools;
             assert(rootLevel >= 1 && rootLevel <= G.levelCount,
@@ -620,8 +622,8 @@ namespace kernel::mm::radix {
         void bindToBucket(BucketTable& t, size_t index, kernel::rcu::Domain& d,
                           DeferredReleasePools& pools) {
             assert(d.initialized(), "radix: the tree's RCU domain must be initialised first");
-            assert(pools.perCpu >= deferredReleaseBound(G),
-                   "radix: the DeferredRelease pool is shallower than this geometry's "
+            assert(pools.reserveDepth() >= deferredReleaseBound(G),
+                   "radix: the DeferredRelease RESERVE is shallower than this geometry's "
                    "per-operation ceiling (§7.1's edge sum)");
             assert(index < kBucketCount, "radix: bucket index out of range");
             domain       = &d;
@@ -1394,6 +1396,21 @@ namespace kernel::mm::radix {
         // somebody's decomposition.
         [[nodiscard]] ApplyStatus runToCompletion(uint64_t lo, uint64_t hi, VMSubstrate::SafePtr<Mapping> value,
                                                   ApplyMode mode = ApplyMode::Overwrite) {
+            // Whatever a replenish borrowed from the reserve goes back when this
+            // operation ends, by whichever of the several exits it takes. See
+            // `returnSurplus` — without this the first CPU to borrow starves
+            // every later one, which is a livelock and not a slow path.
+            struct SurplusGuard {
+                DeferredReleasePools* pools;
+                size_t                cpu;
+                bool                  borrowed = false;
+                ~SurplusGuard() {
+                    if (!borrowed) return;
+                    kernel::rcu::DomainManagementLockGuard guard;
+                    pools->returnSurplus(cpu);
+                }
+            } surplus{releasePools, static_cast<size_t>(arch::getCurrentProcessorID())};
+
             unsigned retryCount = 0;
             unsigned consecutiveShortfalls = 0;
             bool retiredAnything = false;
@@ -1443,6 +1460,7 @@ namespace kernel::mm::radix {
                     // derivation is wrong — which would otherwise present as a
                     // livelock with no output.
                     ++consecutiveShortfalls;
+                    surplus.borrowed = true;
                     assert(consecutiveShortfalls <= 1,
                            "radix: a DeferredRelease shortfall survived a barrier replenish "
                            "— the per-CPU population is smaller than one operation's "
@@ -2121,13 +2139,52 @@ namespace kernel::mm::radix {
             assert(!kernel::interrupts::currentCpuInterruptDepths().inAnyInterruptContext(),
                    "radix: record replenish from interrupt or #PF context — `barrier` "
                    "carries the strict mask");
-            DeferredReleasePool& pool = releasePools->forCpu(arch::getCurrentProcessorID());
+            const arch::ProcessorID cpu = arch::getCurrentProcessorID();
+            DeferredReleasePool& pool = releasePools->forCpu(cpu);
+
+            // ─── 1. The reserve, first (ITEM-084) ──────────────────────────
+            //
+            // Ahead of the pump and the barrier because it is the only remedy
+            // that costs no grace period: the records exist, they are simply in
+            // the address space's reserve rather than this CPU's pool. A whole
+            // operation's worth moves at once — see `refillFromReserve` for why
+            // a per-record fallback would let two CPUs deadlock over fragments.
+            //
+            // This is also where §7.1's termination argument now lives: the
+            // reserve holds one operation's worst case, so a retry after a
+            // successful refill has enough for any shape.
+            {
+                kernel::rcu::DomainManagementLockGuard guard;
+                releasePools->noteShortfall(static_cast<size_t>(cpu));
+                // Up to ONE ATTEMPT'S WORST CASE, not the per-CPU default. The
+                // per-attempt bound is 228 against a 230 ceiling, and a refill
+                // of `perCpu` would leave a wide attempt shortfalling round
+                // after round, accumulating 32 at a time. One refill has to be
+                // enough for any shape or the retry is not bounded.
+                (void)releasePools->refillFromReserve(static_cast<size_t>(cpu),
+                                                      releasePools->reserveDepth());
+                // Promotion is judged HERE, on the shortfall itself, and not
+                // after the barrier below. A refill that rescues the operation
+                // is precisely the "touching the reserve too often" condition
+                // promotion exists to reduce — gating it behind the barrier
+                // meant it could only fire when the reserve had ALSO run dry,
+                // which is the one case a bigger per-CPU pool would not help.
+                if (releasePools->shouldPromote()) releasePools->promote();
+            }
+            if (pool.atFullPopulation()) return;
+
+            // ─── 2. The pump, then the barrier ─────────────────────────────
+            //
+            // Reached when the reserve is itself drained — every record is in
+            // flight through this address space's own retires — and then only a
+            // grace period brings them home.
             (void)kernel::rcu::tryAdvance(*domain);
             (void)kernel::rcu::drain(*domain);
             // "If still short" — measured against the full population rather
             // than against emptiness, because a pool holding three records when
             // the operation needs five is not empty and is still short.
             if (!pool.atFullPopulation()) kernel::rcu::barrier(*domain);
+
         }
 
         // ─── One attempt (§3.2: one attempt is ONE read section) ───────────

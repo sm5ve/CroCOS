@@ -70,7 +70,7 @@ namespace CroCOSTest::radix {
         // per-address-space reservation cannot — which is the whole point of the
         // change that made this a pointer.
         alignas(arch::CACHE_LINE_SIZE)
-        kernel::mm::radix::DeferredReleasePool poolStorage[arch::MAX_PROCESSOR_COUNT];
+        kernel::mm::radix::DeferredReleasePool poolStorage[arch::MAX_PROCESSOR_COUNT + 1];
 
         // The root bucket page's pinned pool (D-051). Per ADDRESS-SPACE STORE in
         // production; a fixture that constructs a `ClusterTable` directly needs
@@ -100,9 +100,13 @@ namespace CroCOSTest::radix {
                 VS::test::shutdown();
                 throw AssertionFailure(std::string("radix Harness: domain init failed"));
             }
+            // Per-CPU at the amd64 default, reserve at the ceiling — the same
+            // split the kernel uses, so the harness exercises the refill path
+            // rather than a fixture-only shape.
             if (!releasePools.create(
-                    poolStorage, cpus, kernel::mm::radix::deferredReleaseBound(
-                                           kernel::mm::radix::kAmd64Geometry))) {
+                    poolStorage, cpus, kernel::mm::radix::kDefaultRecordsPerCpu,
+                    kernel::mm::radix::deferredReleaseBound(
+                        kernel::mm::radix::kAmd64Geometry))) {
                 (void)domain.deinit();
                 VS::test::shutdown();
                 throw AssertionFailure(

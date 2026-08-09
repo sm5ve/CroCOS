@@ -16,14 +16,14 @@
 // block would put an `ensureTLBEntryFresh` on every descent-cache hit, which is
 // the spec's hottest path.
 //
-// **What did NOT move with it, and cost a Phase 5 debugging session**: the root
-// bucket page is still an ordinary `tryMake<BucketTable>` allocation, so it IS
-// vmsmalloc memory and its VA recycles like any other. Every descent opens by
-// loading a bucket word out of it, so it carries a per-touch
-// `ensureTLBEntryFresh` obligation on exactly the path this block was
-// rearranged to keep clear — see `BucketTable::fresh`. Whether the root page
-// should join the control block in pinned storage is a real design question and
-// is recorded as one; the current answer is the freshness call.
+// **What did not move with it cost a Phase 5 debugging session, and has since
+// moved**: the root bucket page was an ordinary `tryMake<BucketTable>`
+// allocation, so its VA recycled like any other arena page while every descent
+// opened by loading a bucket word out of it — a per-touch freshness obligation
+// on exactly the path this block was rearranged to keep clear, and a real stale
+// read. D-051 gave it its own pinned pool at page stride (4,096 B of window per
+// address space, against 8,192 B had it been folded into this block, whose
+// combined 4,864 B stride would exceed a page and could not sub-page pack).
 //
 // Reservations are kernel-lifetime and never returned to VMSubstrate, so blocks
 // recycle through a freelist. **Zero-fill is a per-RESERVATION guarantee, not a
@@ -321,7 +321,11 @@ namespace kernel::mm::radix {
         }
 
         // ─── 4. The per-CPU record pools ───────────────────────────────────
-        if (!block->pools.create(block->poolStorage(), cpuCount, perCpuRecords)) {
+        // The reserve is sized at the per-operation ceiling and the per-CPU
+        // pools are not: that split is ITEM-084's answer, and which of the two
+        // carries §7.1's termination argument is stated on `refillFromReserve`.
+        if (!block->pools.create(block->poolStorage(), cpuCount, perCpuRecords,
+                                 deferredReleaseBound(G))) {
             block->clusters.destroy();
             (void)block->domain.deinit();
             kernel::rcu::DomainManagementLockGuard guard;

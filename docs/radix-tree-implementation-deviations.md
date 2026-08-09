@@ -2761,3 +2761,89 @@ want breathing room into two that conflict. Measured cost of what remains: a mea
 of 2.84–4.03 probe iterations at 10–75% occupancy, each one guard enumerate plus
 one fused verify-install. **Closeable as already-done**, with the guard check
 recorded as intentionally separate.
+
+---
+
+## D-056 — ITEM-084 settled: a small per-CPU pool behind one per-address-space reserve (Spencer-directed)
+
+Spencer's call, and it is D-054's option 3 with adaptive promotion on top. **Option
+2 is dead first**, which is what made the choice clean.
+
+### Option 2 died to a proof, not a measurement
+
+The open sub-question was whether DEC-077's unit decomposition already bounds one
+attempt below the edge sum. It does not, and the reason is a one-line
+disjointness argument worth keeping:
+
+> **The rows that draw records consume no detachment budget, and the row that
+> consumes detachment budget draws no records.**
+
+`redispatchAgrees` draws only for `OverwriteLeaf`, `ClearSlot` and `Subdivide`
+over a leaf; `planDetachment` — the only thing that increments `detachNodes` —
+fires only on `DetachChild`, which the draw switch excludes by name because "a
+fully covered child's displaced values all ride node deleters"
+(`CoreTree.h:2954-2961`). So the maximal-draw shape has `detachNodes == 0` and can
+never trip the budget. The true per-attempt maximum is **228** against a derived
+ceiling of 230 — the derivation over-counts by exactly 2, because the top node
+cannot both charge its full valence and supply two descending edges. Each unit is
+a separate attempt with a fresh count (`runToCompletion` constructs `Attempt`
+inside the retry loop), so nothing accumulates across units.
+
+The bound is therefore sized against the right quantity and there is no smaller
+provable one to shrink to.
+
+### The design
+
+- **Per-CPU pools at `kDefaultRecordsPerCpu = 32`** — one node's worst partial
+  cover at the widest valence, so the entire single-node dense shape stays off
+  the reserve.
+- **One reserve per address space** at the full ceiling, in `pools[cpuCount]`.
+- **The reserve carries termination; the per-CPU size only decides how often it
+  is touched.** Getting the latter wrong costs retries, never progress.
+- **Refill is bulk and happens in `replenishRecords`**, never in the draw: the
+  draw runs inside a read section and the pool lock would be blocking while
+  holding claims (§3.2). The existing abandon-and-retry path is already outside
+  every section.
+- **Promotion** doubles the per-CPU population, capped at the ceiling, judged on
+  the shortfall itself. Allocation is legal there and nowhere else on the path.
+  Failure is harmless by construction, since termination lives in the reserve.
+
+| | records/AS | 8 CPUs | 256 CPUs | creation |
+|---|---|---|---|---|
+| before | 230 × N | ≈115 KiB | ≈3.6 MiB | 1,840 `tryMake` |
+| after | 32N + 230 | **≈30 KiB** | **≈526 KiB** | **486** |
+
+Cost: one more cache-line pool slot in the control block takes its stride from
+768 B to 832 B, so blocks pack 4 to a page instead of 5 — 1,024 B of window per
+address space instead of 819 B.
+
+### Three defects found by building it, all mine
+
+1. **The refill was sized to `perCpu`.** A wide attempt would shortfall round
+   after round, accumulating 32 at a time, and trip the `consecutiveShortfalls
+   <= 1` assert. It must move one attempt's worst case at once.
+2. **Hoarding is a livelock, not an inefficiency.** A CPU that borrows 230
+   records for an operation needing 3 leaves the reserve empty and **nothing ever
+   makes it give them back**; the next CPU to need a wide attempt barriers,
+   recovers only its own retirees, and never proceeds. Fixed by `returnSurplus`:
+   at the end of every operation, everything above this CPU's target goes home,
+   routed by `homePool` so loans land in the reserve and natives stay put. Found
+   by the promotion test, which stopped seeing shortfalls after the first.
+3. **Promotion was gated behind the barrier**, which the refill bypasses — so it
+   could only fire when the reserve had *also* run dry, the one case where a
+   bigger per-CPU pool would not help. Moved onto the shortfall itself.
+
+Plus one latent bug the tests surfaced: `destroy()` nulls the pool array and was
+not idempotent, while DEC-101's creation unwind can reach it twice. Now guarded.
+
+### Tests
+
+`radix_a_starved_per_cpu_pool_completes_through_the_reserve` and
+`radix_repeated_shortfalls_promote_the_per_cpu_population`, both on a fixture
+with a deliberately starved two-record pool — the shipping default of 32 fits the
+single-node dense shape without ever touching the reserve, which is what it is
+chosen for and exactly why it cannot exercise the path. §11's conservation check
+became a **total** rather than per-pool, since a refill legitimately moves records
+between pools; it still catches a record drawn and never returned.
+
+Suite 171×2. Six clean boots, residue at or below the DEC-096 bound.

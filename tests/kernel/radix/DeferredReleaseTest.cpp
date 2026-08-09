@@ -207,8 +207,15 @@ TEST(radix_deferred_release_records_return_to_their_home_pool) {
     TreeA tree;
     ASSERT_TRUE(tree.init(5, 0, h.domain, h.releasePools));
 
+    // ITEM-084 split the population: the per-CPU pool holds the common-case
+    // default and the RESERVE holds the per-attempt ceiling, which is what
+    // carries §7.1's termination argument. Both are asserted, because a change
+    // that quietly moved the ceiling out of the reserve would leave this test
+    // passing on the per-CPU half alone.
     const size_t population = poolOf(h, 0).population;
-    ASSERT_EQ(static_cast<size_t>(rdx::deferredReleaseBound(GA)), population);
+    ASSERT_EQ(static_cast<size_t>(rdx::kDefaultRecordsPerCpu), population);
+    ASSERT_EQ(static_cast<size_t>(rdx::deferredReleaseBound(GA)),
+              h.releasePools.reserve().population);
     ASSERT_TRUE(poolOf(h, 0).atFullPopulation());
 
     // Churn well past the population, so a mechanism that consumed a record per
@@ -297,10 +304,16 @@ TEST(radix_deferred_release_a_shortfall_is_replenished_and_the_retry_succeeds) {
     std::string firstError;
     std::mutex errorMutex;
 
-    // The population, so the churn cap is derived rather than guessed: each
-    // displacing operation draws exactly one record, so running well past the
-    // population with the epoch stalled must exhaust it.
-    const size_t population = poolOf(h, 0).population;
+    // The churn cap is derived rather than guessed: each displacing operation
+    // draws exactly one record, so running well past the population with the
+    // epoch stalled must exhaust it. **Since ITEM-084 the population is in two
+    // parts** — the per-CPU pool and the address space's reserve, which a
+    // shortfall refills from — so the quantity to exhaust is their sum. Deriving
+    // it from the per-CPU half alone left the writer finishing before the
+    // reader's stall could bite, and the test then failed for want of rounds
+    // rather than for want of the mechanism.
+    const size_t population =
+        poolOf(h, 0).population + h.releasePools.reserve().population;
 
     std::vector<std::thread> workers;
 
@@ -472,4 +485,107 @@ TEST(radix_draw_count_report) {
         assertNoLiveObjects("draw count report");
     }
     std::printf("\n");
+}
+
+// ─── ITEM-084: the reserve, and what it is for ─────────────────────────────
+//
+// The per-CPU pools are sized for the common case (D-054: max 2 draws over 4.77M
+// attempts) and the RESERVE carries §7.1's termination argument. That division
+// is the whole design, so it is tested directly rather than inferred from the
+// absence of hangs — a livelock in this path presents as no output at all.
+//
+// The fixture deliberately starves the per-CPU pool. With the shipping default
+// of 32 the single-node dense shape fits without ever touching the reserve,
+// which is exactly what the default is chosen for and exactly why it cannot
+// exercise what happens when it does not fit.
+
+namespace {
+
+struct StarvedPools {
+    // +1 for the reserve slot.
+    alignas(arch::CACHE_LINE_SIZE)
+    rdx::DeferredReleasePool storage[arch::MAX_PROCESSOR_COUNT + 1];
+    rdx::DeferredReleasePools pools{};
+
+    explicit StarvedPools(unsigned perCpu) {
+        if (!pools.create(storage, 1, perCpu, rdx::deferredReleaseBound(GA))) {
+            throw AssertionFailure(std::string("starved pool creation failed"));
+        }
+        // The record population is fixture infrastructure, exactly as the
+        // Harness's own is — re-baseline so `assertNoLiveObjects` measures what
+        // the TEST allocated rather than what the fixture did.
+        setAccountingBaseline();
+    }
+    ~StarvedPools() { pools.destroy(); }
+};
+
+// Fill one level-6 node's sixteen page slots with distinct records, then clear
+// fifteen of them: §7.1's expensive shape, needing fifteen records in ONE
+// attempt.
+void fillNodeAndPartiallyClear(TreeA& tree, Harness& h) {
+    for (unsigned i = 0; i < 16; i++) {
+        auto* m = makeMapping(i * kPage);
+        ASSERT_TRUE(m != nullptr);
+        ASSERT_TRUE(tree.apply(i * kPage, (i + 1) * kPage - 1, m) == rdx::ApplyStatus::Ok);
+    }
+    ASSERT_TRUE(tree.apply(0, 15 * kPage - 1, nullptr) == rdx::ApplyStatus::Ok);
+    quiesce(h);
+}
+
+}  // namespace
+
+TEST(radix_a_starved_per_cpu_pool_completes_through_the_reserve) {
+    Harness h(1, 1);
+    StarvedPools sp{2};                       // two records per CPU: far too few
+    TreeA tree;
+    ASSERT_TRUE(tree.init(5, 0, h.domain, sp.pools));
+
+    // Fifteen distinct records displaced in one attempt against a two-record
+    // pool. Without the reserve this is the livelock D-054 warns about: the
+    // draw fails, the attempt abandons, the barrier brings back two records,
+    // and the retry fails identically forever.
+    fillNodeAndPartiallyClear(tree, h);
+
+    ASSERT_TRUE(sp.pools.shortfallCount() > 0);   // it really did starve
+    ASSERT_TRUE(sp.pools.reserveDepth() >= rdx::deferredReleaseBound(GA));
+
+    ASSERT_TRUE(tree.apply(0, tree.span() - 1, nullptr) == rdx::ApplyStatus::Ok);
+    quiesce(h);
+    tree.destroyTree();
+    quiesce(h);
+    assertNoLiveObjects("starved pool via reserve");
+}
+
+TEST(radix_repeated_shortfalls_promote_the_per_cpu_population) {
+    Harness h(1, 1);
+    StarvedPools sp{2};
+    TreeA tree;
+    ASSERT_TRUE(tree.init(5, 0, h.domain, sp.pools));
+
+    const unsigned before = sp.pools.perCpuTarget();
+    ASSERT_EQ(unsigned{2}, before);
+
+    // Enough dense operations to cross the promotion threshold several times.
+    for (unsigned round = 0; round < 4 * rdx::kPromotionThreshold; round++) {
+        fillNodeAndPartiallyClear(tree, h);
+        ASSERT_TRUE(tree.apply(0, tree.span() - 1, nullptr) == rdx::ApplyStatus::Ok);
+        quiesce(h);
+    }
+
+    // Promotion is an OPTIMISATION — it reduces how often the reserve is
+    // touched and never carries correctness — so what is asserted is that it
+    // reacted and stayed within its cap, not a particular size.
+    ASSERT_TRUE(sp.pools.perCpuTarget() > before);
+    ASSERT_TRUE(sp.pools.perCpuTarget() <= sp.pools.reserveDepth());
+    ASSERT_TRUE(sp.pools.promotionCount() > 0);
+
+    tree.destroyTree();
+    quiesce(h);
+    // Promotion ALLOCATES — that is what it is — so the pools must be released
+    // before the live-object check, which would otherwise read a grown
+    // population as a leak. Releasing here rather than in the destructor is
+    // also the assertion that promotion's extra records are properly owned:
+    // `destroy()`'s conservation check counts them.
+    sp.pools.destroy();
+    assertNoLiveObjects("promotion");
 }

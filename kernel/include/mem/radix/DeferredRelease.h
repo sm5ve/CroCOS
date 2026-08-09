@@ -369,8 +369,42 @@ namespace kernel::mm::radix {
     // Bytes of pool storage a given CPU count needs. Exported because the
     // storage is the CALLER's to provide — see the note on `create`.
     constexpr size_t deferredReleasePoolBytes(size_t cpus) {
-        return cpus * sizeof(DeferredReleasePool);
+        // cpus + 1: the extra slot is the per-ADDRESS-SPACE reserve (ITEM-084).
+        return (cpus + 1) * sizeof(DeferredReleasePool);
     }
+
+    // ─── ITEM-084's answer: a small per-CPU pool behind one reserve ────────
+    //
+    // DEC-068 sized every per-CPU pool at the per-OPERATION ceiling, which made
+    // the per-address-space cost scale with `processorCount()` — ~115 KiB per
+    // process on an 8-CPU desktop and ~3.6 MiB at the 256-CPU architectural
+    // maximum, plus one `tryMake` per record at creation (1,840 allocations per
+    // fork on 8 CPUs). D-054 measured the realistic draw at **2**.
+    //
+    // The split: a small per-CPU pool for the common case, and ONE reserve per
+    // address space holding a full ceiling. The division of labour matters and
+    // is worth stating plainly —
+    //
+    //   * **The reserve carries TERMINATION.** §7.1's replenish loop terminates
+    //     only because a population covering one operation's worst case is
+    //     reachable without allocating. That property now lives in the reserve
+    //     rather than in every per-CPU pool, which is the whole saving.
+    //   * **The per-CPU size is only about how OFTEN the reserve is touched.**
+    //     Getting it wrong costs abandon-and-retry round trips, never progress.
+    //
+    // 32 is one node's worst partial cover at the widest valence in the kernel
+    // geometry (a 32-slot node, 31 of them cleared), so the entire single-node
+    // dense shape — the one D-054 could construct — stays off the reserve.
+    inline constexpr unsigned kDefaultRecordsPerCpu = 32;
+
+    // Shortfalls on one CPU before the address space is promoted to a larger
+    // per-CPU population. Deliberately small: a shortfall already costs an
+    // abandon and a retry, so there is little value in tolerating many before
+    // reacting, and D-054's measurement says the common workload takes none at
+    // all. A promoted address space never demotes — the workloads that produce
+    // dense arrangements (`MAP_FIXED` packing, `fork`) are properties of a
+    // process, not phases of one.
+    inline constexpr unsigned kPromotionThreshold = 4;
 
     struct DeferredReleasePools {
         // ─── The array is RUNTIME-SIZED, and the storage is the caller's ────
@@ -396,6 +430,13 @@ namespace kernel::mm::radix {
         DeferredReleasePool* pools = nullptr;
         size_t cpuCount = 0;
         unsigned perCpu = 0;
+        // ITEM-084's metadata, living in the control block by virtue of this
+        // object living there. `shortfalls` drives promotion; `promotions` is
+        // the evidence that it ever fired, which the measured workload says it
+        // should not.
+        unsigned reserveSize = 0;
+        unsigned promotions  = 0;
+        Atomic<uint64_t> shortfallEvents{0};
 
         // Allocate the fixed population, one `tryMake` per record (§7.1). Returns
         // false having freed everything it took — address-space creation is the
@@ -406,7 +447,7 @@ namespace kernel::mm::radix {
         // cache-line aligned, and outlive these pools. It is NOT freed by
         // `destroy()`: the records are this object's, the array is not.
         [[nodiscard]] bool create(DeferredReleasePool* storage, size_t cpus,
-                                  unsigned recordsPerCpu) {
+                                  unsigned recordsPerCpu, unsigned reserveRecords) {
             assert(cpus <= arch::MAX_PROCESSOR_COUNT,
                    "radix DeferredReleasePools: CPU count exceeds the processor cap");
             assert(storage != nullptr, "radix DeferredReleasePools: no pool storage");
@@ -415,11 +456,16 @@ namespace kernel::mm::radix {
                    "every CPU's deleters push into every CPU's head, and unaligned heads "
                    "reintroduce exactly the false sharing the alignas exists to prevent");
             pools    = storage;
-            for (size_t c = 0; c < cpus; c++) new (&pools[c]) DeferredReleasePool();
+            for (size_t c = 0; c <= cpus; c++) new (&pools[c]) DeferredReleasePool();
             cpuCount = cpus;
             perCpu   = recordsPerCpu;
-            for (size_t c = 0; c < cpus; c++) {
-                for (unsigned k = 0; k < recordsPerCpu; k++) {
+            reserveSize = reserveRecords;
+            // The reserve is filled FIRST, so a partial creation failure leaves
+            // the termination-carrying pool short rather than absent — and
+            // `destroy()` unwinds either way.
+            for (size_t c = 0; c <= cpus; c++) {
+                const unsigned want = (c == cpus) ? reserveRecords : recordsPerCpu;
+                for (unsigned k = 0; k < want; k++) {
                     auto p = VMSubstrate::tryMake<DeferredRelease>();
                     if (!p) { destroy(); return false; }
                     auto* r = static_cast<DeferredRelease*>(p.raw());
@@ -433,6 +479,124 @@ namespace kernel::mm::radix {
             return true;
         }
 
+        [[nodiscard]] DeferredReleasePool& reserve() { return pools[cpuCount]; }
+        [[nodiscard]] unsigned perCpuTarget() const { return perCpu; }
+        [[nodiscard]] unsigned reserveDepth() const { return reserveSize; }
+        [[nodiscard]] unsigned promotionCount() const { return promotions; }
+        [[nodiscard]] uint64_t shortfallCount() const {
+            return shortfallEvents.load(kPoolAccounting);
+        }
+
+        void noteShortfall(size_t cpu) {
+            (void)cpu;
+            shortfallEvents.fetch_add(1, kPoolAccounting);
+        }
+
+        // Caller holds the domain-management lock (promotion mutates `perCpu`
+        // and the pools). The threshold is counted per ADDRESS SPACE rather than
+        // per CPU: the dense shapes this reacts to are properties of a process's
+        // allocation pattern, and one CPU seeing them means the others will.
+        [[nodiscard]] bool shouldPromote() const {
+            return shortfallEvents.load(kPoolAccounting) >=
+                   uint64_t{kPromotionThreshold} * (promotions + 1);
+        }
+
+        // ─── The bulk refill (ITEM-084) ────────────────────────────────────
+        //
+        // **Bulk, and that is the correctness point rather than an efficiency
+        // one.** `deferMappingRelease` draws ONE record at a time as it
+        // discovers distinct mappings and never knows how many it will need, so
+        // a per-record fallback to a shared reserve lets two CPUs each hold a
+        // fragment of it with neither able to finish — both abandon, both retry,
+        // and they can ping-pong. Moving a whole operation's worth at once means
+        // a CPU either has enough for any shape or abandons immediately, and the
+        // reserve is never held in fragments.
+        //
+        // **Called from `replenishRecords`, never from the draw**, because the
+        // draw runs inside an attempt's read section and this takes the
+        // domain-management lock — blocking while holding claims, which §3.2
+        // forbids. The existing abandon-and-retry path is already outside every
+        // section, which is exactly where this belongs.
+        //
+        // Loaned records keep `homePool` pointing at the RESERVE, so they find
+        // their own way back when their deleters run. There is no return path to
+        // write.
+        size_t refillFromReserve(size_t cpu, unsigned want) {
+            assert(cpu < cpuCount, "radix DeferredReleasePools: refill for no such CPU");
+            size_t moved = 0;
+            for (unsigned k = 0; k < want; k++) {
+                DeferredRelease* r = reserve().pop();
+                if (r == nullptr) break;          // reserve empty: caller falls through
+                pools[cpu].push(r);
+                moved++;
+            }
+            return moved;
+        }
+
+        // ─── The return path, without which the reserve is a livelock ──────
+        //
+        // A refill lends this CPU up to a whole attempt's worth. **Nothing else
+        // ever makes it give them back**, and that is a livelock rather than an
+        // inefficiency: a CPU that borrowed 230 records for an operation needing
+        // 3 leaves the reserve empty, and the next CPU to need a wide attempt
+        // finds nothing there, barriers, recovers only its OWN retirees, and
+        // never proceeds. Found by the promotion test, which stopped seeing
+        // shortfalls after the first one because the borrower never released.
+        //
+        // So: at the end of every operation, everything above this CPU's own
+        // target goes home. Records are routed by `homePool`, so loans land back
+        // in the reserve and natives stay put — the population accounting stays
+        // exact rather than drifting between pools.
+        void returnSurplus(size_t cpu) {
+            assert(cpu < cpuCount, "radix DeferredReleasePools: surplus for no such CPU");
+            DeferredReleasePool& mine = pools[cpu];
+            if (mine.depth.load(kPoolAccounting) <= static_cast<int64_t>(perCpu)) return;
+
+            // Drain and re-file. O(depth), and reached only after a refill,
+            // which D-054 measures at zero occurrences in a realistic workload.
+            DeferredRelease* natives = nullptr;
+            while (DeferredRelease* r = mine.pop()) {
+                if (r->homePool == &mine) {
+                    r->next.store(natives, kPrivateInit);
+                    natives = r;
+                } else {
+                    r->homePool->push(r);
+                }
+            }
+            while (natives != nullptr) {
+                DeferredRelease* const next = natives->next.load(kPrivateInit);
+                mine.push(natives);
+                natives = next;
+            }
+        }
+
+        // Promotion (ITEM-084). Grows the per-CPU population for an address
+        // space that keeps taking shortfalls, capped at the ceiling — above
+        // which the reserve is the answer, not a bigger per-CPU pool.
+        //
+        // **Failure is harmless by construction**: termination rests on the
+        // reserve, so a promotion that cannot allocate leaves a correct system
+        // that merely visits the reserve more often. That is why this is
+        // `tryMake` with no unwind and no status.
+        void promote() {
+            if (perCpu >= reserveSize) return;                  // already at the cap
+            const unsigned target = (perCpu * 2 < reserveSize) ? perCpu * 2 : reserveSize;
+            for (size_t c = 0; c < cpuCount; c++) {
+                for (unsigned k = perCpu; k < target; k++) {
+                    auto p = VMSubstrate::tryMake<DeferredRelease>();
+                    if (!p) return;                             // harmless; see above
+                    auto* r = static_cast<DeferredRelease*>(p.raw());
+                    r->mapping  = nullptr;
+                    r->delta    = 0;
+                    r->homePool = &pools[c];
+                    pools[c].push(r);
+                    pools[c].population++;
+                }
+            }
+            perCpu = target;
+            promotions++;
+        }
+
         // §7.4: the pools are freed at teardown, record by record, AFTER
         // `drainAllQuiescent` has returned every record home. The population
         // check is §11's conservation target, and it is the only detector for a
@@ -440,23 +604,39 @@ namespace kernel::mm::radix {
         // presents as nothing at all until the pool runs dry under load much
         // later.
         void destroy() {
-            for (size_t c = 0; c < cpuCount; c++) {
+            // Idempotent. `destroy()` nulls the array below, and it is reachable
+            // twice for real reasons: DEC-101's creation unwind calls it on a
+            // partial failure, and a caller may release the pools before the
+            // object's own teardown. The second call dereferencing a null array
+            // is a SEGV, which is how this was found.
+            if (pools == nullptr) return;
+            // §11's conservation check is now a TOTAL rather than per-pool, and
+            // the weakening is forced by the reserve: a refill moves records
+            // between pools, and an unused loan is still sitting in the CPU pool
+            // it was lent to at teardown. The total still catches the failure
+            // this exists for — a record drawn and never returned — it just no
+            // longer says which pool lost it.
+            size_t recoveredTotal = 0, populationTotal = 0;
+            for (size_t c = 0; c <= cpuCount; c++) {
                 size_t recovered = 0;
                 while (DeferredRelease* r = pools[c].pop()) {
                     VMSubstrate::destroy(VMSubstrate::SafePtr<DeferredRelease>(r));
                     recovered++;
                 }
-                assert(recovered == pools[c].population,
-                       "radix DeferredReleasePools: a pool did not hold its creation "
-                       "population at teardown — a record was drawn and never returned, "
-                       "or drainAllQuiescent ran before every retire completed (§11)");
+                recoveredTotal  += recovered;
+                populationTotal += pools[c].population;
                 pools[c].population = 0;
                 pools[c].draws.store(0, kPoolAccounting);
                 pools[c].shortfalls.store(0, kPoolAccounting);
                 pools[c].depth.store(0, kPoolAccounting);
             }
+            assert(recoveredTotal == populationTotal,
+                   "radix DeferredReleasePools: the pools did not hold their creation "
+                   "population at teardown — a record was drawn and never returned, or "
+                   "drainAllQuiescent ran before every retire completed (§11)");
             cpuCount = 0;
             perCpu   = 0;
+            reserveSize = 0;
             // The array itself is the caller's storage and is deliberately NOT
             // released here — it is a slice of a pinned reservation that
             // outlives this object and is reused by the next tenant.
