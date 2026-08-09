@@ -1484,7 +1484,7 @@ frame behind it.
 
 ---
 
-## D-042 — DEFECT (Phase 5, partially fixed) — a node pointer decoded from a slot word owes the freshness call too
+## D-042 — DEFECT (Phase 5, fixed) — a node pointer decoded from a slot word owes the freshness call too — **RESOLVED 2026-08-09, option 1**
 
 D-039's third instalment, found the same way and one layer deeper. Under
 Release/LTO — which reaches **1025 cycles** in the same 20 s window a debug build
@@ -1517,7 +1517,7 @@ per walk suffices.
 **Result: 6 of 8 Release runs now reach 1025 cycles cleanly, against roughly half
 before. It is an improvement, not a fix, and the remainder is D-041.**
 
-### The cost, which is not priced anywhere
+### The cost, which was not priced anywhere (it is now — see the resolution)
 
 This is **one `ensureTLBEntryFresh` per level on the descent** — the spec's
 hottest path — and RCU P4-ITEM-002 measured a freshness call at ~40 instructions
@@ -1537,7 +1537,40 @@ Three answers, and choosing between them is Spencer's:
    guarantee can be strengthened into "a re-backed slab page is globally fresh"
    is a vmsmalloc question, not a radix one.
 
-**Flagged, not decided.**
+### RESOLVED 2026-08-09 — option 1, keep the calls (Spencer)
+
+Decided against measurements rather than against the estimate the entry above
+was written with, which turned out to be both right and wrong in instructive
+ways. The evidence, in the order it was gathered:
+
+- **D-052** (harness, exact): the read path makes **1.00 freshness calls per
+  level**, plus one for the record. The estimate in this entry survived D-044's
+  move from per-derivation to per-access untouched, because a lookup reads
+  exactly one field per node — the slot it descends through. The write path pays
+  7–11 per level, but that is `mmap`/`munmap`, which already allocates and locks.
+- **D-052** (harness, best case): a descent's calls land on **2–3 distinct
+  pages** even at depth 6, because same-size-class nodes share a slab page. Since
+  the call `invlpg`s only when the page's dirty bit is set, **only the first call
+  per page can miss** — which is the specific worry this entry raised, and it is
+  much weaker than "a cache line per node".
+- **D-053** (target, `-icount`): **24 instructions per call** net of probe — not
+  the ~40 quoted above, which was pre-LTO — against **516–797 for a whole
+  lookup**, at **3–5 calls per lookup**. So the discipline is **~10–20% of the
+  fault path's instruction count, ≤23% on a full cache-missing descent**. For
+  scale, the same call is 51–59% of an RCU retire.
+
+**What option 1 accepts, stated plainly**: the cost of a call that *misses* is
+still unmeasured, because TCG models neither the cache miss on the dirty-bitmap
+word nor `invlpg`. What makes that acceptable rather than an open item is the
+concentration finding — the number of possible misses per descent is bounded by
+the number of distinct pages a descent touches, not by its depth.
+
+**What this does not close.** Options 2 and 3 remain the right answers if the
+cost is ever shown to matter, and D-051's `BlockPool` backend seam is where
+option 2 would now be built. Nothing about this decision blocks them; it declines
+to pay their complexity on the strength of a cost that measured small.
+
+The §7.1 spec text is still owed, now including this entry's resolution.
 
 ---
 

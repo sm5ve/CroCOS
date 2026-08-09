@@ -8,10 +8,10 @@ read §0 and §1 before anything else.
 
 Read in this order:
 
-1. **§0** — state, and the one thing still waiting on Spencer.
+1. **§0** — state, and how the two design questions were settled.
 2. **§1** — what changed outside the radix tree.
 3. **§2** — the last item closed (RCU slot-block packing) and what is left.
-4. `docs/radix-tree-implementation-deviations.md` — D-001..D-051. **Live:
+4. `docs/radix-tree-implementation-deviations.md` — D-001..D-053. **Live:
    D-004, D-010, D-029, D-030 (older); D-033/034/036/039/042/044/046 owe the
    spec text.**
 5. `specs/radix-tree-phase-5.md` — the remaining phase work (calibration).
@@ -30,7 +30,7 @@ Read in this order:
 | **5** | **Partly landed.** Kernel codec instance, node/`Mapping` censuses, the in-kernel stress, the whole freshness family, and the pinned-memory work through D-048 (radix control block AND RCU slot block both sub-page packed). Debug **and** Release/LTO boot clean on `run`, `run_numa`, `run_numa_hmat`. **Calibration untouched.** |
 
 Full suite, sequential: Core 441 + 425 TSan, Kernel 177, LibAlloc 38×2, vmsmalloc
-31×2, RCU 64×2, **radix 164×3** (ASan, TSan, progress audit). The default kernel
+31×2, RCU 64×2, **radix 165×3** (ASan, TSan, progress audit). The default kernel
 (stress off) builds and boots.
 
 ```
@@ -51,31 +51,40 @@ both of Phase 5's defects became reproducible. Current reach in a 20 s window:
 2,049 cycles debug, 8,193 Release/LTO (was 1,025 debug before D-048; the stress
 reports at cycle 1–4 then every 1,024, so read these as bands, not exact counts).
 
-### The one thing still waiting on Spencer
+### Nothing is waiting on Spencer
 
-Design questions, not bugs; options are in the deviations log.
+Both design questions this file carried are settled, and each was settled by
+measurement rather than by argument — which is the pattern worth keeping:
 
-1. ~~The root bucket page~~ — **settled by D-051**: Spencer's second pinned
-   allocator. The page moved to its own `PinnedBlockPool` at stride 4,096 (which
-   packs exactly, where folding it into the control block would have cost
-   8,192 B), so every descent's opening bucket read is now obligation-free.
-   Window per address space 1,843 -> 5,939 B, ceiling ~580,000 -> ~180,000.
-2. **Per-level node freshness** (D-042) — the one still open. One
-   `ensureTLBEntryFresh` per level on the descent. Keep and price it / nodes from
-   never-recycling storage / a stronger vmsmalloc guarantee. **D-051 changed the
-   options rather than the question**: nodes cannot be pinned (their count per
-   address space is unbounded), but the `BlockPool` backend seam is where a
-   VA-reclaiming allocator would go, and that is option 2 made buildable. Needs a
-   cache-miss measurement, not `-icount`: the instruction count is small and the
-   extra cache line per node is not.
+1. **The root bucket page** — settled by **D-051**: its own pinned
+   `PinnedBlockPool` at stride 4,096, which packs exactly where folding it into
+   the control block would have cost 8,192 B. Every descent's opening bucket read
+   is now obligation-free. Window per address space 1,843 -> 5,939 B, ceiling
+   ~580,000 -> ~180,000.
+2. **Per-level node freshness** — settled by **D-042's resolution**: keep the
+   calls. D-052 measured 1.00 calls per level on the read path (the original
+   estimate survived D-044's move to per-access) landing on only 2–3 distinct
+   pages, and D-053 measured 24 instructions per call against 516–797 for a whole
+   lookup — **~10–20% of the fault path, ≤23% worst case**, against 51–59% for
+   the same call on an RCU retire. The unmeasured residual is what a *missing*
+   call costs, bounded by the page-concentration finding.
+
+Options 2 and 3 for the latter (nodes from never-recycling storage, or a stronger
+vmsmalloc guarantee) are not foreclosed — D-051's backend seam is where the first
+would now be built — merely not paid for on the strength of a cost that measured
+small.
 
 ### Phase 5's remaining work
 
-- **Calibration, entirely untouched**: `detachBudget`, `drainBatchBound`,
+- **Calibration, largely untouched**: `detachBudget`, `drainBatchBound`,
   ITEM-084's draw-count histogram, ITEM-055's state-word placement, DEC-095's K
   and `scanChunk`, DEC-079's entry count. `-icount` per RCU P4-DEC-010, **not**
   TCG block counts. D-034 records what the Phase 4 harness could and could not
-  settle.
+  settle. **The harness now exists**: `make run_icount` plus
+  `CROCOS_RADIX_INSN_PROBE` (D-053), and the two traps it cost to find are that
+  icount forces `thread=single`, and that single-threaded TCG reports a 74%
+  descent-cache hit rate where MTTCG reports 7% — so any locality-sensitive
+  figure read under `-icount` is a best case.
 - ~~Finish the freshness audit deliberately~~ — **done, D-049; its two gaps
   closed by D-050.** Every class of memory the tree touches has a verdict, both
   `Mapping` boundaries now pass `SafePtr`, and — the durable half — **the harness
