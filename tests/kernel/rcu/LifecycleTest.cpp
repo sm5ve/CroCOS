@@ -161,6 +161,88 @@ TEST(rcu_domain_recycled_blocks_are_reused_not_merely_freed) {
     ASSERT_TRUE(c.deinit());
 }
 
+// ─── Sub-page packing ──────────────────────────────────────────────────────
+
+TEST(rcu_domain_slot_blocks_pack_several_into_one_page) {
+    Harness h(8);
+    // `sizeof(ReaderSlot)` is 128 B, so eight CPUs want 1,024 B and a dedicated
+    // page wasted 75% of itself on EVERY address space. Four now share a page.
+    rcu::Domain d[4];
+    for (unsigned i = 0; i < 4; i++) ASSERT_TRUE(d[i].init("packed", 8));
+
+    // Distinct, ReaderSlot-aligned, and far enough apart that no two slot arrays
+    // overlap — the alignment is what every false-sharing property of ReaderSlot
+    // rests on, and it is not free: it is the pool's cache-line stride rounding.
+    //
+    // This runs BEFORE the block-count assertions deliberately. A too-small
+    // stride fails both, and whichever assertion runs first is the only one the
+    // mutation demonstrates is live — so the one that must not be vacuous goes
+    // first.
+    for (unsigned i = 0; i < 4; i++) {
+        const auto ai = reinterpret_cast<uintptr_t>(rcu::test::slotAddress(d[i]));
+        ASSERT_EQ(uintptr_t{0}, ai % alignof(Core::rcu::ReaderSlot));
+        for (unsigned j = i + 1; j < 4; j++) {
+            const auto aj = reinterpret_cast<uintptr_t>(rcu::test::slotAddress(d[j]));
+            ASSERT_TRUE(ai != aj);
+            const uintptr_t gap = ai < aj ? aj - ai : ai - aj;
+            ASSERT_TRUE(gap >= 8 * sizeof(Core::rcu::ReaderSlot));
+        }
+    }
+
+    ASSERT_EQ(size_t{4}, rcu::test::slotPoolBlocksPerPage());
+    ASSERT_EQ(size_t{1}, rcu::test::slotPoolPagesReserved());
+
+    for (auto& dom : d) ASSERT_TRUE(dom.deinit());
+}
+
+TEST(rcu_domain_a_packed_block_does_not_reach_into_its_neighbour) {
+    Harness h(8);
+    // The structural check above says the arrays do not overlap; this one drives
+    // it. A domain writing its HIGHEST slot is the case an undersized stride
+    // corrupts, and the corruption lands in another address space's reader state
+    // — where it would read as a phantom open section and stall reclamation
+    // rather than crash.
+    rcu::Domain a, b;
+    ASSERT_TRUE(a.init("neighbour-a", 8));
+    ASSERT_TRUE(b.init("neighbour-b", 8));
+
+    kernel::test::bindThreadToCpu(7);
+    {
+        rcu::ReadGuard g(a);
+        ASSERT_EQ(uint64_t{1}, rcu::test::nesting(a, 7));
+        // EVERY slot of b, not just slot 7. A stride wrong by a non-multiple of
+        // sizeof(ReaderSlot) lands the corruption on a different slot INDEX than
+        // the writer's, so checking the matching index alone passes while the
+        // neighbour is being scribbled on.
+        for (size_t j = 0; j < 8; j++) ASSERT_EQ(uint64_t{0}, rcu::test::nesting(b, j));
+    }
+    kernel::test::bindThreadToCpu(0);
+
+    ASSERT_TRUE(a.deinit());
+    ASSERT_TRUE(b.deinit());
+}
+
+TEST(rcu_domain_multi_page_slot_arrays_keep_their_dedicated_pages) {
+    Harness h(64);
+    // Above 32 CPUs the array genuinely spans pages, so per-page NUMA placement
+    // and the contiguity dependency both start meaning something and the pool is
+    // deliberately not used. The pool must therefore stay untouched — a
+    // regression that routed this path through it would be an out-of-bounds
+    // write past a one-page block, not a failed allocation.
+    rcu::Domain d;
+    ASSERT_TRUE(d.init("wide", 8));
+    ASSERT_EQ(size_t{64}, rcu::test::slotCount(d));
+    ASSERT_EQ(size_t{0}, rcu::test::slotPoolPagesReserved());
+
+    // And the whole-block freelist that path still owns keeps recycling.
+    const void* first = rcu::test::slotAddress(d);
+    ASSERT_TRUE(d.deinit());
+    ASSERT_TRUE(d.init("wide-again", 8));
+    ASSERT_EQ(first, rcu::test::slotAddress(d));
+    ASSERT_EQ(size_t{0}, rcu::test::slotPoolPagesReserved());
+    ASSERT_TRUE(d.deinit());
+}
+
 // ─── The failable path ─────────────────────────────────────────────────────
 
 TEST(rcu_domain_init_fails_cleanly_when_storage_is_exhausted) {

@@ -224,6 +224,19 @@ namespace kernel::rcu {
         // letting it grow with cumulative process churn — which is the claim
         // vmsmalloc DEC-050 rests on.
         void*       slotBlock   = nullptr;
+        // Which source handed `slotBlock` out, as a `numa::DomainID` value:
+        // a real domain means the shared sub-page pool (and names the domain its
+        // page was placed on, which `PinnedBlockPool::freeLocked` requires),
+        // while DomainID's null sentinel means the multi-page path, whose block
+        // spans several per-page placements and so has no single domain to name.
+        // The two facts are one field because they are one fact.
+        //
+        // Spelled as the raw underlying integer rather than as `numa::DomainID`
+        // so this header does not have to include <mem/NUMA.h> — Vector, Variant,
+        // Span and the whole ACPI-derived topology — for one private member. It
+        // becomes a DomainID again the moment it is used, inside RCU.cpp, which
+        // static_asserts the two spellings still agree.
+        uint16_t    slotBlockDomain = UINT16_MAX;
         // P2-DEC-009 / failure table: with opaque storage there is NO engine
         // pointer to null-check, so used-before-init is caught by this flag and
         // nothing else. Zeroed storage scans clean — an uninitialized domain

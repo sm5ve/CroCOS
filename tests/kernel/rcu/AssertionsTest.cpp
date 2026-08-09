@@ -53,8 +53,12 @@ struct Harness {
         kernel::timing::test::resetMonoTime();
         ictx::test::resetInterruptDepths();
     }
+    // The reset is not optional bookkeeping: the slot pool is process-global and
+    // holds carved blocks pointing into THIS fixture's arena, plus a block stride
+    // fixed by this fixture's CPU count. Both outlive the munmap below.
     ~Harness() {
         ictx::test::resetInterruptDepths();
+        rcu::test::resetDomainManagementState();
         VS::test::shutdown();
     }
 };

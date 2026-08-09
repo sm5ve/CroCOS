@@ -1,17 +1,17 @@
 # radix-tree — implementation handoff
 
-**Written 2026-08-08 at `be2681c`.** Branch `radix-tree`, local-only, unmerged
-(16 commits ahead of `1d448e0`). **Phases 0–4 complete and green; Phase 5 partly
-landed.** This session went well beyond the radix tree — it changed `SafePtr`,
-the kernel's logging rules, and added a pinned-memory allocator — so read §0 and
-§1 before anything else.
+**Written 2026-08-08 at `be2681c`; §0/§2 updated 2026-08-09 for D-048.** Branch
+`radix-tree`, local-only, unmerged. **Phases 0–4 complete and green; Phase 5
+partly landed.** This session went well beyond the radix tree — it changed
+`SafePtr`, the kernel's logging rules, and added a pinned-memory allocator — so
+read §0 and §1 before anything else.
 
 Read in this order:
 
 1. **§0** — state, and the two things waiting on Spencer.
 2. **§1** — what changed outside the radix tree.
-3. **§2** — the next work item, fully specified (the RCU reader-slot block).
-4. `docs/radix-tree-implementation-deviations.md` — D-001..D-047. **Live:
+3. **§2** — the last item closed (RCU slot-block packing) and what is left.
+4. `docs/radix-tree-implementation-deviations.md` — D-001..D-048. **Live:
    D-004, D-010, D-029, D-030 (older); D-033/034/036/039/042/044/046 owe the
    spec text.**
 5. `specs/radix-tree-phase-5.md` — the remaining phase work (calibration).
@@ -27,10 +27,10 @@ Read in this order:
 |---|---|
 | 0–3 | Complete. See §0.1 and §4 below. |
 | **4** | **Complete.** DEC-078 seam (`PinnedNode`, `pinLocked`, `resumeDescent`, `release`) and DEC-079's cache: per-CPU direct-mapped set of 4, VA-range-deferred install, generation check, `Detached`/generation eviction. All four §13 gate properties tested; the calibration report runs in the suite. |
-| **5** | **Partly landed.** Kernel codec instance, node/`Mapping` censuses, the in-kernel stress, and the whole freshness family. Debug **and** Release/LTO boot clean on `run`, `run_numa`, `run_numa_hmat`; Release reaches 1025 cycles/boot, 8-of-8. **Calibration untouched.** |
+| **5** | **Partly landed.** Kernel codec instance, node/`Mapping` censuses, the in-kernel stress, the whole freshness family, and the pinned-memory work through D-048 (radix control block AND RCU slot block both sub-page packed). Debug **and** Release/LTO boot clean on `run`, `run_numa`, `run_numa_hmat`. **Calibration untouched.** |
 
 Full suite, sequential: Core 441 + 425 TSan, Kernel 177, LibAlloc 38×2, vmsmalloc
-31×2, RCU 61×2, **radix 156×3** (ASan, TSan, progress audit). The default kernel
+31×2, RCU 64×2, **radix 156×3** (ASan, TSan, progress audit). The default kernel
 (stress off) builds and boots.
 
 ```
@@ -45,9 +45,11 @@ second, which looks exactly like a healthy boot. `RadixStress.cpp` compiles
 either way on purpose: it is the only TU that type-checks the tree against the
 real freestanding toolchain and `-Werror`.
 
-`-DCROCOS_RADIX_STRESS_OPS=24` turns a debug boot's 4 cycles into 1025 with every
-assert live. **That is the most useful debugging lever here** — it is how both of
-Phase 5's defects became reproducible.
+`-DCROCOS_RADIX_STRESS_OPS=24` turns a debug boot's 4 cycles into thousands with
+every assert live. **That is the most useful debugging lever here** — it is how
+both of Phase 5's defects became reproducible. Current reach in a 20 s window:
+2,049 cycles debug, 8,193 Release/LTO (was 1,025 debug before D-048; the stress
+reports at cycle 1–4 then every 1,024, so read these as bands, not exact counts).
 
 ### The two things waiting on Spencer
 
@@ -151,11 +153,12 @@ freelist over page-granular reservations, carving each page into as many blocks 
 it holds. Spencer's framing: *"it can just be a big linked list of control blocks
 with a lock."*
 
-| | before | after pools fix | with the pool |
-|---|---|---|---|
-| radix block, window cost | 20,480 B | 4,096 B | **819 B** (5/page) |
-| total per address space | 24,576 B | 8,192 B | **4,915 B** |
-| ceiling (concurrent AS) | ~43,700 | ~131,000 | **~218,000** |
+| | before | after pools fix | with the pool | + D-048 |
+|---|---|---|---|---|
+| radix block, window cost | 20,480 B | 4,096 B | **819 B** (5/page) | 819 B |
+| RCU slot block, window cost | 4,096 B | 4,096 B | 4,096 B | **1,024 B** (4/page) |
+| total per address space | 24,576 B | 8,192 B | 4,915 B | **~1,843 B** |
+| ceiling (concurrent AS) | ~43,700 | ~131,000 | ~218,000 | **~580,000** |
 
 Three facts that are load-bearing and easy to get wrong:
 
@@ -181,97 +184,35 @@ a second subsystem needs it. vmsmalloc keeps its spelling as an alias.
 
 ---
 
-## 2. NEXT: the RCU reader-slot block
+## 2. DONE: the RCU reader-slot block (D-048)
 
-**Now the dominant per-address-space cost by 5×** — 4,096 B against the radix
-block's 819 B — and the highest-value remaining item on this thread. Deliberately
-not done, for reasons worth having up front.
+Was the dominant per-address-space cost by 5×. Now **1,024 B against 4,096**:
+`sizeof(ReaderSlot)` is 128 B, so an 8-CPU slot array is 1,024 B and four share a
+page through `PinnedBlockPool`. Per-address-space total 4,915 B -> **~1,843 B**;
+ceiling ~218,000 -> **~580,000** concurrent address spaces.
 
-### The situation
+It went the way §2 predicted: `cpuCount <= kSlotsPerPage` (32 CPUs, the whole
+consumer-desktop target) is one page, which makes per-page NUMA placement and the
+contiguity dependency both vacuous, so that case pools and the multi-page case
+keeps the old path verbatim. **D-048 has the full record** — the two decisions
+inside it (provenance recorded rather than re-derived; stride fixed by the first
+caller and asserted), the new out-of-bounds hazard the assert exists for, and the
+mutation testing, including the two checks that were vacuous when first written.
 
-`Domain::init` → `acquireSlotBlockLocked` → `reserveFreshSlotBlockLocked`
-(`kernel/rcu/RCU.cpp` ~276–350):
+One thing worth carrying forward, because it will bite the next shared-state
+change the same way: `resetDomainManagementState()` was documented as mandatory
+for every fixture constructing a domain and only one of five called it. A
+freelist tolerated that (nothing reaches a freelist unless a test calls
+`deinit`); a **pool does not**, because it retains carved blocks pointing into
+the fixture's arena. The stride assert surfaced it as 18 failing tests rather
+than as dangling memory handed out whenever two fixtures agreed on CPU count.
 
-```cpp
-const size_t pages = divideAndRoundUp(cpuCount, kSlotsPerPage);
-for (size_t p = 0; p < pages; p++) {
-    const auto firstCpu = static_cast<arch::ProcessorID>(p * kSlotsPerPage);
-    const numa::DomainID d = numa::numaPolicy().homeDomain(firstCpu);
-    void* got = tryReservePerDomainStaticBuffer(arch::smallPageSize, d);
-    ...
-}
-```
+### What is left on this thread
 
-`sizeof(ReaderSlot)` is **128 B**, so `kSlotsPerPage` is **32**. An 8-CPU machine
-needs 1,024 B and takes a whole 4 KiB page — **75% wasted, on every address
-space**. Blocks recycle through `gFreeSlotBlocks`
-(`popFreeSlotBlockLocked`/`pushFreeSlotBlockLocked`), pushed by `Domain::deinit`.
-
-### Already checked — do not redo
-
-- **`gFreeSlotBlocks` does NOT have the NUMA bug radix's freelist had.** RCU
-  derives placement from the fixed CPU topology (`homeDomain(p * kSlotsPerPage)`),
-  so every block has identical per-page placement and blocks are interchangeable.
-  Radix's differed only because `home` is a caller-supplied per-address-space
-  parameter.
-- **RCU already re-zeroes on reuse** (`memset(block, 0, blockBytes)` in
-  `Domain::init`, RCU-DEC-043(i)) — so the pool's no-zeroing contract already
-  suits it.
-- **Reserving less saves nothing.** The bump pointer advances by whole pages, so a
-  1,024 B request consumes the same 4 KiB. The saving exists only via sub-page
-  packing, i.e. `PinnedBlockPool`.
-
-### The two obstacles
-
-1. **Per-page NUMA placement.** Page `p` is deliberately placed on the domain of
-   the CPUs whose slots it holds. A fixed-stride pool hands out blocks, not
-   page-aligned runs with per-page placement.
-2. **A contiguity dependency.** `reserveFreshSlotBlockLocked` asserts consecutive
-   reservations return consecutive VAs, because the slot array must be dense — and
-   says so: *"CONTIGUITY DEPENDENCY: consecutive reservations returning consecutive
-   VAs is a property of VMSubstrate's bump allocator, not a documented contract."*
-   A shared pool **breaks that** by interleaving carves from other consumers.
-
-### The shape of the answer
-
-**The single-page case has neither problem, and it is every machine up to 32
-CPUs** — the entire consumer-desktop target. For `cpuCount <= kSlotsPerPage`
-there is one page (so per-page placement already degrades to "pick one domain" —
-it picks `homeDomain(cpu 0)`) and one reservation (so contiguity is vacuous).
-
-A `PinnedBlockPool` with stride `cpuCount * sizeof(ReaderSlot)` serves it
-directly: 1,024 B → **4 slot blocks per page**, taking the per-address-space cost
-from 4,915 B to **~2,048 B** and the ceiling from ~218,000 to **~520,000**.
-
-Suggested shape, leaving the multi-page path untouched:
-
-```
-cpuCount <= kSlotsPerPage  -> PinnedBlockPool, stride cpuCount*sizeof(ReaderSlot)
-otherwise                  -> the existing page-per-group path, unchanged
-```
-
-The branch is honest rather than ugly: the cases genuinely differ in whether
-per-page placement means anything. Put the `if` where the reason is visible and
-say why.
-
-**Watch for**: `Domain::deinit` must return the block to whichever source gave it
-out, so `slotBlock` alone is no longer enough. `PinnedBlock` carries the domain
-for exactly this reason — storing one in `Domain` beside `slotBlock` is the
-obvious move.
-
-**Do not** simply retire the multi-page path: it exists for >32-CPU machines and
-its per-page placement is real. Unifying would need a contiguous-extent request
-from the pool, which is a bigger change than this item requires.
-
-### Gate
-
-RCU's own suite (`KernelRcuIntegrationTestRunner{,TSan}`, 61×2) plus the radix
-stress, whose ~1025 domain create/destroy pairs per boot is the only thing that
-exercises this path at volume. Add a packing test mirroring
-`radix_address_space_store_packs_blocks_into_a_page`, and **mutation-test it** — a
-packing test that passes vacuously tells you nothing.
-
----
+1. **The two Spencer decisions** in §0 (D-039 root bucket page, D-042 per-level
+   node freshness). Both unchanged and both still gating.
+2. **Calibration**, entirely untouched — see §0.
+3. **The freshness audit, walked deliberately** rather than by defect — see §0.
 
 ## 3. Traps worth not rediscovering
 

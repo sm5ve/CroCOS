@@ -71,6 +71,13 @@ namespace kernel::rcu::test {
     // The domain's slot block, for the RCU-DEC-043 freelist-recycling test:
     // it asserts the SAME storage comes back, not merely that nothing ran out.
     const void* slotAddress(const Domain& d);
+    // The sub-page slot pool's window cost: pages it has reserved, and how many
+    // slot blocks each of those pages holds. `blocksPerPage() > 1` is the whole
+    // reason the pooled path exists, so it is what the packing test asserts.
+    // Both read zero before the first pooled draw — the pool is inert until then.
+    size_t slotPoolPagesReserved();
+    size_t slotPoolBlocksPerPage();
+
     // Drop the RCU-DEC-043 block freelist. The harness re-mmaps its arena per
     // test, so a block recycled by the previous test dangles into unmapped
     // memory; the kernel's window lives as long as the kernel and never needs

@@ -33,6 +33,7 @@
 #include <CpuLocal.h>
 #include <interrupts/InterruptContextDepths.h>
 #include <mem/NUMA.h>
+#include <mem/PinnedBlockPool.h>
 #include <mem/VMSubstrate.h>
 #include <timing/timing.h>
 #include <core/math.h>
@@ -248,19 +249,71 @@ namespace {
     // same-entry install race (vmsmalloc DEC-051c), so it has to be the same
     // lock in both places.
     //
-    // The freelist recycles slot blocks. Reservations are kernel-lifetime and
-    // are never returned to VMSubstrate, so without recycling the reservation
-    // would grow with CUMULATIVE process churn until the static-buffer window
-    // ran out and every later fork failed — which is precisely the high-water-
-    // mark claim vmsmalloc DEC-050 makes. Every block is the same size (the
-    // slot count is fixed at boot), so one list suffices.
+    // Blocks are recycled rather than reserved afresh. Reservations are
+    // kernel-lifetime and are never returned to VMSubstrate, so without recycling
+    // the reservation would grow with CUMULATIVE process churn until the
+    // static-buffer window ran out and every later fork failed — which is
+    // precisely the high-water-mark claim vmsmalloc DEC-050 makes.
     //
-    // Linkage lives in the block's first word. Legal because a freed block holds
-    // no live object: deinit has already poisoned it, and init re-zeroes before
-    // constructing.
+    // ─── Two paths, and why the branch is honest ───────────────────────────
+    //
+    // A slot array of `cpuCount <= kSlotsPerPage` slots is ONE page, and the two
+    // things this code does with pages both go vacuous at one:
+    //
+    //   - **per-page NUMA placement** degrades to "pick a domain" (it picks CPU
+    //     0's), because there is no second page to place differently;
+    //   - **the contiguity dependency** below is a statement about consecutive
+    //     reservations, and there is only one.
+    //
+    // So the single-page case can come from a shared, sub-page-granular
+    // `PinnedBlockPool`, and it should: `sizeof(ReaderSlot)` is 128 B, so an
+    // 8-CPU machine's slot array is 1,024 B and a dedicated page wastes 75% of
+    // itself — on EVERY address space. Pooled, four of them share a page.
+    //
+    // That covers every machine up to 32 CPUs, which is the whole consumer-
+    // desktop target. Above it the array genuinely spans pages, per-page
+    // placement starts meaning something, and the old path — one whole-page
+    // reservation per page, contiguity checked, whole blocks recycled through
+    // `gFreeSlotBlocks` — is kept unchanged. Unifying the two would need a
+    // contiguous-extent request from the pool, i.e. the pool growing the one
+    // thing its header says it does not do.
+    //
+    // `gFreeSlotBlocks` linkage lives in the block's first word. Legal because a
+    // freed block holds no live object: deinit has already poisoned it, and init
+    // re-zeroes before constructing.
     Spinlock gDomainManagementLock;
     void*    gFreeSlotBlocks = nullptr;      // guarded by gDomainManagementLock
     size_t   gReservedBlockCount = 0;        // high-water mark, for the log
+
+    // The single-page path's storage. Constexpr-inert for the same reason
+    // `kernelDomain` is: no global constructor may touch VMSubstrate, which does
+    // not exist during cpp_init.
+    mm::PinnedBlockPool gSlotBlockPool;
+
+    // A drawn block, together with what deinit needs to give it back.
+    //
+    // `domain` doubles as the tag for WHICH path produced it, using DomainID's
+    // own null sentinel rather than a separate bool: a pooled block sits on
+    // exactly one domain and says which, and a multi-page block is deliberately
+    // spread across per-page placements, so "no single domain" and "not from the
+    // pool" are one fact rather than two fields that can disagree. A block
+    // misrouted to the pool anyway trips `PinnedBlockPool`'s domain-range assert
+    // instead of quietly corrupting its freelist.
+    struct SlotBlock {
+        unsigned char* ptr    = nullptr;
+        numa::DomainID domain = numa::DomainID{};   // null == the multi-page path
+
+        [[nodiscard]] bool pooled() const { return !(domain == numa::DomainID{}); }
+    };
+
+    // `Domain::slotBlockDomain` stores this as a raw uint16_t to keep
+    // <mem/NUMA.h> out of the public header; here is where the two spellings are
+    // held to each other, so a DomainID that grows a field or changes its null
+    // value breaks the build instead of silently misfiling recycled blocks.
+    static_assert(sizeof(numa::DomainID) == sizeof(uint16_t),
+                  "Domain::slotBlockDomain is a DomainID spelled raw");
+    static_assert(numa::DomainID{}.value == UINT16_MAX,
+                  "Domain::slotBlockDomain's default must be DomainID's null sentinel");
 
     void* popFreeSlotBlockLocked() {
         void* b = gFreeSlotBlocks;
@@ -340,13 +393,58 @@ namespace {
         return base;
     }
 
-    // Draw a slot block: recycled if one is free, freshly reserved otherwise.
-    // Caller holds gDomainManagementLock.
-    unsigned char* acquireSlotBlockLocked(size_t cpuCount, const char* name) {
+    // Draw a single-page slot block from the pool. Caller holds
+    // gDomainManagementLock — which is the pool's own contract, inherited from
+    // `reserveStaticBufferImpl`'s, so no second lock appears here.
+    SlotBlock drawPooledSlotBlockLocked(size_t cpuCount) {
+        const size_t slotBytes = cpuCount * sizeof(Core::rcu::ReaderSlot);
+
+        // The stride is fixed by the first caller, exactly as radix's
+        // ControlBlockStore does it. In the kernel `processorCount()` is constant
+        // after boot so every caller agrees; the harness varies it per fixture
+        // and resets the pool between them. The assert is what stops a larger
+        // later caller being handed a block sized for a smaller earlier one —
+        // which, with fixed-stride blocks packed adjacently, would be an
+        // out-of-bounds write into the NEXT address space's slots rather than
+        // merely a short array.
+        if (!gSlotBlockPool.ready()) gSlotBlockPool.init(slotBytes);
+        assert(slotBytes <= gSlotBlockPool.blockStride(),
+               "rcu: the slot pool was built for fewer CPUs than this domain needs");
+
+        // Page placement for a one-page array is CPU 0's domain — the same choice
+        // the multi-page path makes for its page 0, kept identical so the two
+        // paths do not disagree about placement on the machines where both could
+        // in principle run.
+        const numa::DomainID home =
+            numa::numaPolicy().homeDomain(static_cast<arch::ProcessorID>(0));
+
+        const mm::PinnedBlock got = gSlotBlockPool.allocateLocked(home);
+        if (!got) return {};
+
+        // A slot must not straddle a cache line differently than it would in a
+        // dedicated page: EpochDomain indexes at natural stride, and every
+        // false-sharing property of ReaderSlot rests on its alignment. The pool
+        // rounds strides to a cache line and carves from a page base, so this
+        // holds structurally today — the check is here so a future ReaderSlot
+        // that breaks it fails loudly rather than silently sharing lines.
+        assert(reinterpret_cast<uintptr_t>(got.ptr) % alignof(Core::rcu::ReaderSlot) == 0,
+               "rcu: pooled slot block is not ReaderSlot-aligned");
+        assert(!(got.domain == numa::DomainID{}),
+               "rcu: the pool reported a null domain for a block it handed out");
+
+        return {static_cast<unsigned char*>(got.ptr), got.domain};
+    }
+
+    // Draw a slot block: pooled when the array fits a page, otherwise recycled if
+    // one is free and freshly reserved if not. Caller holds
+    // gDomainManagementLock.
+    SlotBlock acquireSlotBlockLocked(size_t cpuCount, const char* name) {
+        if (cpuCount <= kSlotsPerPage) return drawPooledSlotBlockLocked(cpuCount);
+
         if (void* recycled = popFreeSlotBlockLocked()) {
-            return static_cast<unsigned char*>(recycled);
+            return {static_cast<unsigned char*>(recycled), numa::DomainID{}};
         }
-        return reserveFreshSlotBlockLocked(cpuCount, name);
+        return {reserveFreshSlotBlockLocked(cpuCount, name), numa::DomainID{}};
     }
 
     // Construct the ReaderSlot objects over a block that init has already
@@ -406,15 +504,12 @@ bool Domain::init(const char* name, size_t drainBatchBound) CROCOS_RCU_NOEXCEPT 
     // across this call self-deadlocks (RCU-DEC-043) — consumer reservation and
     // framework init are two independent rare acquisitions, never one hold
     // spanning both.
-    unsigned char* block = nullptr;
+    SlotBlock block;
     {
         LockGuard<Spinlock> guard(gDomainManagementLock);
         block = acquireSlotBlockLocked(cpuCount, name);
     }
-    if (block == nullptr) return false;
-
-    const size_t blockBytes =
-        divideAndRoundUp(cpuCount, kSlotsPerPage) * arch::smallPageSize;
+    if (block.ptr == nullptr) return false;
 
     // RCU-DEC-043 (i): ZERO BEFORE INITIALIZING. The zero-fill guarantee is per
     // RESERVATION (vmsmalloc DEC-051), not per domain, so a freelist-recycled
@@ -424,15 +519,22 @@ bool Domain::init(const char* name, size_t drainBatchBound) CROCOS_RCU_NOEXCEPT 
     // no-reclamation) or defeats the use-before-init assert. Zeroing here makes
     // every init valid regardless of block provenance, which is the only form
     // of the rule that does not depend on how the caller obtained its storage.
-    memset(block, 0, blockBytes);
+    //
+    // Exactly the slots, not the whole block: a pooled block's bytes past the
+    // slot array are the pool's stride padding and belong to nobody, and a
+    // multi-page block's last-page remainder holds no object either. Reader state
+    // — the thing a recycled block carries and this clause exists to erase —
+    // lives only in the slots.
+    memset(block.ptr, 0, cpuCount * sizeof(Core::rcu::ReaderSlot));
     memset(engineStorage, 0, sizeof(engineStorage));
 
-    Core::rcu::ReaderSlot* slots = constructSlots(block, cpuCount);
+    Core::rcu::ReaderSlot* slots = constructSlots(block.ptr, cpuCount);
 
     Engine* engine = new (detail::Access::storage(*this)) Engine(slots, cpuCount);
     engine->setDrainBatchBound(drainBatchBound);
 
-    slotBlock = block;
+    slotBlock       = block.ptr;
+    slotBlockDomain = block.domain.value;
 
     // RCU-DEC-043 (iii), install-before-publish: the block is fully mapped and
     // the engine fully constructed BEFORE `initialized` is set, so any reader
@@ -444,16 +546,29 @@ bool Domain::init(const char* name, size_t drainBatchBound) CROCOS_RCU_NOEXCEPT 
     // P2-DEC-004's verification target. The absence of this line is the
     // silent-failure mode the phase's failure table names as the worst one: a
     // domain that was never initialized scans clean and reclaims freely.
+    //
+    // What it reports is the WINDOW cost, not the page count, because that is
+    // the number this path is judged on and the only one that means the same
+    // thing on both paths: a pooled block's share of its page (1,024 B where a
+    // dedicated page was 4,096), against a multi-page block's whole reservation.
+    // One statement per branch and never two — `AtomicPrintStream` holds the log
+    // lock for the lifetime of the temporary, so a line split across statements
+    // can interleave with another CPU's.
+    const uint64_t windowBytes =
+        block.pooled()
+            ? static_cast<uint64_t>(arch::smallPageSize / gSlotBlockPool.blocksPerPage())
+            : static_cast<uint64_t>(divideAndRoundUp(cpuCount, kSlotsPerPage) *
+                                    arch::smallPageSize);
+    const char* provenance = block.pooled() ? "pooled" : "dedicated pages";
+
     if (drainBatchBound == Core::rcu::kUnboundedDrainBatch) {
         klog() << "rcu: domain [" << name << "] ready — " << static_cast<uint64_t>(cpuCount)
-               << " slots across "
-               << static_cast<uint64_t>(divideAndRoundUp(cpuCount, kSlotsPerPage))
-               << " page(s), drain batch unbounded\n";
+               << " slots, " << windowBytes << " B of window (" << provenance
+               << "), drain batch unbounded\n";
     } else {
         klog() << "rcu: domain [" << name << "] ready — " << static_cast<uint64_t>(cpuCount)
-               << " slots across "
-               << static_cast<uint64_t>(divideAndRoundUp(cpuCount, kSlotsPerPage))
-               << " page(s), drain batch " << static_cast<uint64_t>(drainBatchBound) << "\n";
+               << " slots, " << windowBytes << " B of window (" << provenance
+               << "), drain batch " << static_cast<uint64_t>(drainBatchBound) << "\n";
     }
     return true;
 }
@@ -470,8 +585,13 @@ bool Domain::deinit() CROCOS_RCU_NOEXCEPT {
     // sanctioned sequence is quiesce -> drainAllQuiescent() -> deinit().
     detail::Access::engine(*this).checkQuiescent();
 
-    // Read everything we need BEFORE poisoning.
-    void* block = slotBlock;
+    // Read everything we need BEFORE poisoning — now two fields, not one: a
+    // block must go back to the source that handed it out, and which source that
+    // was is recorded, not re-derived. Re-deriving it from `processorCount()`
+    // would work today and would silently misfile every block the moment the CPU
+    // count could change between init and deinit.
+    void*          block     = slotBlock;
+    const uint16_t blockHome = slotBlockDomain;
 
 #if CROCOS_RCU_DEBUG_CHECKS
     // Poison the whole block, THEN clear `initialized` — in that order.
@@ -483,13 +603,19 @@ bool Domain::deinit() CROCOS_RCU_NOEXCEPT {
     // freelisted domain would then sail past the check and reclaim freely.
     __builtin_memset(static_cast<void*>(this), 0xA5, sizeof(Domain));
 #endif
-    isInitialized = false;
-    domainName    = nullptr;
-    slotBlock     = nullptr;
+    isInitialized   = false;
+    domainName      = nullptr;
+    slotBlock       = nullptr;
+    slotBlockDomain = numa::DomainID{}.value;
 
     if (block != nullptr) {
+        const numa::DomainID home{blockHome};
         LockGuard<Spinlock> guard(gDomainManagementLock);
-        pushFreeSlotBlockLocked(block);
+        if (home == numa::DomainID{}) {
+            pushFreeSlotBlockLocked(block);
+        } else {
+            gSlotBlockPool.freeLocked(mm::PinnedBlock{block, home});
+        }
     }
     return true;
 }
@@ -775,10 +901,28 @@ namespace test {
     // and got a stale recycled block, and one scripted a reservation failure
     // that never fired because the freelist satisfied the request without ever
     // calling the reservation.
+    // Window cost, the number the pooled path exists to reduce. Zero pages
+    // before the first pooled draw, since the pool is inert until then.
+    size_t slotPoolPagesReserved() { return gSlotBlockPool.pagesReserved(); }
+    size_t slotPoolBlocksPerPage() {
+        return gSlotBlockPool.ready() ? gSlotBlockPool.blocksPerPage() : 0;
+    }
+
     void resetDomainManagementState() {
         LockGuard<Spinlock> guard(gDomainManagementLock);
         gFreeSlotBlocks     = nullptr;
         gReservedBlockCount = 0;
+
+        // The pool has no reset() and should not grow one: production never
+        // needs it — the static-buffer window outlives everything — and a door in
+        // the header that only tests open is how a reset eventually gets called
+        // in the kernel. Re-constructing in place is well-defined
+        // (PinnedBlockPool is trivially destructible) and gives the next fixture
+        // both a fresh freelist, which it needs because the arena it points into
+        // is about to be munmapped, and a fresh STRIDE, which it needs because
+        // fixtures vary processorCount() and the stride is fixed at first use.
+        gSlotBlockPool.~PinnedBlockPool();
+        new (&gSlotBlockPool) mm::PinnedBlockPool();
     }
 }
 #endif // CROCOS_RCU_TEST_HARNESS

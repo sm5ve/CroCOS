@@ -2000,3 +2000,88 @@ returning consecutive VAs** — a property of the bump allocator that a shared p
 breaks by interleaving carves. A single-page slot block (any machine up to 32
 CPUs) has neither problem and could use a pool; the multi-page case needs either
 a contiguous-extent request or for the contiguity dependency to be removed first.
+
+*Settled by D-048 below, along the line this paragraph predicted.*
+
+---
+
+## D-048 — RCU's reader-slot block, packed (the item D-047 left owed)
+
+`sizeof(ReaderSlot)` is 128 B, so an 8-CPU machine's slot array is 1,024 B and
+took a dedicated 4 KiB page — **75% of it wasted, on every address space**, which
+after D-047 made it 5× the radix control block and the dominant per-address-space
+cost. Four now share a page.
+
+| | before D-045 | after D-047 | now |
+|---|---|---|---|
+| RCU slot block, window cost | 4,096 B | 4,096 B | **1,024 B** |
+| radix block, window cost | 20,480 B | 819 B | 819 B |
+| total per address space | 24,576 B | 4,915 B | **~1,843 B** |
+| ceiling (concurrent AS) | ~43,700 | ~218,000 | **~580,000** |
+
+### The branch, and why it is honest rather than lazy
+
+Both of the obstacles the "Still owed" note names are **statements about pages**,
+and both go vacuous at one page:
+
+- *per-page NUMA placement* degrades to "pick a domain" — there is no second page
+  to place differently, and the code already picks CPU 0's domain;
+- *the contiguity dependency* is a claim about consecutive reservations, and
+  there is exactly one.
+
+So the single-page case takes a `PinnedBlockPool` and the multi-page case keeps
+the original path verbatim — whole-page reservations, contiguity checked,
+whole blocks recycled through `gFreeSlotBlocks`. `cpuCount <= kSlotsPerPage` is
+32 CPUs, i.e. the entire consumer-desktop target, so the kept path is the one
+that never runs on the hardware CroCOS aims at. Unifying them would need a
+contiguous-extent request from the pool — the one thing `PinnedBlockPool`'s
+header says it does not do — which is a larger change than this item.
+
+### Two decisions inside it
+
+**Provenance is recorded, not re-derived.** A block must go back to whichever
+source produced it, so `Domain` stores the DomainID beside `slotBlock`. It could
+instead recompute `cpuCount <= kSlotsPerPage` at deinit, which works today and
+silently misfiles every block the moment CPU count can differ between init and
+deinit. The DomainID doubles as the tag using its own null sentinel: a pooled
+block sits on one domain and names it (which `freeLocked` requires), and a
+multi-page block spans per-page placements and has no single domain — one fact,
+one field, no way for two fields to disagree. A block misrouted to the pool
+anyway trips `PinnedBlockPool`'s domain-range assert rather than corrupting it.
+
+**The stride is fixed by the first caller and asserted thereafter**, exactly as
+radix's `ControlBlockStore` does it. This is a genuinely new hazard rather than
+inherited caution: every old block was ≥ one page, so a block drawn when
+`processorCount()` was smaller was still big enough; a 128 B-per-CPU stride
+makes the same reuse an **out-of-bounds write into the next address space's
+slots**. Unreachable in the kernel — the boot log confirms the kernel domain
+already sees all 8 CPUs in `memory_management` — and immediately reachable in the
+harness, which is where it fired.
+
+### What this forced on the harness
+
+`resetDomainManagementState()` was documented as mandatory for every fixture that
+constructs a domain, and only `LifecycleTest` called it. That was harmless while
+the shared state was a freelist — nothing reaches a freelist unless a test calls
+`deinit` — and is not harmless now: the pool retains **carved blocks pointing
+into the fixture's arena**, plus a stride, both of which outlive the munmap. Four
+harnesses gained the call. The mismatched-stride assert is what surfaced it, at
+18 failing tests; without it the same fixtures would have handed out dangling
+memory whenever two consecutive fixtures happened to agree on CPU count.
+
+### Mutation-tested
+
+| Mutation | Caught by |
+|---|---|
+| pooled path disabled (`if (false && ...)`) | `..._pack_several_into_one_page` (block count) |
+| stride halved, guard assert removed | `..._pack_several_into_one_page` (gap), `..._does_not_reach_into_its_neighbour` |
+| multi-page arrays routed through the pool | `..._multi_page_slot_arrays_keep_their_dedicated_pages` |
+
+Two of the checks were vacuous when first written and the mutations are what
+showed it. The overlap loop sat *after* the block-count assertions, so the
+stride mutation aborted the test before reaching it — whichever assertion runs
+first is the only one a mutation demonstrates. And the neighbour test originally
+checked only slot 7 of the neighbouring domain, while a half-stride lands the
+corruption on a **different slot index** than the writer's; it now checks every
+slot. Both were reordered/widened until the mutation killed the check it was
+supposed to kill.

@@ -59,6 +59,12 @@
 // a property of the bump allocator that a shared pool would break by
 // interleaving carves. A consumer with that shape keeps reserving directly.
 //
+// Note what that does NOT exclude, because RCU is the example (radix D-048):
+// both obstacles are statements about pages, so both go vacuous at ONE page.
+// RCU therefore draws single-page slot arrays — every machine up to 32 CPUs —
+// from a pool, and keeps its own path only for the multi-page case. A consumer
+// whose block spans pages only SOMETIMES is not disqualified; it is two cases.
+//
 
 #ifndef CROCOS_PINNED_BLOCK_POOL_H
 #define CROCOS_PINNED_BLOCK_POOL_H

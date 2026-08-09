@@ -125,12 +125,20 @@ namespace kernel::mm::VMSubstrate {
     //
     //   - **No free path.** Every consumer that needs reuse hand-rolls a
     //     freelist over blocks this hands out: `kernel::rcu`'s
-    //     `gFreeSlotBlocks` and radix's `ControlBlockFreelist` are the same
+    //     `gFreeSlotBlocks` and radix's `ControlBlockFreelist` were the same
     //     structure written twice. The radix one had to grow NUMA partitioning
     //     and a size check (radix D-045) that the RCU one does not need only
     //     because its placement happens to be topology-derived rather than
     //     caller-supplied. A third consumer will write it a third time and get a
     //     different subset right.
+    //
+    // Both bullets are now addressed by `mm::PinnedBlockPool`, a layer over this
+    // one — see its header. Radix reserves through it exclusively; RCU does for
+    // slot arrays that fit a page (every machine up to 32 CPUs) and keeps
+    // `gFreeSlotBlocks` for the multi-page case, which needs per-page placement
+    // and the contiguity property noted below. What is written here stays true
+    // of THIS entry point, which is what a new consumer reaching for it directly
+    // needs to know.
     //
     // What is wanted: a pinned allocator **partitioned per NUMA domain**, with
     // sub-page suballocation and real free/reuse. Note what it does NOT need to
@@ -144,9 +152,9 @@ namespace kernel::mm::VMSubstrate {
     // free; only returning pages to the PageAllocator would break the invariant,
     // and no consumer has asked for that.
     //
-    // The current ceiling, for scale: ~131,000 concurrent address spaces at
-    // 8 KiB each, against a 1 GiB region. Sub-page packing alone roughly doubles
-    // it, and stops every consumer paying a page minimum.
+    // The ceiling, for scale, against a 1 GiB region: ~131,000 concurrent
+    // address spaces when both consumers paid a page minimum, ~580,000 now that
+    // neither does (radix D-047/D-048).
     void* tryReservePerDomainStaticBuffer(size_t byteSize, numa::DomainID d);
 
     // Returns the base VA of CPU `i`'s per-CPU CpuLocal page (sized via
