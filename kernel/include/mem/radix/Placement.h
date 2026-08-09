@@ -61,6 +61,7 @@
 #include <core/utility.h>   // the AssignmentPolicy concept's requires-clause
 #include <mem/radix/ClusterTable.h>
 #include <mem/radix/CoreTree.h>
+#include <mem/radix/DeferredRelease.h>
 #include <mem/radix/Geometry.h>
 
 namespace kernel::mm::radix {
@@ -157,7 +158,10 @@ namespace kernel::mm::radix {
 
             const ApplyStatus st =
                 tree.apply(va, va + span - 1, value, ApplyMode::OnlyIfEmpty);
-            if (st == ApplyStatus::Ok)          return {PlaceStatus::Ok, va};
+            if (st == ApplyStatus::Ok) {
+                noteProbeCount(k + 1);          // DEC-095's K, as consumed
+                return {PlaceStatus::Ok, va};
+            }
             if (st == ApplyStatus::OutOfMemory) return {PlaceStatus::OutOfMemory, 0};
             // ApplyStatus::Occupied — an ordinary miss. Probe again.
         }
@@ -174,15 +178,21 @@ namespace kernel::mm::radix {
         // presents as a cluster reporting itself full while most of it is empty:
         // a placement failure, not a crash, and one that looks exactly like
         // genuine exhaustion.
+        noteProbeFallback();                    // stage 1 exhausted K probes
         auto cursor = tree.freeRunScanFrom(base, base + size - 1);
+        uint64_t chunks = 0;
         while (!cursor.finished()) {
             uint64_t candidate = 0;
+            chunks++;
             if (!tree.findFreeRunChunk(cursor, span, kPlacementGranularity, candidate)) {
                 continue;   // budget spent; the cursor advanced
             }
             const ApplyStatus st =
                 tree.apply(candidate, candidate + span - 1, value, ApplyMode::OnlyIfEmpty);
-            if (st == ApplyStatus::Ok)          return {PlaceStatus::Ok, candidate};
+            if (st == ApplyStatus::Ok) {
+                noteScanChunks(chunks);         // DEC-095's scanChunk, as consumed
+                return {PlaceStatus::Ok, candidate};
+            }
             if (st == ApplyStatus::OutOfMemory) return {PlaceStatus::OutOfMemory, 0};
         }
 

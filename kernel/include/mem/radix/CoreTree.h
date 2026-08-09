@@ -2086,6 +2086,7 @@ namespace kernel::mm::radix {
             // the peak an attempt actually held — abandonment returns records,
             // so a retried operation's demand is per attempt, not cumulative.
             noteDrawCount(a.heldReleaseCount);
+            noteDetachSize(a.detachNodes);
             DeferredRelease* r = a.heldReleases;
             while (r != nullptr) {
                 DeferredRelease* const next = r->next.load(kPrivateInit);
@@ -2529,7 +2530,10 @@ namespace kernel::mm::radix {
         // address. Because the refcount keeps it alive, it does not even crash.
         ApplyStatus planDetachment(NodeRef node, unsigned level, uint64_t nodeBase,
                                    Attempt& a) {
-            if (++a.detachNodes > DetachBudget) return ApplyStatus::NeedsDecomposition;
+            if (++a.detachNodes > DetachBudget) {
+                noteDecomposition();
+                return ApplyStatus::NeedsDecomposition;
+            }
             if (!a.claims.addOrMerge(node, level, nodeBase, valenceMask(G, level),
                                      /*wholeNode=*/true)) {
                 return ApplyStatus::NeedsDecomposition;

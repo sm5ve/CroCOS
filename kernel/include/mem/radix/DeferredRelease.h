@@ -277,6 +277,47 @@ namespace kernel::mm::radix {
         [[nodiscard]] uint64_t total() const { return operations.load(kCensusAccounting); }
     };
 
+    // ─── DEC-077's evidence: the detachment-size distribution ──────────────
+    //
+    // `detachBudget` bounds the nodes ONE attempt may mark and claim; exceeding
+    // it returns `NeedsDecomposition` and §6.5 splits the operation into units.
+    // Claim.h brackets the shapes — a full C1 subtree is 33 nodes and never
+    // decomposes at 64, a full C0 is 1,057 and always does — and says "Phase 5
+    // measures it".
+    //
+    // What is recorded is the SIZE, not the decomposition rate, and that is the
+    // better instrument: the rate at any budget follows from the distribution,
+    // while a rate measured at one budget says nothing about another. The same
+    // buckets as the draw histogram, so the two read alike.
+    using DetachHistogram = DrawHistogram;
+    // DEC-059's: objects destroyed by one pump, against `drainBatchBound`.
+    using DrainHistogram = DrawHistogram;
+
+#ifdef CROCOS_RADIX_DRAW_HISTOGRAM
+    inline DetachHistogram gDetachHistogram;
+    // Attempts that hit the budget and had to decompose.
+    inline Atomic<uint64_t> gDecompositions{0};
+    inline void noteDetachSize(uint64_t nodes) { if (nodes) gDetachHistogram.note(nodes); }
+    inline void noteDecomposition() { gDecompositions.fetch_add(1, kCensusAccounting); }
+    inline DrainHistogram gDrainHistogram;
+    inline void noteDrainBatch(uint64_t destroyed) { gDrainHistogram.note(destroyed); }
+    // DEC-095's two halves: probes consumed by a placement that succeeded in
+    // stage 1, and chunks consumed by one that fell through to the stage-2 scan.
+    inline DrawHistogram gProbeHistogram;
+    inline DrawHistogram gScanChunkHistogram;
+    inline Atomic<uint64_t> gProbeFallbacks{0};
+    inline void noteProbeCount(uint64_t probes) { gProbeHistogram.note(probes); }
+    inline void noteProbeFallback() { gProbeFallbacks.fetch_add(1, kCensusAccounting); }
+    inline void noteScanChunks(uint64_t chunks) { gScanChunkHistogram.note(chunks); }
+#else
+    inline void noteDetachSize(uint64_t) {}
+    inline void noteDecomposition() {}
+    inline void noteDrainBatch(uint64_t) {}
+    inline void noteProbeCount(uint64_t) {}
+    inline void noteProbeFallback() {}
+    inline void noteScanChunks(uint64_t) {}
+#endif
+
 #ifdef CROCOS_RADIX_DRAW_HISTOGRAM
     inline DrawHistogram gDrawHistogram;
     inline void noteDrawCount(uint64_t held) { gDrawHistogram.note(held); }

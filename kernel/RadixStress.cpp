@@ -143,6 +143,7 @@ namespace radix_stress {
     Atomic<uint64_t> gFixed{0};           // load-bearing: no MAP_FIXED, no detachment
     Atomic<uint64_t> gLookups{0};
     Atomic<uint64_t> gBulkUnmaps{0};
+    Atomic<uint64_t> gDenseRegions{0};
     Atomic<uint64_t> gOom{0};
     Atomic<uint64_t> gGrowths{0};
     Atomic<uint64_t> gClusters{0};        // D-030's stranded-root allowance is 2x this
@@ -439,6 +440,68 @@ namespace radix_stress {
                     VMS::destroy(VMS::SafePtr<rdx::Mapping>(m));
                     gOom.fetch_add(1, RELAXED);
                 }
+            } else if (row == 13) {
+                // ── A dense region, built then torn down whole ─────────────
+                //
+                // **The one shape no other row can make, and the reason two
+                // calibration items had no data.** Every other row places
+                // through DEC-032's probe, which inserts random guard gaps
+                // precisely so mappings are NOT adjacent — so nodes hold one
+                // record apiece, the tree barely subdivides, and a slot whose
+                // child is fully covered by an operation's range essentially
+                // never occurs. `detachBudget` was therefore measured at zero
+                // detachments in 1.9M attempts, which says nothing about the
+                // budget.
+                //
+                // This builds the opposite on purpose: distinct records in
+                // ADJACENT granules, which forces subdivision, and then one
+                // operation over the whole run, which fully covers the child
+                // and dispatches to DetachChild. It is a realistic shape as well
+                // as a useful one — a linker mapping a library's segments
+                // individually and unmapping it as a unit does exactly this.
+                // **PAGE-granular, and that is the whole trick.** A record
+                // covering a slot's entire span is stored as a LEAF in that
+                // slot — so a run of adjacent GRANULE-sized records fills a
+                // level-5 node's leaf slots and subdivides nothing, which is why
+                // the first version of this row produced 102,408 dense regions
+                // and still zero detachments. `kPlacementGranularity` is 64 KiB,
+                // which is exactly `nodeSpan(level 6)`. Records SMALLER than the
+                // slot are what force a child node to exist.
+                //
+                // One granule densified with pages = one level-6 node under a
+                // level-5 slot. Unmapping whole granules then fully covers those
+                // children and dispatches to DetachChild. Sixteen of them is a
+                // whole level-5 node, which detaches as 1 + 16 = 17.
+                const bool     wide  = ((r >> 33) & 7) == 0;
+                const unsigned gran  = wide ? 16u : 1u + static_cast<unsigned>((r >> 37) % 4);
+                const uint64_t base  = clusterLo + ((r >> 45) % 256) * kGranule * 16;
+                const uint64_t pages = kGranule / arch::smallPageSize;
+                unsigned built = 0;
+                for (unsigned g = 0; g < gran; g++) {
+                    for (uint64_t i = 0; i < pages; i++) {
+                        const uint64_t va = base + g * kGranule + i * arch::smallPageSize;
+                        rdx::Mapping* m = tryMakeMapping(va);
+                        if (m == nullptr) { g = gran; break; }
+                        const auto st = tree.apply(va, va + arch::smallPageSize - 1, m,
+                                                   rdx::ApplyMode::Overwrite);
+                        if (st != rdx::ApplyStatus::Ok) {
+                            // Never published: §7.3's shallow discard.
+                            rdx::noteMappingDestroyed();
+                            VMS::destroy(VMS::SafePtr<rdx::Mapping>(m));
+                            g = gran;
+                            break;
+                        }
+                    }
+                    if (g < gran) built++;
+                }
+                if (built != 0) {
+                    // One operation over the whole run: a FULL cover of every
+                    // child it built, so every release rides a node deleter and
+                    // this draws no records at all — the cheap row of §7.1 and
+                    // the expensive one for DEC-077, which is the point.
+                    (void)tree.apply(base, base + built * kGranule - 1, nullptr);
+                    gDenseRegions.fetch_add(1, RELAXED);
+                }
             } else if (row == 14) {
                 // ── Bulk unmap: a range covering SEVERAL distinct records ──
                 //
@@ -538,7 +601,21 @@ namespace radix_stress {
             }
 
             gHeartbeat[static_cast<size_t>(me)].beat.store(++beat, RELAXED);
-            if ((r >> 60) == 0) (void)rcu::tryAdvance(block.domain);
+            if ((r >> 60) == 0) {
+                // DEC-059's evidence. `drain` reports what it destroyed and
+                // `tryAdvance` does not, so the instrumented pump uses it — the
+                // sweep is the same work either way; only the epoch-advance
+                // attempt differs, and that is not what the bound governs.
+                //
+                // The question the bound poses is two-sided: unbounded turns a
+                // #PF into an arbitrarily long deleter run, too small strands
+                // residue behind the pump rate. Both are answered by the same
+                // distribution — **does a sweep ever reach the bound?** If the
+                // batch never fills, the bound cannot be stranding anything and
+                // raising it would change nothing.
+                const size_t reclaimed = rcu::drain(block.domain);
+                rdx::noteDrainBatch(reclaimed);
+            }
         }
     }
 
@@ -613,6 +690,7 @@ namespace radix_stress {
                << " place=" << gPlacements.load(RELAXED)
                << " unmap=" << gUnmaps.load(RELAXED)
                << " bulk=" << gBulkUnmaps.load(RELAXED)
+               << " dense=" << gDenseRegions.load(RELAXED)
                << " fixed=" << gFixed.load(RELAXED)
                << " lookup=" << gLookups.load(RELAXED)
                << " grow=" << gGrowths.load(RELAXED)
@@ -674,6 +752,45 @@ namespace radix_stress {
                << " 9-16:" << h.bucket(6) << " 17-32:" << h.bucket(7) << " 33-64:" << h.bucket(8)
                << " 65-128:" << h.bucket(9) << " 129-230:" << h.bucket(10)
                << " OVER-CEILING:" << h.bucket(11) << "\n";
+    }
+
+    // DEC-077's evidence, same shape and same population of attempts, so the two
+    // distributions can be read against each other.
+    void drainHistogram() {
+        const auto& h = rdx::gDrainHistogram;
+        klog() << "radixStress: objects destroyed per pump (DEC-059) — n=" << h.total()
+               << " max=" << h.max()
+               << " bound=" << static_cast<uint64_t>(rdx::kDrainBatchBound)
+               << "\n  0:" << h.bucket(0) << " 1:" << h.bucket(1) << " 2:" << h.bucket(2)
+               << " 3:" << h.bucket(3) << " 4:" << h.bucket(4) << " 5-8:" << h.bucket(5)
+               << " 9-16:" << h.bucket(6) << " 17-32:" << h.bucket(7) << " 33-64:" << h.bucket(8)
+               << " 65-128:" << h.bucket(9) << " 129-230:" << h.bucket(10)
+               << " >230:" << h.bucket(11) << "\n";
+    }
+
+    void placementHistogram() {
+        const auto& p = rdx::gProbeHistogram;
+        const auto& c = rdx::gScanChunkHistogram;
+        klog() << "radixStress: placement probes used (DEC-095) — n=" << p.total()
+               << " max=" << p.max() << " K=" << static_cast<uint64_t>(rdx::kProbeCount)
+               << " fallbacks=" << rdx::gProbeFallbacks.load(rdx::kCensusAccounting)
+               << " scanChunkRuns=" << c.total() << " maxChunks=" << c.max()
+               << "\n  1:" << p.bucket(1) << " 2:" << p.bucket(2) << " 3:" << p.bucket(3)
+               << " 4:" << p.bucket(4) << " 5-8:" << p.bucket(5) << " 9-16:" << p.bucket(6)
+               << "\n";
+    }
+
+    void detachHistogram() {
+        const auto& h = rdx::gDetachHistogram;
+        klog() << "radixStress: detachment size in nodes (DEC-077) — n=" << h.total()
+               << " max=" << h.max()
+               << " budget=" << static_cast<uint64_t>(rdx::kDetachBudget)
+               << " decompositions=" << rdx::gDecompositions.load(rdx::kCensusAccounting)
+               << "\n  1:" << h.bucket(1) << " 2:" << h.bucket(2)
+               << " 3:" << h.bucket(3) << " 4:" << h.bucket(4) << " 5-8:" << h.bucket(5)
+               << " 9-16:" << h.bucket(6) << " 17-32:" << h.bucket(7) << " 33-64:" << h.bucket(8)
+               << " 65-128:" << h.bucket(9) << " 129-230:" << h.bucket(10)
+               << " >230:" << h.bucket(11) << "\n";
     }
 #endif
 
@@ -777,6 +894,9 @@ namespace radix_stress {
                 st::liveness(me);
 #ifdef CROCOS_RADIX_DRAW_HISTOGRAM
                 st::drawHistogram();
+                st::detachHistogram();
+                st::drainHistogram();
+                st::placementHistogram();
 #endif
             }
         }

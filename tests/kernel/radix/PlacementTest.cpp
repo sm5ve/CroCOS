@@ -441,3 +441,91 @@ TEST(radix_assignment_seam_accepts_a_second_policy) {
     ASSERT_EQ(unsigned{1}, toy.repoints);
     ASSERT_EQ(size_t{1}, toy.bucketFor(arch::ProcessorID{0}, 5));
 }
+
+// ─── DEC-095's K, across the occupancy range it was written for ────────────
+
+TEST(radix_placement_probe_calibration_report) {
+    // The in-kernel stress answers this at LOW occupancy and nothing else:
+    // 99.8% of 331,545 placements land on the first probe and the stage-2 scan
+    // never runs. That is not the regime DEC-095 is about. Its own rationale is
+    // explicit — "a process with a few hundred MiB in a 1 GiB cluster probes at
+    // tens of percent, so the scan is a priced slow path rather than a rare
+    // fallback" — and a sparse workload cannot see it.
+    //
+    // So: sweep occupancy and report what K actually buys. A probe hits an
+    // occupied position with probability ≈ occupancy, so the expected number of
+    // probes to a hit is 1/(1-p) and the fallback rate is p^K; the measurement
+    // is worth having because guard gaps make the effective occupancy higher
+    // than the nominal one, by an amount no closed form gives.
+    std::printf("\n  placement probes vs cluster occupancy (K=%u, guard <= %u granules)\n",
+                rdx::kProbeCount, rdx::kMaxGuardGranules);
+    std::printf("      occupancy | placements | mean probes | max | fell to scan | "
+                "max chunks\n");
+
+    for (unsigned pct : {10u, 25u, 50u, 75u, 90u}) {
+        Harness h;
+        TreeA   tree;
+        // A C2 root: 1 MiB of span per slot at 16 slots, small enough that
+        // filling it to 90% is quick and large enough that probing is not
+        // trivially cornered.
+        ASSERT_TRUE(tree.init(4, 0, h.domain, h.releasePools));
+        Entropy e{pct};
+
+        const uint64_t positions = tree.span() / kGran;
+        const uint64_t target    = positions * pct / 100;
+
+        // Fill deterministically to the target occupancy, striding so the
+        // occupied set is spread rather than packed at the bottom — packed
+        // would make probing find the free tail immediately and report a
+        // fallback rate of zero at every occupancy.
+        uint64_t placed = 0;
+        for (uint64_t i = 0; i < positions && placed < target; i++) {
+            const uint64_t va = ((i * 7919) % positions) * kGran;
+            auto* m = makeMapping(va);
+            ASSERT_TRUE(m != nullptr);
+            if (tree.apply(va, va + kGran - 1, m, rdx::ApplyMode::OnlyIfEmpty)
+                == rdx::ApplyStatus::Ok) {
+                placed++;
+            } else {
+                rdx::noteMappingDestroyed();
+                VS::destroy(VS::SafePtr<rdx::Mapping>(m));
+            }
+        }
+
+        rdx::gProbeHistogram.reset();
+        rdx::gScanChunkHistogram.reset();
+        rdx::gProbeFallbacks.store(0, rdx::kCensusAccounting);
+
+        unsigned attempts = 0, ok = 0;
+        for (unsigned k = 0; k < 200; k++) {
+            auto* m = makeMapping(0);
+            ASSERT_TRUE(m != nullptr);
+            attempts++;
+            const auto r = rdx::placeInCluster(tree, kGran, m, e);
+            if (r.status == rdx::PlaceStatus::Ok) {
+                ok++;
+            } else {
+                rdx::noteMappingDestroyed();
+                VS::destroy(VS::SafePtr<rdx::Mapping>(m));
+            }
+        }
+
+        const auto& ph = rdx::gProbeHistogram;
+        uint64_t weighted = 0, n = 0;
+        for (unsigned b = 1; b <= 4; b++) { weighted += b * ph.bucket(b); n += ph.bucket(b); }
+        weighted += 6 * ph.bucket(5);  n += ph.bucket(5);      // 5-8 midpoint
+        std::printf("      %8u%% | %10u | %11.2f | %3llu | %12llu | %10llu\n",
+                    pct, ok, n ? double(weighted) / double(n) : 0.0,
+                    (unsigned long long)ph.max(),
+                    (unsigned long long)rdx::gProbeFallbacks.load(rdx::kCensusAccounting),
+                    (unsigned long long)rdx::gScanChunkHistogram.max());
+        (void)attempts;
+
+        ASSERT_TRUE(tree.apply(0, tree.span() - 1, nullptr) == rdx::ApplyStatus::Ok);
+        quiesce(h);
+        tree.destroyTree();
+        quiesce(h);
+        assertNoLiveObjects("probe calibration");
+    }
+    std::printf("\n");
+}

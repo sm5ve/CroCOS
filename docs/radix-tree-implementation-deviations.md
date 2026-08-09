@@ -2652,3 +2652,112 @@ So the live options are:
 **Not decided.** The distribution is now measurable on demand
 (`CROCOS_RADIX_DRAW_HISTOGRAM`, implied by the stress) and the worst case is
 reproducible in the harness, which is what the item asked for.
+
+---
+
+## D-055 — Phase 5's calibration pass
+
+Every Provisional constant, measured or consciously retained. The exit gate asks
+for "the calibration table filled in with measured values and the spec's
+Provisional markers resolved or consciously retained", and the second clause is
+doing real work here: three items are cache-effect questions that no TCG-hosted
+measurement can answer, and saying so is the honest close rather than inventing
+a number.
+
+### The table
+
+| Constant | Value | Measured | Outcome |
+|---|---|---|---|
+| `detachBudget` (DEC-077) | 64 | max **17** nodes over 57,050 detachments; **0 decompositions** | **Retained.** Nothing below a 32 MiB dense region approaches it |
+| `drainBatchBound` (DEC-059) | 64 | max **18** destroyed per pump over 49,221 pumps | **Retained.** The batch never fills; 3.5× headroom |
+| `kProbeCount` K (DEC-095) | 8 | 99.8% first-probe in the stress; **but 13–98% fall to the scan** across 10–90% occupancy in the harness | **Retained, with a corrected model** — see below |
+| `kScanChunk` (DEC-095) | 64 | ≤ **8** chunks per fallback scan | **Retained.** Bounds the same quantity as `detachBudget`, and binds no harder |
+| `kDescentCacheEntries` (DEC-079) | 4 | 96.9% hit at ≤4 hot regions; 0% at 8; degradation is **per-index, not global** | **Retained.** 8 entries doubles a per-CPU-per-address-space cost for the tail |
+| `DeferredRelease` pool (ITEM-084) | 230 | max **2** draws over 4.77M attempts; constructed worst case reaches the model exactly | **Open** — D-054 has the argument |
+| ITEM-055, ITEM-002, ITEM-031 | — | not measurable under TCG | **Consciously retained** — see below |
+
+### DEC-095's model is wrong in a way the measurement names
+
+DEC-095 reasons about probe success from **occupancy**: "a process with a few
+hundred MiB in a 1 GiB cluster probes at tens of percent, so the scan is a priced
+slow path rather than a rare fallback". The stress agreed with the optimistic
+half — 99.8% of 331,545 placements landed on the first probe — because its
+clusters are sparse. The harness sweep is the other half:
+
+```
+      occupancy | placements | mean probes | max | fell to scan | max chunks
+            10% |        200 |        2.84 |   8 |           27 |          1
+            25% |        200 |        3.14 |   8 |           48 |          2
+            50% |        200 |        3.44 |   8 |          101 |          6
+            75% |        128 |        4.03 |   8 |          166 |          8
+            90% |         52 |        3.25 |   7 |          196 |          8
+```
+
+**At 10% occupancy, 13.5% of placements already fall through all eight probes** —
+against the `p^K` ≈ 10⁻⁸ a naive occupancy model predicts. The cause is not
+occupancy: it is the **guard gaps**. A probe must find its span *and* up to
+`kMaxGuardGranules` clear on each side, so a one-granule mapping tests a
+nine-granule window and the effective rejection probability is roughly `1 -
+(1-p)⁹`. Guard gaps, not occupancy, dominate the fallback rate.
+
+Two consequences worth carrying:
+
+- **The scan is the normal path above ~25% occupancy**, not a rare fallback.
+  DEC-095 was right that it is "a priced slow path" and wrong about when it is
+  paid. It behaves: ≤8 chunks, and it finds space whenever space exists.
+- **A cluster is effectively full long before its occupancy says so.** At 90%
+  nominal occupancy only 52 of 200 placements succeeded, because 10% free spread
+  thinly contains no nine-granule window. That is DEC-091 policy-relevant: the
+  grow-or-repoint trigger should key off placement failure, which it already
+  does, and not off an occupancy threshold, which would fire far too late.
+
+**The caveat this measurement carries**: the fill is maximally *spread* (a
+stride-7919 pattern), which is the worst case for guard gaps. A clustered fill
+leaves contiguous free runs and would probe far better. The curve is therefore an
+upper bound on the fallback rate, and the real workload sits somewhere between it
+and the stress's sparse 0%.
+
+### Why two knobs had no data until the workload was fixed
+
+`detachBudget` measured **zero detachments in 1.9M attempts**, and that was an
+artifact twice over — the same trap D-054 hit:
+
+1. Every stress row unmapped exactly the span it placed, so no operation ever
+   fully covered a *child*. Fixed by a dense-region row.
+2. The first dense row used **granule**-sized records, and a record covering a
+   slot's whole span is stored as a LEAF — `kPlacementGranularity` is 64 KiB,
+   which is exactly `nodeSpan(level 6)`. 102,408 dense regions still produced
+   zero detachments. Records must be **smaller** than the slot to force a child
+   to exist; page-granular density is what finally did it.
+
+With that, the distribution matches Claim.h's analytic bracket exactly: a
+densified granule detaches as 1 node, a full level-5 node as **17** (1 + 16),
+which is the 17-32 bucket holding 7,241 of 57,050 samples. The budget of 64 sits
+above every shape below the multi-MiB range, exactly as the comment predicted.
+
+### Consciously retained, with what would settle each
+
+- **ITEM-055 (state-word placement vs false sharing).** A 288 B node spans five
+  cache lines; where the writer-owned state word sits relative to reader-owned
+  slots is a **false-sharing** question. TCG models no cache, so `-icount` cannot
+  see it — the spec names `-icount` for this item, and that is the one place its
+  method is wrong. Settled by hardware counters (or a cache simulator) on a
+  multi-CPU run, comparing state-word-first against state-word-on-its-own-line.
+- **ITEM-002 (bit-split assignment).** 5/5/4 is one valid arrangement of DEC-031's
+  14 bits. Choosing between arrangements needs depth-vs-fanout costs that are
+  again cache-dominated, and a retune invalidates every memory figure in §5.1.
+  Retained; the measurement that would move it is the same one ITEM-055 needs.
+- **ITEM-031 (leaf-only compression).** Blocked on ITEM-002 by its own note.
+
+### ITEM-024 — answered from the code, not a measurement
+
+"Can the random probe's verification descent be fused with the insert descent?"
+**It already is**, and has been since DEC-007: `ApplyMode::OnlyIfEmpty` moves the
+emptiness check inside the attempt, where the claims freeze every slot it will
+write, so a successful probe is one traversal. The item's premise — two
+traversals — describes only the **guard check**, which is deliberately unfused
+and says so at length: claiming the gap would turn two placements that merely
+want breathing room into two that conflict. Measured cost of what remains: a mean
+of 2.84–4.03 probe iterations at 10–75% occupancy, each one guard enumerate plus
+one fused verify-install. **Closeable as already-done**, with the guard check
+recorded as intentionally separate.
