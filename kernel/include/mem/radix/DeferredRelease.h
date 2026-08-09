@@ -406,6 +406,14 @@ namespace kernel::mm::radix {
     // process, not phases of one.
     inline constexpr unsigned kPromotionThreshold = 4;
 
+    // Consecutive replenish rounds before a shortfall is treated as a defect
+    // rather than as contention for the shared reserve (D-056). Generous on
+    // purpose: the legitimate worst case is every other CPU of the address space
+    // borrowing the reserve ahead of this one, each for a grace period, so a
+    // bound tight enough to be interesting would fire on a busy machine. What it
+    // still catches is the case worth catching — records that never come home.
+    inline constexpr unsigned kShortfallRoundLimit = 64;
+
     struct DeferredReleasePools {
         // ─── The array is RUNTIME-SIZED, and the storage is the caller's ────
         //

@@ -2847,3 +2847,60 @@ became a **total** rather than per-pool, since a refill legitimately moves recor
 between pools; it still catches a record drawn and never returned.
 
 Suite 171×2. Six clean boots, residue at or below the DEC-096 bound.
+
+---
+
+## D-057 — CORRECTION to D-056: what a shared reserve does to the retry bound
+
+D-056 claimed "the reserve holds one operation's worst case, so a retry after a
+successful refill has enough for any shape". **That is true only if the refill
+succeeds in full**, and with one reserve shared by every CPU of an address space
+it need not. Spencer asked the question directly — what happens when several CPUs
+want a wide draw at once — and the honest answer separates two things D-056 ran
+together.
+
+### Safety and liveness: retained
+
+Two CPUs both needing a wide draw in the same address space:
+
+1. CPU0 shortfalls, takes the lock, refills — and takes the **whole** reserve,
+   because the refill asks for `reserveDepth()`. Reserve empty.
+2. CPU0 draws and commits; those records are now **in flight in RCU bags** and
+   return to the reserve only when their deleters run.
+3. CPU1 shortfalls, finds the reserve empty, and **its own `barrier` cannot help**
+   — a barrier drives the calling CPU's retirees, and CPU1 has none.
+
+It still terminates, for two reasons worth stating because neither is luck:
+
+- **A refill asks for the whole reserve**, so two CPUs can never each hold half
+  and stall. The loser gets nothing and retries intact. Had the refill been
+  chunked, the symmetric split would be a genuine deadlock — which is a second,
+  independent argument for the bulk rule D-056 adopted for a different reason.
+- **RCU's sweep is domain-wide** (RCU-DEC-006 stealing), so the waiting CPU's own
+  `drain` runs the borrower's expired deleters and pushes the records back to the
+  reserve. The waiter is not dependent on the borrower being scheduled.
+
+### The bound: lost, and the assert with it
+
+What does not survive is "one replenish round suffices". The old
+`consecutiveShortfalls <= 1` assert was exact under the per-CPU-ceiling design —
+a second round could only mean the ceiling derivation was wrong — and its message
+said so: *"a sizing error and not contention"*. Under a shared reserve a second
+round **is** contention, and the assert would fire on correct behaviour the first
+time two CPUs wanted wide draws at once.
+
+Replaced with `kShortfallRoundLimit = 64`, and the change of character is the
+point: it is no longer an invariant but a **defect detector**. Many consecutive
+rounds means the records are not merely contended but never coming home — a leak,
+a stalled epoch, or a `homePool` pointing at nothing — which is a bug in a way
+that a handful of contended rounds is not.
+
+### What this costs, stated plainly
+
+A wide operation on a busy address space can now wait a grace period per
+competing CPU rather than completing after one barrier. That is the price of
+trading `cpuCount × ceiling` records for `cpuCount × 32 + ceiling`, it falls
+only on the pathological shape D-054 measured at **zero occurrences** in a
+realistic workload, and it is a latency cost rather than a correctness one. If a
+workload ever shows it, the answer is not a bigger reserve — it is per-CPU
+promotion, which already exists and reacts to exactly this signal.

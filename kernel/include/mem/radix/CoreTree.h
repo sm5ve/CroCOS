@@ -1461,11 +1461,41 @@ namespace kernel::mm::radix {
                     // livelock with no output.
                     ++consecutiveShortfalls;
                     surplus.borrowed = true;
-                    assert(consecutiveShortfalls <= 1,
-                           "radix: a DeferredRelease shortfall survived a barrier replenish "
-                           "— the per-CPU population is smaller than one operation's "
-                           "ceiling (§7.1's edge sum), which is a sizing error and not "
-                           "contention");
+                    // ─── Why this is no longer "at most one round" (D-056) ──
+                    //
+                    // It used to be exact: every CPU's own pool held the full
+                    // ceiling, so one barrier — which brings this CPU's retirees
+                    // home — always sufficed, and a second consecutive shortfall
+                    // could only mean the ceiling derivation was wrong.
+                    //
+                    // With ONE reserve shared by every CPU of an address space,
+                    // a second round is legitimate contention. Two CPUs both
+                    // needing a wide draw: the first to take the lock refills
+                    // and takes the WHOLE reserve, and its records are then in
+                    // flight in RCU bags until a grace period ends. The second
+                    // CPU finds the reserve empty and cannot be rescued by its
+                    // own barrier, which drives only its own retirees.
+                    //
+                    // **Progress is still guaranteed, by two properties.**
+                    // First, a refill asks for the whole reserve, so two CPUs
+                    // can never each hold half and stall — the loser gets
+                    // nothing and retries intact, rather than both deadlocking
+                    // on fragments. Second, RCU's sweep is domain-wide
+                    // (RCU-DEC-006 stealing), so the waiting CPU's own `drain`
+                    // runs the borrower's expired deleters and pushes the
+                    // records back to the reserve. What is lost is only the
+                    // BOUND: the wait is paced by a grace period, not by one
+                    // replenish.
+                    //
+                    // So the check becomes a defect detector rather than an
+                    // invariant. Many consecutive rounds means records are not
+                    // coming back at all — a leak, a stalled epoch, or a
+                    // `homePool` that no longer points anywhere real — which is
+                    // a bug in a way that a handful of contended rounds is not.
+                    assert(consecutiveShortfalls <= kShortfallRoundLimit,
+                           "radix: DeferredRelease shortfalls are not resolving — after this "
+                           "many replenish rounds the records are not merely contended, they "
+                           "are not coming home at all (§7.1 / ITEM-084)");
                     continue;
                 }
                 consecutiveShortfalls = 0;
