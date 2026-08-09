@@ -256,10 +256,34 @@ namespace kernel::mm::radix {
     // `deferredReleaseBound(G)`, and CoreTree::init asserts the pool it is handed
     // is at least that deep — so an undersized pool is caught at bind time
     // rather than as a mysterious shortfall much later.
+    // Bytes of pool storage a given CPU count needs. Exported because the
+    // storage is the CALLER's to provide — see the note on `create`.
+    constexpr size_t deferredReleasePoolBytes(size_t cpus) {
+        return cpus * sizeof(DeferredReleasePool);
+    }
+
     struct DeferredReleasePools {
-        // Sized for the compile-time processor cap. The heads are cache-line
-        // aligned because every CPU's deleters push into every CPU's pool.
-        DeferredReleasePool pools[arch::MAX_PROCESSOR_COUNT];
+        // ─── The array is RUNTIME-SIZED, and the storage is the caller's ────
+        //
+        // It used to be `DeferredReleasePool pools[arch::MAX_PROCESSOR_COUNT]`
+        // by value — 256 cache-line-aligned entries, **unconditionally**. That
+        // is 16,448 bytes of a 16,704-byte control block: on an 8-CPU machine,
+        // 98% of the per-address-space pinned reservation was padding for CPUs
+        // that do not exist, and it set the static-buffer window's ceiling at
+        // roughly 44,000 concurrent address spaces instead of half a million.
+        //
+        // A POINTER rather than an allocation of its own, because the pool heads
+        // are the one thing that must not move to vmsmalloc: every CPU's
+        // deleters push into every CPU's pool, so the heads sit on other CPUs'
+        // hot paths, and DEC-082's round-4 amendment put them in pinned storage
+        // precisely so they carry no `ensureTLBEntryFresh` obligation. Allocating
+        // the array here would hand that obligation straight back.
+        //
+        // So the caller supplies storage from wherever it already has pinned
+        // bytes — in the kernel, the tail of the control block's own
+        // reservation, which keeps the "one block anchors everything" property
+        // DEC-082 is built on.
+        DeferredReleasePool* pools = nullptr;
         size_t cpuCount = 0;
         unsigned perCpu = 0;
 
@@ -267,9 +291,21 @@ namespace kernel::mm::radix {
         // false having freed everything it took — address-space creation is the
         // operation allowed to fail here, and DEC-101's unwind is why this must
         // leave nothing behind.
-        [[nodiscard]] bool create(size_t cpus, unsigned recordsPerCpu) {
+        //
+        // `storage` must hold `deferredReleasePoolBytes(cpus)` bytes, be
+        // cache-line aligned, and outlive these pools. It is NOT freed by
+        // `destroy()`: the records are this object's, the array is not.
+        [[nodiscard]] bool create(DeferredReleasePool* storage, size_t cpus,
+                                  unsigned recordsPerCpu) {
             assert(cpus <= arch::MAX_PROCESSOR_COUNT,
                    "radix DeferredReleasePools: CPU count exceeds the processor cap");
+            assert(storage != nullptr, "radix DeferredReleasePools: no pool storage");
+            assert(reinterpret_cast<uintptr_t>(storage) % arch::CACHE_LINE_SIZE == 0,
+                   "radix DeferredReleasePools: pool storage must be cache-line aligned — "
+                   "every CPU's deleters push into every CPU's head, and unaligned heads "
+                   "reintroduce exactly the false sharing the alignas exists to prevent");
+            pools    = storage;
+            for (size_t c = 0; c < cpus; c++) new (&pools[c]) DeferredReleasePool();
             cpuCount = cpus;
             perCpu   = recordsPerCpu;
             for (size_t c = 0; c < cpus; c++) {
@@ -311,6 +347,10 @@ namespace kernel::mm::radix {
             }
             cpuCount = 0;
             perCpu   = 0;
+            // The array itself is the caller's storage and is deliberately NOT
+            // released here — it is a slice of a pinned reservation that
+            // outlives this object and is reused by the next tenant.
+            pools    = nullptr;
         }
 
         [[nodiscard]] DeferredReleasePool& forCpu(arch::ProcessorID i) {

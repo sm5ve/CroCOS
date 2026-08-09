@@ -1740,3 +1740,92 @@ is scheduled, and the reader loop consulted `stop` before its first sweep, so it
 made zero observations and failed its own vacuity check. It now completes one
 full sweep before checking. A test bug, not a tree bug, but one that fires
 whenever anything shifts the timing — which this change did.
+
+---
+
+## D-045 — DEFECT (2026-08-08, user-directed) — the release pools were sized for 256 CPUs on every machine, and the freelist threw away NUMA placement
+
+Two independent problems in the same structure, found by measuring the control
+block rather than by reading it. Both are about the **pinned static-buffer
+window**, which is the scarce resource here: one 1 GiB region, bump-allocated,
+with no free path at all.
+
+### (a) `DeferredReleasePools::pools[arch::MAX_PROCESSOR_COUNT]`
+
+The pool array was a by-value member sized at the compile-time processor cap —
+256 cache-line-aligned entries, unconditionally. Measured:
+
+| | before | after |
+|---|---|---|
+| `sizeof(ControlBlock)` | 16,704 B | **256 B** |
+| — of which the pool array | 16,448 B (98.5%) | 0 (moved to the tail) |
+| reservation, 8-CPU machine | 16,704 B | **768 B** |
+| reservation, 256-CPU machine | 16,704 B | 16,640 B |
+| window ceiling (concurrent address spaces) | ~44,000 | ~500,000 |
+
+On an 8-CPU desktop — the stated primary target — 98% of every process's pinned
+reservation was padding for CPUs that do not exist. **21.75x smaller**, and
+unchanged on a machine that genuinely has 256.
+
+The array is now runtime-sized and lives in the **tail of the control block's own
+reservation**, which is the part that is a decision rather than an
+implementation detail. It could not simply become its own allocation: the pool
+heads sit on every other CPU's hot path (every CPU's deleters push into every
+CPU's pool), which is exactly why DEC-082's round-4 amendment put them in pinned
+storage. A vmsmalloc array would hand back the `ensureTLBEntryFresh` obligation
+that amendment removed. Keeping it in the same reservation preserves "one block
+anchors everything" *and* the freshness-free property.
+
+Consequences worth stating: `ControlBlock` is now variable-sized, so the freelist
+is size-aware (`takeLocked` refuses a block whose trailing array is too short —
+never reached in the kernel, where `processorCount()` is a boot constant, but the
+harness varies it and an under-sized block would be an out-of-bounds write with
+no diagnostic); and the zero-fill on reuse covers the whole reservation, not
+`sizeof(Block)`, because a stale pool head is a live record list handed to a
+process that does not own it.
+
+### (b) `ControlBlockFreelist` discarded the NUMA domain
+
+`createAddressSpace` takes a `home` domain and `tryReservePerDomainStaticBuffer`
+honours it — **on the first reservation only**. One undifferentiated list meant
+every reuse handed back whatever was at the head, so placement was a suggestion
+obeyed exactly once. On a multi-socket machine that puts a process's control
+block on a remote node, and the block holds the generation and the pool heads
+every CPU reads on hot paths.
+
+The list is now partitioned by domain, with each block recording where its pages
+actually are (`homeDomain`) so `returnLocked` files it back where it came from.
+Reservations are kernel-lifetime, so a block's placement is fixed at its first
+reservation forever; remembering it is the only thing the freelist can do.
+
+The cross-domain fallback is deliberate: a wrong-domain block beats burning
+window on a fresh reservation, because the window is bounded and unreclaimable —
+remote-but-present is a performance answer where exhaustion is a correctness one.
+
+**`kernel::numa::kMaxDomains`** is a promotion, not a new constant: it lived in
+vmsmalloc's implementation-internal `VMSubstrateSlab.h`, and a cap on `DomainID`
+belongs with `DomainID` once a second subsystem needs it. vmsmalloc keeps its own
+spelling as an alias, so no call site there changed.
+
+**Mutation-tested** per D-022's rule, because a placement test's failure mode is
+passing vacuously: pooling every domain onto one list makes
+`radix_address_space_freelist_preserves_numa_placement` fail on the assertion
+that the domain-0 request gets the domain-0 block rather than the most recently
+freed one.
+
+### What this does NOT fix
+
+`Domain::init` reserves `divideAndRoundUp(cpuCount, kSlotsPerPage)` pages for its
+reader slots — a **whole 4 KiB page** for 8 CPUs' slots. With the radix block down
+to 768 B, RCU's slot page is now the dominant per-address-space term by 5x and
+sets the real window ceiling. Same shape of problem, different subsystem, and not
+touched here.
+
+### And it reopens D-039's root-page question with different numbers
+
+Folding the 4 KiB root bucket page into the control block was +24% when the block
+was 16.3 KiB. Against 768 B it is **+533%**. The argument for doing it is
+unchanged and is not about size — the root page is the only per-address-space
+structure whose *mapping* churns, and that churn is what produced D-039's stale
+bucket word — but the arithmetic now cuts the other way and the decision should
+be taken against these figures, not the old ones.

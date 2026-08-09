@@ -61,6 +61,15 @@ namespace CroCOSTest::radix {
         // that WANT the shortfall path arm it deliberately.
         kernel::mm::radix::DeferredReleasePools releasePools{};
 
+        // Storage for the pool array. In production this is the tail of the
+        // control block's own pinned reservation (see ControlBlock); a fixture
+        // that is not testing the address-space lifecycle just owns a buffer.
+        // Sized at the cap because a test fixture can afford what a
+        // per-address-space reservation cannot — which is the whole point of the
+        // change that made this a pointer.
+        alignas(arch::CACHE_LINE_SIZE)
+        kernel::mm::radix::DeferredReleasePool poolStorage[arch::MAX_PROCESSOR_COUNT];
+
         explicit Harness(size_t cpus = 1, size_t domains = 1) {
             VS::test::initialize(cpus, domains);
             numa::test::configure(cpus, domains, &allToDomainZero);
@@ -82,8 +91,8 @@ namespace CroCOSTest::radix {
                 throw AssertionFailure(std::string("radix Harness: domain init failed"));
             }
             if (!releasePools.create(
-                    cpus, kernel::mm::radix::deferredReleaseBound(
-                              kernel::mm::radix::kAmd64Geometry))) {
+                    poolStorage, cpus, kernel::mm::radix::deferredReleaseBound(
+                                           kernel::mm::radix::kAmd64Geometry))) {
                 (void)domain.deinit();
                 VS::test::shutdown();
                 throw AssertionFailure(

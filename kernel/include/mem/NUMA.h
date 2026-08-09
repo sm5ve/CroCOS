@@ -36,6 +36,19 @@ namespace kernel::numa {
 // but they inhabit distinct namespaces.  The type system makes them hard to
 // confuse: DomainID(2) and ClockDomainID(2) are unrelated values.
 
+    // ─── Upper cap on DomainID values an array may be indexed by ───────────
+    //
+    // Lived in vmsmalloc's implementation-internal `VMSubstrateSlab.h` until a
+    // second subsystem needed it (the radix control-block freelist, which
+    // partitions by domain so a recycled block keeps its placement). A cap on
+    // DomainID belongs with DomainID; vmsmalloc keeps its own spelling as an
+    // alias so no call site there changes.
+    //
+    // Real consumer hardware is single-NUMA-domain and multi-domain servers stay
+    // well under 64, so an array sized to this costs a few hundred bytes of .bss
+    // for a bound nothing realistic approaches.
+    inline constexpr size_t kMaxDomains = 64;
+
 struct DomainID {
     uint16_t value = UINT16_MAX;  // UINT16_MAX == null/invalid sentinel
 

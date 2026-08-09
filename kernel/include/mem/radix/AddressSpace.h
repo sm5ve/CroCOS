@@ -86,8 +86,27 @@ namespace kernel::mm::radix {
     // beyond what `create` does explicitly, because a recycled block's bytes are
     // the previous tenant's and the zeroing is a step of the sequence rather
     // than a language feature.
+    // ─── The block ─────────────────────────────────────────────────────────
+    //
+    // **Variable-sized: the DeferredRelease pool array lives in the tail of this
+    // block's own reservation**, sized at the machine's actual CPU count rather
+    // than at `arch::MAX_PROCESSOR_COUNT`. Before that, the array was a by-value
+    // member and 16,448 of the block's 16,704 bytes were padding for CPUs that
+    // do not exist — which on an 8-CPU machine is 98% of every process's pinned
+    // reservation, and put the static-buffer window's ceiling at ~44,000
+    // concurrent address spaces instead of ~500,000.
+    //
+    // Keeping the array *inside this reservation* rather than allocating it
+    // separately is the point. The pool heads sit on every other CPU's hot path
+    // (every CPU's deleters push into every CPU's pool), which is exactly why
+    // DEC-082's round-4 amendment put them in pinned storage; a vmsmalloc array
+    // would hand back the `ensureTLBEntryFresh` obligation that amendment
+    // removed. One reservation still anchors everything.
+    //
+    // Cache-line aligned so the trailing array — whose entries are
+    // `alignas(CACHE_LINE_SIZE)` — starts aligned at `block + 1`.
     template <GeometryDescriptor G, typename Codec, unsigned DetachBudget = kDetachBudget>
-    struct ControlBlock {
+    struct alignas(arch::CACHE_LINE_SIZE) ControlBlock {
         using Table = ClusterTable<G, Codec, DetachBudget>;
 
         kernel::rcu::Domain  domain;
@@ -110,7 +129,39 @@ namespace kernel::mm::radix {
         // Freelist linkage for recycled blocks. Pinned storage is never returned
         // to VMSubstrate, so this is how the high-water mark stays at "maximum
         // concurrent address spaces" instead of growing with process churn.
+        //
+        // Reuse costs nothing and is worth understanding rather than assuming:
+        // handing this block to a different process does not touch a PTE at all.
+        // The VA -> physical mapping is unchanged and only the bytes differ, so
+        // a CPU's cached translation stays *correct* and there is nothing to
+        // invalidate. DEC-051b's write-once-PTE invariant is what buys that —
+        // it is in tension with RETURNING pages to the allocator, never with
+        // reusing them.
         ControlBlock* freelistNext;
+
+        // How many CPUs' worth of pool storage the trailing array was reserved
+        // for. Survives the zero-fill on reuse, like `generation`, because it
+        // describes the RESERVATION rather than the tenant — and the freelist
+        // needs it to refuse a block that is too small.
+        size_t reservedCpus;
+
+        // Where the pages actually are, which is not necessarily the `home` any
+        // given tenant asked for: reservations are kernel-lifetime, so a block's
+        // placement is fixed at its FIRST reservation and every later tenant
+        // inherits it. Recorded so `returnLocked` can file the block back on the
+        // list it came from instead of pooling every domain together — which is
+        // what made `home` a suggestion honoured exactly once.
+        numa::DomainID homeDomain;
+
+        // The trailing pool array. Immediately after the block, cache-line
+        // aligned by the `alignas` above.
+        [[nodiscard]] DeferredReleasePool* poolStorage() {
+            return reinterpret_cast<DeferredReleasePool*>(this + 1);
+        }
+
+        [[nodiscard]] static size_t reservationBytes(size_t cpus) {
+            return sizeof(ControlBlock) + deferredReleasePoolBytes(cpus);
+        }
     };
 
     // ─── The freelist ──────────────────────────────────────────────────────
@@ -123,21 +174,73 @@ namespace kernel::mm::radix {
     struct ControlBlockFreelist {
         using Block = ControlBlock<G, Codec, DetachBudget>;
 
-        Block*   head  = nullptr;
+        // ─── Partitioned by NUMA domain ────────────────────────────────────
+        //
+        // One list per domain, because a single list silently discards the
+        // placement its blocks were reserved with. `createAddressSpace` takes a
+        // `home` domain and `tryReservePerDomainStaticBuffer` honours it — but
+        // only on the FIRST reservation; a recycled block came from wherever the
+        // last tenant happened to be. On a multi-socket machine that hands a
+        // process a control block on a remote node, and this block holds the
+        // generation and the pool heads that every CPU reads on hot paths, which
+        // is the entire reason DEC-082 moved them into pinned storage.
+        //
+        // Not urgent on the stated target (single-NUMA consumer desktops, where
+        // there is one list and this is a no-op), but multi-domain correctness is
+        // preserved architecturally rather than aspirationally, and "the NUMA
+        // placement is right until the second process" is not that.
+        //
+        // The fallback is deliberate: a block from the wrong domain still beats
+        // burning window on a fresh reservation, since the window is the scarce
+        // resource and remote-but-present is a performance answer where
+        // exhaustion is a correctness one.
+        Block*   heads[numa::kMaxDomains] = {};
         uint64_t nextGeneration = 1;
 
         // Caller holds the domain-management lock.
-        [[nodiscard]] Block* takeLocked() {
-            if (head == nullptr) return nullptr;
-            Block* b = head;
-            head = b->freelistNext;
-            b->freelistNext = nullptr;
-            return b;
+        //
+        // Size-aware, because blocks became variable-sized when the pool array
+        // moved into their reservation. In the kernel every block is the same
+        // size — `cpus` is `arch::processorCount()`, fixed after boot — so the
+        // scan never advances past the head; it exists so a caller that varies
+        // the count (the harness does) cannot silently be handed a block whose
+        // trailing array is too short, which would be an out-of-bounds write
+        // with no diagnostic.
+        [[nodiscard]] Block* takeFromListLocked(Block*& listHead, size_t cpus) {
+            Block** link = &listHead;
+            while (Block* b = *link) {
+                if (b->reservedCpus >= cpus) {
+                    *link = b->freelistNext;
+                    b->freelistNext = nullptr;
+                    return b;
+                }
+                link = &b->freelistNext;
+            }
+            return nullptr;
+        }
+
+        [[nodiscard]] Block* takeLocked(numa::DomainID home, size_t cpus) {
+            const size_t h = domainIndex(home);
+            if (Block* b = takeFromListLocked(heads[h], cpus)) return b;
+            // Wrong-domain fallback — see the note above.
+            for (size_t d = 0; d < numa::kMaxDomains; d++) {
+                if (d == h) continue;
+                if (Block* b = takeFromListLocked(heads[d], cpus)) return b;
+            }
+            return nullptr;
         }
 
         void returnLocked(Block* b) {
-            b->freelistNext = head;
-            head = b;
+            const size_t h = domainIndex(b->homeDomain);
+            b->freelistNext = heads[h];
+            heads[h] = b;
+        }
+
+        static size_t domainIndex(numa::DomainID d) {
+            const size_t i = static_cast<size_t>(d.value);
+            assert(i < numa::kMaxDomains,
+                   "radix: NUMA domain id outside the freelist's partition");
+            return i;
         }
     };
 
@@ -159,13 +262,22 @@ namespace kernel::mm::radix {
         // ─── 1. The control block, under the domain-management lock ────────
         Block* block = nullptr;
         bool   recycled = false;
+        size_t reserved = cpuCount;
+        // Captured BEFORE the zero-fill below, which does not spare them.
+        numa::DomainID placedOn = home;
         {
             kernel::rcu::DomainManagementLockGuard guard;
-            block = freelist.takeLocked();
+            block = freelist.takeLocked(home, cpuCount);
             if (block != nullptr) {
                 recycled = true;
+                reserved = block->reservedCpus;
+                placedOn = block->homeDomain;
             } else {
-                void* raw = VMSubstrate::tryReservePerDomainStaticBuffer(sizeof(Block), home);
+                // The reservation covers the block AND its trailing pool array,
+                // sized at this machine's CPU count — see ControlBlock's note on
+                // why the array is here rather than allocated separately.
+                void* raw = VMSubstrate::tryReservePerDomainStaticBuffer(
+                    Block::reservationBytes(cpuCount), home);
                 if (raw == nullptr) return CreateStatus::OutOfMemory;
                 block = static_cast<Block*>(raw);
             }
@@ -180,10 +292,18 @@ namespace kernel::mm::radix {
         // above, after the wipe would have happened — so the order here is not
         // arbitrary either.
         if (recycled) {
+            // The whole RESERVATION, not just the block: the trailing pool array
+            // carries the previous tenant's heads, and a stale head is a live
+            // record list handed to a process that does not own it.
             const uint64_t generation = block->generation;
-            memset(static_cast<void*>(block), 0, sizeof(Block));
+            memset(static_cast<void*>(block), 0, Block::reservationBytes(reserved));
             block->generation = generation;
         }
+        // Both describe the RESERVATION rather than the tenant, so they are
+        // written after the wipe on both paths, from the values captured before
+        // it.
+        block->reservedCpus = reserved;
+        block->homeDomain   = placedOn;
         new (&block->domain)   kernel::rcu::Domain();
         new (&block->clusters) typename Block::Table();
         new (&block->pools)    DeferredReleasePools();
@@ -206,7 +326,7 @@ namespace kernel::mm::radix {
         }
 
         // ─── 4. The per-CPU record pools ───────────────────────────────────
-        if (!block->pools.create(cpuCount, perCpuRecords)) {
+        if (!block->pools.create(block->poolStorage(), cpuCount, perCpuRecords)) {
             block->clusters.destroy();
             (void)block->domain.deinit();
             kernel::rcu::DomainManagementLockGuard guard;

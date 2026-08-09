@@ -377,10 +377,12 @@ inline constexpr size_t kPerDomainBufBytes = roundUpToNearestMultiple(
 static_assert(kPerDomainBufBytes % arch::smallPageSize == 0,
               "kPerDomainBufBytes must be a whole number of pages");
 
-// Upper cap on DomainID values we'll index. Real consumer hardware is
-// single-NUMA-domain; multi-domain servers stay well under 64. The static
-// array sized to this cap costs ~512 B in .bss — negligible.
-inline constexpr size_t kMaxDomains = 64;
+// Upper cap on DomainID values we'll index. Moved to `kernel::numa` when the
+// radix control-block freelist became a second consumer — a cap on DomainID
+// belongs with DomainID, and two subsystems disagreeing about it is the kind of
+// thing that shows up as an out-of-bounds write on a machine nobody has.
+// Aliased rather than replaced so no call site here changes.
+inline constexpr size_t kMaxDomains = numa::kMaxDomains;
 
 // Per-domain buffer base pointers (defined in VMSubstrateSlab.cpp). A
 // `nullptr` entry means that DomainID is not CPU-bearing; DEC-018 / DEC-038

@@ -73,9 +73,9 @@ rdx::Mapping* makeMapping(uint64_t baseVA) {
 // creates those itself, and having the fixture create a second set would make
 // every accounting assertion below ambiguous.
 struct BareArena {
-    explicit BareArena(size_t cpus = 1) {
-        VS::test::initialize(cpus, 1);
-        numa::test::configure(cpus, 1, &allToDomainZero);
+    explicit BareArena(size_t cpus = 1, size_t domains = 1) {
+        VS::test::initialize(cpus, domains);
+        numa::test::configure(cpus, domains, &allToDomainZero);
         arch::test::setProcessorCount(cpus);
         kernel::test::bindThreadToCpu(0);
         kernel::mm::radix::HarnessSlotBase::bind(
@@ -244,6 +244,80 @@ TEST(radix_address_space_creation_handles_a_failed_reservation) {
 }
 
 // ─── Recycling: the block comes back, and it comes back CLEAN ──────────────
+
+// ─── The freelist keeps each block on its own NUMA domain ──────────────────
+//
+// `createAddressSpace` takes a `home` domain and `tryReservePerDomainStaticBuffer`
+// honours it — but only on the FIRST reservation. With one undifferentiated
+// freelist, every reuse afterwards handed back whatever was at the head, so the
+// placement was a suggestion obeyed exactly once. On a multi-socket machine that
+// puts a process's control block on a remote node, and this block holds the
+// generation and the pool heads every CPU reads on hot paths — which is the
+// entire reason DEC-082 moved them into pinned storage.
+//
+// Reservations are kernel-lifetime, so a block's placement is fixed forever at
+// its first reservation; the only thing the freelist can do is remember it and
+// hand the block back to a tenant that wants that domain.
+TEST(radix_address_space_freelist_preserves_numa_placement) {
+    BareArena arena(2, 2);
+    FreelistA freelist;
+
+    BlockA* onZero = nullptr;
+    BlockA* onOne  = nullptr;
+    ASSERT_TRUE(rdx::createAddressSpace(freelist, kernel::numa::DomainID{0}, 1,
+                                        kTestRecords, onZero) == rdx::CreateStatus::Ok);
+    ASSERT_TRUE(rdx::createAddressSpace(freelist, kernel::numa::DomainID{1}, 1,
+                                        kTestRecords, onOne) == rdx::CreateStatus::Ok);
+    ASSERT_TRUE(onZero != onOne);
+
+    // Both go back. Order matters to the test: domain 1's block is returned
+    // LAST, so a single-list freelist would hand it to the next request whatever
+    // domain that request asked for.
+    rdx::destroyAddressSpace(freelist, onZero);
+    rdx::destroyAddressSpace(freelist, onOne);
+
+    BlockA* wantZero = nullptr;
+    ASSERT_TRUE(rdx::createAddressSpace(freelist, kernel::numa::DomainID{0}, 1,
+                                        kTestRecords, wantZero) == rdx::CreateStatus::Ok);
+    // The block placed on domain 0, not the one most recently freed.
+    ASSERT_EQ(onZero, wantZero);
+    ASSERT_TRUE(wantZero->homeDomain == kernel::numa::DomainID{0});
+
+    BlockA* wantOne = nullptr;
+    ASSERT_TRUE(rdx::createAddressSpace(freelist, kernel::numa::DomainID{1}, 1,
+                                        kTestRecords, wantOne) == rdx::CreateStatus::Ok);
+    ASSERT_EQ(onOne, wantOne);
+    ASSERT_TRUE(wantOne->homeDomain == kernel::numa::DomainID{1});
+
+    rdx::destroyAddressSpace(freelist, wantZero);
+    rdx::destroyAddressSpace(freelist, wantOne);
+}
+
+// The fallback, which is deliberate rather than incidental: a block from the
+// wrong domain still beats burning static-buffer window on a fresh reservation.
+// The window is the scarce resource — it is a bounded 1 GiB region with no free
+// path — so remote-but-present is a performance answer where exhaustion is a
+// correctness one.
+TEST(radix_address_space_freelist_falls_back_across_domains) {
+    BareArena arena(2, 2);
+    FreelistA freelist;
+
+    BlockA* onZero = nullptr;
+    ASSERT_TRUE(rdx::createAddressSpace(freelist, kernel::numa::DomainID{0}, 1,
+                                        kTestRecords, onZero) == rdx::CreateStatus::Ok);
+    rdx::destroyAddressSpace(freelist, onZero);
+
+    // Domain 1's list is empty; the block on domain 0 is taken rather than a
+    // fresh reservation made.
+    BlockA* wantOne = nullptr;
+    ASSERT_TRUE(rdx::createAddressSpace(freelist, kernel::numa::DomainID{1}, 1,
+                                        kTestRecords, wantOne) == rdx::CreateStatus::Ok);
+    ASSERT_EQ(onZero, wantOne);
+    // ...and it still reports where it actually IS, not where it was wanted.
+    ASSERT_TRUE(wantOne->homeDomain == kernel::numa::DomainID{0});
+
+    rdx::destroyAddressSpace(freelist, wantOne);
+}
 
 TEST(radix_address_space_blocks_recycle_through_the_freelist) {
     BareArena arena;
