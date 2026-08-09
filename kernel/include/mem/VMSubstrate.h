@@ -110,6 +110,43 @@ namespace kernel::mm::VMSubstrate {
     //
     // Zero-fill is a per-RESERVATION guarantee. A recycled block is the caller's
     // to re-zero.
+    //
+    // ─── PLANNED: a per-NUMA-domain pinned allocator should replace this ────
+    //
+    // This is a bump pointer over one 1 GiB arena slot with **no free path and
+    // page granularity**, and both halves of that now cost real memory:
+    //
+    //   - **Page granularity.** The bump pointer advances by whole pages, so a
+    //     768-byte reservation consumes 4 KiB. Measured on an 8-CPU machine: the
+    //     radix control block wants 768 B and takes a page (81% wasted); RCU's
+    //     reader slots want 1,024 B and take a page (75% wasted). Two consumers,
+    //     two pages, ~1.8 KiB of 8 KiB actually used. Sizing either request
+    //     smaller saves nothing — the waste is here, not in the callers.
+    //
+    //   - **No free path.** Every consumer that needs reuse hand-rolls a
+    //     freelist over blocks this hands out: `kernel::rcu`'s
+    //     `gFreeSlotBlocks` and radix's `ControlBlockFreelist` are the same
+    //     structure written twice. The radix one had to grow NUMA partitioning
+    //     and a size check (radix D-045) that the RCU one does not need only
+    //     because its placement happens to be topology-derived rather than
+    //     caller-supplied. A third consumer will write it a third time and get a
+    //     different subset right.
+    //
+    // What is wanted: a pinned allocator **partitioned per NUMA domain**, with
+    // sub-page suballocation and real free/reuse. Note what it does NOT need to
+    // do — and this is what makes it tractable rather than a shootdown problem:
+    // it must never unmap a page. DEC-051b's safety argument is that every entry
+    // here "transitions not-present -> present EXACTLY ONCE and never changes",
+    // which is precisely why nothing pinned carries an `ensureTLBEntryFresh`
+    // obligation. Reusing a BLOCK inside an already-mapped page does not touch a
+    // PTE at all: the VA -> physical mapping is unchanged and only the bytes
+    // differ, so a CPU's cached translation stays correct. Free-and-reuse is
+    // free; only returning pages to the PageAllocator would break the invariant,
+    // and no consumer has asked for that.
+    //
+    // The current ceiling, for scale: ~131,000 concurrent address spaces at
+    // 8 KiB each, against a 1 GiB region. Sub-page packing alone roughly doubles
+    // it, and stops every consumer paying a page minimum.
     void* tryReservePerDomainStaticBuffer(size_t byteSize, numa::DomainID d);
 
     // Returns the base VA of CPU `i`'s per-CPU CpuLocal page (sized via

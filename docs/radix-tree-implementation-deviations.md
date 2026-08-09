@@ -1763,6 +1763,12 @@ The pool array was a by-value member sized at the compile-time processor cap —
 | reservation, 256-CPU machine | 16,704 B | 16,640 B |
 | window ceiling (concurrent address spaces) | ~44,000 | ~500,000 |
 
+> **CORRECTED by D-046.** The window figures in this table are wrong: reservations
+> are rounded up to whole pages, so the true reduction is 20,480 B -> 4,096 B
+> (5x) and the ceiling goes ~43,700 -> ~131,000 (3x), not ~500,000. The byte
+> figures above are right; they were measured against the request rather than
+> against the window.
+
 On an 8-CPU desktop — the stated primary target — 98% of every process's pinned
 reservation was padding for CPUs that do not exist. **21.75x smaller**, and
 unchanged on a machine that genuinely has 256.
@@ -1863,3 +1869,60 @@ unchanged and is not about size — the root page is the only per-address-space
 structure whose *mapping* churns, and that churn is what produced D-039's stale
 bucket word — but the arithmetic now cuts the other way and the decision should
 be taken against these figures, not the old ones.
+
+---
+
+## D-046 — CORRECTION to D-045's figures, and the note it points to
+
+**D-045 overstated its own result**, and the error is worth keeping because it is
+the kind that survives review: the numbers were measured, they were just measured
+against the wrong quantity.
+
+`reserveStaticBufferImpl` advances its bump pointer by **whole pages** —
+`staticBufferNextVA += pages * smallPageSize` — so every reservation consumes at
+least 4 KiB regardless of `byteSize`. D-045 reported the reduction in the *request*
+and called it a reduction in the *window*.
+
+| | before | after | |
+|---|---|---|---|
+| `sizeof(ControlBlock)` | 16,704 B | 256 B | as reported |
+| reservation request, 8 CPUs | 16,704 B | 768 B | as reported |
+| **window actually consumed** | 20,480 B (5 pages) | **4,096 B (1 page)** | **5x, not 21.75x** |
+| ceiling (with RCU's page) | ~43,700 | **~131,000** | **3x, not ~11x** |
+
+The fix is real and worth having. It is 3x, not an order of magnitude.
+
+### Which is why the RCU reader-slot sizing was NOT done
+
+`sizeof(ReaderSlot)` is 128 B, so 8 CPUs need 1,024 B and take a whole page — 75%
+wasted. But **reserving 1,024 instead of 4,096 consumes the same page**. The waste
+is structural in `reservePerDomainStaticBuffer`, not in RCU's request, and a
+change there would be a no-op dressed as an improvement.
+
+Also checked and **not** a bug: RCU's `gFreeSlotBlocks` does not lose NUMA
+placement the way radix's freelist did. RCU derives placement from the fixed CPU
+topology (`homeDomain(p * kSlotsPerPage)`), so every block has identical per-page
+placement and blocks are interchangeable. Radix's differed only because `home` is
+a caller-supplied per-address-space parameter.
+
+### The note
+
+The real fix is a **per-NUMA-domain pinned allocator with sub-page suballocation
+and free/reuse**, recorded at `tryReservePerDomainStaticBuffer` in
+`kernel/include/mem/VMSubstrate.h` where an implementer will find it.
+
+The part that makes it tractable, and that took a wrong turn earlier in this
+session to establish: **it must never unmap a page, and it does not need to.**
+DEC-051b's safety argument is that every entry there "transitions not-present ->
+present EXACTLY ONCE and never changes", which is exactly why pinned storage
+carries no `ensureTLBEntryFresh` obligation. Reusing a *block inside an
+already-mapped page* touches no PTE — the VA to physical mapping is unchanged and
+only the bytes differ, so a CPU's cached translation stays correct. Free-and-reuse
+is free. Only returning pages to the PageAllocator would break the invariant, and
+no consumer has asked for that.
+
+Evidence that it is owed: two consumers have now hand-rolled the same freelist
+over these blocks (`kernel::rcu::gFreeSlotBlocks` and radix's
+`ControlBlockFreelist`), and the radix one needed NUMA partitioning and a size
+check the RCU one does not. A third consumer will write it again and get a
+different subset right.
