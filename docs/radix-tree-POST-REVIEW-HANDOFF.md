@@ -15,11 +15,12 @@ defect they uncovered in the RCU engine. §4 and §5 are history — read them f
 reasoning, not for work to do. D-059, D-060 and D-061 in the deviations log are
 the long-form accounts, and `specs/rcu-phase-1.md` P1-DEC-019 carries the RCU one.
 
-**Both merge blockers are closed, and so are R-4, R-5, R-6, R-9, R-16 and R-17**
-(D-062..D-067). **Every detector gap and the port-blocking ordering defect are
-closed.** What remains is two latent items — **R-12** (Treiber ABA safety holds only
-because no scheduler exists) and **R-13** (`ensureTLBEntryFresh` on pinned memory
-RMWs into live data) — and the rest of the hygiene list (**R-18** the TSan-stress default, **R-19**'s four surviving wrong
+**Everything with teeth is closed**: both merge blockers, every detector gap, the
+port-blocking ordering defect, and the pinned-memory corruption door
+(D-058..D-068). **One latent item remains and it is not actionable yet** — **R-12**,
+Treiber ABA safety holding only because no scheduler exists; it becomes real when
+preemption lands, so it wants tying to that milestone rather than code now. Then the
+hygiene list (**R-18** the TSan-stress default, **R-19**'s four surviving wrong
 comments, **R-20** the displaced coverage, **R-21** the `detachBudget` retention).
 **R-5 is the one with a live hole behind it**: `GrowthTest.cpp` and
 `DecompositionTest.cpp` have zero oracle assertions, and an unpublished leaked node
@@ -37,7 +38,7 @@ history. `docs/radix-tree-HANDOFF-impl.md` is still the implementation reference
 
 ## 0. Suite state
 
-**172/172, ASan and TSan, and the whole `run_all_tests` gate green (1,662 tests
+**172/172, ASan and TSan, and the whole `run_all_tests` gate green (1,664 tests
 across ten runners).** The in-kernel radix stress boots clean at
 `CROCOS_RADIX_STRESS_OPS=24`, Release, exit 0.
 
@@ -110,13 +111,13 @@ at all (a barrier, not more rounds, is what made the detector reliable), and
 `discardUnusedAllocations` was already covered by the two concurrent-writer tests
 and the only single-threaded decomposition discard is structurally unreachable.
 
-### Latent — real, not currently reachable (R-9 now FIXED)
+### Latent — R-9 and R-13 now FIXED; only R-12 remains
 
 | ID | Finding | Anchor |
 |---|---|---|
 | **R-9** | **FIXED** (D-067). Audited all five sites: the other three genuinely hold whole-node claims and now ASSERT it. The two failing ones take a new `kAttemptSlotLoad = ACQUIRE` |
 | **R-12** | Treiber ABA safety holds only because **no scheduler exists** | `CoreTree.h:1412` |
-| **R-13** | `ensureTLBEntryFresh` on **pinned** memory RMWs into live data | `VMSubstrate.cpp:1235` |
+| **R-13** | **FIXED** (D-068). Debug assert in `ensureTLBEntryFresh` + mirrored in the mock so it is TESTABLE, plus the four "carries no obligation" comments corrected to say *forbidden*. Nothing was doing it — this closed the door |
 
 **R-9 is fixed** (D-067). It is worth keeping the reasoning: the constant claimed
 "a writer reading a slot it already holds the claim bit for", and at two of five
@@ -126,10 +127,13 @@ well-formed atomic — so it was findable only by reading. The precondition is n
 runnable `assert(claimsFullValence(...))` at the three sites that depend on it,
 which is the part that stops it recurring.
 
-**R-13**: the pinned exemption is documented everywhere as an absence of
-*obligation*, which invites the conclusion that a call there is merely wasted. It
-is not — it read-modify-writes at `tableBase + dw*4096 + k_abs*8`, and the
-static-buffer slot has no dirty bitmap by design, so it lands in live pinned data.
+**R-13 is fixed** (D-068). The finding was really about the documentation: every
+statement of the pinned exemption said "carries no *obligation*", which invites the
+conclusion that a call there is merely wasted. It is not — it read-modify-writes at
+`tableBase + dw*4096 + k_abs*8`, and the static-buffer slot has no dirty bitmap by
+design, so it lands in live pinned data. Now a debug assert, mirrored in the mock so
+a unit test can drive the refusal — this bug class has eight members and **zero**
+were ever found by tests.
 
 ### Removed by option C — CLOSED, the code they lived in is gone
 
