@@ -1,62 +1,137 @@
 ---
 kind: handoff
-status: ready
-audience: the next session — READ D-070 FIRST. A 5-referee pass ran; the branch did NOT merge.
-supersedes: docs/radix-tree-REVIEW-HANDOFF.md (its referee pass is complete)
+status: ready — ONE DECISION WAITING ON SPENCER
+audience: the next session
+supersedes: docs/radix-tree-REVIEW-HANDOFF.md (deleted — it declared itself obsolete)
+companion: docs/radix-tree-HANDOFF-impl.md (implementation reference, still current)
 ---
 
-# radix-tree — post-review handoff
+# radix-tree — where the branch stands
 
-**Written 2026-08-09 after the pre-merge referee pass. The branch did not pass.**
-This note carries every finding and the plan that came out of it.
+**Branch `radix-tree`, 80 commits, not merged, not pushed. `master` does not even
+configure** (its `libraries/LibExt/CMakeLists.txt` names sources that do not exist
+there), so this branch is required to restore a working default target.
 
-**Updated 2026-08-10: option C AND R-2 are implemented and committed**, plus one
-defect they uncovered in the RCU engine. §4 and §5 are history — read them for the
-reasoning, not for work to do. D-059, D-060 and D-061 in the deviations log are
-the long-form accounts, and `specs/rcu-phase-1.md` P1-DEC-019 carries the RCU one.
-
-**Everything with teeth is closed**: both merge blockers, every detector gap, the
-port-blocking ordering defect, and the pinned-memory corruption door
-(D-058..D-068). **One latent item remains and it is not actionable yet** — **R-12**,
-Treiber ABA safety holding only because no scheduler exists; it becomes real when
-preemption lands, so it wants tying to that milestone rather than code now. Then the
-hygiene list (**R-18** the TSan-stress default, **R-19**'s four surviving wrong
-comments, **R-20** the displaced coverage, **R-21** the `detachBudget` retention).
-**R-5 is the one with a live hole behind it**: `GrowthTest.cpp` and
-`DecompositionTest.cpp` have zero oracle assertions, and an unpublished leaked node
-is invisible to the validator, to `nodeCount()` and to LSan.
-
-**A defect found while closing them, worth knowing about:** `barrier` could return
-while another CPU was still inside one of the caller's deleters — an RCU-engine
-bug, four phases old, invisible to the torture suite because it needs stealing. It
-was only observable because D-059 restored an exact invariant. Fixed; see D-061.
-
-`docs/radix-tree-REVIEW-HANDOFF.md` was the brief FOR that pass and is now
-history. `docs/radix-tree-HANDOFF-impl.md` is still the implementation reference.
+Everything below §1 is the historical record of the pre-merge referee pass. **Read
+§0 and stop; go to `docs/radix-tree-implementation-deviations.md` D-070 for detail.**
 
 ---
 
-## 0. STOP — this document is superseded in part by D-070
+## 0. The one thing waiting on you
 
-A five-referee adversarial pre-merge pass ran on 2026-08-10 against `e2edd73`. **The
-branch did not merge.** It found one merge blocker (D-059 claimed it did not touch
-§7.1 and never checked — the spec is now amended and every amendment is marked
-`PENDING SPENCER REVIEW`), two of my own ordering defects, R-2's class surviving in
-its own fix's function, and a long tail. All of it is in **D-070**, which is the
-current record. Everything below predates that pass; where the two disagree, D-070
-wins.
+**`specs/radix-tree.md` §7.1's per-CPU population rule.** It normatively required the
+population to be *"at least the per-operation ceiling"* (≈230). The shipping code uses
+32, because D-059 made the population **also the per-attempt record budget** — an
+attempt that would want more returns `NeedsDecomposition` and §6.5 splits it.
 
-Corrections to what follows, so it does not mislead: **all six** R-19 comments are
-closed, not four; R-18 and R-21's cheap half are closed; R-5's hole IS closed (§2's
-"live hole" paragraph is stale — line 107 of this file already said so, which was one
-of the contradictions the pass flagged); R-8 appears twice below and the "CLOSED" row
-is the right one; and the "add new radix headers to OrderingSpellingTest.cpp" trap is
-gone — R-4 replaced the list with directory enumeration. What genuinely remains open
-is **R-12**, **R-20 + R-21b** (the stress fixture), and D-070's own open list.
+I amended §7.1, ITEM-084's decision cell, DEC-068 and DEC-077 to match, and marked
+every amendment **`PENDING SPENCER REVIEW`** (grep that string — four hits). I did
+not have the standing to quietly rewrite approved normative text, and D-059 made
+things worse by *claiming* it had not touched §7.1 without checking.
+
+**The decision:** either the amendments stand, or the ≈230 rule stands and **the code
+changes back** — which means restoring a per-operation-ceiling population and paying
+115 KiB per address space instead of 16 KiB. The engineering case for 32 is in D-059
+and was independently confirmed by two referees; the authority is yours.
+
+Two smaller judgement calls that came with it:
+
+- **`kDefaultRecordsPerCpu = 32` is one short for one shape.** A full-span clear of a
+  32-valence *cluster root* takes 32 per-slot rows (§6.5 keeps a root's per-slot
+  results rather than replacing it), so the "never decomposes" property holds only
+  because the budget happens to equal 32 exactly. Fine today; it constrains any
+  future tuning downward.
+- **R-20 + R-21b, the stress-fixture widening**, is deliberately still open. The
+  in-kernel stress caps a wide unmap at 16 granules, so `kDetachBudget = 64` has
+  **zero in-kernel decomposition coverage** and its `max=17` is fixture arithmetic
+  (now labelled as such, derived from `kWideGranules` so it cannot go stale). Doing it
+  re-baselines the branch's own integration instrument, which is why I did not do it
+  in the same breath as thirteen deviations.
+
+## 0a. State, verified
+
+| | |
+|---|---|
+| Tests | **1,666 green across eleven runners**, ASan and TSan |
+| Kernel | builds Debug and Release (LTO); all four boot configs exit 0, zero panics |
+| Stress | radix clean at `OPS=24` Release, max 2 draws/attempt over 4.77M; RCU clean at 9.6M retires/CPU |
+| Deviations | D-001..**D-070** |
+| RCU | `specs/rcu-phase-1.md` **P1-DEC-019** added (a real `barrier` defect, four phases old) |
+
+Reproduce: `cd tests && cmake --build build --target run_all_tests -j8`. The
+race-detector stress is opt-in by design — `cmake --build build --target
+run_tsan_stress` (quiet machine only; 441 vs the default gate's 425).
+
+## 0b. What this session did, in one paragraph each
+
+**D-058/D-059 — option C.** ITEM-084's shared per-address-space reserve made CPU A's
+progress depend on CPU B's records coming home, which the RCU engine has no primitive
+for; that one coupling produced four liveness defects. Replaced by the record budget:
+the pool's population *is* the per-attempt limit, so termination is local to one CPU
+and `consecutiveShortfalls <= 1` is exact again.
+
+**D-060 — R-2.** `tryAllocateSmallPage` forwarded default flags, and default flags
+*panic*; the `return false` was dead code, so the entire "failable" family was
+non-failable and address-space creation could panic the kernel from userspace.
+
+**D-061 / P1-DEC-019 — an RCU engine defect.** `drainClaimedBag` popped a node before
+running its deleter, so `barrier` could return with a deleter still in flight.
+Unreachable without stealing, which is why the torture suite missed it for four
+phases; only observable because D-059 restored an exact invariant.
+
+**D-062..D-069 — the referee findings.** R-17 (LibExt broke `all`), R-16 (the
+static-buffer ceiling, wrong three times, now derived and asserted per row), R-5 (the
+lost-CAS test never called the oracle it claimed to), R-4 (the ordering scanner's
+hand-maintained header list omitted `Claim.h`), R-6 (the deleters' freshness — the
+filed mutation was green *for a correct reason*), R-9 (a RELAXED load consuming
+unclaimed child pointers), R-13 (a freshness call on pinned memory corrupts), R-18,
+R-19, R-21's cheap half.
+
+**D-070 — the five-referee pass.** One merge blocker (§0), two ordering defects I
+introduced, R-2's class surviving three lines above its own fix, and a long tail.
+
+## 0c. Traps, and the ones I hit
+
+- **Give every mutating referee its own `git worktree`.** Four shared one tree and
+  interfered; one built against another's injected `throw` that silently disabled
+  R-5's whole fix and reported a false leak.
+- **One probe assert per build.** Two in one build and the earlier caller aborts
+  first, making the later site read as dead code.
+- **A page-granular freshness assertion is only as strong as its guarantee that
+  nothing else on that page was touched.** Four rewrites, four different maskings.
+- **A coverage floor on a total cannot detect a missing subset** — that is why the
+  ordering scanner's own self-check never noticed two unscanned headers.
+- **More rounds do not fix an unentered race.** A barrier does.
+- Everything in §6 of the old text still applies: `CROCOS_RADIX_STRESS_OPS=24`,
+  Release/LTO being more informative than debug, `-icount` forcing single-thread TCG,
+  `quiesce(h)` before any count check.
+
+## 0d. Open, ranked
+
+1. **§7.1's population rule** — yours (§0).
+2. **R-20 + R-21b** — the stress fixture; one measurement pass, then a re-baseline.
+3. **`CLAUDE.md`** mentions none of this: a 30k-line subsystem, `kernel::random`,
+   `mm::BlockPool`, five new build options, two new run targets.
+4. **`RCU-proposal.md`** is a stray root-level file from the same `git add -A` as the
+   LibExt stubs — but three specs cite it, so **move** it under `docs/`, do not delete.
+5. **R-12** — Treiber ABA safety holds only because no scheduler exists. Tie to the
+   preemption milestone; `Attempt::drawCpu` is the cheap half, already in.
+6. **`SafePtr`'s two move semantics** — `SafePtr<T>` nulls the source, the `void`
+   specialization copies. Same abstraction, opposite behaviour, no assertion.
+7. One unidentified transient in ~16 suite runs at peak referee load (10/10 clean
+   after). Most likely the known load-sensitive conflict-rate assertion in
+   `radix_concurrent_disjoint_writers_do_not_interfere`. Capture the name if it
+   recurs.
 
 ---
 
-## 0b. Suite state
+# Historical: the pre-merge referee pass
+
+Everything below is the record of the pass that produced D-062..D-069, kept for its
+findings table. Status columns are accurate; the surrounding prose predates D-070.
+
+## Suite state at the time
+
 
 **176/176, ASan and TSan, and the whole `run_all_tests` gate green (1,664 tests
 across ten runners).** The in-kernel radix stress boots clean at

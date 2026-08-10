@@ -103,6 +103,12 @@ D-055 is recorded together with the workload that produced it for this reason.
 
 ---
 
+> **Entry point is `docs/radix-tree-POST-REVIEW-HANDOFF.md` §0**, not this file. This is
+> the implementation reference — mechanism, measurements, traps — and it is current for
+> that. It does NOT track branch status or open decisions; §0 there does, and one
+> decision is waiting on Spencer.
+
+
 ## 1. What changed outside the radix tree
 
 ### 1.1 The freshness family — eight sites, six of them unlisted
