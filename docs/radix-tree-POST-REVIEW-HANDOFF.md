@@ -10,12 +10,21 @@ supersedes: docs/radix-tree-REVIEW-HANDOFF.md (its referee pass is complete)
 **Written 2026-08-09 after the pre-merge referee pass. The branch did not pass.**
 This note carries every finding and the plan that came out of it.
 
-**Updated 2026-08-09: option C is implemented and committed.** §4 and §5 are now
-history — read them for the reasoning, not for work to do. D-059 in the
-deviations log is the long-form account. What remains open is §2, and the two
-biggest items there are **R-2** (the userspace-triggerable panic, still the most
-user-visible defect on the branch) and **R-16** (the stale static-buffer ceiling,
-whose arithmetic D-059 changed again).
+**Updated 2026-08-10: option C AND R-2 are implemented and committed**, plus one
+defect they uncovered in the RCU engine. §4 and §5 are history — read them for the
+reasoning, not for work to do. D-059, D-060 and D-061 in the deviations log are
+the long-form accounts, and `specs/rcu-phase-1.md` P1-DEC-019 carries the RCU one.
+
+**Both merge blockers are now closed.** What remains open in §2 is the detector
+gaps (R-4..R-7, R-9), the latent items (R-12, R-13) and the hygiene list — of which
+**R-17 is the one that must not merge as-is** (`libraries/LibExt/TestDriver.cpp`
+breaks the default `all` target) and **R-16** needs its arithmetic re-derived a
+third time (D-059 took the control-block stride 832 → 768 B).
+
+**A defect found while closing them, worth knowing about:** `barrier` could return
+while another CPU was still inside one of the caller's deleters — an RCU-engine
+bug, four phases old, invisible to the torture suite because it needs stealing. It
+was only observable because D-059 restored an exact invariant. Fixed; see D-061.
 
 `docs/radix-tree-REVIEW-HANDOFF.md` was the brief FOR that pass and is now
 history. `docs/radix-tree-HANDOFF-impl.md` is still the implementation reference.
@@ -24,7 +33,7 @@ history. `docs/radix-tree-HANDOFF-impl.md` is still the implementation reference
 
 ## 0. Suite state
 
-**172/172, ASan and TSan, and the whole `run_all_tests` gate green (1,653 tests
+**172/172, ASan and TSan, and the whole `run_all_tests` gate green (1,656 tests
 across ten runners).** The in-kernel radix stress boots clean at
 `CROCOS_RADIX_STRESS_OPS=24`, Release, exit 0.
 
@@ -45,7 +54,10 @@ Everything the referee pass produced is now on the branch: the R-1 stop-gap, the
 
 ---
 
-## 2. Findings, ranked. 21 from the audit, plus one found while fixing
+## 2. Findings, ranked. 21 from the audit, plus two found while fixing
+
+(the second being D-061's RCU `barrier` defect, which is not in the tables below —
+it is not a radix finding)
 
 Severity, then status. **Open** means nobody has touched it.
 
@@ -54,7 +66,7 @@ Severity, then status. **Open** means nobody has touched it.
 | ID | Finding | Anchor | Status |
 |---|---|---|---|
 | **R-1** | Replenish gate skipped the RCU pump — unbounded silent spin in `munmap` in release | `CoreTree.h:2204` | **FIXED** — stop-gap, then closed properly by C |
-| **R-2** | `tryReservePerDomainStaticBuffer` is not failable — userspace-triggerable kernel **panic** | `VMSubstrate.cpp:1180` → `:693` | **OPEN — the top of the list** |
+| **R-2** | `tryReservePerDomainStaticBuffer` is not failable — userspace-triggerable kernel **panic** | `VMSubstrate.cpp:1180` → `:693` | **FIXED** (D-060) — and it was BIGGER than described: `tryAllocateSmallPage` itself panicked, so the whole failable family was non-failable and every unwind around it was dead code |
 | **R-3** | Termination rests on `promote()` — allocation on the `munmap` path, contra DEC-068 | `DeferredRelease.h:585` | **FIXED** by C (D-059) |
 
 **R-1.** `atFullPopulation()` asks whether the pool holds all the records it
@@ -64,14 +76,18 @@ owns; the question is whether the attempt can proceed. Identical under DEC-068
 because a correct older use of the same predicate sits three lines below.
 Reproduced: gate present → 300 s timeout; gate removed → completes.
 
-**R-2.** The data pages go through `tryAllocateSmallPage` with a clean unwind;
-the lazy subtable installer uses the panicking `allocateSmallPage`.
-`assertNotReached` is `PANIC_NO_STACKTRACE` in **release too** — unlike `assert`.
-A fork storm at low memory panics instead of returning ENOMEM. Two referees found
-this from opposite descriptions of the failure mode, and reconciling them showed
-that `mm.h:59`'s comment (the family "hands back a default-constructed
-`phys_addr`") is itself wrong — that is only true under `GRACEFUL_OOM`. **This is
-independent of C and is the most user-visible defect on the branch.**
+**R-2.** As filed: the data pages go through `tryAllocateSmallPage` with a clean
+unwind, while the lazy subtable installer used the panicking `allocateSmallPage`,
+and `assertNotReached` is `PANIC_NO_STACKTRACE` in **release too** — unlike
+`assert`. So a fork storm at low memory panicked instead of returning ENOMEM.
+
+**On fixing it, the defect turned out to be one layer deeper than either referee
+saw.** `tryAllocateSmallPage` forwarded default flags, and default flags panic — so
+the *whole* failable family was non-failable and its `return false` was dead code.
+That is why two referees produced opposite-sounding descriptions and both were
+right. `mm.h:59`'s comment was wrong in the direction that hides it: it claimed the
+family hands back a null `phys_addr`, which describes a caller that gets control
+back. See D-060; the root fix is one flag in two wrappers.
 
 ### Detector gaps — every one proven by mutation, not argued
 
