@@ -1,8 +1,8 @@
 # ─── Build output ──────────────────────────────────────────────────────────
-cmake-build-amd64-kernel-debug/
-cmake-build-release/
-cmake-build-debug/
-cmake-build-o2/
+# Wildcarded rather than enumerated: the list was four fixed names, so every new
+# configuration (a stress build, an -icount build) showed up as untracked until
+# someone remembered to add it.
+cmake-build-*/
 tests/build/
 stress_tests/build/
 build/

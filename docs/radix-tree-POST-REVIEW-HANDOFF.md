@@ -109,10 +109,25 @@ introduced, R-2's class surviving three lines above its own fix, and a long tail
 
 ## 0d. Open, ranked
 
-1. **§7.1's population rule** — yours (§0).
-2. **R-20 + R-21b** — the stress fixture; one measurement pass, then a re-baseline.
-3. **`CLAUDE.md`** mentions none of this: a 30k-line subsystem, `kernel::random`,
-   `mm::BlockPool`, five new build options, two new run targets.
+1. ~~**§7.1's population rule**~~ — **CLOSED 2026-08-10.** Spencer approved the
+   amendments; the population is normatively 32 (§0).
+2. ~~**R-20 + R-21b**~~ — **CLOSED 2026-08-10 (D-071).** `kWideGranules` 16 -> 64 puts
+   the widest attempt at 68 against a budget of 64, so §6.5's decomposition path now
+   runs on the target for the first time (149 decompositions at default OPS, 1,441 at
+   OPS=24) and `max` is bounded by the budget rather than by the fixture. The row
+   space went 16 -> 32, restoring MAP_FIXED and lookup to their pre-D-055 rates.
+   **The widening initially cost a 256x lifecycle regression** — page-granular
+   densification made a wide region 1,024 applies, which cut OPS=24 from 1,025 cycles
+   to 4 — fixed by densifying with 4 x 16 KiB records instead, which holds the wide
+   region at the old fixture's cost. Caught only by A/B-ing at OPS=24; the default
+   setting showed 4 cycles before and after.
+3. ~~**`CLAUDE.md`**~~ — **CLOSED 2026-08-10.** Rewritten for the merged subsystem:
+   RadixVM, RCU, vmsmalloc, the tests/ project and its eleven runners, the two opt-in
+   runners, the exit-code contract, the `klog` interrupt-safety trap, the `-icount`
+   caveats, and the `specs/` untracking. It also **corrected an actively wrong
+   instruction**: it told the reader to `brew install x86_64-elf-gcc`, which silently
+   discards every global constructor. Note `CLAUDE.md` is gitignored, so that fix is
+   local-only and does not travel with the repo.
 4. **`RCU-proposal.md`** is a stray root-level file from the same `git add -A` as the
    LibExt stubs — but three specs cite it, so **move** it under `docs/`, do not delete.
 5. **R-12** — Treiber ABA safety holds only because no scheduler exists. Tie to the

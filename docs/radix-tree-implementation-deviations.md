@@ -4089,3 +4089,90 @@ the digit, including that a stride change reproduces the referee's independent
 ~174,000; the ordering scanner catching a bare enumerator in **16/16** headers by
 injection; and every mutation claim in D-059/D-064/D-066/D-068 reproduced — one of
 them 10/10 where the record said 3/3.
+
+---
+
+## D-071 — R-20 + R-21b: the stress fixture, widened — and the cost that came with it
+
+The two findings D-070 left deliberately open, done as one measurement pass because
+they are one defect wearing two hats: the in-kernel stress was reporting numbers that
+were properties of the fixture rather than of the tree.
+
+### R-21b — `kDetachBudget = 64` had no in-kernel coverage
+
+The dense row capped a wide unmap at 16 granules. From `kAmd64Geometry`'s
+`{4,4,5,5,4,4}` over a 4 KiB floor, a level-6 node spans one 64 KiB granule and a
+level-5 node spans sixteen of them, so a full-span clear of a densified run detached
+at most `1 + 16 = 17` nodes against a budget of 64. `max=17 decompositions=0` was
+therefore arithmetic, not observation, and §6.5's decomposition path had **never run
+on the target** — its only exercise was `DecompositionTest`, at a synthetic budget of
+1 on the tiny geometry.
+
+`kWideGranules` 16 -> 64 is four whole level-5 nodes: the summed detachment is
+`4 x 17 = 68`, over budget, so decomposition is forced. It is the smallest multiple of
+a level-5 node that crosses (three is 51). A `static_assert` in `detachHistogram()`
+now fails the build if the wide row ever stops exceeding the budget, so this cannot
+silently regress to the state R-21 found.
+
+The reported line changed meaning with it. `max` is now bounded by the **budget**
+rather than by the fixture — every recorded detachment is a decomposed unit, and a
+unit that fit is what the budget means — and `decompositions` became a real
+observation, so a zero there is now a finding rather than a tautology.
+`posesOverBudget` is printed alongside so a fixture that stopped posing the shape is
+distinguishable from a decomposition defect.
+
+### R-20 — the row mix had drifted silently
+
+D-055 added the dense and bulk rows inside a fixed 16-row space and paid for them out
+of MAP_FIXED (3 -> 2, -33%) and lookup (2 -> 1, -50%). Lookup is the only row driving
+the descent cache and the `-icount` probes, so that halved the coverage of a whole
+subsystem without anything saying so.
+
+The row space is now 32 with the mix written out as a table beside it, restoring
+MAP_FIXED and lookup to their exact pre-D-055 rates, keeping dense and bulk at theirs,
+and taking the dilution out of the two highest-volume rows. The boundaries are named
+constants rather than integer literals in an `else if` chain, which is what let the
+mix drift unremarked in the first place.
+
+### The cost, which is the part worth keeping
+
+Widening the row to 64 granules while densifying with PAGE-sized records took a wide
+region from 256 applies to 1,024. Under `-DCROCOS_RADIX_STRESS_OPS=24` — the knob
+that makes the address-space LIFECYCLE the thing under test — that swamped the
+cycle's own op budget and cut the run from **1,025 cycles to 4**. A 256x loss of
+exactly the coverage the knob exists for, in the same change that added coverage
+elsewhere.
+
+It was caught only by A/B-ing the new fixture against the old one at OPS=24 rather
+than at the default. **A fixture change has to be re-baselined at every setting the
+fixture is run at, not just the default** — the default was 4 cycles both before and
+after, and showed nothing.
+
+The fix follows from what the trap actually requires. Page-granularity was never the
+requirement: what forces a level-6 node is a record SMALLER than the level-5 slot,
+and page-sized is merely one way to be sub-granule. `kDenseRecordsPerGranule = 4`
+(16 KiB records) keeps every granule subdivided while holding a wide region at
+`64 x 4 = 256` applies — the *same* cost the 16-granule fixture had. Span quadrupled,
+cost unchanged, and OPS=24 is back to 1,025 cycles exactly.
+
+### Measured
+
+| | before | after |
+|---|---|---|
+| decompositions (Release, default OPS) | **0** | **149** |
+| decompositions (Debug, OPS=24) | **0** | **1,441** |
+| detach `max` | 17 (fixture ceiling) | 51-57 (units, `<= 64`) |
+| MAP_FIXED | 2,077 | 3,031 (+46%) |
+| lookup | 1,027 | 2,121 (+101%) |
+| descent-cache hit rate | 50% | 77% |
+| cycles at OPS=24 | 1,025 | 1,025 (restored; 4 before the fix) |
+| dense / bulk / clusters | unchanged rate | unchanged rate |
+
+All six boot configs clean — `run`, `run_numa`, `run_numa_hmat` in Debug and
+Release/LTO, zero panics, `oom=0`, residue gate satisfied. Suite 1,665 green
+(`RadixStress.cpp` is kernel-only and not in the test build).
+
+**Closes R-20 and R-21b.** The retention argument for `kDetachBudget = 64` is still
+the analytic bracket at `Claim.h` — a full C1 subtree is 33 and a full C0 is 1,057 —
+and no stress figure replaces it. What changed is that the budget's decomposition
+path is now exercised on the target instead of only being argued about.

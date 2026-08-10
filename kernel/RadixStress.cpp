@@ -102,18 +102,103 @@ namespace radix_stress {
     // all. A workload that only ever grows the tree exercises none of it.
     constexpr unsigned kLiveSlots     = 24;
 
-    // Granules in a WIDE unmap. Named rather than inlined because the detach
-    // histogram's label is derived from it (R-21/D-070): sixteen granules is one
-    // whole level-5 node, which detaches as 1 + 16 = 17, so `max` is this
-    // fixture's arithmetic and not a measurement. Widening the fixture — the open
-    // follow-up — must move the label with it, which deriving guarantees.
-    constexpr unsigned kWideGranules  = 16;
+    // Granules in a WIDE unmap — sized to CROSS `kDetachBudget`, which is the
+    // whole point of the row (R-21b).
+    //
+    // The arithmetic, from `kAmd64Geometry`'s `{4,4,5,5,4,4}` over a 4 KiB floor:
+    // a level-6 node spans 16 x 4 KiB = 64 KiB = one granule, and a level-5 node
+    // spans 16 x 64 KiB = 1 MiB = sixteen granules. Densify a granule with
+    // sub-granule records and it gains a level-6 node; sixteen such granules fill
+    // a level-5 node, which detaches as a subtree of 1 + 16 = 17 nodes.
+    //
+    // At the previous value of 16 the widest possible attempt was therefore
+    // exactly 17 nodes against a budget of 64 — so `decompositions=0` was a
+    // property of this constant, not of the tree, and the shipping budget's
+    // decomposition path had NO in-kernel coverage (only `DecompositionTest`, at a
+    // synthetic budget of 1 on the tiny geometry). 64 granules is four whole
+    // level-5 nodes: the summed detachment is 4 x 17 = 68, over the budget of 64,
+    // so §6.5 must decompose. It is the smallest multiple of a level-5 node that
+    // crosses — 3 nodes is 51, comfortably under.
+    //
+    // The base below is 1 MiB-aligned but not 32 MiB-aligned, so a run either sits
+    // inside one level-4 node (site = that node) or straddles two (site = the
+    // cluster root). Both decompose, and exercising both is deliberate.
+    //
+    // The detach histogram's label derives from this constant so it cannot go
+    // stale (R-21/D-069).
+    constexpr unsigned kWideGranules  = 64;
+
+    // Granules per level-5 node, and the node count a fully-covered one detaches
+    // as. Both are geometry, restated here only so the reporting below can show
+    // its work rather than asserting a number.
+    constexpr unsigned kGranulesPerL5 = 16;
+    constexpr unsigned kL5DetachNodes = 1 + kGranulesPerL5;   // 17
+
+    // Records used to densify one granule in the dense row.
+    //
+    // What forces a level-6 node to exist is a record SMALLER than the level-5
+    // slot it sits in — the slot spans a whole granule, and a record covering it
+    // exactly is stored as a leaf there instead (that is D-055's trap, which
+    // produced 102,408 dense regions and zero detachments). Page-sized records are
+    // one way to be sub-granule; they are not the requirement, and treating them
+    // as one has a cost that matters.
+    //
+    // That cost is the reason for this constant. Densifying with pages is 16
+    // records per granule, so widening the row to `kWideGranules = 64` for R-21b
+    // took a wide region from 256 applies to 1,024 — which at
+    // `-DCROCOS_RADIX_STRESS_OPS=24` swamped the cycle's own op budget and cut the
+    // run from **1,025 cycles to 4**. OPS=24 exists to make the address-space
+    // LIFECYCLE the thing under test, so that is a 256x loss of exactly the
+    // coverage the knob is for — measured, not theorised.
+    //
+    // Four 16 KiB records per granule keeps a granule subdivided while holding the
+    // wide region at 64 x 4 = 256 applies, the same cost the 16-granule fixture
+    // had. Span quadrupled, cost unchanged.
+    constexpr unsigned kDenseRecordsPerGranule = 4;
+    constexpr uint64_t kDenseRecordBytes = rdx::kPlacementGranularity / kDenseRecordsPerGranule;
+    static_assert(kDenseRecordBytes < rdx::kPlacementGranularity,
+                  "a dense record must be SMALLER than the level-5 slot or it is "
+                  "stored as a leaf and subdivides nothing — that was D-055");
+    static_assert(kDenseRecordBytes % arch::smallPageSize == 0,
+                  "a dense record must be a whole number of pages");
 
     // Placement sizes, in 64 KiB placement granules (DEC-013). Spread so the
     // tree subdivides to several depths rather than settling at one level:
     // leaves live at any level, and a workload that produces only one leaf level
     // exercises one dispatch row.
     constexpr uint64_t kGranule       = rdx::kPlacementGranularity;
+
+    // ── The row mix, stated rather than implied (R-20) ─────────────────────
+    //
+    // Every operation draws a row from `kRowSpace`, so the mix is these numbers
+    // and nothing else. It is written out because it has drifted silently once
+    // already: D-055 added the dense and bulk rows inside a 16-row space and paid
+    // for them out of MAP_FIXED (3 -> 2, -33%) and lookup (2 -> 1, -50%) without
+    // saying so. Lookup is the ONLY row that drives the descent cache and the
+    // `-icount` probes, so halving it halved the coverage of a whole subsystem.
+    //
+    // A 32-row space restores MAP_FIXED and lookup to their pre-D-055 RATES
+    // exactly, keeps dense and bulk at theirs, and takes the dilution out of the
+    // two highest-volume rows, which are the ones that can spare it:
+    //
+    //     row            count   share    pre-D-055   D-055
+    //     placement      10      31.25%   37.50%      37.50%
+    //     munmap          8      25.00%   31.25%      31.25%
+    //     MAP_FIXED       6      18.75%   18.75%      12.50%   <- restored
+    //     dense           2       6.25%   --           6.25%
+    //     bulk unmap      2       6.25%   --           6.25%
+    //     lookup          4      12.50%   12.50%       6.25%   <- restored
+    //
+    // Note the observed unmap share runs above 25%: the placement row also unmaps
+    // when the live set is full, and those count as unmaps too.
+    constexpr unsigned kRowSpace      = 32;
+    constexpr unsigned kRowPlaceEnd   = 10;   // [0, 10)  placement
+    constexpr unsigned kRowUnmapEnd   = 18;   // [10, 18) munmap
+    constexpr unsigned kRowFixedEnd   = 24;   // [18, 24) MAP_FIXED
+    constexpr unsigned kRowDenseEnd   = 26;   // [24, 26) dense region
+    constexpr unsigned kRowBulkEnd    = 28;   // [26, 28) bulk unmap
+                                              // [28, 32) lookup
+    static_assert(kRowBulkEnd < kRowSpace, "the lookup row must not be empty");
 
     // ── The address space under test ───────────────────────────────────────
     //
@@ -351,9 +436,9 @@ namespace radix_stress {
             }
             rdx::KernelTree tree = block.clusters.treeFor(bucket);
 
-            const unsigned row = static_cast<unsigned>((r >> 17) % 16);
+            const unsigned row = static_cast<unsigned>((r >> 17) % kRowSpace);
 
-            if (row < 6 || live.count == 0) {
+            if (row < kRowPlaceEnd || live.count == 0) {
                 // ── Probed placement (§5.6, DEC-095) ───────────────────────
                 if (live.count == kLiveSlots) {
                     // Full: drop the oldest to make room, so the live set is a
@@ -399,7 +484,7 @@ namespace radix_stress {
                         gOom.fetch_add(1, RELAXED);
                     }
                 }
-            } else if (row < 11) {
+            } else if (row < kRowUnmapEnd) {
                 // ── munmap ─────────────────────────────────────────────────
                 const unsigned k = static_cast<unsigned>((r >> 41) % live.count);
                 const uint64_t va = live.va[k];
@@ -422,7 +507,7 @@ namespace radix_stress {
                     live.count--;
                 }
                 gUnmaps.fetch_add(1, RELAXED);
-            } else if (row < 13) {
+            } else if (row < kRowFixedEnd) {
                 // ── MAP_FIXED over a live range (§6.5's detachment) ────────
                 const unsigned k = static_cast<unsigned>((r >> 41) % live.count);
                 const uint64_t va = live.va[k];
@@ -447,7 +532,7 @@ namespace radix_stress {
                     VMS::destroy(VMS::SafePtr<rdx::Mapping>(m));
                     gOom.fetch_add(1, RELAXED);
                 }
-            } else if (row == 13) {
+            } else if (row < kRowDenseEnd) {
                 // ── A dense region, built then torn down whole ─────────────
                 //
                 // **The one shape no other row can make, and the reason two
@@ -466,30 +551,38 @@ namespace radix_stress {
                 // and dispatches to DetachChild. It is a realistic shape as well
                 // as a useful one — a linker mapping a library's segments
                 // individually and unmapping it as a unit does exactly this.
-                // **PAGE-granular, and that is the whole trick.** A record
-                // covering a slot's entire span is stored as a LEAF in that
-                // slot — so a run of adjacent GRANULE-sized records fills a
-                // level-5 node's leaf slots and subdivides nothing, which is why
-                // the first version of this row produced 102,408 dense regions
-                // and still zero detachments. `kPlacementGranularity` is 64 KiB,
-                // which is exactly `nodeSpan(level 6)`. Records SMALLER than the
-                // slot are what force a child node to exist.
+                // **SUB-GRANULE, and that is the whole trick.** A record covering
+                // a slot's entire span is stored as a LEAF in that slot — so a run
+                // of adjacent GRANULE-sized records fills a level-5 node's leaf
+                // slots and subdivides nothing, which is why the first version of
+                // this row produced 102,408 dense regions and still zero
+                // detachments. `kPlacementGranularity` is 64 KiB, which is exactly
+                // `nodeSpan(level 6)`. Records SMALLER than the slot are what force
+                // a child node to exist — see `kDenseRecordsPerGranule`, which is
+                // where the size and its cost are argued.
                 //
-                // One granule densified with pages = one level-6 node under a
-                // level-5 slot. Unmapping whole granules then fully covers those
-                // children and dispatches to DetachChild. Sixteen of them is a
-                // whole level-5 node, which detaches as 1 + 16 = 17.
+                // One granule densified = one level-6 node under a level-5 slot.
+                // Unmapping whole granules then fully covers those children and
+                // dispatches to DetachChild. Sixteen of them is a whole level-5
+                // node, which detaches as 1 + 16 = 17.
+                //
+                // The WIDE variant (`kWideGranules`, one dense region in eight) is
+                // sized to run four level-5 nodes together, so its clear sums to
+                // 4 x 17 = 68 against a budget of 64 and §6.5 has to decompose it.
+                // That is the only in-kernel exercise the decomposition path gets —
+                // see `kWideGranules` for the arithmetic and R-21b for why it
+                // matters. The narrow variant stays at 1-4 granules so the common,
+                // under-budget detach keeps dominating the histogram.
                 const bool     wide  = ((r >> 33) & 7) == 0;
                 const unsigned gran  = wide ? kWideGranules : 1u + static_cast<unsigned>((r >> 37) % 4);
-                const uint64_t base  = clusterLo + ((r >> 45) % 256) * kGranule * 16;
-                const uint64_t pages = kGranule / arch::smallPageSize;
+                const uint64_t base  = clusterLo + ((r >> 45) % 256) * kGranule * kGranulesPerL5;
                 unsigned built = 0;
                 for (unsigned g = 0; g < gran; g++) {
-                    for (uint64_t i = 0; i < pages; i++) {
-                        const uint64_t va = base + g * kGranule + i * arch::smallPageSize;
+                    for (uint64_t i = 0; i < kDenseRecordsPerGranule; i++) {
+                        const uint64_t va = base + g * kGranule + i * kDenseRecordBytes;
                         rdx::Mapping* m = tryMakeMapping(va);
                         if (m == nullptr) { g = gran; break; }
-                        const auto st = tree.apply(va, va + arch::smallPageSize - 1, m,
+                        const auto st = tree.apply(va, va + kDenseRecordBytes - 1, m,
                                                    rdx::ApplyMode::Overwrite);
                         if (st != rdx::ApplyStatus::Ok) {
                             // Never published: §7.3's shallow discard.
@@ -509,7 +602,7 @@ namespace radix_stress {
                     (void)tree.apply(base, base + built * kGranule - 1, nullptr);
                     gDenseRegions.fetch_add(1, RELAXED);
                 }
-            } else if (row == 14) {
+            } else if (row < kRowBulkEnd) {
                 // ── Bulk unmap: a range covering SEVERAL distinct records ──
                 //
                 // Every other unmap row clears exactly the span it placed — a
@@ -795,27 +888,43 @@ namespace radix_stress {
                << "\n";
     }
 
-    // ─── This line's `max` is NOT an observation (R-21) ────────────────────
+    // ─── What this line does and does not say (R-21 / R-21b) ───────────────
     //
-    // It reads like evidence that `kDetachBudget = 64` is comfortable. It is not:
-    // the workload caps a wide unmap at `gran = 16` granules, and the comment at
-    // that site does the arithmetic itself — "sixteen of them is a whole level-5
-    // node, which detaches as 1 + 16 = 17". So `max=17` is the FIXTURE's ceiling
-    // and `decompositions=0` follows structurally rather than empirically.
+    // History, because it is the reason the label is this verbose. The row used to
+    // cap a wide unmap at 16 granules — one whole level-5 node — so the widest
+    // attempt the fixture could pose was 1 + 16 = 17 against a budget of 64.
+    // `max=17 decompositions=0` therefore read as "64 is comfortable" while being
+    // pure fixture arithmetic, and the shipping budget's decomposition path had no
+    // in-kernel coverage at all. A structural ceiling presented as a measurement is
+    // worse than no measurement.
     //
-    // Which means the shipping budget's decomposition path has no in-kernel
-    // coverage at all — it is exercised only by `DecompositionTest`, at a synthetic
-    // budget of 1 on the tiny geometry. Widening the fixture is the fix and is a
-    // deliberate follow-up (it retunes this instrument's whole distribution, so it
-    // wants its own baseline); until then the label says what the number is, because
-    // a structural ceiling presented as a measurement is worse than no measurement.
-    // The retention argument for 64 is the analytic bracket at `Claim.h`'s
-    // `kDetachBudget` — a full C1 subtree is 33 and a full C0 is 1,057 — not this.
+    // R-21b widened the row: `kWideGranules = 64` is four level-5 nodes, so the
+    // widest attempt sums to 4 x 17 = 68 and MUST decompose. Two consequences for
+    // reading this line:
+    //
+    //   - `decompositions` is now an OBSERVATION. It counts §6.5 actually
+    //     splitting an over-budget attempt on the target. A zero here is now a
+    //     finding, not a tautology — it would mean the fixture stopped posing the
+    //     shape (a short `built` run, say), and `posesOverBudget` below is printed
+    //     so that case is distinguishable from a decomposition defect.
+    //   - `max` is now bounded by the BUDGET rather than by the fixture: every
+    //     recorded detachment is a decomposed UNIT, and a unit that fit is what
+    //     the budget means. `max <= budget` is the property; `max` climbing to
+    //     roughly the budget is the fixture working, not a problem.
+    //
+    // What still does NOT rest on this line is the retention of 64 itself. That is
+    // the analytic bracket at `Claim.h`'s `kDetachBudget` — a full C1 subtree is 33
+    // and a full C0 is 1,057 — and no stress figure replaces it.
     void detachHistogram() {
         const auto& h = rdx::gDetachHistogram;
+        // The widest attempt this fixture can pose, derived so it cannot go stale.
+        constexpr unsigned kPosed = (kWideGranules / kGranulesPerL5) * kL5DetachNodes;
+        static_assert(kPosed > rdx::kDetachBudget,
+                      "the wide row must exceed kDetachBudget or the decomposition "
+                      "path has no in-kernel coverage — that was R-21b");
         klog() << "radixStress: detachment size in nodes (DEC-077) — n=" << h.total()
-               << " max=" << h.max() << " (fixture ceiling " << (1u + kWideGranules)
-               << ", not an observation — R-21)"
+               << " max=" << h.max() << " (units, so <= budget)"
+               << " posesOverBudget=" << kPosed
                << " budget=" << static_cast<uint64_t>(rdx::kDetachBudget)
                << " decompositions=" << rdx::gDecompositions.load(rdx::kCensusAccounting)
                << "\n  1:" << h.bucket(1) << " 2:" << h.bucket(2)
