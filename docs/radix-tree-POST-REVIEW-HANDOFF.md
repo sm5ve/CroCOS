@@ -1,7 +1,7 @@
 ---
 kind: handoff
 status: ready
-audience: the next session — C, R-2, R-5, R-16, R-17 all DONE; pick from §2
+audience: the next session — all detector gaps + both blockers DONE; latent items remain
 supersedes: docs/radix-tree-REVIEW-HANDOFF.md (its referee pass is complete)
 ---
 
@@ -15,11 +15,11 @@ defect they uncovered in the RCU engine. §4 and §5 are history — read them f
 reasoning, not for work to do. D-059, D-060 and D-061 in the deviations log are
 the long-form accounts, and `specs/rcu-phase-1.md` P1-DEC-019 carries the RCU one.
 
-**Both merge blockers are closed, and so are R-5, R-16 and R-17** (D-062, D-063,
-D-064). What remains open in §2 is the detector gaps **R-4** (the ordering check
-does not scan `Claim.h`) and **R-6** (neither deleter's freshness discipline is
-asserted), the latent items (**R-9, R-12, R-13**), and the rest of the hygiene
-list (**R-18** the TSan-stress default, **R-19**'s four surviving wrong
+**Both merge blockers are closed, and so are R-4, R-5, R-6, R-16 and R-17**
+(D-062..D-066). **Every detector gap the referee pass found is closed.** What
+remains is the latent items (**R-9, R-12, R-13** — all three real, none currently
+reachable, and R-9 is the one to re-read before any non-x86 port) and the rest of
+the hygiene list (**R-18** the TSan-stress default, **R-19**'s four surviving wrong
 comments, **R-20** the displaced coverage, **R-21** the `detachBudget` retention).
 **R-5 is the one with a live hole behind it**: `GrowthTest.cpp` and
 `DecompositionTest.cpp` have zero oracle assertions, and an unpublished leaked node
@@ -37,7 +37,7 @@ history. `docs/radix-tree-HANDOFF-impl.md` is still the implementation reference
 
 ## 0. Suite state
 
-**172/172, ASan and TSan, and the whole `run_all_tests` gate green (1,658 tests
+**172/172, ASan and TSan, and the whole `run_all_tests` gate green (1,662 tests
 across ten runners).** The in-kernel radix stress boots clean at
 `CROCOS_RADIX_STRESS_OPS=24`, Release, exit 0.
 
@@ -97,9 +97,9 @@ back. See D-060; the root fix is one flag in two wrappers.
 
 | ID | Finding | Anchor | Proof |
 |---|---|---|---|
-| **R-4** | §11 ordering check does not scan `Claim.h` — the claim protocol's own four atomics | `OrderingSpellingTest.cpp:45` | Bare `ACQUIRE` in `Claim.h:91` **passes**; same edit in a scanned header **fails** |
+| **R-4** | **FIXED** (D-065). `ProgressAudit.h` (35 atomics) was missing too. The header list is gone — the directory is enumerated, so the standing "add new headers to this file" chore is gone with it. Neither header needed a fix; both already used named constants |
 | **R-5** | **FIXED** (D-064). Both discard sites covered (`:309` and `:229`). The single race detected the leak only 10/12 — a **barrier before each growth** took it to 20/20, and 20/20 pass clean. `nodeCount()`'s `>=` bound is exact now |
-| **R-6** | Neither deleter's freshness discipline is asserted | `CoreTree.h:112`, `DeferredRelease.h:193` | Both `SafePtr`s deleted → **green both times** |
+| **R-6** | **FIXED** (D-066) — and green for a CORRECT reason: those two `SafePtr`s wrap the retire subject, `onPreTouch` already refreshed it, and freshness is **page-granular**. The wrong "and NOTHING else" comments are corrected (closes R-19's `CoreTree.h:107` row). The load-bearing `Mapping`-side call is now asserted; making it non-vacuous took **four** measured attempts |
 | **R-7** | D-057's own test is vacuous for the property it names | `DeferredReleaseTest.cpp:593` | `promo=3, perCpu=16` — promotion covers the demand, reserve never touched |
 | **R-8** | §7.1's `barrier` remedy was unreachable in every fixture | `CoreTree.h:2211` | Refill ahead of the pump; partially addressed by the R-1 fix |
 
@@ -152,7 +152,7 @@ that no longer exists.
 | **R-16** | **FIXED** (D-063). Measured **~180,795 at 8 CPUs, 5,939 B each**. The ~174,000 re-derivation was also wrong: the metric is each consumer's SHARE OF A PAGE, not its stride. The figure is now DERIVED by `radix_static_buffer_ceiling_is_derived_from_the_live_pools` and asserted per row — a bracket was tried and let a 9% regression through |
 | **R-17** | **FIXED** (D-062). `Ext` is an INTERFACE library and both stubs are gone — they were stray `git add -A` additions in `87e4a2f`, and `master` had the mirror-image break (the CMakeLists named sources that did not exist). The reported error was actually host clang meeting cross-GCC's `-Wno-comma-subscript` under `-Werror`, not the `<iostream>` |
 | **R-18** | `CROCOS_SKIP_TSAN_STRESS` defaults ON → 441 vs 425; EpochDomain loses race coverage in the default gate, re-creating by another route the exact condition the comment above it warns about |
-| **R-19** | Six load-bearing comments state properties the code lacks — see below |
+| **R-19** | Six load-bearing comments state properties the code lacks — see below. **Four now fixed**: the two `DeferredRelease.h` rows by D-059, and the `CoreTree.h:107` page-granularity row by D-066 (in three places, not one). `CoreTree.h:3053`, `CoreTree.h:1540` and `mm.h:59` remain — the last of those is fixed by D-060 |
 | **R-20** | D-055's workload change displaced coverage: MAP_FIXED −33%, lookup −50% (the only row exercising the descent cache and the `-icount` probes) |
 | **R-21** | `detachBudget`'s measured "max 17" is the fixture's structural ceiling (`wide ? 16u` granules = one level-5 node = 17), not an observation. The analytic bracket in `Claim.h:60` carries the retention |
 
