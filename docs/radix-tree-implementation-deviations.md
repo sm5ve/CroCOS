@@ -4744,3 +4744,45 @@ headers. I considered it and did not revert: there is now **one** site naming an
 ordering instead of seventeen, and a call site that takes no ordering argument
 cannot spell one wrong. That narrows the surface rather than weakening the check,
 and any newly added atomic in the file is still scanned.
+
+---
+
+## D-080 — the `{}` workaround retired, because the type was fixed
+
+D-077 found that `Atomic<T>::Atomic(T)` performed a SEQ_CST store, so every
+`Atomic<uint64_t> x{0}` member initializer was a locked `xchg` — and a `CoreTree`
+is constructed BY VALUE on the lookup path, so `TreeStats`' nine counters plus
+`backoffSequence` were ten locked RMWs on a stack object per page fault. The
+mitigation was local: spell them `{}` so they value-initialize, and move
+`backoffSequence`'s non-zero seed into a `CoreTree()` body.
+
+That was a workaround at the call site for a defect in the type. **The type has
+since been fixed** (`core: Atomic's constructor should not be a SEQ_CST store`,
+on master): `Atomic(T)` is `constexpr` and initializes non-atomically, on the
+standard's reasoning that construction is not observable by another thread. So
+this branch was rebased onto it and the workaround retired — `{0}` on all nine
+counters, `backoffSequence` back to a member initializer, and the constructor
+body it forced deleted.
+
+**Verified cost-neutral rather than assumed.** `-icount` mode 4, same build,
+before and after the revert:
+
+| | inner min | inner mean | pump min | pump mean | **total min** | **total mean** |
+|---|---|---|---|---|---|---|
+| workaround in place | 241 | 336 | 198 | 209 | **439** | **545** |
+| workaround retired | 225 | 331 | 214 | 214 | **439** | **545** |
+
+The totals are identical; the inner/pump split moved within the instrument's
+run-to-run noise, which the pump study measured at about ±12 on code it had not
+touched. Had `{0}` still been a locked `xchg`, ten of them per lookup would have
+been unmissable.
+
+Worth stating as a rule, because the shape recurs: a workaround spread across
+call sites should be retired when the underlying defect is fixed, and the retirement
+should be *measured*, not assumed. Leaving it costs nothing at runtime and costs a
+reader every time — `{}` on a counter invites the question "why not `{0}`?", and the
+answer had already stopped being true.
+
+Suite 1,673 green; Debug and Release/LTO+stress build; three boot configs clean;
+decompositions still 149.
+

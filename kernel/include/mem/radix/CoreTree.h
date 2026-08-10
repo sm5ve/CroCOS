@@ -595,49 +595,44 @@ namespace kernel::mm::radix {
     // pairs should not conflict AT ALL — a conflict counter near zero is the
     // stronger signal, and a HIGH ONE MEANS THE ONE-CONFLICT-SITE ANALYSIS IS
     // WRONG." Acceptance is instrumented, not silent.
-    // ─── `{}` and not `{0}`, on every counter here (D-076) ─────────────────
-    //
-    // `Atomic<T>::Atomic(T)` performs a SEQ_CST store, so `Atomic<uint64_t> x{0}`
-    // compiles to a LOCKED `xchg` — and a `TreeStats` is not a singleton. A tree
-    // is "a VALUE, deliberately" (ClusterTable::treeFor), so every lookup
-    // constructs one, and these member initializers were nine locked
-    // read-modify-writes on a stack object per FAULT. Empty braces
-    // value-initialize instead: `Atomic`'s default constructor is `= default`
-    // and therefore not user-provided, so `{}` zero-initializes the storage with
-    // a plain store and the value is identical.
-    //
-    // No ordering is lost, because there is none to lose: an object still under
-    // construction is not reachable by any other CPU, which is exactly what
-    // `kPrivateInit` means everywhere else in this tree.
+    // These were briefly spelled `{}` rather than `{0}`. `Atomic<T>::Atomic(T)`
+    // used to perform a SEQ_CST store, and a `TreeStats` is not a singleton — a
+    // tree is "a VALUE, deliberately" (ClusterTable::treeFor), so every lookup
+    // constructed one and these initializers were nine locked read-modify-writes
+    // on a stack object per FAULT. That was a workaround at the call site for a
+    // defect in the type, and the type has since been fixed: `Atomic(T)` is now
+    // `constexpr` and initializes non-atomically, because construction is not
+    // observable by another thread. So `{0}` is free again, and says what it
+    // means.
     struct TreeStats {
-        Atomic<uint64_t> attempts{};
-        Atomic<uint64_t> completions{};
+        Atomic<uint64_t> attempts{0};
+        Atomic<uint64_t> completions{0};
         // Retries caused by a failed claim acquisition — the genuine conflicts.
-        Atomic<uint64_t> claimConflicts{};
+        Atomic<uint64_t> claimConflicts{0};
         // Retries caused by re-dispatch finding a changed row. Counted apart
         // because it is a DIFFERENT phenomenon: the claim set was computed
         // against a tree that has since moved, not a contended bit.
-        Atomic<uint64_t> redispatchChanges{};
+        Atomic<uint64_t> redispatchChanges{0};
         // The longest retry run any single operation needed. §9 accepts that
         // individual starvation is unbounded in principle (DEC-097 adds no bound
         // beyond backoff), so this is a COUNTER and never an assert — but a test
         // that sees thousands is looking at a livelock, not at bad luck.
-        Atomic<uint64_t> maxRetries{};
+        Atomic<uint64_t> maxRetries{0};
         // Slots commit declined to act on because the attempt holds no claim bit
         // for them — a clearing row that appeared in the window between
         // re-dispatch and commit (D-013). A legal execution, so a counter rather
         // than an assert, but a number that climbs into the operation count means
         // the read pass is under-claiming rather than losing a genuine race.
-        Atomic<uint64_t> unheldRowsSkipped{};
+        Atomic<uint64_t> unheldRowsSkipped{0};
         // §6.5 decompositions entered (including recursive ones). A `MAP_FIXED`
         // shape that decomposes when the geometry says it should not is a
         // budget-tuning signal, not a correctness one.
-        Atomic<uint64_t> decompositions{};
+        Atomic<uint64_t> decompositions{0};
         // §7.1: attempts abandoned because this CPU's DeferredRelease pool was
         // momentarily short — the records exist and are in flight. Each one costs
         // a grace period, so this is the number that says whether the per-CPU
         // POPULATION is big enough for the workload.
-        Atomic<uint64_t> recordShortfalls{};
+        Atomic<uint64_t> recordShortfalls{0};
         // D-059: attempts refused because their record demand exceeded the budget,
         // and therefore decomposed. Counted apart from `decompositions` and from
         // `recordShortfalls` because it is a third phenomenon and the three want
@@ -645,7 +640,7 @@ namespace kernel::mm::radix {
         // the workload legitimately displaces more distinct mappings in one attempt
         // than a pool holds, and a plain decomposition is about detachment size.
         // Confusing the first two is what ITEM-084 did.
-        Atomic<uint64_t> recordBudgetOverruns{};
+        Atomic<uint64_t> recordBudgetOverruns{0};
 
         void reset() {
             attempts.store(0, kPrivateInit);
@@ -677,10 +672,6 @@ namespace kernel::mm::radix {
         // the conceptual full-depth tree, so prefix indexing inside it is free
         // and growth is exact (the old root becomes precisely one child slot of
         // its new parent, so no mapping moves).
-        // Seeds `backoffSequence` and nothing else; every other member has an
-        // initializer. A body rather than a member initializer because that one
-        // is an `Atomic` with a non-zero seed — see the member's own note.
-        CoreTree() { backoffSequence.store(0x243F6A8885A308D3ull, kPrivateInit); }
 
         // The tree's domain is per-address-space (DEC-072 / RCU-DEC-043). One
         // global domain was rejected on the merits: teardown's no-new-users
@@ -1970,11 +1961,12 @@ namespace kernel::mm::radix {
         // Jitter state for the retry backoff. Shared rather than per-CPU because
         // it only needs to decorrelate, and the CPU id is mixed in at use.
         //
-        // Seeded by `CoreTree()`'s body rather than by a member initializer, for
-        // the reason spelled out above `TreeStats`: a non-empty `Atomic{...}`
-        // initializer is a SEQ_CST store, i.e. a locked `xchg`, and this member
-        // is constructed once per lookup along with the rest of the tree value.
-        Atomic<uint64_t> backoffSequence;
+        // A member initializer again. This was briefly seeded from a `CoreTree()`
+        // body, because a non-empty `Atomic{...}` initializer used to be a SEQ_CST
+        // store and this member is constructed once per lookup along with the rest
+        // of the tree value. `Atomic(T)` is `constexpr` and non-atomic now, so the
+        // initializer is free and the constructor body it forced is gone.
+        Atomic<uint64_t> backoffSequence{0x243F6A8885A308D3ull};
         // DEC-060: whether this operation retired anything, so operation exit
         // knows whether to pump. Pumping unconditionally would be harmless but
         // dishonest — the site exists to stop a just-filled bag sitting OPEN on
