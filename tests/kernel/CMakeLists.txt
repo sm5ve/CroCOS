@@ -12,6 +12,7 @@ add_library(KernelTests STATIC)
 
 target_sources(KernelTests PRIVATE
     ArchMocks.cpp
+    ArchMocksTest.cpp
     InterruptGraphTests.cpp
     PageAllocatorTests.cpp
     NUMATests.cpp

@@ -150,13 +150,29 @@ namespace CroCOSTest {
         void (*cleanupFunc)();
     };
 
+    // Test-body prologue hook: runs immediately before each test body, ON THE
+    // THREAD THAT EXECUTES THAT BODY.  That thread distinction is the whole
+    // point — a timed test runs on a freshly spawned thread, so per-thread
+    // state a test needs (e.g. which logical CPU this thread is bound to)
+    // cannot be established by the main thread on its behalf.  Use
+    // REGISTER_TEST_PROLOGUE.
+    struct TestPrologueHook {
+        void (*prologueFunc)();
+    };
+
+    // Runs every registered prologue hook. Called by the harness on the body
+    // thread; exposed because that thread is spawned inside runSingleTest.
+    void runTestPrologues();
+
         // Cross-platform section attributes
     #ifdef __APPLE__
     #define CROCOS_TEST_SECTION         __attribute__((used, section("__DATA,crocos_tests")))
     #define CROCOS_CLEANUP_SECTION      __attribute__((used, section("__DATA,crocos_cleanup")))
+    #define CROCOS_PROLOGUE_SECTION     __attribute__((used, section("__DATA,crocos_prologue")))
     #else
     #define CROCOS_TEST_SECTION         __attribute__((used, section(".crocos_unit_tests")))
     #define CROCOS_CLEANUP_SECTION      __attribute__((used, section(".crocos_test_cleanup")))
+    #define CROCOS_PROLOGUE_SECTION     __attribute__((used, section(".crocos_test_prologue")))
     #endif
 
         // Test registration macro using custom section (cross-platform)
@@ -217,6 +233,16 @@ namespace CroCOSTest {
     const CroCOSTest::TestCleanupHook cleanupFn##_hook { cleanupFn }; \
     CROCOS_CLEANUP_SECTION \
     const CroCOSTest::TestCleanupHook* cleanupFn##_hook_registration = &cleanupFn##_hook; \
+    }
+
+    // Register a function to be called before every test body, on the thread
+    // that runs that body.
+    // Usage: REGISTER_TEST_PROLOGUE(myPrologueFn)  (no semicolon on the function itself)
+    #define REGISTER_TEST_PROLOGUE(prologueFn) \
+    namespace { \
+    const CroCOSTest::TestPrologueHook prologueFn##_prologue { prologueFn }; \
+    CROCOS_PROLOGUE_SECTION \
+    const CroCOSTest::TestPrologueHook* prologueFn##_prologue_registration = &prologueFn##_prologue; \
     }
 }
 

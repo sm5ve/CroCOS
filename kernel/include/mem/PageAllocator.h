@@ -247,6 +247,14 @@ struct PageAllocatorImpl {
     NUMAPool** numaPools;
     size_t numDomains;
     LocalPool** localPools;
+    // Number of valid logical CPU IDs, i.e. the length of `localPools`. Recorded
+    // so the contract stated at `createPageAllocator` — "processorCount is the
+    // number of valid logical CPU IDs ([0, processorCount))" — can be CHECKED
+    // rather than merely documented. It was documented and unchecked, and a test
+    // harness that reported more CPUs than the allocator was built for indexed
+    // past this array and dereferenced the garbage: a SEGV inside the allocator
+    // with nothing naming the cause.
+    size_t localPoolCount;
     NUMADomainEntry* domainTable;
     size_t domainTableSize;
     // Physical memory with no NUMA affinity; queried last during allocation.

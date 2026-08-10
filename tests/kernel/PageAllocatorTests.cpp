@@ -11,6 +11,7 @@
 #include <thread>
 #include <atomic>
 #include <algorithm>
+#include "ArchMocks.h"   // arch::testing::setProcessorCount
 #include <mutex>
 #include <random>
 #include <chrono>
@@ -724,6 +725,9 @@ struct TestPageAllocatorImpl {
     std::optional<kernel::numa::NUMAPolicy>   policy;
     PageAllocatorImpl                         impl;
 
+    size_t priorProcessorCount = 0;
+    ~TestPageAllocatorImpl() { arch::testing::setProcessorCount(priorProcessorCount); }
+
     explicit TestPageAllocatorImpl(std::vector<DomainSpec> domains) {
         domainBuffers.reserve(domains.size()); // prevent reallocation; see note above
         Vector<NUMAPool*> numaPools;
@@ -785,6 +789,16 @@ struct TestPageAllocatorImpl {
                 localPools[cpu] = createLocalPool(real, &topology, domainPool, static_cast<arch::ProcessorID>(cpu));
             }
         }
+
+        // The allocator is built with one LocalPool per CPU named in the domain
+        // specs — four, here — so the mock must agree on how many logical CPUs
+        // exist before any thread binds to one. Left unsynchronised, a worker
+        // could bind to a CPU the allocator has no pool for, index past
+        // `localPools` in allocateFallback, and dereference the garbage: a SEGV
+        // inside the allocator with nothing naming the cause. Restored on
+        // destruction, because the setting is global.
+        priorProcessorCount = arch::testing::getProcessorCount();
+        arch::testing::setProcessorCount(processorCount);
 
         impl = createPageAllocator(move(numaPools), localPools, processorCount,
                                    nullptr, policyPtr);
@@ -1880,31 +1894,39 @@ TEST_WITH_TIMEOUT_NO_TRACKING(NUMAPool_ConcurrentStress_SmallPages, 8000) {
         std::vector<std::thread> threads;
         threads.reserve(numThreads);
 
-        for (int t = 0; t < numThreads; t++) {
-            threads.emplace_back([&, t]() {
-                std::mt19937_64 rng(std::random_device{}() ^ (uint64_t(t) << 32));
-                std::uniform_int_distribution<size_t> pick(1, maxSmallReq);
+        {
+            // The workers occupy every logical CPU, so the driver must give up
+            // the one the harness bound it to — it holds no CPU while parked in
+            // join(), and claiming otherwise would trip the exclusivity check.
+            arch::testing::DetachedDriver parked;
 
-                while (!stop.load(std::memory_order_relaxed)) {
-                    PageRef pages[maxSmallReq];
-                    size_t pageCount = 0;
-                    BigPageMetadata* rem = nullptr;
-                    size_t count = pick(rng);
+            for (int t = 0; t < numThreads; t++) {
+                threads.emplace_back([&, t]() {
+                    arch::testing::ProcessorBinding cpu(static_cast<arch::ProcessorID>(t));
+                    std::mt19937_64 rng(std::random_device{}() ^ (uint64_t(t) << 32));
+                    std::uniform_int_distribution<size_t> pick(1, maxSmallReq);
 
-                    p.pool->allocatePages(count, [&](PageRef r){ pages[pageCount++] = r; }, rem);
+                    while (!stop.load(std::memory_order_relaxed)) {
+                        PageRef pages[maxSmallReq];
+                        size_t pageCount = 0;
+                        BigPageMetadata* rem = nullptr;
+                        size_t count = pick(rng);
 
-                    if (rem && !rem->isEmpty() && !rem->isFull())
-                        rem->returnPage();
+                        p.pool->allocatePages(count, [&](PageRef r){ pages[pageCount++] = r; }, rem);
 
-                    if (pageCount > 0)
-                        p.pool->freePages(pages, pageCount);
-                }
-            });
+                        if (rem && !rem->isEmpty() && !rem->isFull())
+                            rem->returnPage();
+
+                        if (pageCount > 0)
+                            p.pool->freePages(pages, pageCount);
+                    }
+                });
+            }
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(epochMs));
+            stop.store(true, std::memory_order_relaxed);
+            for (auto& th : threads) th.join();
         }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(epochMs));
-        stop.store(true, std::memory_order_relaxed);
-        for (auto& th : threads) th.join();
 
         ASSERT_TRUE(p.pool->checkInvariants());
         ASSERT_LE(p.pool->getFreeBigPageCount() + p.pool->getPAPagesCount(), numBigPages);
@@ -1925,28 +1947,33 @@ TEST_WITH_TIMEOUT_NO_TRACKING(NUMAPool_ConcurrentStress_BigPages, 8000) {
         std::vector<std::thread> threads;
         threads.reserve(numThreads);
 
-        for (int t = 0; t < numThreads; t++) {
-            threads.emplace_back([&]() {
-                while (!stop.load(std::memory_order_relaxed)) {
-                    PageRef page[1];
-                    size_t pageCount = 0;
-                    BigPageMetadata* rem = nullptr;
+        {
+            arch::testing::DetachedDriver parked;
 
-                    p.pool->allocatePages(
-                        PageAllocator::smallPagesPerBigPage,
-                        [&](PageRef r){ page[pageCount++] = r; },
-                        rem,
-                        AllocBehavior::BIG_PAGE_ONLY);
+            for (int t = 0; t < numThreads; t++) {
+                threads.emplace_back([&, t]() {
+                    arch::testing::ProcessorBinding cpu(static_cast<arch::ProcessorID>(t));
+                    while (!stop.load(std::memory_order_relaxed)) {
+                        PageRef page[1];
+                        size_t pageCount = 0;
+                        BigPageMetadata* rem = nullptr;
 
-                    if (pageCount > 0)
-                        p.pool->freePages(page, pageCount);
-                }
-            });
+                        p.pool->allocatePages(
+                            PageAllocator::smallPagesPerBigPage,
+                            [&](PageRef r){ page[pageCount++] = r; },
+                            rem,
+                            AllocBehavior::BIG_PAGE_ONLY);
+
+                        if (pageCount > 0)
+                            p.pool->freePages(page, pageCount);
+                    }
+                });
+            }
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(epochMs));
+            stop.store(true, std::memory_order_relaxed);
+            for (auto& th : threads) th.join();
         }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(epochMs));
-        stop.store(true, std::memory_order_relaxed);
-        for (auto& th : threads) th.join();
 
         ASSERT_TRUE(p.pool->checkInvariants());
         ASSERT_EQ(numBigPages, p.pool->getFreeBigPageCount());
@@ -1968,39 +1995,44 @@ TEST_WITH_TIMEOUT_NO_TRACKING(NUMAPool_ConcurrentStress_Mixed, 8000) {
         std::vector<std::thread> threads;
         threads.reserve(numThreads);
 
-        for (int t = 0; t < numThreads; t++) {
-            threads.emplace_back([&, t]() {
-                std::mt19937_64 rng(std::random_device{}() ^ (uint64_t(t) << 32));
-                std::uniform_int_distribution<size_t> smallPick(1, maxSmallReq);
+        {
+            arch::testing::DetachedDriver parked;
 
-                while (!stop.load(std::memory_order_relaxed)) {
-                    PageRef pages[maxSmallReq];
-                    size_t pageCount = 0;
-                    BigPageMetadata* rem = nullptr;
+            for (int t = 0; t < numThreads; t++) {
+                threads.emplace_back([&, t]() {
+                    arch::testing::ProcessorBinding cpu(static_cast<arch::ProcessorID>(t));
+                    std::mt19937_64 rng(std::random_device{}() ^ (uint64_t(t) << 32));
+                    std::uniform_int_distribution<size_t> smallPick(1, maxSmallReq);
 
-                    if (rng() & 1) {
-                        p.pool->allocatePages(
-                            PageAllocator::smallPagesPerBigPage,
-                            [&](PageRef r){ pages[pageCount++] = r; },
-                            rem,
-                            AllocBehavior::BIG_PAGE_ONLY);
-                    } else {
-                        size_t count = smallPick(rng);
-                        p.pool->allocatePages(count, [&](PageRef r){ pages[pageCount++] = r; }, rem);
+                    while (!stop.load(std::memory_order_relaxed)) {
+                        PageRef pages[maxSmallReq];
+                        size_t pageCount = 0;
+                        BigPageMetadata* rem = nullptr;
 
-                        if (rem && !rem->isEmpty() && !rem->isFull())
-                            rem->returnPage();
+                        if (rng() & 1) {
+                            p.pool->allocatePages(
+                                PageAllocator::smallPagesPerBigPage,
+                                [&](PageRef r){ pages[pageCount++] = r; },
+                                rem,
+                                AllocBehavior::BIG_PAGE_ONLY);
+                        } else {
+                            size_t count = smallPick(rng);
+                            p.pool->allocatePages(count, [&](PageRef r){ pages[pageCount++] = r; }, rem);
+
+                            if (rem && !rem->isEmpty() && !rem->isFull())
+                                rem->returnPage();
+                        }
+
+                        if (pageCount > 0)
+                            p.pool->freePages(pages, pageCount);
                     }
+                });
+            }
 
-                    if (pageCount > 0)
-                        p.pool->freePages(pages, pageCount);
-                }
-            });
+            std::this_thread::sleep_for(std::chrono::milliseconds(epochMs));
+            stop.store(true, std::memory_order_relaxed);
+            for (auto& th : threads) th.join();
         }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(epochMs));
-        stop.store(true, std::memory_order_relaxed);
-        for (auto& th : threads) th.join();
 
         ASSERT_TRUE(p.pool->checkInvariants());
     }
@@ -2023,31 +2055,36 @@ TEST_WITH_TIMEOUT_NO_TRACKING(NUMAPool_ConcurrentStress_MultiRange, 8000) {
         std::vector<std::thread> threads;
         threads.reserve(numThreads);
 
-        for (int t = 0; t < numThreads; t++) {
-            threads.emplace_back([&, t]() {
-                std::mt19937_64 rng(std::random_device{}() ^ (uint64_t(t) << 32));
-                std::uniform_int_distribution<size_t> pick(1, maxSmallReq);
+        {
+            arch::testing::DetachedDriver parked;
 
-                while (!stop.load(std::memory_order_relaxed)) {
-                    PageRef pages[maxSmallReq];
-                    size_t pageCount = 0;
-                    BigPageMetadata* rem = nullptr;
-                    size_t count = pick(rng);
+            for (int t = 0; t < numThreads; t++) {
+                threads.emplace_back([&, t]() {
+                    arch::testing::ProcessorBinding cpu(static_cast<arch::ProcessorID>(t));
+                    std::mt19937_64 rng(std::random_device{}() ^ (uint64_t(t) << 32));
+                    std::uniform_int_distribution<size_t> pick(1, maxSmallReq);
 
-                    p.pool->allocatePages(count, [&](PageRef r){ pages[pageCount++] = r; }, rem);
+                    while (!stop.load(std::memory_order_relaxed)) {
+                        PageRef pages[maxSmallReq];
+                        size_t pageCount = 0;
+                        BigPageMetadata* rem = nullptr;
+                        size_t count = pick(rng);
 
-                    if (rem && !rem->isEmpty() && !rem->isFull())
-                        rem->returnPage();
+                        p.pool->allocatePages(count, [&](PageRef r){ pages[pageCount++] = r; }, rem);
 
-                    if (pageCount > 0)
-                        p.pool->freePages(pages, pageCount);
-                }
-            });
+                        if (rem && !rem->isEmpty() && !rem->isFull())
+                            rem->returnPage();
+
+                        if (pageCount > 0)
+                            p.pool->freePages(pages, pageCount);
+                    }
+                });
+            }
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(epochMs));
+            stop.store(true, std::memory_order_relaxed);
+            for (auto& th : threads) th.join();
         }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(epochMs));
-        stop.store(true, std::memory_order_relaxed);
-        for (auto& th : threads) th.join();
 
         ASSERT_TRUE(p.pool->checkInvariants());
         ASSERT_LE(p.pool->getFreeBigPageCount() + p.pool->getPAPagesCount(), numBigPages);
@@ -2416,33 +2453,40 @@ TEST_WITH_TIMEOUT_NO_TRACKING(PAI_ConcurrentStress_SingleDomain, 8000) {
         // Written by thread t after its loop exits; read by main after join().
         std::vector<std::vector<PageRef>> heldPages(numThreads);
 
-        for (int t = 0; t < numThreads; t++) {
-            threads.emplace_back([&, t]() {
-                std::mt19937_64 rng(std::random_device{}());
-                std::uniform_int_distribution<size_t> pick(1, maxPages);
+        {
+            // numThreads equals the domain's CPU count, so the workers take every
+            // logical CPU and the driver must hold none while it waits.
+            arch::testing::DetachedDriver parked;
 
-                while (!stop.load(std::memory_order_relaxed)) {
-                    PageRef pages[maxPages];
-                    size_t pageCount = 0;
-                    impl.impl.allocatePages(pick(rng),
-                        [&](PageRef r){ pages[pageCount++] = r; },
-                        AllocBehavior::GRACEFUL_OOM);
+            for (int t = 0; t < numThreads; t++) {
+                threads.emplace_back([&, t]() {
+                    arch::testing::ProcessorBinding cpu(static_cast<arch::ProcessorID>(t));
+                    std::mt19937_64 rng(std::random_device{}());
+                    std::uniform_int_distribution<size_t> pick(1, maxPages);
 
-                    if (pageCount > 0) {
-                        impl.impl.freePages(pages, pageCount);
+                    while (!stop.load(std::memory_order_relaxed)) {
+                        PageRef pages[maxPages];
+                        size_t pageCount = 0;
+                        impl.impl.allocatePages(pick(rng),
+                            [&](PageRef r){ pages[pageCount++] = r; },
+                            AllocBehavior::GRACEFUL_OOM);
+
+                        if (pageCount > 0) {
+                            impl.impl.freePages(pages, pageCount);
+                        }
                     }
-                }
 
-                // Final alloc: record but do NOT free — held for epoch-end inspection.
-                impl.impl.allocatePages(maxPages,
-                    [&](PageRef r){ heldPages[t].push_back(r); },
-                    AllocBehavior::GRACEFUL_OOM);
-            });
+                    // Final alloc: record but do NOT free — held for epoch-end inspection.
+                    impl.impl.allocatePages(maxPages,
+                        [&](PageRef r){ heldPages[t].push_back(r); },
+                        AllocBehavior::GRACEFUL_OOM);
+                });
+            }
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(epochMs));
+            stop.store(true, std::memory_order_relaxed);
+            for (auto& th : threads) th.join();
         }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(epochMs));
-        stop.store(true, std::memory_order_relaxed);
-        for (auto& th : threads) th.join();
 
         // ---- Epoch-end correctness checks ----
 

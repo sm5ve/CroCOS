@@ -570,7 +570,7 @@ PageAllocatorImpl createPageAllocator(Vector<NUMAPool*>&& numaPools, LocalPool**
         algorithm::sort(gDomainTable, tableSize, comp);
     }
 
-    PageAllocatorImpl impl{gNumaPoolStorage, numDomains, localPools, gDomainTable, tableSize, unownedPool, numaPolicy, {}};
+    PageAllocatorImpl impl{gNumaPoolStorage, numDomains, localPools, processorCount, gDomainTable, tableSize, unownedPool, numaPolicy, {}};
 
     // Precompute cpuNearestPool: for each CPU, record the nearest non-null pool.
     if (numaPolicy != nullptr) {
@@ -673,6 +673,9 @@ size_t PageAllocatorImpl::allocatePages(size_t smallPageCount, PageAllocationCal
 size_t PageAllocatorImpl::allocateFast(size_t smallPageCount, PageAllocationCallback cb, AllocFlags flags) {
     if (!flags.has(AllocBehavior::BIG_PAGE_ONLY) && smallPageCount < mm::PageAllocator::smallPagesPerBigPage) {
         const auto pid = arch::getCurrentProcessorID();
+        assert(pid < localPoolCount,
+           "page allocator: logical CPU id is outside the range the allocator was built "
+           "for — localPools has one entry per valid CPU, so this would index past it");
         auto& localPool = *localPools[pid];
         return localPool.allocatePages(smallPageCount, cb, flags | AllocBehavior::LOCAL_DOMAIN_ONLY);
     }
@@ -690,6 +693,9 @@ size_t PageAllocatorImpl::allocatePages(size_t smallPageCount, PageAllocationCal
 size_t PageAllocatorImpl::allocateFallback(size_t smallPageCount, PageAllocationCallback cb, AllocFlags flags) {
     size_t allocatedPages = 0;
     const auto pid = arch::getCurrentProcessorID();
+    assert(pid < localPoolCount,
+           "page allocator: logical CPU id is outside the range the allocator was built "
+           "for — localPools has one entry per valid CPU, so this would index past it");
     auto& localPool = *localPools[pid];
 
     const auto allocFromLocalPool = [&](const size_t count, const AllocFlags f) {

@@ -30,6 +30,17 @@
         return nullptr;
     }
 
+    static const CroCOSTest::TestPrologueHook** getMacOSPrologueHooks(unsigned long* count) {
+        const struct mach_header_64* header = (const struct mach_header_64*)_dyld_get_image_header(0);
+        if (!header) { *count = 0; return nullptr; }
+        unsigned long size;
+        const CroCOSTest::TestPrologueHook** section_data =
+            (const CroCOSTest::TestPrologueHook**)getsectiondata(header, "__DATA", "crocos_prologue", &size);
+        if (section_data) { *count = size / sizeof(const CroCOSTest::TestPrologueHook*); return section_data; }
+        *count = 0;
+        return nullptr;
+    }
+
     static const CroCOSTest::TestCleanupHook** getMacOSCleanupHooks(unsigned long* count) {
         const struct mach_header_64* header = (const struct mach_header_64*)_dyld_get_image_header(0);
         if (!header) { *count = 0; return nullptr; }
@@ -46,6 +57,8 @@
     extern "C" const CroCOSTest::TestInfo* __crocos_unit_tests_end[] __attribute__((weak));
     extern "C" const CroCOSTest::TestCleanupHook* __crocos_test_cleanup_start[] __attribute__((weak));
     extern "C" const CroCOSTest::TestCleanupHook* __crocos_test_cleanup_end[] __attribute__((weak));
+    extern "C" const CroCOSTest::TestPrologueHook* __crocos_test_prologue_start[] __attribute__((weak));
+    extern "C" const CroCOSTest::TestPrologueHook* __crocos_test_prologue_end[] __attribute__((weak));
 #endif
 
 // Function pointer approach - more reliable across platforms
@@ -110,6 +123,29 @@ constexpr int kTimeoutMultiplier = 1;
 #endif
     }
     
+    void runTestPrologues() {
+        size_t hookCount = 0;
+        const TestPrologueHook* const* hooks = nullptr;
+#ifdef __APPLE__
+        unsigned long macCount;
+        hooks = getMacOSPrologueHooks(&macCount);
+        hookCount = macCount;
+#else
+        if (__crocos_test_prologue_start != nullptr && __crocos_test_prologue_end != nullptr &&
+            __crocos_test_prologue_start < __crocos_test_prologue_end) {
+            hookCount = __crocos_test_prologue_end - __crocos_test_prologue_start;
+            hooks = __crocos_test_prologue_start;
+        }
+#endif
+        if (!hooks) return;
+        // Tracking is paused: a prologue sets up harness-side per-thread state,
+        // which must not be attributed to the test as an allocation or a leak.
+        pauseTracking();
+        for (size_t i = 0; i < hookCount; ++i)
+            if (hooks[i] != nullptr) hooks[i]->prologueFunc();
+        resumeTracking();
+    }
+
     TestResult TestRunner::runSingleTest(const TestInfo* test) {
         printf("Running test: %s...\n", test->name);
         fflush(stdout);
@@ -134,6 +170,8 @@ constexpr int kTimeoutMultiplier = 1;
 
             std::thread testThread([promisePtr, test]() {
                 try {
+                    // On the body thread, not the main thread — see TestPrologueHook.
+                    runTestPrologues();
                     test->testFunc();
                     try { promisePtr->set_value(); } catch (...) {}
                 } catch (const ThreadTerminationRequest&) {
@@ -172,6 +210,7 @@ constexpr int kTimeoutMultiplier = 1;
             }
         } else {
             try {
+                runTestPrologues();
                 test->testFunc();
             } catch (const AssertionFailure& e) {
                 return handleException(e.what());
