@@ -4598,3 +4598,149 @@ other than the calling CPU's (it bumps four CPUs' rows and reads from one).
 Suite 1,673 green, 11 runners: 1,667 baseline, +4 from the cherry-picked bench's
 two opt-in reports across both radix runners, +2 from the test above. Kernel
 builds; boot clean, `hit%` still in its historical 74-82% band.
+
+---
+
+## D-077..D-079 — the optimisation pass: what four agents found, and what the
+## instruments said afterwards
+
+D-076 covers the descent-cache counters in detail. This entry is the pass around
+it: the other three findings, the measurements that settled them, and the two
+hypotheses of mine that turned out to be wrong.
+
+### D-077 — `Geometry.h` was being evaluated at runtime
+
+Everything dimensional in the tree derives `constexpr` from a `GeometryDescriptor`.
+That is the design and it is good — but the derivations take `level` as a
+parameter, and on a descent `level` is a **loop variable**. So GCC could not fold
+them and emitted them literally: loops reloading `levelBits[]` from `.rodata`.
+**138 instances of that loop body in the kernel.** One leaf-terminating descent step
+ran eleven of them, and the seam's one-line range check —
+`nodeSpan(G, pin.nodeLevel)` — was 50 instructions by itself.
+
+`Geo<G>` tabulates the same quantities per level at compile time, built by calling
+the existing derivation functions, with a `static_assert` checking every row against
+them for all three shipped geometries. Nothing is hard-coded, so §12 and DEC-093
+still hold: a retune remains one edit to the descriptor.
+
+**A second finding fell out of the same disassembly, and it is not a radix
+question.** `Atomic<T>::Atomic(T)` performs a SEQ_CST store, so every
+`Atomic<uint64_t> x{0}` **member initialiser** in the project is a locked `xchg`. A
+`CoreTree` is constructed **by value** on the lookup path (`treeFor` returns one),
+so that was **ten locked `xchg` on a stack object per page fault**. `{}`
+value-initialises instead. The general shape — a relaxed/constexpr init constructor
+in `Core` — is a Core-wide question and is flagged, not fixed here. It also makes
+`treeFor`'s "constructing one is free" comment false; it is ~19 stores.
+
+### D-078 — a 64-bit `div` per slot on the hottest path
+
+`sweepExpired` walked slots as `idx = (slot + k) % slotCount`. `slotCount` is a
+runtime `size_t`, so that is a **64-bit `div`, 30-90 cycles, once per slot, on the
+path every page fault takes**. It survived because it is invisible to every
+instrument this project had: `-icount` counts it as **1**, and TCG does not model
+its latency. Increment-and-wrap gives the byte-identical visit order and preserves
+P1-DEC-008's own-slot-first property. Sweep 645 -> 507 instructions at P=8 (-21%).
+
+`slots`/`slotCount` are hoisted into locals in the same change: `claimAndDrain` may
+call a deleter through a function pointer, so the compiler had to assume `this`
+could be written and was reloading both on every bag iteration.
+
+### D-079 — two hypotheses of mine, falsified
+
+**(a) "The O(P) scan is conditional."** D-075 said so. It is not. The own-slot
+early-out fires only when the caller's own slot is active with a stale epoch, and
+DEC-060's pump is deliberately placed *after* the read section closes — so `own` is
+inactive, the conjunction is false, and the scan runs **every time**, followed by an
+unconditional `sweepExpired`. Verified in source.
+
+**(b) "The pump is ~83% of the contention."** I inferred this by subtraction and
+pushed it to the agent studying the pump. **It falsified it, which is what should
+have happened.** Measured directly by removing the pump entirely: it costs ~47 ns at
+one thread and **does not grow with core count** — at 8 threads the no-pump arm's
+minimum was *higher* than baseline's and the two arms straddled each other across
+ten rounds. Eight contended remote reads per fault would have shown as hundreds of
+nanoseconds of additional cost; it showed as ~20.
+
+The structural reason, from the disassembly rather than from the source comments:
+slot stride is 128 B and `bagTagState[0..3]` sit at 0x48-0x60, so **all four bag
+words share one line** — the sweep is *P* line touches, not 4P — and `state` is a
+*different* line, so the scan and the sweep touch disjoint lines. The sweep's lines
+are written only by **retire** traffic, so under a read-heavy fault load they sit
+Shared, and read-sharing is nearly free.
+
+The pump's internal split, also measured: `sweepExpired` is **89%** of it at P=2 and
+**96%** at P=8; the epoch-advance attempt is a flat **24 instructions** at both,
+because the scan breaks at the first blocked slot. And the sweep almost never finds
+work — 0 productive of 545 at P=2, 9 of 2121 at P=8.
+
+**Conclusion: the pump was not amortised.** `kFaultPumpInterval` sits at its shipped
+value of 1 with the numbers to change it by. The case for raising it is a ~45 ns
+single-thread cost, which is a fraction of a page fault rather than of a lookup, and
+the cost is a documented reclamation-latency change. Rejected alternatives, each on
+evidence: splitting advance from sweep (the advance is 4%, and it needs an entry
+point RCU-DEC-006 deliberately refuses); a timer tick (**currently illegal** —
+`tryAdvance` asserts `!inAllocForbiddenContext()`, and radix deleters call `vmsfree`,
+which DEC-014 permits from `#PF` and not from IRQ); conditioning on local retirees
+(wrong test — the fault-path sweep exists to steal *other* CPUs' bags).
+
+### What the whole pass bought
+
+Native A/B on an idle M1, `-O2` no sanitizers, four alternating rounds, minima —
+pre-optimisation code with the benchmark cherry-picked onto it, against the
+integrated branch. **Every after-run beat every before-run at every thread count,
+with no overlap.**
+
+| threads | before | after | |
+|---|---|---|---|
+| 1 | 114.8 | 104.2 | -9.2% |
+| 2 | 289.7 | 206.3 | -28.8% |
+| 4 | 449.6 | 303.8 | **-32.4%** |
+| 8 | 1701.3 | 1228.6 | -27.8% |
+
+The shape is the attribution: ~9% at one thread is the instruction-level work
+(D-077), and the rest appearing only as threads rise is the contention work (D-076
+counters, the `ReaderSlot` false sharing, D-078's div).
+
+`-icount` mode 4 on the integrated branch, for the instruction side: `innerMean`
+566 -> **343** (-39%), `innerMin` 313 -> **246**, whole lookup 799 -> **564** (-29%).
+
+### A measurement error worth recording
+
+The first A/B run showed **zero difference at every thread count** — before and
+after identical to within a nanosecond. That was not a result, it was
+`KernelRadixBenchRunner` being `EXCLUDE_FROM_ALL`: every `run_all_tests` build had
+left it stale, so "after" was a binary predating every change. Two identical columns
+are a symptom to distrust, not a finding to report.
+
+### Open, and deliberately not acted on
+
+- **`TreeStats` is dead through the cluster path**, found independently by two
+  agents and verified here: `ClusterTable::treeFor` returns a `CoreTree` **by value**
+  with fresh zeroed counters, so every `counters.*` increment during a kernel
+  operation lands in a stack temporary. §11 names `claimConflicts` "the standing
+  regression detector for DEC-085" — through the cluster path that detector
+  structurally cannot record anything. **The naive repair is a trap**: making it
+  reachable and shared would recreate D-076 on the mutation path. Gate it or make it
+  per-CPU from the start.
+- **`globalEpoch` is CAS'd at fault rate** — one global line, ranked #2 by the sweep.
+- **`pool.draws`/`shortfalls`** share `DeferredReleasePool`'s line with `head` and
+  `depth`, ungated, munmap path only. Cannot simply be gated: `DeferredReleaseTest`
+  asserts on both.
+- **Two suite failures seen only under 8-way parallel load**, by one agent, both in
+  runners compiling no radix header, both green 5/5 in isolation:
+  `rcuTortureDeadSlotDoesNotUnboundLimbo` (a residue-bound assert) and
+  `PAI_ConcurrentStress_SingleDomain` (**a SEGV, null deref in
+  `LocalPool::allocatePages`**). A second agent independently saw one unattributed
+  non-zero suite exit under load. Neither could be attributed to any change in this
+  pass, and neither could be ruled out as a real concurrency bug that load merely
+  exposes. **The SEGV deserves its own investigation and is not filed as noise.**
+
+### A judgement call recorded rather than actioned
+
+Routing 17 counter bumps through `DescentCacheStats::bump()` removes them from
+`OrderingSpellingTest`'s textual scan, and that scan's floor is a **total**, which
+cannot detect a missing subset — the exact shape that once hid two unscanned
+headers. I considered it and did not revert: there is now **one** site naming an
+ordering instead of seventeen, and a call site that takes no ordering argument
+cannot spell one wrong. That narrows the surface rather than weakening the check,
+and any newly added atomic in the file is still scanned.
