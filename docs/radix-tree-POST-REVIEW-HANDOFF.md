@@ -1,7 +1,7 @@
 ---
 kind: handoff
 status: ready
-audience: the next session — C, R-2, R-16, R-17 all DONE; pick from §2
+audience: the next session — C, R-2, R-5, R-16, R-17 all DONE; pick from §2
 supersedes: docs/radix-tree-REVIEW-HANDOFF.md (its referee pass is complete)
 ---
 
@@ -15,10 +15,11 @@ defect they uncovered in the RCU engine. §4 and §5 are history — read them f
 reasoning, not for work to do. D-059, D-060 and D-061 in the deviations log are
 the long-form accounts, and `specs/rcu-phase-1.md` P1-DEC-019 carries the RCU one.
 
-**Both merge blockers are closed, and so are R-16 and R-17** (D-062, D-063). What
-remains open in §2 is the mutation-proven detector gaps (**R-4, R-5, R-6, R-9** —
-R-7 went with option C), the latent items (**R-12, R-13**), and the rest of the
-hygiene list (**R-18** the TSan-stress default, **R-19**'s four surviving wrong
+**Both merge blockers are closed, and so are R-5, R-16 and R-17** (D-062, D-063,
+D-064). What remains open in §2 is the detector gaps **R-4** (the ordering check
+does not scan `Claim.h`) and **R-6** (neither deleter's freshness discipline is
+asserted), the latent items (**R-9, R-12, R-13**), and the rest of the hygiene
+list (**R-18** the TSan-stress default, **R-19**'s four surviving wrong
 comments, **R-20** the displaced coverage, **R-21** the `detachBudget` retention).
 **R-5 is the one with a live hole behind it**: `GrowthTest.cpp` and
 `DecompositionTest.cpp` have zero oracle assertions, and an unpublished leaked node
@@ -97,15 +98,17 @@ back. See D-060; the root fix is one flag in two wrappers.
 | ID | Finding | Anchor | Proof |
 |---|---|---|---|
 | **R-4** | §11 ordering check does not scan `Claim.h` — the claim protocol's own four atomics | `OrderingSpellingTest.cpp:45` | Bare `ACQUIRE` in `Claim.h:91` **passes**; same edit in a scanned header **fails** |
-| **R-5** | Growth loser's discard can be deleted and leak, in genuinely raced code | `ClusterTable.h:309` | Deleted it → **172/172 still green** |
+| **R-5** | **FIXED** (D-064). Both discard sites covered (`:309` and `:229`). The single race detected the leak only 10/12 — a **barrier before each growth** took it to 20/20, and 20/20 pass clean. `nodeCount()`'s `>=` bound is exact now |
 | **R-6** | Neither deleter's freshness discipline is asserted | `CoreTree.h:112`, `DeferredRelease.h:193` | Both `SafePtr`s deleted → **green both times** |
 | **R-7** | D-057's own test is vacuous for the property it names | `DeferredReleaseTest.cpp:593` | `promo=3, perCpu=16` — promotion covers the demand, reserve never touched |
 | **R-8** | §7.1's `barrier` remedy was unreachable in every fixture | `CoreTree.h:2211` | Refill ahead of the pump; partially addressed by the R-1 fix |
 
-R-5 is the one with a live hole behind it: `GrowthTest.cpp` and
-`DecompositionTest.cpp` contain **zero** oracle assertions (grep-verified, 0 and
-0, against ModelTest's 6), and an unpublished leaked node is invisible to the
-validator, to `nodeCount()`, and to LSan (§10: the arena is one live mmap).
+R-5's hole is closed: both files now assert the allocation oracle after an explicit
+teardown. Two things learned doing it, in D-064 — the CAS was rarely being **lost**
+at all (a barrier, not more rounds, is what made the detector reliable), and
+`DecompositionTest`'s new assertions are hygiene rather than a closed finding, since
+`discardUnusedAllocations` was already covered by the two concurrent-writer tests
+and the only single-threaded decomposition discard is structurally unreachable.
 
 ### Latent — real, not currently reachable
 
