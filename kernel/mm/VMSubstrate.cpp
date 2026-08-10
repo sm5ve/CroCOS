@@ -1283,11 +1283,40 @@ namespace kernel::mm::VMSubstrate {
     uint64_t freshnessCallCount() { return gFreshnessCallCount.load(RELAXED); }
 #endif
 
+    // ─── A call on PINNED memory is destructive, not wasted (R-13) ──────────
+    //
+    // Everything in this subsystem documents pinned storage as carrying no
+    // freshness OBLIGATION, which reads as "a call there is merely a wasted
+    // instruction". It is not. Read the arithmetic below: the dirty word is located
+    // at `tableBase + dw*4096 + k_abs*8`, where `tableBase` is the 2 MiB-aligned
+    // base of the enclosing leaf page table's region. In an ARENA, that region's
+    // first pages ARE the per-CPU dirty bitmaps, installed by
+    // `initializePageTable`. In the static-buffer slot there is no dirty bitmap by
+    // design — those pages are somebody's control block, pool heads or RCU slot
+    // array.
+    //
+    // So a call on a pinned pointer reads a live data word, and if that word
+    // happens to have this CPU's bit set — arbitrary data, so half the time —
+    // it **`fetch_and(~bit)` into another tenant's live state**. Silent, durable,
+    // and attributable to nothing.
+    //
+    // Hence the assert rather than a range check: this is the hottest function in
+    // the system and DEC-051b guarantees a pinned mapping never changes, so the
+    // release build must not pay for a bounds test. Debug catches the first call on
+    // the first boot. `SafePtr` is the only way to reach here by accident, and the
+    // pinned regions are exactly the ones the headers tell you not to wrap.
     bool ensureTLBEntryFresh(void* ptr) {
 #if defined(CROCOS_RADIX_INSN_PROBE) && CROCOS_RADIX_INSN_PROBE == 3
         gFreshnessCallCount.fetch_add(1, RELAXED);
 #endif
         const auto ptrAddr = reinterpret_cast<uint64_t>(ptr);
+        assert(staticBufferSlotBase.value == 0 ||
+                   ptrAddr < staticBufferSlotBase.value ||
+                   ptrAddr >= staticBufferSlotEnd.value,
+               "VMSubstrate: ensureTLBEntryFresh on a PINNED static-buffer address. The "
+               "slot has no dirty bitmap, so the dirty-word arithmetic lands in live "
+               "pinned data and the fetch_and below CORRUPTS it — this is not a wasted "
+               "call, it is a write into another tenant's control block (R-13)");
         const auto tableBase = roundDownToNearestMultiple(ptrAddr, arch::bigPageSize);
         const size_t k_abs = (ptrAddr - tableBase) / arch::smallPageSize;
         const size_t myCPU = arch::getCurrentProcessorID();

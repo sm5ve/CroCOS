@@ -81,9 +81,24 @@ namespace kernel::mm::VMSubstrate {
     namespace test {
         extern thread_local bool freshnessRecordingArmed;
         void recordFreshnessCall(const void* p);
+        // R-13: pinned storage has no dirty bitmap, so the kernel's dirty-word
+        // arithmetic would land in live pinned data. Mirrored here so the mistake
+        // is catchable by a unit test rather than only by a debug kernel boot.
+        bool isPinnedStaticBufferAddress(const void* p);
     }
 
-    inline bool ensureTLBEntryFresh(void* p) noexcept {
+    // NOT `noexcept`, deliberately, and it matches the real declaration
+    // (`kernel/include/mem/VMSubstrate.h`) which carries none either. The mock's
+    // copy had acquired one, and with the R-13 guard below that turns a catchable
+    // assertion into `std::terminate` — a negative test cannot exercise a refusal
+    // that kills the runner.
+    inline bool ensureTLBEntryFresh(void* p) {
+        // The kernel asserts this and would CORRUPT without the assert (R-13): a
+        // pinned address's dirty word is somebody's live control block. Userspace
+        // cannot reproduce the corruption, so it reproduces the refusal.
+        assert(!test::isPinnedStaticBufferAddress(p),
+               "VMSubstrate: ensureTLBEntryFresh on a PINNED static-buffer address — in "
+               "the kernel this writes into another tenant's live state (R-13)");
         if (test::freshnessRecordingArmed) test::recordFreshnessCall(p);
         return false;                                      // userspace: never stale
     }

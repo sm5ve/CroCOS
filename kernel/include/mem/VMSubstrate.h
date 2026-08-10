@@ -146,7 +146,11 @@ namespace kernel::mm::VMSubstrate {
     // it must never unmap a page. DEC-051b's safety argument is that every entry
     // here "transitions not-present -> present EXACTLY ONCE and never changes",
     // which is precisely why nothing pinned carries an `ensureTLBEntryFresh`
-    // obligation. Reusing a BLOCK inside an already-mapped page does not touch a
+    // obligation — and, since R-13, why nothing pinned may TAKE one: the slot has
+    // no dirty bitmap, so the call's dirty-word arithmetic addresses live pinned
+    // data and its `fetch_and` corrupts it. `ensureTLBEntryFresh` asserts against
+    // pinned addresses; do not wrap pinned storage in a `SafePtr`.
+    // Reusing a BLOCK inside an already-mapped page does not touch a
     // PTE at all: the VA -> physical mapping is unchanged and only the bytes
     // differ, so a CPU's cached translation stays correct. Free-and-reuse is
     // free; only returning pages to the PageAllocator would break the invariant,

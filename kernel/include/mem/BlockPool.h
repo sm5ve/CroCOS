@@ -40,7 +40,8 @@
 // `PinnedBackend`'s cannot. `reserveStaticBufferImpl`'s safety argument
 // (DEC-051b) is that every page-table entry it writes "transitions not-present
 // -> present EXACTLY ONCE and never changes", which is precisely why pinned
-// storage carries no `ensureTLBEntryFresh` obligation while vmsmalloc memory
+// storage carries no `ensureTLBEntryFresh` obligation — nor any permission, since
+// a call there corrupts live pinned data (R-13) — while vmsmalloc memory
 // does. A VA-recycling backend's mapping DOES change, and every block it hands
 // out carries the obligation — the DEC-047 stale-TLB class, which this project
 // has now shipped eight instances of.

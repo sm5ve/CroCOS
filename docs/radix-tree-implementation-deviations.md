@@ -3745,3 +3745,73 @@ ordered. Whether a descended child can be replaced under an attempt at all is a
 separate argument (it is pinned by the claims the attempt holds deeper, in the
 cases that matter), and it is not the argument this constant should have been
 resting on.
+
+---
+
+## D-068 — R-13: a freshness call on pinned memory does not waste a cycle, it corrupts
+
+The last latent finding with teeth. Nothing was calling it wrongly — this closes the
+door before someone does, and the door was being held open by the documentation.
+
+### The hazard, from the arithmetic
+
+`ensureTLBEntryFresh(ptr)` locates the per-CPU dirty word like this:
+
+```
+tableBase = roundDownToNearestMultiple(ptr, bigPageSize)   // the 2 MiB region
+k_abs     = (ptr - tableBase) / smallPageSize              // which page in it
+dirtyWord = *(Atomic<uint64_t>*)(tableBase + dw*4096 + k_abs*8)
+if (dirtyWord & bit) { invlpg(ptr); dirtyWord.fetch_and(~bit); }
+```
+
+In an **arena** that lands on a per-CPU dirty bitmap page, installed by
+`initializePageTable` at slots `[0, D-1]` of the leaf page table. In the
+**static-buffer slot there is no dirty bitmap by design** — those pages are
+somebody's radix control block, `DeferredRelease` pool heads or RCU reader-slot
+array.
+
+So a call on a pinned pointer reads a live data word, and if that word happens to
+have this CPU's bit set — arbitrary data, so roughly half the time — it
+**`fetch_and(~bit)`s into another tenant's live state.** Silent, durable, and
+attributable to nothing afterwards.
+
+### The documentation was the actual defect
+
+Every statement of the pinned exemption said pinned storage "carries no
+`ensureTLBEntryFresh` **obligation**", which invites precisely one wrong
+conclusion: that wrapping a pinned pointer in a `SafePtr` is harmless tidiness. The
+`PinnedBlockPool` header, `VMSubstrate.h`, and two places in `DeferredRelease.h` all
+said it that way. All four now say exempt means **forbidden**, with the reason.
+
+That is the whole finding. There was no bug to fix — a debug kernel boot of both
+stress configurations, and 1,662 unit tests, pass with the guard live, so nothing
+in the tree does this today. What existed was an invitation.
+
+### An assert, not a range check
+
+`ensureTLBEntryFresh` is the hottest function in the system and DEC-051b guarantees
+a pinned mapping never changes, so the release build must not pay a bounds test for
+a mistake that is a programming error rather than a runtime condition — the house
+stance (trust callers in release, check in debug, force discipline with loud
+assertions).
+
+**Mirrored in the mock**, which is the part that makes it testable. Userspace has no
+page tables so it cannot reproduce the corruption, and this bug class has eight
+members of which **zero** were found by tests — so the mock reproduces the
+*refusal* instead. `radix_a_safeptr_over_pinned_storage_is_refused` drives a real
+`tryReservePerDomainStaticBuffer` block through a `SafePtr` and requires the assert;
+it also checks the two directions that would make the guard useless — that the same
+address is fine WITHOUT a `SafePtr` (the exemption still stands) and that a
+vmsmalloc pointer is still accepted (the guard does not refuse everything).
+Mutation-proven: neutering the assert fails the test.
+
+Two incidental findings from writing it:
+
+- **The mock's `ensureTLBEntryFresh` had acquired a `noexcept`** the real
+  declaration does not have. With an assert inside, that turns a catchable
+  `AssertionFailure` into `std::terminate` — the runner dies instead of reporting.
+  Dropped, and now matches the real signature.
+- **The harness's `releasePools` storage is a plain array member**, not a
+  reservation, which is why `radix_pinned_storage_stays_exempt` can asserts about
+  pool heads without tripping anything and why this test had to reserve its own
+  block. Worth knowing before writing another pinned-storage test.

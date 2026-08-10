@@ -187,6 +187,22 @@ void* reservePerDomainStaticBuffer(size_t byteSize, numa::DomainID) {
     return p;
 }
 
+// ─── R-13's guard, mirrored in the mock ────────────────────────────────────
+//
+// The kernel's `ensureTLBEntryFresh` asserts its argument is not a pinned
+// static-buffer address, because the dirty-word arithmetic would land in live
+// pinned data and the `fetch_and` would corrupt it. The mock has no page tables so
+// it cannot reproduce the corruption — which is exactly why it needs to reproduce
+// the ASSERT: otherwise the one bug class in this subsystem that is invisible to
+// userspace gains a second member that is also invisible to userspace.
+namespace test {
+    bool isPinnedStaticBufferAddress(const void* p) {
+        if (gRegion == nullptr || p == nullptr) return false;
+        const auto* q = static_cast<const uint8_t*>(p);
+        return q >= gRegion + kPageSize && q < gStaticEnd;
+    }
+}
+
 void* cpuLocalPageFor(arch::ProcessorID i) {
     return gCpuLocalBase + static_cast<size_t>(i) * kCpuLocalBytes;
 }

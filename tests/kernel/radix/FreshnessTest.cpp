@@ -499,6 +499,50 @@ TEST(radix_pinned_storage_stays_exempt) {
     pool.push(r);
 }
 
+// R-13: the pinned exemption is not "the call is unnecessary", it is "the call
+// CORRUPTS". The kernel locates a page's dirty word at `tableBase + dw*4096 +
+// k_abs*8`, which in an arena is the per-CPU dirty bitmap and in the static-buffer
+// slot is somebody's live control block — and then `fetch_and`s a bit out of it.
+//
+// Every header in the subsystem described pinned storage as carrying no
+// OBLIGATION, which invites exactly the wrong conclusion: that wrapping a pinned
+// pointer in a `SafePtr` is harmless tidiness. So the refusal is now checked, and
+// checked HERE rather than only in a debug kernel boot, because this bug class has
+// eight members and every one of them was found by an in-kernel stress rather than
+// by this suite.
+//
+// Driven through a REAL reservation. Note what does not work here and why: the
+// harness's `releasePools` storage is a plain array member of the fixture, not a
+// `reservePerDomainStaticBuffer` block — a fixture simplification, and the reason
+// `radix_pinned_storage_stays_exempt` above can wrap nothing. In production those
+// heads are the tail of the DEC-082 control block's reservation, which is what this
+// reserves directly.
+TEST(radix_a_safeptr_over_pinned_storage_is_refused) {
+    Harness h;
+
+    void* pinned = VS::tryReservePerDomainStaticBuffer(arch::smallPageSize,
+                                                       kernel::numa::DomainID{0});
+    ASSERT_TRUE(pinned != nullptr);
+
+    // The shape the guard exists to reject. Any access through the SafePtr
+    // triggers the freshness call, and in the kernel that call read-modify-writes
+    // a word of live pinned data.
+    EXPECT_ASSERT_FAILURE(*VS::SafePtr<uint64_t>(static_cast<uint64_t*>(pinned)));
+
+    // ...and the same address used WITHOUT a SafePtr is fine, which is the whole
+    // point of the exemption: pinned mappings never change, so there is nothing to
+    // discharge. A guard that made pinned storage unusable would be the wrong fix.
+    ASSERT_EQ(uint64_t{0}, *static_cast<uint64_t*>(pinned));   // reservations are zeroed
+
+    // A vmsmalloc-backed pointer is of course still accepted — otherwise the guard
+    // could be satisfied by refusing everything.
+    auto* m = makeMapping(0);
+    ASSERT_TRUE(m != nullptr);
+    const VS::SafePtr<rdx::Mapping> p(m);
+    ASSERT_EQ(uint64_t{0}, p->baseVA);
+    VS::destroy(p);
+}
+
 TEST(radix_root_bucket_page_is_exempt) {
     // D-051's whole point, and the reason it is worth 4,096 B of window per
     // address space. Every descent opens by loading a bucket word; while the

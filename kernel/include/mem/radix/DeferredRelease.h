@@ -102,7 +102,11 @@
 // the draw site, and NOT redundant there.
 //
 // The pool HEADS are exempt: they live in pinned per-address-space storage
-// whose mapping never changes.
+// whose mapping never changes. **Exempt means FORBIDDEN, not optional** (R-13):
+// pinned storage has no dirty bitmap, so the freshness call's dirty-word
+// arithmetic lands in live pinned data and its `fetch_and` corrupts it. Wrapping
+// a pool head in a `SafePtr` is not harmless tidiness; `ensureTLBEntryFresh`
+// asserts against it.
 //
 
 #ifndef CROCOS_RADIX_DEFERRED_RELEASE_H
@@ -501,7 +505,9 @@ namespace kernel::mm::radix {
         // are the one thing that must not move to vmsmalloc: every CPU's
         // deleters push into every CPU's pool, so the heads sit on other CPUs'
         // hot paths, and DEC-082's round-4 amendment put them in pinned storage
-        // precisely so they carry no `ensureTLBEntryFresh` obligation. Allocating
+        // precisely so they carry no `ensureTLBEntryFresh` obligation — and, per
+        // R-13, no PERMISSION either: a call on pinned memory writes into another
+        // tenant's live state. Allocating
         // the array here would hand that obligation straight back.
         //
         // So the caller supplies storage from wherever it already has pinned
