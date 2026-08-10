@@ -1,6 +1,6 @@
 ---
 kind: handoff
-status: ready — ONE DECISION WAITING ON SPENCER
+status: ready — all decisions closed (§7.1 approved by Spencer 2026-08-10)
 audience: the next session
 supersedes: docs/radix-tree-REVIEW-HANDOFF.md (deleted — it declared itself obsolete)
 companion: docs/radix-tree-HANDOFF-impl.md (implementation reference, still current)
@@ -17,22 +17,23 @@ Everything below §1 is the historical record of the pre-merge referee pass. **R
 
 ---
 
-## 0. The one thing waiting on you
+## 0. RESOLVED 2026-08-10 — the amendments stand
 
 **`specs/radix-tree.md` §7.1's per-CPU population rule.** It normatively required the
 population to be *"at least the per-operation ceiling"* (≈230). The shipping code uses
 32, because D-059 made the population **also the per-attempt record budget** — an
 attempt that would want more returns `NeedsDecomposition` and §6.5 splits it.
 
-I amended §7.1, ITEM-084's decision cell, DEC-068 and DEC-077 to match, and marked
-every amendment **`PENDING SPENCER REVIEW`** (grep that string — four hits). I did
-not have the standing to quietly rewrite approved normative text, and D-059 made
-things worse by *claiming* it had not touched §7.1 without checking.
+That contradiction was raised to Spencer with the four amendments marked
+`PENDING SPENCER REVIEW`. **Spencer approved the amendments on 2026-08-10**: the
+population is normatively 32, the ≈230 edge sum survives only as the derivation that
+makes the budget necessary and as the draw histogram's top bucket, and the code stands
+as shipped. The rejected alternative was reverting to a ceiling-sized population at
+115 KiB per address space against 16 KiB, and 1,840 `tryMake` calls per fork against
+256. All four markers are cleared; the spec text now reads
+`APPROVED BY SPENCER 2026-08-10`.
 
-**The decision:** either the amendments stand, or the ≈230 rule stands and **the code
-changes back** — which means restoring a per-operation-ceiling population and paying
-115 KiB per address space instead of 16 KiB. The engineering case for 32 is in D-059
-and was independently confirmed by two referees; the authority is yours.
+**No decision is outstanding. The branch is merge-ready.**
 
 Two smaller judgement calls that came with it:
 

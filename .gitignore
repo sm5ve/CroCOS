@@ -18,6 +18,13 @@ test.img
 # ─── macOS ─────────────────────────────────────────────────────────────────
 .DS_Store
 
+# ─── Specs ─────────────────────────────────────────────────────────────────
+# The spec tree is internal to the design process, not a published artifact:
+# working documents with open items, referee rounds and in-flight amendments,
+# read alongside the .claude/skills spec workflow. The committed record of what
+# was decided and why lives in docs/ instead.
+specs/
+
 # ─── Claude Code ───────────────────────────────────────────────────────────
 # Personal overrides only. .claude/settings.json and .claude/skills/ are
 # deliberately NOT ignored — the skills directory holds this project's spec
