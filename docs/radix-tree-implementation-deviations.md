@@ -3271,3 +3271,84 @@ a test reaching past it cannot see it. Both reproduced the panic before the fix 
 pass after. The overloads are tested separately on purpose: a fix applied to one
 and not the other would leave every VMSubstrate arena allocation still panicking.
 
+---
+
+## D-061 — the RCU `barrier` defect D-059's exact invariant uncovered
+
+**Not a radix defect. `Core::rcu::EpochDomain::drainClaimedBag` was wrong, and it
+had been for four phases.** Recorded here because this is where it was found and
+why. The decision lives at `specs/rcu-phase-1.md` **P1-DEC-019**.
+
+### How it surfaced
+
+D-059 restored `consecutiveShortfalls <= 1` as an exact invariant. Its whole basis
+is that a `barrier` brings the caller's own retirees home, so one replenish round
+must always suffice. Under six-way concurrent TSan load the assert fired in
+`radix_two_cpus_over_budget_at_once_both_finish` — roughly one run in fifty.
+
+Instrumented rather than argued. The state at the failure:
+
+```
+cpu=1 entryDepth=1 exitDepth=1 barriers=12 rounds=12 pop=2 budget=2 sf=12
+```
+
+The barrier ran and brought **nothing** home — `entryDepth == exitDepth == 1`
+against a population of 2 — and the missing record arrived microseconds later,
+after `replenishRecords` had returned.
+
+### The defect
+
+`drainClaimedBag` advanced `bagHead` past a node **before** invoking its deleter,
+and `bagHead` is the only evidence `barrier`'s termination predicate
+(`anyPendingBagAtOrBefore`) has that a bag still owes work. So for the **last node
+of a stolen bag** there was a window in which the bag read empty and the deleter
+had not run: the owner's concurrent `barrier` saw its predicate go false, saw the
+epoch already past `e0 + 2`, and returned with a deleter still in flight on another
+CPU.
+
+That falsifies `barrier`'s central promise — "every object retired before the call
+has been destroyed", whose only stated exception is other slots' **Open** bags. The
+record's bag was Sealed, then Claimed.
+
+**Only reachable via stealing.** A bag drained by its own owner cannot have that
+owner simultaneously inside `barrier`, which is why the torture suite, the soak and
+1,261 green tests never produced it. It matters beyond radix: `barrier` underwrites
+the `unlink(); barrier(); reuse();` idiom, and a caller reusing an object after
+barrier was racing its deleter.
+
+### The fix
+
+Run the deleter, **then** advance `head`. Safe by the same I6 exclusivity that made
+the pops plain ops — only the claim winner touches `head`, and barrier's reader
+compares it against null rather than dereferencing it. After the loop `head ==
+nullptr` now means exactly "every deleter this bag owed has completed", which is
+what both barrier and the RCU-DEC-033 re-seal below it always wanted.
+
+### The test
+
+`rcu_barrier_waits_for_a_deleter_running_on_a_thief` (ConcurrentTest.cpp). A thief
+is parked inside a blocking deleter for a node in the owner's sealed bag; the owner
+barriers and records **what was true at the instant barrier returned**, while the
+main thread releases the deleter on a schedule neither worker can observe.
+
+**The assertion is an order, not a timing**, which is what makes it deterministic
+in both directions: 3/3 fail with the pop restored, and it passes with it deferred.
+
+### A test defect fixed alongside, and one pre-existing flake measured not fixed
+
+`radix_deferred_release_a_shortfall_is_replenished_and_the_retry_succeeds` had a
+one-directional handshake: it made the reader wait for the writer's shortfall, but
+never made the writer wait for the reader's section to be OPEN. With the epoch free
+to advance, every record comes home immediately and the churn can finish before the
+reader thread starts — so the test failed on its own non-vacuity guard rather than
+on the mechanism. It went unnoticed while the round count was derived from pool
+plus reserve (262 rounds of accidental slack); D-059 took it to 32. Both directions
+are now explicit. Measured: **9/30 failures under load before, 0/30 after.**
+
+`rcuTortureDeadSlotDoesNotUnboundLimbo` also fails under that artificial load —
+**5/25 both with these fixes and with them stashed**, i.e. an identical rate, so it
+is pre-existing load sensitivity of a residue *bound* under 12-way oversubscription
+of an 8-core machine and not a regression. Same class as the documented
+`CROCOS_SKIP_TSAN_STRESS` starvation. Left alone deliberately: it is not this
+change's to fix, and the number is recorded here so the next person who sees it
+does not attribute it to D-059.

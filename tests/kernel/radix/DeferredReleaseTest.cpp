@@ -277,14 +277,26 @@ TEST(radix_deferred_release_steady_state_churn_allocates_no_records) {
 // what §7.1 says a short pool means. So CPU 1 holds a read section open, which
 // stops the epoch advancing, and CPU 0 churns until its pool runs dry.
 //
-// The handshake is what makes this deterministic instead of a sleep: CPU 1 waits
-// on CPU 0's *shortfall counter*, which is bumped at the draw — before the
-// abandon, before the barrier. So by the time CPU 0 is blocked inside `barrier`,
-// CPU 1 has already been told to let go.
+// **The handshake runs in BOTH directions**, and it has to. CPU 1 waits on CPU
+// 0's *shortfall counter*, which is bumped at the draw — before the abandon,
+// before the barrier — so by the time CPU 0 is blocked inside `barrier`, CPU 1
+// has already been told to let go. That is the release direction.
 //
-// The deadline is a safety net for the failure case, not part of the mechanism:
-// if CPU 0 never runs short, CPU 1 must not spin forever, and the assertion
-// below then fails loudly rather than the test hanging with no diagnosis.
+// The acquire direction was missing and it cost a load-dependent failure: CPU 0
+// must not start churning until CPU 1's read section is actually OPEN, because
+// with the epoch free to advance every record comes home immediately and the pool
+// never runs dry. The whole churn can then finish before the reader's thread has
+// started, and the test fails on its own non-vacuity guard rather than on the
+// mechanism — which is exactly the misleading shape the guard exists to prevent.
+//
+// It went unnoticed while the round count was derived from the per-CPU pool PLUS
+// the reserve (262 rounds of slack); D-059 deleted the reserve and took the
+// derivation to 32, which shrank the accidental margin 8x and surfaced it under
+// TSan on a loaded machine.
+//
+// The deadlines are safety nets for the failure cases, not part of the mechanism:
+// neither thread may spin forever, and each assertion then fails loudly rather
+// than the test hanging with no diagnosis.
 TEST(radix_deferred_release_a_shortfall_is_replenished_and_the_retry_succeeds) {
     constexpr size_t kCpus = 2;
     Harness h(kCpus, 1);
@@ -298,6 +310,9 @@ TEST(radix_deferred_release_a_shortfall_is_replenished_and_the_retry_succeeds) {
 
     std::atomic<bool> sawShortfall{false};
     std::atomic<bool> writerDone{false};
+    // Set by CPU 1 once its read section is open, which is the precondition for
+    // CPU 0's churn to be able to exhaust anything at all.
+    std::atomic<bool> readerInSection{false};
     std::atomic<uint64_t> operations{0};
     std::atomic<size_t> failures{0};
     std::string firstError;
@@ -315,6 +330,17 @@ TEST(radix_deferred_release_a_shortfall_is_replenished_and_the_retry_succeeds) {
     workers.emplace_back([&] {
         kernel::test::bindThreadToCpu(0);
         try {
+            // Wait for the reader's section. Without this the churn can complete
+            // against a freely advancing epoch and exhaust nothing.
+            const auto ready = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+            while (!readerInSection.load(std::memory_order_acquire)) {
+                if (std::chrono::steady_clock::now() >= ready) {
+                    throw AssertionFailure(std::string(
+                        "the reader's section never opened, so the writer could not have "
+                        "run short — this is the fixture failing, not the mechanism"));
+                }
+                std::this_thread::yield();
+            }
             for (size_t round = 0; round < 8 * population; round++) {
                 auto* m = makeMapping(0);
                 if (!m) break;
@@ -341,6 +367,9 @@ TEST(radix_deferred_release_a_shortfall_is_replenished_and_the_retry_succeeds) {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
         {
             kernel::rcu::ReadGuard guard(h.domain);
+            // Announce only once the guard is constructed — the writer's
+            // precondition is an OPEN section, not an intention to open one.
+            readerInSection.store(true, std::memory_order_release);
             while (poolOf(h, 0).shortfalls.load(RELAXED) == 0 &&
                    !writerDone.load(std::memory_order_acquire) &&
                    std::chrono::steady_clock::now() < deadline) {

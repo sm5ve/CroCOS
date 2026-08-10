@@ -1157,10 +1157,14 @@ namespace Core::rcu {
             return ran;
         }
 
-        // Pop-run-pop, in place. NOT a wholesale head.exchange(nullptr) detach —
+        // Run-then-pop, in place. NOT a wholesale head.exchange(nullptr) detach —
         // that form makes the batch-bound remainder invisible to barrier, so do not
         // reintroduce it. Exclusivity comes from the Claimed state itself (I6: only
         // the claim winner touches head), which is why the pops are plain ops.
+        //
+        // **Run, THEN pop** — the order is load-bearing and the note inside says
+        // why. `head` is barrier's only evidence that a bag still owes deleters, so
+        // popping first publishes "nothing left to do" before it is true.
         //
         // A deleter that itself retires is safe and expected: its pushes go to its
         // OWN slot's Open bag, which is a different bag from this Claimed one by
@@ -1182,12 +1186,39 @@ namespace Core::rcu {
                 void (* const deleter)(RetireHead*) = n->deleter;
                 assert(deleter != nullptr, "rcu: retired node has no deleter");
 
-                head.store(next, kBagDrainAccess);                  // RELAXED — pop
                 n->next = nullptr;                                  // clears the double-retire marker
                 --budget;
                 ++ran;
 
                 deleter(n);                                         // may reenter retire
+
+                // ─── The pop happens AFTER the deleter, and it must (P1-DEC-019) ──
+                //
+                // This store used to sit above `deleter(n)`, and that made
+                // `barrier`'s central promise — "every object retired BEFORE the
+                // call has been destroyed" — false in a narrow window. `head` is
+                // the ONLY evidence `anyPendingBagAtOrBefore` has that a bag still
+                // owes work. Advancing it first meant that for the LAST node of a
+                // stolen bag there was an interval where the bag read empty and the
+                // deleter had not run: the owner's concurrent `barrier` saw its
+                // predicate go false, saw the epoch past e0+2, and returned while a
+                // thief was still inside the deleter.
+                //
+                // Only reachable via STEALING — a bag drained by its own owner
+                // cannot have that owner simultaneously in `barrier` — which is why
+                // the torture suite never produced it. It surfaced when radix
+                // D-059 restored an exact "one replenish round suffices" invariant,
+                // whose whole basis is that a `barrier` brings the caller's own
+                // retirees home; the pool was still one record short on return, and
+                // the record arrived microseconds later.
+                //
+                // Deferring the store costs nothing and is safe by the same I6
+                // exclusivity that made the pops plain: only the claim winner
+                // touches `head`, and barrier's reader never DEREFERENCES it, it
+                // only compares it against null. After the loop, `head == nullptr`
+                // now means exactly "every deleter this bag owed has completed",
+                // which is the property the re-seal below and barrier both want.
+                head.store(next, kBagDrainAccess);                  // RELAXED — pop
                 n = next;
             }
             return ran;

@@ -180,6 +180,184 @@ TEST(rcu_idle_slots_sealed_bags_are_drained_by_other_cpus) {
     rcu::test::assertQuiescent(d);
 }
 
+// ─── barrier vs a thief still inside a deleter (P1-DEC-019) ────────────────
+//
+// `barrier`'s promise is that every object retired to the domain BEFORE the call
+// has been **destroyed** — deleter run to completion — with one stated exception,
+// objects in other slots' Open bags at entry. This pins the promise against the
+// one arrangement that can break it: the caller's own sealed bag being drained by
+// a DIFFERENT CPU while the caller barriers.
+//
+// It was broken. `drainClaimedBag` advanced `bagHead` past a node before invoking
+// its deleter, and `bagHead` is the only evidence barrier's termination predicate
+// has that a bag still owes work. So for the last node of a stolen bag there was a
+// window where the bag read empty and the deleter had not run: barrier's predicate
+// went false, the epoch was already past e0+2, and barrier returned with a deleter
+// still in flight on another CPU.
+//
+// Unreachable without stealing — a bag drained by its own owner cannot have that
+// owner simultaneously inside `barrier` — which is why the whole torture suite
+// missed it for four phases. It surfaced from radix D-059, whose "one replenish
+// round always suffices" invariant rests on exactly this promise.
+//
+// **The assertion is an ORDER, not a timing.** The barrier thread records whether
+// the deleter had finished at the instant barrier returned; the main thread
+// releases the deleter on its own schedule. So a correct build can only ever
+// record `true`, a broken one records `false`, and neither outcome depends on how
+// long anything took.
+namespace {
+    Atomic<bool> gDeleterEntered{false};
+    Atomic<bool> gDeleterMayFinish{false};
+    Atomic<bool> gDeleterFinished{false};
+
+    void blockingDeleter(Node* n) {
+        if (n->magic != kMagic) gBadMagic.fetch_add(1, SEQ_CST);
+        n->magic = 0;
+        gDeleterEntered.store(true, SEQ_CST);
+        while (!gDeleterMayFinish.load(SEQ_CST)) std::this_thread::yield();
+        gDeleterFinished.store(true, SEQ_CST);
+        gDeleted.fetch_add(1, SEQ_CST);
+    }
+
+    // Every wait in this test is bounded, so a failure reports rather than hangs —
+    // and reports as the fixture failing rather than as the property failing, which
+    // are different findings.
+    bool waitFor(Atomic<bool>& flag, const char* what) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+        while (!flag.load(SEQ_CST)) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                std::fprintf(stderr, "[rcu barrier-vs-thief] timed out waiting for %s\n", what);
+                return false;
+            }
+            std::this_thread::yield();
+        }
+        return true;
+    }
+}
+
+TEST(rcu_barrier_waits_for_a_deleter_running_on_a_thief) {
+    Harness h(2, 1);
+    rcu::Domain d;
+    ASSERT_TRUE(d.init("barrier-vs-thief"));
+    gDeleted.store(0, SEQ_CST);
+    gBadMagic.store(0, SEQ_CST);
+    gDeleterEntered.store(false, SEQ_CST);
+    gDeleterMayFinish.store(false, SEQ_CST);
+    gDeleterFinished.store(false, SEQ_CST);
+
+    Node blocker{kMagic, {}, 0};
+    // Retired AFTER the blocker, so rotation puts them in a later bag — and even
+    // if they share the blocker's bag, the retire stack is LIFO, so the blocker is
+    // drained LAST either way. That is what makes it the node whose deleter runs
+    // with the bag head already at null on a broken build.
+    std::vector<Node> followers(4);
+    for (auto& n : followers) n = Node{kMagic, {}, 1};
+
+    Atomic<bool> blockerRetired{false};
+    Atomic<bool> epochAdvanced{false};
+    Atomic<bool> followersRetired{false};
+    Atomic<bool> sawFinishedAtReturn{false};
+    Atomic<bool> fixtureFailed{false};
+
+    // ── CPU 1: the owner. Retires the blocker, then barriers. It must never
+    // drain, or it would run the blocking deleter itself and there would be no
+    // thief.
+    std::thread owner([&] {
+        kernel::test::bindThreadToCpu(1);
+        {
+            rcu::ReadGuard g(d);
+            rcu::retire<Node, &Node::head, blockingDeleter>(d, &blocker);
+        }
+        blockerRetired.store(true, SEQ_CST);
+
+        // The thief advances the epoch first, so this retire finds the open bag
+        // stale and ROTATES — sealing the blocker's bag, which is the only way a
+        // remote CPU can ever claim it (I13).
+        if (!waitFor(epochAdvanced, "the thief to advance the epoch")) {
+            fixtureFailed.store(true, SEQ_CST);
+            return;
+        }
+        for (auto& n : followers) {
+            rcu::ReadGuard g(d);
+            rcu::retire<Node, &Node::head, countingDeleter>(d, &n);
+        }
+        followersRetired.store(true, SEQ_CST);
+
+        if (!waitFor(gDeleterEntered, "the thief to enter the blocking deleter")) {
+            fixtureFailed.store(true, SEQ_CST);
+            return;
+        }
+
+        // **The measurement.** Nothing here is timed; the question is only what was
+        // true at the instant barrier handed control back.
+        rcu::barrier(d);
+        sawFinishedAtReturn.store(gDeleterFinished.load(SEQ_CST), SEQ_CST);
+    });
+
+    // ── CPU 0: the thief. Advances the epoch, then sweeps until it has claimed
+    // the owner's sealed bag and entered the deleter.
+    std::thread thief([&] {
+        kernel::test::bindThreadToCpu(0);
+        if (!waitFor(blockerRetired, "the owner to retire the blocker")) {
+            fixtureFailed.store(true, SEQ_CST);
+            return;
+        }
+        // Past tag+2, so the bag is claimable the moment the owner seals it.
+        for (size_t i = 0; i < 8; i++) (void)rcu::tryAdvance(d);
+        epochAdvanced.store(true, SEQ_CST);
+
+        if (!waitFor(followersRetired, "the owner to seal by rotation")) {
+            fixtureFailed.store(true, SEQ_CST);
+            return;
+        }
+        // Sweep until this CPU is inside the blocking deleter. The deleter itself
+        // never returns until the main thread says so, so this loop runs at most
+        // once to completion.
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+        while (!gDeleterEntered.load(SEQ_CST)) {
+            (void)rcu::tryAdvance(d);
+            (void)rcu::drain(d);
+            if (std::chrono::steady_clock::now() >= deadline) {
+                std::fprintf(stderr, "[rcu barrier-vs-thief] the thief never claimed the "
+                                     "owner's bag\n");
+                fixtureFailed.store(true, SEQ_CST);
+                return;
+            }
+            std::this_thread::yield();
+        }
+    });
+
+    // ── The main thread releases the deleter, on a schedule of its own that
+    // neither worker can observe or influence.
+    const bool entered = waitFor(gDeleterEntered, "the deleter to be entered");
+    if (entered) {
+        // Long enough that a build which returns early has certainly done so.
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        gDeleterMayFinish.store(true, SEQ_CST);
+    } else {
+        gDeleterMayFinish.store(true, SEQ_CST);   // never leave the workers wedged
+    }
+
+    owner.join();
+    thief.join();
+    kernel::test::bindThreadToCpu(0);
+
+    ASSERT_TRUE(!fixtureFailed.load(SEQ_CST));
+    ASSERT_TRUE(entered);
+    ASSERT_TRUE(gDeleterFinished.load(SEQ_CST));
+
+    // **The property.** A barrier that returns while one of the caller's own
+    // retirees is still inside its deleter has broken its central promise, and any
+    // caller using the `unlink(); barrier(); reuse();` idiom is racing that
+    // deleter.
+    ASSERT_TRUE(sawFinishedAtReturn.load(SEQ_CST));
+
+    rcu::test::drainAllQuiescent(d);
+    ASSERT_EQ(followers.size() + 1, gDeleted.load(SEQ_CST));
+    ASSERT_EQ(0u, gBadMagic.load(SEQ_CST));
+    rcu::test::assertQuiescent(d);
+}
+
 // P2-I1 under concurrency: each thread's section lands in its own slot and
 // nowhere else. Single-threaded this is trivially true; the point here is that
 // nothing in the veneer caches or shares the derived index.
