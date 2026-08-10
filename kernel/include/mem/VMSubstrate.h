@@ -152,9 +152,33 @@ namespace kernel::mm::VMSubstrate {
     // free; only returning pages to the PageAllocator would break the invariant,
     // and no consumer has asked for that.
     //
-    // The ceiling, for scale, against a 1 GiB region: ~131,000 concurrent
-    // address spaces when both consumers paid a page minimum, ~580,000 now that
-    // neither does (radix D-047/D-048).
+    // ─── The ceiling, and why it is not stated here any more (R-16) ─────────
+    //
+    // For scale: against the 1 GiB region, **~180,000 concurrent address spaces
+    // on an 8-CPU machine**, at 5,939 B of window each.
+    //
+    // That figure is DERIVED, by
+    // `radix_static_buffer_ceiling_is_derived_from_the_live_pools`
+    // (`tests/kernel/radix/AddressSpaceTest.cpp`), from the live pools' own
+    // strides — and it is derived there rather than asserted here because **this
+    // sentence has been wrong twice.** It said ~131,000, then ~580,000 once
+    // neither consumer paid a page minimum (radix D-047/D-048); D-051 then moved
+    // the root bucket page into its own pool and D-059 took the control block's
+    // stride from 832 B to 768 B, and each time the code that changed was three
+    // files away from the prose describing it. A referee's re-derivation to
+    // ~174,000 was also wrong, for the reason in the next paragraph.
+    //
+    // Two things to know if you need to move it. **The metric is each consumer's
+    // SHARE OF A PAGE, not its stride** — a 768 B block costs 4,096/5 = 819 B of
+    // window, because the sixth does not fit. And **the root bucket page
+    // dominates**: it is a whole page against everything else's fractions (819 B
+    // control block + 4,096 B root page + 1,024 B RCU slot array), so it is the
+    // only row worth attacking. The test asserts that dominance, so the
+    // conclusion cannot go stale either.
+    //
+    // The number is CPU-count dependent — the control block carries a per-CPU
+    // pool array and the RCU slot array leaves the pooled path above 32 CPUs — so
+    // read it as the consumer-desktop figure it is.
     void* tryReservePerDomainStaticBuffer(size_t byteSize, numa::DomainID d);
 
     // Returns the base VA of CPU `i`'s per-CPU CpuLocal page (sized via

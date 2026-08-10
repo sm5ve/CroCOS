@@ -476,7 +476,12 @@ namespace kernel::mm::radix {
         // is 16,448 bytes of a 16,704-byte control block: on an 8-CPU machine,
         // 98% of the per-address-space pinned reservation was padding for CPUs
         // that do not exist, and it set the static-buffer window's ceiling at
-        // roughly 44,000 concurrent address spaces instead of half a million.
+        // roughly 44,000 concurrent address spaces instead of the ~180,000 it
+        // reaches now. (That figure is DERIVED by
+        // `radix_static_buffer_ceiling_is_derived_from_the_live_pools`, not
+        // transcribed — R-16, after this sentence's predecessor said "half a
+        // million", which was true only until D-051 moved the root bucket page
+        // into the same window.)
         //
         // A POINTER rather than an allocation of its own, because the pool heads
         // are the one thing that must not move to vmsmalloc: every CPU's

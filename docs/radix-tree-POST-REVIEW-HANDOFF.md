@@ -1,7 +1,7 @@
 ---
 kind: handoff
 status: ready
-audience: the next session — option C is DONE; pick from §2
+audience: the next session — C, R-2, R-16, R-17 all DONE; pick from §2
 supersedes: docs/radix-tree-REVIEW-HANDOFF.md (its referee pass is complete)
 ---
 
@@ -15,11 +15,14 @@ defect they uncovered in the RCU engine. §4 and §5 are history — read them f
 reasoning, not for work to do. D-059, D-060 and D-061 in the deviations log are
 the long-form accounts, and `specs/rcu-phase-1.md` P1-DEC-019 carries the RCU one.
 
-**Both merge blockers are now closed.** What remains open in §2 is the detector
-gaps (R-4..R-7, R-9), the latent items (R-12, R-13) and the hygiene list — of which
-**R-17 is the one that must not merge as-is** (`libraries/LibExt/TestDriver.cpp`
-breaks the default `all` target) and **R-16** needs its arithmetic re-derived a
-third time (D-059 took the control-block stride 832 → 768 B).
+**Both merge blockers are closed, and so are R-16 and R-17** (D-062, D-063). What
+remains open in §2 is the mutation-proven detector gaps (**R-4, R-5, R-6, R-9** —
+R-7 went with option C), the latent items (**R-12, R-13**), and the rest of the
+hygiene list (**R-18** the TSan-stress default, **R-19**'s four surviving wrong
+comments, **R-20** the displaced coverage, **R-21** the `detachBudget` retention).
+**R-5 is the one with a live hole behind it**: `GrowthTest.cpp` and
+`DecompositionTest.cpp` have zero oracle assertions, and an unpublished leaked node
+is invisible to the validator, to `nodeCount()` and to LSan.
 
 **A defect found while closing them, worth knowing about:** `barrier` could return
 while another CPU was still inside one of the caller's deleters — an RCU-engine
@@ -33,7 +36,7 @@ history. `docs/radix-tree-HANDOFF-impl.md` is still the implementation reference
 
 ## 0. Suite state
 
-**172/172, ASan and TSan, and the whole `run_all_tests` gate green (1,656 tests
+**172/172, ASan and TSan, and the whole `run_all_tests` gate green (1,658 tests
 across ten runners).** The in-kernel radix stress boots clean at
 `CROCOS_RADIX_STRESS_OPS=24`, Release, exit 0.
 
@@ -143,8 +146,8 @@ that no longer exists.
 | ID | Finding |
 |---|---|
 | **R-15** | `BlockPool`: no double-free detection; domain bound is debug-only over a release OOB write (`BlockPool.h:250`, `:278`) |
-| **R-16** | Static-buffer ceiling stated as ~580,000 at `VMSubstrate.h:155`; **re-derives to ~174,000** after D-051. **Re-derive again after D-059** — the control-block stride went 832 → 768 B when the reserve slot left the trailing pool array, so five address spaces share a window page instead of four |
-| **R-17** | `libraries/LibExt/TestDriver.cpp` and `Temp.cpp` break the default `all` target — a `main()` including `<iostream>`, built by the cross toolchain. **Should not merge** |
+| **R-16** | **FIXED** (D-063). Measured **~180,795 at 8 CPUs, 5,939 B each**. The ~174,000 re-derivation was also wrong: the metric is each consumer's SHARE OF A PAGE, not its stride. The figure is now DERIVED by `radix_static_buffer_ceiling_is_derived_from_the_live_pools` and asserted per row — a bracket was tried and let a 9% regression through |
+| **R-17** | **FIXED** (D-062). `Ext` is an INTERFACE library and both stubs are gone — they were stray `git add -A` additions in `87e4a2f`, and `master` had the mirror-image break (the CMakeLists named sources that did not exist). The reported error was actually host clang meeting cross-GCC's `-Wno-comma-subscript` under `-Werror`, not the `<iostream>` |
 | **R-18** | `CROCOS_SKIP_TSAN_STRESS` defaults ON → 441 vs 425; EpochDomain loses race coverage in the default gate, re-creating by another route the exact condition the comment above it warns about |
 | **R-19** | Six load-bearing comments state properties the code lacks — see below |
 | **R-20** | D-055's workload change displaced coverage: MAP_FIXED −33%, lookup −50% (the only row exercising the descent cache and the `-icount` probes) |

@@ -487,6 +487,118 @@ TEST(radix_address_space_store_packs_blocks_into_a_page) {
     assertNoLiveObjects("sub-page packing");
 }
 
+// ─── The static-buffer ceiling, DERIVED (R-16) ─────────────────────────────
+//
+// How many concurrent address spaces the pinned static-buffer window can hold.
+// `VMSubstrate.h` used to state the answer in prose, and **it was wrong twice** —
+// once when D-051 moved the root bucket page into its own pool, and again when
+// D-059 deleted the reserve slot from the control block's trailing array. Both
+// times the code that changed was three files away from the sentence that
+// described it.
+//
+// So the number is computed here from the live pools instead. DEC-093's rule for
+// the geometry ("retuning costs a descriptor edit and re-derived figures, and a
+// transcribed number would silently survive a retune that changed it") is exactly
+// the rule this figure needed and did not have.
+//
+// **The metric is each consumer's SHARE OF A PAGE, not its stride**, and the
+// difference is the whole reason the old arithmetic drifted. A 768 B block does not
+// cost 768 B of window: five fit in a 4,096 B page and the sixth does not, so each
+// costs 4,096/5 = 819.2 B. The RCU veneer already reports its own cost this way
+// (`RCU.cpp`'s `windowBytes` is `smallPageSize / blocksPerPage()`), and this reuses
+// that definition so the two agree.
+TEST(radix_static_buffer_ceiling_is_derived_from_the_live_pools) {
+    constexpr size_t kCpus = 8;                       // the consumer-desktop target
+    BareArena arena(kCpus);
+    StoreA    store;
+
+    // Draw one of everything, because every pool is inert until its first
+    // allocation — `blocksPerPage()` reads zero before then, and a ceiling derived
+    // from zeros would be silently infinite.
+    BlockA* block = nullptr;
+    ASSERT_TRUE(rdx::createAddressSpace(store, kernel::numa::DomainID{0}, kCpus,
+                                        rdx::kDefaultRecordsPerCpu, block)
+                == rdx::CreateStatus::Ok);
+
+    // Per-address-space share of a page, one row per pinned consumer.
+    const size_t controlBlockShare = kPage / store.pool.blocksPerPage();
+    const size_t rootPageShare     = kPage / store.rootPages.blocksPerPage();
+    const size_t rcuSlotShare      = kPage / rcu::test::slotPoolBlocksPerPage();
+    const size_t perAddressSpace   = controlBlockShare + rootPageShare + rcuSlotShare;
+
+    // ─── The one number not derived here, and why that is acceptable ────
+    //
+    // `kernel::mm::getKernelMemRegionSize()` is the authority, and its header
+    // cannot be included in the harness: `kmemlayout.h` needs the real
+    // `arch::PageTable` template and `arch::pageTableDescriptor`, which the mocks
+    // do not provide. So the window size is mirrored, and the mirror is a
+    // deliberate asymmetry rather than an oversight —
+    //
+    //   * the quantity that has DRIFTED, twice, is `perAddressSpace`: it is the
+    //     sum of three pool strides that change whenever a struct gains a field,
+    //     and it is derived above from the live pools with nothing transcribed;
+    //   * the window size is one constexpr in one header, derived from the page
+    //     table's own geometry, and has been 1 GiB since the layout existed.
+    //
+    // Mirroring the stable term to derive the volatile one is the trade this test
+    // exists to make. It is NOT the 64 MiB mock arena: the ceiling is a claim
+    // about production, and using the fixture's arena would silently answer a
+    // different question.
+    constexpr size_t regionBytes = size_t{1} << 30;      // getKernelMemRegionSize()
+    const size_t ceiling = regionBytes / perAddressSpace;
+
+    std::printf("\n  static-buffer window: %zu concurrent address spaces at %zu CPUs\n",
+                ceiling, kCpus);
+    std::printf("      consumer            | stride | blocks/page | B per address space\n");
+    std::printf("      radix control block | %6zu | %11zu | %zu\n",
+                store.pool.blockStride(), store.pool.blocksPerPage(), controlBlockShare);
+    std::printf("      radix root bucket   | %6zu | %11zu | %zu\n",
+                store.rootPages.blockStride(), store.rootPages.blocksPerPage(), rootPageShare);
+    std::printf("      RCU slot array      | %6s | %11zu | %zu\n",
+                "-", rcu::test::slotPoolBlocksPerPage(), rcuSlotShare);
+    std::printf("      total               |        |             | %zu   (region %zu MiB)\n\n",
+                perAddressSpace, regionBytes / (1024 * 1024));
+
+    // Each consumer must actually be PACKING. A row that fell back to one block
+    // per page is the regression this layer exists to prevent, and it would show up
+    // as a quietly smaller ceiling rather than as a failure anywhere else.
+    ASSERT_TRUE(store.pool.blocksPerPage() > 1);
+    ASSERT_TRUE(rcu::test::slotPoolBlocksPerPage() > 1);
+    // The root bucket page is the one that legitimately does not pack: a
+    // `BucketTable` is exactly a page by design (D-051), which is why it got its
+    // own pool instead of being folded into the control block's stride.
+    ASSERT_EQ(size_t{1}, store.rootPages.blocksPerPage());
+    ASSERT_EQ(kPage, rootPageShare);
+
+    // The root page dominates — it is a whole page against everything else's
+    // fractions — so it is the row to attack if this ceiling ever needs to move.
+    // Asserted rather than remarked, because it is the actionable conclusion.
+    ASSERT_TRUE(rootPageShare > controlBlockShare + rcuSlotShare);
+
+    // ─── Exact, per row, and that is the point ──────────────────────────────
+    //
+    // A bracket was tried first and it was not a detector: re-adding eight pool
+    // slots to the control block's trailing array — the same shape of change
+    // ITEM-084 made, which is what put the wrong number in `VMSubstrate.h` — moved
+    // the ceiling 180,795 -> 165,573 and a `> 150000 && < 200000` bracket passed
+    // it. A 9% window regression that no test objects to is how this figure went
+    // stale twice.
+    //
+    // So each row is exact. That means an intentional change to any of these
+    // structs fails here and has to be re-derived deliberately — which is the
+    // forcing function DEC-093 requires of the geometry's figures and that this
+    // one never had. The printf above hands you the new numbers, so honouring it
+    // costs one edit, and the per-row form says WHICH consumer moved.
+    ASSERT_EQ(size_t{819},  controlBlockShare);       // 768 B stride, 5 per page
+    ASSERT_EQ(size_t{4096}, rootPageShare);           // one whole page, by design
+    ASSERT_EQ(size_t{1024}, rcuSlotShare);            // 8 x 128 B slots, 4 per page
+    ASSERT_EQ(size_t{5939}, perAddressSpace);
+    ASSERT_EQ(size_t{180795}, ceiling);
+
+    rdx::destroyAddressSpace(store, block);
+    assertNoLiveObjects("static-buffer ceiling");
+}
+
 TEST(radix_address_space_blocks_recycle_through_the_store) {
     BareArena arena;
     StoreA    store;

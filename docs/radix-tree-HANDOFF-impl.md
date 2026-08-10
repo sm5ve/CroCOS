@@ -186,6 +186,14 @@ with a lock."*
 | total per address space | 24,576 B | 8,192 B | 4,915 B | **~1,843 B** |
 | ceiling (concurrent AS) | ~43,700 | ~131,000 | ~218,000 | **~580,000** |
 
+**That last column is a historical endpoint, not the current state** (R-16). D-051
+then moved the root bucket page into pinned storage — it was vmsmalloc memory
+before, so it cost the window nothing — which takes the per-address-space total to
+**5,939 B** and the ceiling to **~180,000**, and D-059 shaved the radix block's
+stride 832 -> 768 B. The live figure is derived by
+`radix_static_buffer_ceiling_is_derived_from_the_live_pools`; do not transcribe it
+here, which is the mistake that made this row misleading in the first place.
+
 Three facts that are load-bearing and easy to get wrong:
 
 - **Reservations round up to whole pages.** `staticBufferNextVA += pages *
@@ -215,7 +223,9 @@ a second subsystem needs it. vmsmalloc keeps its spelling as an alias.
 Was the dominant per-address-space cost by 5×. Now **1,024 B against 4,096**:
 `sizeof(ReaderSlot)` is 128 B, so an 8-CPU slot array is 1,024 B and four share a
 page through `PinnedBlockPool`. Per-address-space total 4,915 B -> **~1,843 B**;
-ceiling ~218,000 -> **~580,000** concurrent address spaces.
+ceiling ~218,000 -> **~580,000** concurrent address spaces — *as of D-048*; D-051
+took it to 5,939 B and ~180,000 by moving the root page into the window. See the
+note under the table above.
 
 It went the way §2 predicted: `cpuCount <= kSlotsPerPage` (32 CPUs, the whole
 consumer-desktop target) is one page, which makes per-page NUMA placement and the

@@ -3352,3 +3352,117 @@ of an 8-core machine and not a regression. Same class as the documented
 `CROCOS_SKIP_TSAN_STRESS` starvation. Left alone deliberately: it is not this
 change's to fix, and the number is recorded here so the next person who sees it
 does not attribute it to D-059.
+
+---
+
+## D-062 — R-17: LibExt broke the default `all` target, and had on master too
+
+The referee pass filed this as "a `main()` including `<iostream>`, built by the
+cross toolchain. **Should not merge**". Reproduced, and the mechanism turned out to
+be three overlapping problems, only one of which the description names.
+
+### What was actually wrong
+
+`libraries/LibExt/CMakeLists.txt` built a `STATIC` library over `Temp.cpp` and an
+executable `TestDriver` over `TestDriver.cpp`, and reassigned
+`CMAKE_C_COMPILER` / `CMAKE_CXX_COMPILER` to Homebrew clang inside the
+subdirectory.
+
+1. **The sources did not exist on `master`.** The two `set()` calls named files
+   that were never committed, so configuring the tree failed outright. The two
+   stubs — an empty TU and a `main()` printing "AAAA", 15 lines together — then
+   arrived as **stray additions in the radix Phase 1 commit** (`87e4a2f`), which
+   mentions neither and was plainly a `git add -A`. So the branch converted a
+   configure error into a compile error rather than introducing the problem.
+2. **The compiler override could not work, and made the failure worse.** CMake
+   fixes the compiler at `project()` time; reassigning it in a subdirectory does
+   not re-detect a toolchain, it swaps the binary while every flag in
+   `CMAKE_CXX_FLAGS` is still the cross-GCC set the top level chose. Host clang
+   then met GCC-only `-Wno-comma-subscript` under `-Werror` and refused — **that is
+   the error the default target actually reported.** It never reached the
+   `<iostream>` in a `-nostdlib -ffreestanding` TU that would have failed next, so
+   the filed description named the second symptom rather than the first.
+3. **A host-compiled target does not belong in this tree at all.** The kernel tree
+   is cross-compiled end to end; everything host-compiled lives in `tests/`, which
+   is a separate CMake project for exactly this reason. That separation is the
+   project's existing answer, and the override was an attempt to work around not
+   using it.
+
+### The fix
+
+`Ext` becomes an `INTERFACE` library and both stubs are deleted. This is not a
+downgrade — **`ext2.h` is header-only**: one `Ext2Superblock` and a
+`static_assert(sizeof(...) == 264)`, which is the point of the header and is checked
+by every TU that includes it. There is no code to compile, and CLAUDE.md's library
+table has recorded LibExt's target as "-" all along; the build now agrees with it.
+
+The driver is gone rather than repaired. If EXT2 grows an implementation it gets
+sources here (cross-compiled, like every other library) and its tests go under
+`tests/`, where a `main()` and a standard library are legal.
+
+Verified by configuring and building a fresh tree: configure and build both exit 0
+with zero errors.
+
+---
+
+## D-063 — R-16: the static-buffer ceiling, made derived instead of prose
+
+`VMSubstrate.h` stated how many concurrent address spaces the pinned window holds.
+**The sentence was wrong twice, and the referee's re-derivation was wrong too.**
+
+| stated | when | wrong because |
+|---|---|---|
+| ~131,000 | before D-047/D-048 | superseded by sub-page packing |
+| ~580,000 | after D-047/D-048 | D-051 moved the root bucket page INTO the window |
+| ~174,000 | referee's re-derivation | used the 832 B stride as the cost; the cost is the share of a page, and D-059 took the stride to 768 B |
+
+### The measured answer
+
+**~180,795 concurrent address spaces at 8 CPUs, 5,939 B of window each:**
+
+| consumer | stride | blocks/page | B per address space |
+|---|---|---|---|
+| radix control block | 768 | 5 | 819 |
+| radix root bucket page | 4,096 | 1 | **4,096** |
+| RCU slot array | — | 4 | 1,024 |
+| total | | | **5,939** |
+
+Two things the prose kept getting wrong, both now asserted:
+
+- **The metric is each consumer's SHARE OF A PAGE, not its stride.** A 768 B block
+  costs 4,096/5 = 819 B of window, because the sixth does not fit. The RCU veneer
+  had already been reporting its own cost this way (`RCU.cpp`'s `windowBytes` is
+  `smallPageSize / blocksPerPage()`); the ceiling arithmetic had not.
+- **The root bucket page dominates** — a whole page against everything else's
+  fractions. It is the only row worth attacking if the ceiling ever needs to move,
+  and the test asserts that dominance so the conclusion cannot go stale either.
+
+### The fix is that the number is no longer written down
+
+`radix_static_buffer_ceiling_is_derived_from_the_live_pools` computes it from the
+live pools' own strides. `VMSubstrate.h` now cites the derivation and explains the
+two traps rather than restating a figure that lives in three other files. This is
+DEC-093's rule for the geometry's figures ("retuning costs a descriptor edit and
+re-derived figures, and a transcribed number would silently survive a retune that
+changed it") applied to the one figure that never had it.
+
+**Every row is asserted EXACTLY, and a bracket was tried first and rejected.**
+Re-adding eight pool slots to the control block's trailing array — the same shape
+of change ITEM-084 made, i.e. the one that put the wrong number in the header —
+moves the ceiling 180,795 → 165,573, and a `> 150000 && < 200000` bracket **passed
+it**. A 9% window regression no test objects to is exactly how this went stale
+twice. Exact rows mean an intentional change fails here and must be re-derived
+deliberately, and the per-row form says which consumer moved.
+
+One quantity is still mirrored rather than derived: the 1 GiB region size, because
+`kmemlayout.h` cannot be included in the harness (it needs the real
+`arch::PageTable` template and `arch::pageTableDescriptor`). The asymmetry is
+deliberate — the term that has drifted twice is the sum of three pool strides, and
+that is the one derived live; the region size is one constexpr in one header,
+derived from the page table's own geometry, and has been 1 GiB since the layout
+existed.
+
+Two other places presented the superseded figure as current and now say otherwise:
+`docs/radix-tree-HANDOFF-impl.md`'s D-047/D-048 progression table (its last column
+is a historical endpoint, which the table did not say) and
+`DeferredRelease.h`'s "instead of half a million".
