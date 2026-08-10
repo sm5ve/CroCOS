@@ -28,19 +28,34 @@
 // traffic. That makes contention measurable here and nowhere else, so this file
 // measures it here.
 //
-// ─── What it measures ─────────────────────────────────────────────────────
+// ─── What it measures, and the claim it deliberately does NOT make ────────
 //
-// Lookup throughput against thread count, on a shared tree. The absolute
-// nanoseconds are the least interesting output; the SHAPE is the finding:
+// Lookup throughput at several thread counts, over disjoint per-thread regions.
 //
-//   - scaling near-linear  -> the per-fault atomics are not a bottleneck at this
-//                             core count, and the counters can stay as they are;
-//   - scaling that flattens or inverts -> coherence traffic dominates, and the
-//                             shared counters are the first suspect.
+// **It does not report a scaling efficiency, because it cannot honestly.** The
+// first version did, and the number was partly an artifact. `bindThreadToCpu` in
+// the mock environment binds a thread to a LOGICAL cpu — it selects which mock
+// `CpuLocal` page and RCU reader slot the thread uses — and does no physical
+// affinity at all. macOS grants no usable affinity on Apple Silicon anyway. So on
+// a 4+4 performance/efficiency machine, thread placement is the scheduler's
+// choice, and a "scaling curve" conflates three things: coherence traffic, core
+// asymmetry, and placement luck. The -O2 run that exposed this was
+// non-monotonic — two and four threads slower in AGGREGATE than one — which is
+// not a contention shape, it is a P-core/E-core shape.
 //
-// Reading it as an absolute cost would be wrong twice over: the mock substrate's
+// So this prints per-thread-count timings and nothing derived. The sound way to
+// use it is an **A/B at a FIXED thread count**: build the two variants, run them
+// alternately on an otherwise idle machine, and compare minima. Scheduler noise
+// and core asymmetry then fall on both arms rather than on the conclusion.
+//
+// Minima rather than means, for the reason the `-icount` probes already use them
+// (P4-ITEM-002): a descheduled thread inflates a sample by the whole quantum, and
+// that contamination dilutes with sample count instead of averaging out. The
+// minimum over repeated trials is the least contaminated path.
+//
+// Reading absolute cost off this would be wrong twice more: the mock substrate's
 // `ensureTLBEntryFresh` is a no-op, and an M1's core-to-core latency is not a
-// server's. It is a comparative instrument — run it before a change and after.
+// server's.
 //
 // ─── Why it is a report and not a gate ────────────────────────────────────
 //
@@ -221,34 +236,33 @@ TEST(radix_lookup_contention_scaling_report) {
                 "  absolute ns are dominated by instrumentation. Only the SCALING\n"
                 "  column is being claimed, and only against another run of this\n"
                 "  same binary shape on this same machine.\n");
-    std::printf("      threads |  ns/lookup (aggregate) | Mlookup/s | scaling efficiency\n");
+    std::printf("      threads |  min ns/lookup (aggregate) |  min ns/lookup/thread\n");
 
-    double oneThreadNs = 0.0;
+    constexpr unsigned kTrials = 5;
     for (size_t threads : kThreadCounts) {
-        // Warm the caches and let the descent-cache entries install, so the
-        // measured run is steady-state rather than dominated by cold installs.
+        // One warm-up so descent-cache entries are installed and the measured
+        // trials are steady state rather than cold installs.
         (void)runTrial(*cache, *space.block, threads, regionSpan);
-        const double ns = runTrial(*cache, *space.block, threads, regionSpan);
-        if (threads == 1) oneThreadNs = ns;
 
-        // `ns` is AGGREGATE — wall time over TOTAL lookups — so perfect scaling
-        // makes it fall linearly with thread count, and the ideal at N threads is
-        // the one-thread figure divided by N. Comparing `ns` against the
-        // one-thread figure directly (rather than against that ideal) reports
-        // scaling above 100%, which is how this table read on its first run.
-        const double ideal      = oneThreadNs / static_cast<double>(threads);
-        const double aggregate  = 1000.0 / ns;                 // Mlookup/s, all threads
-        const double efficiency = ns > 0.0 ? (ideal / ns) * 100.0 : 0.0;
-        std::printf("      %7zu | %12.1f | %10.2f | %6.0f%% %s\n",
-                    threads, ns, aggregate, efficiency,
-                    threads == 1 ? "(baseline)"
-                                 : (efficiency >= 85.0 ? "scales"
-                                                       : (efficiency >= 60.0 ? "roll-off"
-                                                                             : "CONTENDED")));
+        double best = 0.0;
+        for (unsigned t = 0; t < kTrials; t++) {
+            const double ns = runTrial(*cache, *space.block, threads, regionSpan);
+            if (best == 0.0 || ns < best) best = ns;
+        }
+        // Aggregate (wall time over TOTAL lookups) and its per-thread inverse.
+        // Both raw. No efficiency column: see the header — without physical
+        // affinity, a derived scaling number would be reporting the macOS
+        // scheduler as though it were coherence traffic.
+        std::printf("      %7zu | %26.1f | %21.1f\n",
+                    threads, best, best * static_cast<double>(threads));
     }
 
-    std::printf("\n  Reading this: per-thread work is disjoint, so degradation is NOT\n"
-                "  the tree. It is the per-fault bookkeeping every lookup performs —\n"
-                "  DescentCacheStats' shared atomics being the standing suspect.\n"
-                "  Compare runs on the SAME machine; absolute values are not portable.\n\n");
+    std::printf("\n  Per-thread regions are DISJOINT, so anything that degrades with\n"
+                "  thread count is not the tree — it is the per-fault bookkeeping every\n"
+                "  lookup performs, with DescentCacheStats' shared atomics the standing\n"
+                "  suspect. But do not read a scaling claim off this table: threads are\n"
+                "  not pinned to physical cores (they cannot be, here), so P-core vs\n"
+                "  E-core placement is mixed into every row.\n"
+                "  Sound use: A/B two builds at ONE thread count, alternating, idle\n"
+                "  machine, compare minima.\n\n");
 }

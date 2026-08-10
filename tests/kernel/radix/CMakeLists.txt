@@ -176,3 +176,35 @@ add_custom_target(run_radix_progress_audit
     DEPENDS KernelRadixProgressAuditRunner
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     COMMENT "Running radix-tree tests (TSan + §6.7 maximum-holder audit)")
+
+# ─── Benchmark runner: optimised, uninstrumented ────────────────────────────
+#
+# Exists for ContentionBench.cpp, and only for it. The ASan runner above is
+# `-O0 -g -fsanitize=address -fsanitize=leak`, which is the right shape for
+# finding bugs and the wrong one for measuring atomic contention twice over:
+# -O0 leaves every abstraction as a real call, and ASan instruments every
+# access. Both inflate the NON-atomic work, so a contended `lock` RMW looks
+# relatively cheaper than it is and the measurement UNDERSTATES the hazard it
+# exists to expose.
+#
+# Not part of `run_all_tests`. It is a measuring instrument, not a gate — its
+# assertions are load-dependent by nature, which is exactly what a gate must
+# not be. Build and run it deliberately:
+#
+#   cmake --build build --target KernelRadixBenchRunner -j8
+#   CROCOS_RADIX_BENCH=1 ./build/kernel/radix/KernelRadixBenchRunner
+#
+# Compare runs of THIS binary against each other on the same machine; the
+# absolute numbers are not portable and are not claimed to be.
+add_executable(KernelRadixBenchRunner EXCLUDE_FROM_ALL ${RDX_SOURCES})
+target_include_directories(KernelRadixBenchRunner PRIVATE ${RDX_INCLUDES})
+target_compile_definitions(KernelRadixBenchRunner PRIVATE ${RDX_DEFINES})
+target_compile_options(KernelRadixBenchRunner PRIVATE ${RDX_COMMON_OPTS} -O2 -g)
+target_link_libraries(KernelRadixBenchRunner PRIVATE TestHarness)
+if(APPLE)
+    target_link_options(KernelRadixBenchRunner PRIVATE
+        -Wl,-force_load,$<TARGET_FILE:TestHarness>)
+else()
+    target_link_options(KernelRadixBenchRunner PRIVATE
+        -Wl,--keep-section=.crocos_unit_tests)
+endif()
