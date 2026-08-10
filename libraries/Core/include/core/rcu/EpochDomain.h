@@ -263,15 +263,57 @@ namespace Core::rcu {
     // exactly this: a slot's state word must share no cache line with another
     // slot's, so the scan's per-slot loads do not false-share with a reader's
     // activation store.
+    // ─── P1-I2 holds BETWEEN slots; the bags needed it INSIDE one too ────────
+    //
+    // The struct alignment above separates one slot's state word from another
+    // slot's. It did NOT separate a slot's state word from its own bag arrays,
+    // and that is a second false-sharing edge with the same two participants:
+    //
+    //   * `state` is written by its owner on EVERY section entry and exit, and
+    //     read by EVERY CPU's `tryAdvance` scan — which, on the radix fault path,
+    //     runs on every lookup (DEC-060's pump is placed after the section
+    //     closes, so the own-slot early-out at the top of the scan is inactive
+    //     there by construction).
+    //   * `bagHead[b]` is written by whichever CPU WON the claim, once per node
+    //     drained — and stealing (RCU-DEC-006) makes that routinely a CPU other
+    //     than the owner.
+    //
+    // At the previous field order `bagHead[0..2]` landed at offsets 40/48/56,
+    // i.e. inside `state`'s line. So a thief draining another CPU's bag
+    // invalidated, once per retired object, the exact line that every CPU
+    // re-reads on every page fault and that the owner re-writes on every read
+    // section. `alignas` on the array closes it; `sizeof(ReaderSlot)` is
+    // unchanged at 128 B because the struct was already padded out to it, so
+    // this costs no footprint at all.
+    //
+    // It is also self-enforcing rather than comment-enforced: a field added
+    // above `bagHead` that overflowed the first line would push the array to
+    // offset 128 and take `sizeof` to 192, which stops tiling a 4 KiB page and
+    // trips the static_assert in kernel/rcu/RCU.cpp that guards exactly that.
     struct alignas(64) ReaderSlot {
         Atomic<uint64_t>    state{kInactive};      // I4: owner writes, everyone reads
         uint64_t            nesting      = 0;      // I5: owner-only, plain
         uint64_t            openBagIndex = 0;      // I5: owner-only bookkeeping
         uint64_t            retireCount  = 0;      // I5: advance threshold counter
         bool                inDrain      = false;  // I5: I14 + the RCU-DEC-038 assert
-        Atomic<RetireHead*> bagHead[kBagCount]     = {};
-        Atomic<uint64_t>    bagTagState[kBagCount] = {};   // (tag : 62, state : 2)
+        // Remotely written (claim winner / thief). Kept off `state`'s line.
+        alignas(64) Atomic<RetireHead*> bagHead[kBagCount]     = {};
+        Atomic<uint64_t>                bagTagState[kBagCount] = {};   // (tag : 62, state : 2)
     };
+
+    // The separation above, asserted rather than left to `alignas` and a comment.
+    // Measured before the fix: `state` at 0 and `bagHead` at 40 — the same line.
+    // A future field inserted above `bagHead`, or a change to `kBagCount`, can
+    // silently re-merge them, and the symptom would be a diffuse SMP slowdown
+    // with nothing to point at. This turns that into a build failure.
+    static_assert(__builtin_offsetof(ReaderSlot, bagHead) >= 64,
+                  "ReaderSlot: the remotely-written bag heads must not share a cache "
+                  "line with `state`, which every CPU's tryAdvance scan re-reads on "
+                  "every page fault and the owner rewrites on every read section");
+    static_assert(sizeof(ReaderSlot) == 128,
+                  "ReaderSlot: the separation above must stay free — it is paid for "
+                  "out of existing tail padding, and growing the struct would also "
+                  "break the page-tiling assert in kernel/rcu/RCU.cpp");
 
     // ─── Hooks policy (RCU-DEC-017, P1-DEC-009) ──────────────────────────────
     //
