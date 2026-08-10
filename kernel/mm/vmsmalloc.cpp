@@ -43,6 +43,7 @@
 #include <liballoc/OccupancyTransition.h>
 #include <mem/NUMA.h>
 #include <mem/VMSubstrate.h>
+#include <sched/Preemption.h>
 
 #include "VMSubstrateSlab.h"
 
@@ -332,16 +333,16 @@ inline bool inForbiddenContextForVmsmalloc() {
 
 // DEC-030 caller-side contract (P7-DEC-003): the caller must hold the thread
 // non-preemptible and pinned to its current CPU. Two separate predicates name
-// the two distinct obligations; both are vacuously true until CroCOS has a
-// preemptive scheduler, at which point only these bodies change.
-inline bool preemptionDisabled() {
-    // TODO(DEC-030, future scheduler): per-CPU preempt-count check.
-    return true;
-}
-inline bool cpuPinned() {
-    // TODO(DEC-030, future scheduler): per-thread migrate-disable check.
-    return true;
-}
+// the two distinct obligations.
+//
+// The bodies moved to `kernel/sched/Preemption.h` when the radix tree became a
+// third consumer (R-12) — the same consolidation, and for the same reason, that
+// `kAllocForbiddenDepthMask` above got when RCU became a second consumer of the
+// DEC-014 rule: one shared predicate beats several that can drift. "Only these
+// bodies change when a scheduler lands" still holds; there is now one copy of
+// them rather than three.
+inline bool preemptionDisabled() { return kernel::sched::preemptionDisabled(); }
+inline bool cpuPinned() { return kernel::sched::cpuPinned(); }
 
 }  // namespace
 

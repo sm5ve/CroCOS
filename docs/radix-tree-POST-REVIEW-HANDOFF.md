@@ -134,8 +134,15 @@ introduced, R-2's class surviving three lines above its own fix, and a long tail
    `specs/`. The `docs/` plan predated the spec tree becoming its own private repo,
    after which `docs/` is specifically the public record of decisions and not a home
    for drafting. Citations that said "project root" now say "this directory".
-5. **R-12** — Treiber ABA safety holds only because no scheduler exists. Tie to the
-   preemption milestone; `Attempt::drawCpu` is the cheap half, already in.
+5. **R-12** — **design half CLOSED 2026-08-10 (D-073); implementation is
+   scheduler-dependent.** `kernel/include/sched/Preemption.h` now carries the seam:
+   two predicates and two RAII guards, all no-ops, with a `PreemptionGuard` applied
+   over `DeferredReleasePool::pop` — chosen over a tagged head because it keeps the
+   pool's single-consumer argument literally true rather than replacing it.
+   vmsmalloc's and RCU's duplicate predicate pairs now delegate there, so a scheduler
+   fills in one file instead of three. Mutation-proved reachable. What is left is a
+   preempt-count in `CpuLocal`, a per-thread migrate-disable count, and four function
+   bodies.
 6. ~~**`SafePtr`'s two move semantics**~~ — **CLOSED 2026-08-10 (D-072).** Resolved
    toward copying in both: `SafePtr` is a non-owning view with no destructor and
    unrestricted copying, and freshness attaches to an access rather than to a pointer,

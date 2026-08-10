@@ -122,6 +122,7 @@
 #include <core/rcu/EpochDomain.h>
 #include <mem/VMSubstrate.h>
 #include <rcu/RCU.h>
+#include <sched/Preemption.h>
 
 #include <mem/radix/Geometry.h>
 #include <mem/radix/Mapping.h>
@@ -216,7 +217,33 @@ namespace kernel::mm::radix {
             depth.fetch_add(1, kPoolDepthPublish);
         }
 
+        // ─── R-12: what "single consumer" costs once a scheduler exists ────
+        //
+        // The ABA-freedom argument above is that reaching a previously popped
+        // node again needs a SECOND popper, and there is none. That is true per
+        // CPU — and "per CPU" is doing more work than it looks, because it
+        // silently assumes a CPU runs one thing at a time.
+        //
+        // Preemption breaks it without touching this code. Thread A loads
+        // `head` = X and reads `X->next` = Y; A is preempted; thread B, on this
+        // same CPU and drawing from this same pool, pops X, pops Y, and pushes X
+        // back; A resumes and CASes head X -> Y. The CAS succeeds because the
+        // head really is X again, and it installs a Y that is no longer in the
+        // stack. Textbook ABA, and one CPU was enough — preemption turned the
+        // single consumer into two.
+        //
+        // The guard is the fix, chosen over tagging the head because it keeps
+        // the design's existing correctness argument literally true rather than
+        // replacing it: the pool stays single-consumer, and this says so at the
+        // one place that depends on it. Vacuous today (no scheduler), and the
+        // assertion is what fails loudly if that ever stops being true while the
+        // guard is still a no-op that someone has removed.
         [[nodiscard]] DeferredRelease* pop() {
+            const sched::PreemptionGuard noPreempt;
+            assert(sched::preemptionDisabled(),
+                   "radix: DeferredReleasePool::pop is ABA-safe only while it is the "
+                   "pool's single consumer — preemption makes one CPU into two poppers");
+
             DeferredRelease* h = head.load(kPoolPop);
             for (;;) {
                 if (h == nullptr) return nullptr;

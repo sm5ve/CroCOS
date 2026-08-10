@@ -35,6 +35,7 @@
 #include <mem/NUMA.h>
 #include <mem/BlockPool.h>
 #include <mem/VMSubstrate.h>
+#include <sched/Preemption.h>
 #include <timing/timing.h>
 #include <core/math.h>
 #include <core/utility.h>
@@ -198,19 +199,18 @@ namespace {
 
     // ─── P2-DEC-006 caller-side contract stubs ─────────────────────────────
     //
-    // Byte-for-byte the DEC-030 pattern from vmsmalloc.cpp:315-321, and
-    // deliberately duplicated rather than shared: they are vacuous today, and
-    // the point of asserting them anyway is that when a scheduler lands the
-    // assertions become real without anyone having to remember to add them. Two
-    // predicates because they name two distinct obligations.
-    inline bool preemptionDisabled() {
-        // TODO(DEC-030, future scheduler): per-CPU preempt-count check.
-        return true;
-    }
-    inline bool cpuPinned() {
-        // TODO(DEC-030, future scheduler): per-thread migrate-disable check.
-        return true;
-    }
+    // These were a private copy of the DEC-030 pattern from vmsmalloc.cpp,
+    // duplicated on the reasoning that they are vacuous today and asserting them
+    // anyway means the assertions become real when a scheduler lands "without
+    // anyone having to remember to add them". Right goal; the duplication fought
+    // it, because a third consumer (the radix tree, R-12) would have made it
+    // three places to remember. They now forward to `kernel/sched/Preemption.h`,
+    // which is the one file a scheduler implements.
+    //
+    // Kept as local names rather than replaced at ~8 call sites: the assertions
+    // read as statements about RCU's contract, and that is what they are.
+    inline bool preemptionDisabled() { return sched::preemptionDisabled(); }
+    inline bool cpuPinned() { return sched::cpuPinned(); }
 
     // Slots per page, and the reason it must divide evenly: the array is dense,
     // so a slot straddling a page boundary would be split across two NUMA

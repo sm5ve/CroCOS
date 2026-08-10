@@ -4235,3 +4235,91 @@ builds Debug and Release/LTO and boots clean.
 
 **Closes the `SafePtr` item.** Of D-070's open list only R-12 remains, which is tied to
 the preemption milestone by design.
+
+---
+
+## D-073 — R-12: a scheduler seam, and the ABA hazard that needs it
+
+R-12 said Treiber ABA safety "holds only because no scheduler exists" and was filed
+as not-actionable until one does. It is actionable now: the API a scheduler must
+provide can be designed, stubbed, and *applied at the sites that depend on it*,
+which is most of the work and all of the thinking.
+
+### The hazard, precisely
+
+`DeferredReleasePool` is a multi-producer, single-consumer Treiber stack, and its
+ABA-freedom rests on there being exactly one popper. That is stated per CPU — and
+"per CPU" quietly assumes a CPU runs one thing at a time.
+
+Preemption breaks it without touching the data structure. Thread A loads `head` = X
+and reads `X->next` = Y; A is preempted; thread B, on the *same* CPU and drawing
+from the *same* pool, pops X, pops Y, pushes X back; A resumes and CASes head
+X -> Y. The CAS succeeds because the head genuinely is X again, and it installs a Y
+that has left the stack. One CPU was sufficient: preemption turned the single
+consumer into two.
+
+### The fix, and what was rejected
+
+A `PreemptionGuard` over the pop, chosen over tagging the head with a generation
+counter. The deciding argument is that it keeps the design's existing correctness
+claim **literally true** — the pool stays single-consumer, and the guard is that
+claim written down at the one place that depends on it — rather than replacing it
+with a different argument and a wider CAS. `DeferredRelease.h` and `Ordering.h` both
+already promise single-consumer in prose; now something enforces it.
+
+The tagged-head alternative remains viable and is recorded here rather than in a
+comment, because it is what to reach for if a future scheduler makes
+non-preemptible sections expensive on this path.
+
+### The API
+
+`kernel/include/sched/Preemption.h`: two predicates (`preemptionDisabled`,
+`cpuPinned`) and two RAII guards (`PreemptionGuard`, `CpuPinGuard`). Every body is a
+no-op today.
+
+Two obligations rather than one, because consumers need different ones. Preemption
+disabled implies pinning; pinning does not imply preemption is off. RCU's `barrier`
+wants exactly the weaker one — RCU-DEC-040 makes the guarantee per-SLOT, so the
+caller must hold affinity while "preemption stays fine". Guards are RAII and counted
+rather than paired calls, because every consumer nests them and a leaked
+preempt-disable under a real scheduler is a hung CPU.
+
+### Three copies became one
+
+`vmsmalloc.cpp` and `kernel/rcu/RCU.cpp` each carried a private
+`preemptionDisabled`/`cpuPinned` pair, duplicated on the stated reasoning that they
+are vacuous today and asserting them anyway means the assertions "become real when a
+scheduler lands without anyone having to remember to add them". The goal is right
+and the duplication fought it: the radix tree would have been a third place to
+remember. Both now delegate.
+
+This is the same consolidation, for the same reason, that vmsmalloc's DEC-014
+interrupt-context predicate got when RCU became a second consumer of that rule —
+"one shared predicate beats two that can drift". The local names are kept at the ~14
+call sites, because the assertions read as statements about each subsystem's own
+contract, which is what they are.
+
+### Verified reachable, which is the whole risk with a stub
+
+A seam nothing reaches is worth nothing, so the predicate was mutated to `false` and
+the consumers isolated one at a time. Un-isolated it fails 152 of 177 radix tests —
+but through *vmsmalloc's* assertion, which fires on every allocation and masks
+everything behind it. With vmsmalloc's and RCU's local predicates pinned true so the
+mutated predicate has exactly one consumer left, the radix site fails with its own
+message:
+
+```
+✗ FAILED: Assert failed: radix: DeferredReleasePool::pop is ABA-safe only while it
+  is the pool's single consumer — preemption makes one CPU into two poppers
+```
+
+So when a scheduler lands and these bodies become real, this site will catch a
+violation rather than being decorative. Worth noting for anyone repeating the
+exercise: the first mutation run *looked* like proof and was not — 152 failures with
+none of them from the site under test.
+
+Suite 1,667 green; kernel builds Debug and Release/LTO; all three boot configs clean.
+
+**R-12's design half is closed.** What remains is genuinely scheduler-dependent: the
+preempt-count in `CpuLocal`, the migrate-disable count per thread, and filling in
+four function bodies.
