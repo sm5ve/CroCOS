@@ -266,3 +266,92 @@ TEST(radix_lookup_contention_scaling_report) {
                 "  Sound use: A/B two builds at ONE thread count, alternating, idle\n"
                 "  machine, compare minima.\n\n");
 }
+
+// ─── Calibration: what does a contended RMW actually cost here? ────────────
+//
+// The lookup benchmark above cannot attribute its degradation on its own. Every
+// lookup performs BOTH the three `DescentCacheStats` bumps and DEC-060's
+// `tryAdvance`, and `tryAdvance` walks every CPU's reader slot — which is also
+// shared-line traffic. So "throughput falls as threads rise" is consistent with
+// the counters, with the pump, or with both, and picking one without evidence is
+// how a performance story becomes folklore.
+//
+// This supplies the missing constant: the cost of one `fetch_add` on a shared
+// line versus one on a private line, at the same thread counts, on this machine.
+// With it, the counters' predicted contribution is 3 x (shared - private) per
+// lookup, which can be checked against what the A/B of an actual fix recovers.
+// If the fix recovers far more than predicted, the pump was the bigger half.
+//
+// Deliberately NOT a claim about the radix tree. It is a machine constant.
+
+TEST(radix_contended_atomic_calibration_report) {
+    if (const char* on = std::getenv("CROCOS_RADIX_BENCH"); on == nullptr || on[0] != '1') {
+        return;   // the lookup benchmark above already explains the opt-in
+    }
+
+    constexpr unsigned kIters = 2000000;
+    constexpr unsigned kTrials = 5;
+
+    // One shared counter, versus one cache-line-padded counter per thread. The
+    // padding is the whole point of the comparison: same instruction, same count,
+    // differing only in whether the line is contended.
+    struct alignas(128) Padded { std::atomic<uint64_t> v{0}; };
+
+    std::printf("\n  contended vs private atomic fetch_add"
+                " (machine constant, not a radix figure)\n");
+    // PER-THREAD nanoseconds, deliberately, so these compose with the lookup
+    // table above — whose per-thread column is what a single faulting CPU
+    // actually experiences. Aggregate figures would not subtract correctly.
+    std::printf("      threads | shared ns/op/thr | private ns/op/thr |  tax per RMW\n");
+
+    for (size_t threads : kThreadCounts) {
+        double bestShared = 0.0, bestPrivate = 0.0;
+
+        for (unsigned trial = 0; trial < kTrials; trial++) {
+            for (int mode = 0; mode < 2; mode++) {          // 0 = shared, 1 = private
+                std::atomic<uint64_t>    shared{0};
+                std::vector<Padded>      privates(threads);
+                std::vector<std::thread> workers;
+                std::atomic<bool>        go{false};
+                std::atomic<size_t>      ready{0};
+
+                for (size_t t = 0; t < threads; t++) {
+                    workers.emplace_back([&, t] {
+                        ready.fetch_add(1, std::memory_order_release);
+                        while (!go.load(std::memory_order_acquire)) { }
+                        auto& slot = (mode == 0) ? shared : privates[t].v;
+                        for (unsigned k = 0; k < kIters; k++) {
+                            slot.fetch_add(1, std::memory_order_relaxed);
+                        }
+                    });
+                }
+                while (ready.load(std::memory_order_acquire) != threads) { }
+                const auto t0 = std::chrono::steady_clock::now();
+                go.store(true, std::memory_order_release);
+                for (auto& w : workers) w.join();
+                const auto t1 = std::chrono::steady_clock::now();
+
+                const double ns =
+                    static_cast<double>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        t1 - t0).count()) / static_cast<double>(threads * kIters);
+                double& best = (mode == 0) ? bestShared : bestPrivate;
+                if (best == 0.0 || ns < best) best = ns;
+            }
+        }
+
+        const double sharedPerThread  = bestShared  * static_cast<double>(threads);
+        const double privatePerThread = bestPrivate * static_cast<double>(threads);
+        std::printf("      %7zu | %16.2f | %17.2f | %9.1f ns\n",
+                    threads, sharedPerThread, privatePerThread,
+                    sharedPerThread - privatePerThread);
+    }
+
+    std::printf("\n  A hit-path lookup performs THREE shared bumps (lookups,\n"
+                "  freshnessLoads, hits), so DescentCacheStats' predicted per-lookup\n"
+                "  cost is 3 x the tax column, in the same per-thread units as the\n"
+                "  lookup table above. Subtract that from the lookup table's per-thread\n"
+                "  degradation to see how much of the problem the counters are NOT.\n"
+                "  Whatever remains is elsewhere — DEC-060's tryAdvance walks every\n"
+                "  CPU's reader slot on every lookup, and those slots are actively\n"
+                "  written by the other threads.\n\n");
+}
