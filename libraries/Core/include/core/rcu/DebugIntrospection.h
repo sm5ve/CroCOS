@@ -76,6 +76,21 @@ namespace Core::rcu {
             return { isActive(w), epochOf(w), s.nesting, s.openBagIndex, s.retireCount, s.inDrain };
         }
 
+        // ─── UNSAFE on a live domain, not merely imprecise (D-070) ─────────
+        //
+        // This walks `p = head; p; p = p->next`, and it is the ONE reader of
+        // `bagHead` that DEREFERENCES it. P1-DEC-019 made the drainer run each
+        // deleter BEFORE advancing `head` past the node, so on a Claimed bag `head`
+        // can now point at a node the deleter has already freed — and `n->next` was
+        // cleared before the deleter ran, so the count would be wrong too. Before
+        // that reorder a racing walk only ever touched live nodes.
+        //
+        // Not reachable today: every call site joins its workers or is otherwise
+        // quiescent. But the file's "snapshots assume a quiescent domain" caveat used
+        // to mean "the number may be stale" and now means "the walk may fault".
+        // `EpochDomain`'s note that "barrier's reader never DEREFERENCES it" is true
+        // of barrier and of the four other readers of `bagHead`; this is the
+        // exception it does not name.
         [[nodiscard]] static BagSnapshot bag(const Domain& d, size_t i, size_t b) {
             const ReaderSlot& s = d.slots[i];
             const uint64_t v = s.bagTagState[b].load(kBagTagLoad);

@@ -82,7 +82,7 @@ small.
 
 ### What Phase 5 left open
 
-- **ITEM-084 is the one genuinely open item**: it has its distribution (D-054/055)
+- **~~ITEM-084 is the one genuinely open item~~ **— CLOSED TWICE AND NOW WITHDRAWN (D-056, then D-059): what ships is neither candidate answer. The per-CPU population is 32 and IS the per-attempt record budget. See D-070 for the spec amendments this required.** Superseded text: ITEM-084 was the one genuinely open item**: it has its distribution (D-054/055)
   and a recorded argument, and what it needs is a decision, not a measurement.
 - **ITEM-055 / ITEM-002 / ITEM-031 are consciously retained** — false-sharing and
   bit-split questions that TCG cannot answer, each recorded with the hardware

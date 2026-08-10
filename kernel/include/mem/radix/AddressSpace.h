@@ -12,9 +12,12 @@
 // domain block, and that placement is load-bearing rather than convenient
 // (DEC-082 as amended): the mapping never changes, so the generation check, the
 // `dying`-flag load and the pool heads — all of which sit on other CPUs' hot
-// paths — carry **no freshness obligation at all**. A vmsmalloc-backed control
-// block would put an `ensureTLBEntryFresh` on every descent-cache hit, which is
-// the spec's hottest path.
+// paths — carry **no freshness obligation at all**, and (R-13/D-068) no permission
+// either: pinned storage has no dirty bitmap, so a freshness call there writes into
+// live pinned data. A vmsmalloc-backed control block would put an
+// `ensureTLBEntryFresh` on every descent-cache hit, which is the spec's hottest
+// path. D-068's sweep of "exempt means forbidden" missed this file; D-070 finishes
+// it — appropriately, since this is the header whose subject is the pinned block.
 //
 // **What did not move with it cost a Phase 5 debugging session, and has since
 // moved**: the root bucket page was an ordinary `tryMake<BucketTable>`

@@ -400,16 +400,37 @@ namespace Core::rcu {
     //                  transitions on a bag no other CPU may write, and their
     //                  visibility to a future thief rides the subsequent
     //                  kBagSeal RELEASE. RELAXED is sufficient and correct.
-    //   kBagDrainAccess — head reads/writes by the CPU holding a bag Claimed.
-    //                  I6 grants that CPU exclusive ownership of head, so these
-    //                  are the "plain ops" of RCU-DEC-033; visibility rides
-    //                  kBagClaim / kBagReseal / kBagRelease on tagState. RELAXED
-    //                  rather than a non-atomic access only because head is an
-    //                  Atomic<> that concurrent observers (barrier's termination
-    //                  predicate, DebugIntrospection) may legally load.
+    //   kBagDrainAccess — head reads/writes by the CPU holding a bag Claimed,
+    //                  BETWEEN nodes. I6 grants that CPU exclusive ownership of
+    //                  head, so these are the "plain ops" of RCU-DEC-033.
+    //
+    //                  This entry used to add "visibility rides kBagClaim /
+    //                  kBagReseal / kBagRelease on tagState", and that was false
+    //                  for the path barrier actually exits through — see
+    //                  kBagEmptyPublish. The two below carry that visibility now;
+    //                  this one carries none and needs none.
+    //   kBagEmptyPublish / kBagEmptyObserve — the pair that makes
+    //                  "head == nullptr" mean something to another CPU. P1-DEC-019
+    //                  made an EMPTY Claimed bag the evidence barrier terminates
+    //                  on, and evidence needs an edge:
+    //
+    //                    - the drainer's final head store must publish everything
+    //                      the deleters did, hence RELEASE;
+    //                    - barrier's predicate load must synchronize with it,
+    //                      hence ACQUIRE.
+    //
+    //                  Without the pair, barrier could exit off a bag observed
+    //                  Claimed-and-empty while the deleter's own release-store of
+    //                  the object (radix pushes the record back to its pool) was
+    //                  not yet visible — the caller then sees its retiree still
+    //                  missing. P1-DEC-019 fixed WHEN the store happens and left
+    //                  its ORDERING open; this closes it. Found by referee audit,
+    //                  ARM-only, invisible to x86 and to TSan's atomic shims.
     //   kEpochObserve — diagnostic / termination-predicate epoch reads.
     inline constexpr MemoryOrder kBagOpen               = RELAXED;
     inline constexpr MemoryOrder kBagDrainAccess        = RELAXED;
+    inline constexpr MemoryOrder kBagEmptyPublish       = RELEASE;
+    inline constexpr MemoryOrder kBagEmptyObserve       = ACQUIRE;
     inline constexpr MemoryOrder kEpochObserve          = ACQUIRE;
 
     template <typename Hooks>
@@ -1218,7 +1239,11 @@ namespace Core::rcu {
                 // only compares it against null. After the loop, `head == nullptr`
                 // now means exactly "every deleter this bag owed has completed",
                 // which is the property the re-seal below and barrier both want.
-                head.store(next, kBagDrainAccess);                  // RELAXED — pop
+                // RELEASE, not RELAXED: this store is what tells another CPU the
+                // bag owes nothing, so it must publish the deleter's effects —
+                // including the deleter's own release-store handing the object
+                // back to its owner. See kBagEmptyPublish.
+                head.store(next, kBagEmptyPublish);
                 n = next;
             }
             return ran;
@@ -1238,7 +1263,10 @@ namespace Core::rcu {
                     const BagState st = bagStateOf(v);
                     if (st != BagState::Sealed && st != BagState::Claimed) continue;
                     if (bagTagOf(v) > e0) continue;
-                    if (slots[i].bagHead[b].load(kBagDrainAccess) != nullptr) return true;
+                    // ACQUIRE: the other half of kBagEmptyPublish's pair. A
+                    // RELAXED read of null here would let barrier terminate on
+                    // evidence whose cause it has not synchronized with.
+                    if (slots[i].bagHead[b].load(kBagEmptyObserve) != nullptr) return true;
                 }
             }
             return false;

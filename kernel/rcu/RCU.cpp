@@ -561,14 +561,51 @@ bool Domain::init(const char* name, size_t drainBatchBound) CROCOS_RCU_NOEXCEPT 
                                     arch::smallPageSize);
     const char* provenance = block.pooled() ? "pooled" : "dedicated pages";
 
-    if (drainBatchBound == Core::rcu::kUnboundedDrainBatch) {
-        klog() << "rcu: domain [" << name << "] ready — " << static_cast<uint64_t>(cpuCount)
-               << " slots, " << windowBytes << " B of window (" << provenance
-               << "), drain batch unbounded\n";
-    } else {
-        klog() << "rcu: domain [" << name << "] ready — " << static_cast<uint64_t>(cpuCount)
-               << " slots, " << windowBytes << " B of window (" << provenance
-               << "), drain batch " << static_cast<uint64_t>(drainBatchBound) << "\n";
+    // ─── ONCE per domain NAME, not once per domain (D-070) ─────────────────
+    //
+    // This line was written when `Domain::init` ran a handful of times at boot, one
+    // per subsystem. RadixVM made it a **runtime, per-address-space** call, and the
+    // line did not change: an `OPS=24` Release stress boot emitted **1,025**
+    // `rcu: domain [radix-as] ready` lines. Once this is wired to `fork`/`exec`,
+    // every process creation would write a serial line while holding
+    // `AtomicPrintStream`'s global spinlock — a per-fork global lock acquisition and
+    // a UART round trip, in release, forever. Found by referee audit; it is the one
+    // thing on this branch that would visibly bite only after merge.
+    //
+    // Keyed on the NAME rather than suppressed outright, because the diagnostic is
+    // genuinely useful the first time each consumer appears — that is when a wrong
+    // slot count or an unexpected `dedicated pages` provenance is worth seeing —
+    // and useless on the thousandth identical repeat. Racy by construction and
+    // deliberately so: the worst case is two CPUs both logging a name once, which
+    // costs one duplicate line and no correctness.
+    {
+        static constexpr size_t kMaxLoggedNames = 8;
+        static const char* loggedNames[kMaxLoggedNames] = {};
+        static Atomic<size_t> loggedCount{0};
+
+        bool alreadyLogged = false;
+        const size_t seen = loggedCount.load(RELAXED);
+        for (size_t i = 0; i < seen && i < kMaxLoggedNames; i++) {
+            const char* a = loggedNames[i];
+            const char* b = name;
+            while (*a != '\0' && *a == *b) { a++; b++; }
+            if (*a == '\0' && *b == '\0') { alreadyLogged = true; break; }
+        }
+        if (!alreadyLogged) {
+            const size_t slot = loggedCount.fetch_add(1, RELAXED);
+            if (slot < kMaxLoggedNames) loggedNames[slot] = name;
+            if (drainBatchBound == Core::rcu::kUnboundedDrainBatch) {
+                klog() << "rcu: domain [" << name << "] ready — "
+                       << static_cast<uint64_t>(cpuCount)
+                       << " slots, " << windowBytes << " B of window (" << provenance
+                       << "), drain batch unbounded\n";
+            } else {
+                klog() << "rcu: domain [" << name << "] ready — "
+                       << static_cast<uint64_t>(cpuCount)
+                       << " slots, " << windowBytes << " B of window (" << provenance
+                       << "), drain batch " << static_cast<uint64_t>(drainBatchBound) << "\n";
+            }
+        }
     }
     return true;
 }

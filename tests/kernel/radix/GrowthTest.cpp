@@ -377,6 +377,18 @@ TEST(radix_growth_lost_cas_leaks_nothing_and_corrupts_nothing) {
     // instant. Bounded, so a worker that throws cannot wedge the others — the
     // waiter reports a fixture failure instead, which is the honest outcome: a run
     // where one CPU died proves nothing about the discard.
+    std::atomic<size_t> arrivedCreate{0};
+    auto createBarrier = [&](size_t round) {
+        const size_t target = kCpus * round;
+        arrivedCreate.fetch_add(1, std::memory_order_acq_rel);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+        while (arrivedCreate.load(std::memory_order_acquire) < target) {
+            if (std::chrono::steady_clock::now() >= deadline) return false;
+            std::this_thread::yield();
+        }
+        return true;
+    };
+
     std::atomic<size_t> arrived{0};
     auto roundBarrier = [&](size_t round) {
         const size_t target = kCpus * round;
@@ -403,7 +415,6 @@ TEST(radix_growth_lost_cas_leaks_nothing_and_corrupts_nothing) {
 
                 // Now race the growths. Each CPU asks for a different width, so
                 // the losers are genuinely losers rather than no-ops.
-                TreeA t = f.table.treeFor(idx);
                 // Above kVA, and a different width per CPU so the losers are
                 // genuinely losers rather than no-ops.
                 const uint64_t want = kVA +
@@ -441,6 +452,19 @@ TEST(radix_growth_lost_cas_leaks_nothing_and_corrupts_nothing) {
                 for (size_t r = 1; r <= kExtraRounds; r++) {
                     const uint64_t va       = kVA + r * kZone;
                     const uint64_t zoneBase = rdx::bucketIndexFor<GA>(va) * kZone;
+                    // TWO barriers per round, not one. The first version had only the
+                    // growth barrier below, and `createCluster`'s own discard site
+                    // (`ClusterTable.h:229`) was left to whoever arrived first — so
+                    // when no CPU lost the create CAS there was no loser and nothing
+                    // leaked. Measured with that discard deleted: 20/20 detection at
+                    // the growth site but only **17-18/20 under load** at this one,
+                    // with the leak magnitude ranging +1..+22. Same "coin toss dressed
+                    // as a test" the barrier was introduced to fix, still present at
+                    // the second site.
+                    if (!createBarrier(r)) {
+                        throw AssertionFailure(std::string(
+                            "create barrier timed out — another CPU died mid-round"));
+                    }
                     const auto cst = f.table.createCluster(va, GA.defaultRootLevel);
                     if (cst == rdx::ClusterStatus::OutOfMemory) {
                         throw AssertionFailure(std::string("extra-round creation OOM"));
@@ -536,4 +560,11 @@ TEST(radix_growth_over_an_empty_cluster_leaves_the_old_root_behind) {
     ASSERT_TRUE(t.apply(kVA, kVA + kPage - 1, nullptr) == rdx::ApplyStatus::Ok);
     quiesce(f.h);
     ASSERT_EQ(size_t{1}, t.nodeCount());   // back to the root alone
+
+    // The oracle matters MORE here than in the other growth tests, not less: this
+    // test's whole subject is a node that survives on purpose (D-030's stranded
+    // root), so "allocation returns to baseline at teardown" is what distinguishes
+    // a bounded, reclaimed-at-teardown residue from a leak. D-064's sweep missed
+    // this one — the only `Fixture` test without the call.
+    f.finishAndAssertNoLeaks("growth over an empty cluster");
 }

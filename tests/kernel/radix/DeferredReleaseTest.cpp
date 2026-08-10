@@ -582,12 +582,6 @@ void fillNode(TreeA& tree, std::vector<rdx::Mapping*>& made) {
     }
 }
 
-void fillNodeAndPartiallyClear(TreeA& tree, Harness& h) {
-    std::vector<rdx::Mapping*> made;
-    fillNode(tree, made);
-    ASSERT_TRUE(tree.apply(0, 15 * kPage - 1, nullptr) == rdx::ApplyStatus::Ok);
-    quiesce(h);
-}
 
 }  // namespace
 

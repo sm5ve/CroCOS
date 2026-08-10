@@ -449,10 +449,31 @@ TEST(radix_release_record_deleter_discharges_freshness_on_the_record) {
     // The premise, asserted rather than hoped for.
     ASSERT_TRUE(pageOf(record) != pageOf(first));
 
+    // ─── Masking route FIVE, and it was live (D-070) ─────────────────────
+    //
+    // `first` and `second` are consecutive allocations in one size class, so they
+    // share a page — measured: `first=…b00`, `second=…b40`, same 4 KiB page. That
+    // makes `pageWasMadeFresh(first)` satisfiable by any freshness call on
+    // `second`, which is masking routes #3 and #4 in a new dress: the premise the
+    // test depends on and the one premise it did not check.
+    //
+    // Not currently exploited — nothing touches `second` inside the measured
+    // window, so the mutation still fails on the named assertion — but the whole
+    // lesson of this test's four rewrites is that an unchecked page premise is
+    // where the masking hides. So `second` gets its own filler run and the
+    // separation is asserted.
+    std::vector<rdx::Mapping*> filler2;
+    for (unsigned i = 0; i < 128; i++) {
+        auto* f2 = makeMapping(0);
+        ASSERT_TRUE(f2 != nullptr);
+        filler2.push_back(f2);
+    }
+
     // Overwrite, so `first` is displaced from a directly-written slot: one record
     // drawn, charged and retired.
     auto* second = makeMapping(0);
     ASSERT_TRUE(second != nullptr);
+    ASSERT_TRUE(pageOf(first) != pageOf(second));
     ASSERT_TRUE(tree.apply(0, kPage - 1, second) == rdx::ApplyStatus::Ok);
 
     VS::test::clearFreshnessRecord();
@@ -472,7 +493,8 @@ TEST(radix_release_record_deleter_discharges_freshness_on_the_record) {
     quiesce(h);
     tree.destroyTree();
     quiesce(h);
-    for (auto* f : filler) VS::destroy(VS::SafePtr<rdx::Mapping>(f));
+    for (auto* f : filler)  VS::destroy(VS::SafePtr<rdx::Mapping>(f));
+    for (auto* f : filler2) VS::destroy(VS::SafePtr<rdx::Mapping>(f));
     assertNoLiveObjects("record deleter freshness");
 }
 

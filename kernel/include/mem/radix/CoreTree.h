@@ -629,13 +629,14 @@ namespace kernel::mm::radix {
         [[nodiscard]] bool init(unsigned rootLevel, uint64_t base, kernel::rcu::Domain& d,
                                 DeferredReleasePools& pools) {
             assert(d.initialized(), "radix: the tree's RCU domain must be initialised first");
-            // There is no depth requirement on the pool, and its ABSENCE is the
-            // point of D-059. The pool's population IS the per-attempt record
-            // budget, so a pool of any size >= 1 is correct: too small only means
-            // more §6.5 decomposition, never a shortfall that cannot resolve.
-            // What used to be here — "the reserve must be at least the edge sum,
-            // or the replenish loop is a livelock" — was a sizing obligation the
-            // caller had to get right from a derivation in another header.
+            // The pool's population IS the per-attempt record budget (D-059), so
+            // there is no per-OPERATION ceiling to satisfy any more — that absence is
+            // the point. But "any size >= 1" was wrong, which this used to claim
+            // (D-070): a probed `OnlyIfEmpty` placement draws records too, and an
+            // overrun there returns `NeedsDecomposition`, which `applyOrDecompose`
+            // forbids for `OnlyIfEmpty` — debug panics, release half-places. So the
+            // floor is geometry-derived, and asserted here because this is where the
+            // geometry is known.
             assert(pools.recordBudget() >= 1,
                    "radix: the DeferredRelease pool holds no records, so no displacing "
                    "operation can ever complete (D-059)");
@@ -1424,6 +1425,24 @@ namespace kernel::mm::radix {
             assert(mode == ApplyMode::Overwrite || value != nullptr,
                    "radix: OnlyIfEmpty with a null value is a clear that refuses to clear "
                    "anything — the caller means one of the two things, not neither");
+            // ─── The OnlyIfEmpty record floor, asserted per MODE (D-070) ────
+            //
+            // A first attempt put this at bind time and it was wrong: it forbade the
+            // small pools that Overwrite-only consumers — including this suite's
+            // deliberately starved fixtures — are entitled to. The requirement is
+            // conditional on the OPERATION, so it belongs where the mode is known.
+            //
+            // Probed placement draws records (its occupancy gate passes a
+            // non-overlapping survivor, which dispatches `Subdivide`), and an overrun
+            // returns `NeedsDecomposition` — which `applyOrDecompose` forbids for
+            // `OnlyIfEmpty`, because no single unit can establish "the whole range was
+            // empty". Debug panics there; release would decompose as Overwrite and
+            // half-place the mapping. Two edge slots per level, one record each.
+            assert(mode == ApplyMode::Overwrite ||
+                       releasePools->recordBudget() >= placementRecordFloor(G),
+                   "radix: an OnlyIfEmpty placement against a record budget below the "
+                   "edge-subdivision floor (2 per level) — it can overrun and reach "
+                   "applyOrDecompose's OnlyIfEmpty assert (D-070)");
             return applyOrDecompose(lo, hi, value, mode, 0);
         }
 
@@ -2138,7 +2157,13 @@ namespace kernel::mm::radix {
                 return DrawResult::OverBudget;
             }
 
-            DeferredReleasePool& pool = releasePools->forCpu(arch::getCurrentProcessorID());
+            const arch::ProcessorID cpu = arch::getCurrentProcessorID();
+            if (!a.drawCpuValid) { a.drawCpu = cpu; a.drawCpuValid = true; }
+            assert(a.drawCpu == cpu,
+                   "radix: an attempt drew DeferredRelease records on two different CPUs — "
+                   "the records' home pool and the CPU that will barrier for them have "
+                   "diverged, so §7.1's replenish cannot bring them home (D-070/R-12)");
+            DeferredReleasePool& pool = releasePools->forCpu(cpu);
             DeferredRelease* r = pool.pop();
             if (r == nullptr) {
                 pool.shortfalls.fetch_add(1, kPoolAccounting);
@@ -2189,6 +2214,13 @@ namespace kernel::mm::radix {
         void retireHeldRecords(Attempt& a) {
             assert(a.phase == Attempt::Phase::Committing,
                    "radix: a release record retired before the commit boundary (§11)");
+            // The other end of D-070's pinning check: these retires bind to the
+            // CALLING CPU's RCU slot, so they must be the CPU that drew them or the
+            // records come home to a pool nobody will barrier for.
+            assert(!a.drawCpuValid || a.drawCpu == arch::getCurrentProcessorID(),
+                   "radix: records drawn on one CPU are being retired on another — the "
+                   "retire binds to the caller's slot, so §7.1's replenish would wait on "
+                   "a barrier that never covers them (D-070/R-12)");
             // ITEM-084's sample, taken at the commit boundary because that is
             // the peak an attempt actually held — abandonment returns records,
             // so a retried operation's demand is per attempt, not cumulative.
@@ -2378,6 +2410,25 @@ namespace kernel::mm::radix {
             // retired (success) or returned to their home pool (abandonment).
             DeferredRelease* heldReleases    = nullptr;
             unsigned         heldReleaseCount = 0;
+
+            // ─── The CPU this attempt's records belong to (D-070) ───────────
+            //
+            // D-059's termination argument reads "every link in the chain is local
+            // to this CPU" as if by construction. It is by PINNING: the draw
+            // re-reads `getCurrentProcessorID()` every time, and `retire`/`barrier`
+            // bind to the calling CPU's slot. Under a scheduler that migrated a
+            // thread mid-attempt, the drawn records' home pool and the barriering
+            // slot would diverge, and the failure is R-1's shape — assert in debug,
+            // unbounded spin inside `munmap` in release.
+            //
+            // No scheduler exists yet (R-12's premise), so rather than assert
+            // scheduler predicates that are file-local to `RCU.cpp`, this records
+            // where the first draw happened and every later draw checks against it.
+            // That catches the divergence with nothing exported and no runtime cost
+            // in release, and it turns a stated premise into a checked one — the
+            // same move `claimsFullValence` made for R-9.
+            arch::ProcessorID drawCpu{};
+            bool              drawCpuValid = false;
 
             // Set only by a failed DRAW. `redispatchAgrees` returning false
             // otherwise means the tree moved under the claim set, which is an
@@ -3164,9 +3215,17 @@ namespace kernel::mm::radix {
         // What safety actually rests on, since it is worth naming rather than
         // inferring from a phase list:
         //
-        //   * **Every site is frozen.** The claims were acquired before the
-        //     boundary and are held across the whole walk, so no other writer can
-        //     be in any of these slots.
+        //   * **Every CLAIMED site is frozen** — and the qualifier is the whole
+        //     point, because this note's first version dropped it and the same
+        //     function contradicts it seventy lines down (D-070). The claims were
+        //     acquired before the boundary and held across the walk, so no other
+        //     writer can be in a slot this attempt holds. An UNCLAIMED row is free
+        //     to change again between re-dispatch and here — the reachable shape is
+        //     a slot the read pass saw empty (a no-op row, which takes no bit) that
+        //     a concurrent writer then filled — so commit re-checks and DECLINES
+        //     those rows rather than trusting them, counting them in
+        //     `unheldRowsSkipped`. That is D-013, and it is a live path, not a
+        //     defensive one.
         //   * **The atomicity unit is ONE SLOT WORD**, single-word and
         //     release-stored (kSlotPublish), giving readers old-or-complete-new per
         //     slot. Cross-slot atomicity was never promised to readers, so a reader

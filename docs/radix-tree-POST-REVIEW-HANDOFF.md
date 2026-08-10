@@ -1,7 +1,7 @@
 ---
 kind: handoff
 status: ready
-audience: the next session — all detector gaps + both blockers DONE; latent items remain
+audience: the next session — READ D-070 FIRST. A 5-referee pass ran; the branch did NOT merge.
 supersedes: docs/radix-tree-REVIEW-HANDOFF.md (its referee pass is complete)
 ---
 
@@ -36,9 +36,29 @@ history. `docs/radix-tree-HANDOFF-impl.md` is still the implementation reference
 
 ---
 
-## 0. Suite state
+## 0. STOP — this document is superseded in part by D-070
 
-**172/172, ASan and TSan, and the whole `run_all_tests` gate green (1,664 tests
+A five-referee adversarial pre-merge pass ran on 2026-08-10 against `e2edd73`. **The
+branch did not merge.** It found one merge blocker (D-059 claimed it did not touch
+§7.1 and never checked — the spec is now amended and every amendment is marked
+`PENDING SPENCER REVIEW`), two of my own ordering defects, R-2's class surviving in
+its own fix's function, and a long tail. All of it is in **D-070**, which is the
+current record. Everything below predates that pass; where the two disagree, D-070
+wins.
+
+Corrections to what follows, so it does not mislead: **all six** R-19 comments are
+closed, not four; R-18 and R-21's cheap half are closed; R-5's hole IS closed (§2's
+"live hole" paragraph is stale — line 107 of this file already said so, which was one
+of the contradictions the pass flagged); R-8 appears twice below and the "CLOSED" row
+is the right one; and the "add new radix headers to OrderingSpellingTest.cpp" trap is
+gone — R-4 replaced the list with directory enumeration. What genuinely remains open
+is **R-12**, **R-20 + R-21b** (the stress fixture), and D-070's own open list.
+
+---
+
+## 0b. Suite state
+
+**176/176, ASan and TSan, and the whole `run_all_tests` gate green (1,664 tests
 across ten runners).** The in-kernel radix stress boots clean at
 `CROCOS_RADIX_STRESS_OPS=24`, Release, exit 0.
 

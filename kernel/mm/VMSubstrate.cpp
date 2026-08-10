@@ -315,9 +315,15 @@ namespace VMSubstrateHelper {
     // an exhaustion the caller could report.
     inline void reserveLeafBit(kernel::mm::virt_addr arenaBase, size_t T, size_t bit,
                                arch::ProcessorID cpu) {
+        // Two causes, not one (D-070). For the commit-phase callers a failure here
+        // really is a broken pre-backing invariant — but `reserveBootBits` does no
+        // pre-backing, so for it this is ordinary physical exhaustion at boot, and
+        // the old message asserted a violation of an invariant that caller never
+        // had. Since D-060 the physical branch is reachable at all.
         if (!ensureLeafBitmapPageMapped(arenaBase, T, cpu))
-            PANIC("VMSubstrate: leaf bitmap page unbacked at reserveLeafBit — the "
-                  "caller's pre-backing invariant is broken");
+            PANIC("VMSubstrate: leaf bitmap page unbacked at reserveLeafBit — out of "
+                  "physical memory backing it, or (for the commit-phase callers, which "
+                  "pre-back) the caller's pre-backing invariant is broken");
         auto bm = leafBitmapView(arenaBase, T);
         const bool wasNonEmpty = !bm.allocSideEmpty();
         bm.reserveBit(bit);
@@ -889,8 +895,18 @@ namespace kernel::mm::VMSubstrate {
     // page zero; making the helpers failable turns that into a loud stop.
     static virt_addr reserveFreeVA(virt_addr& outArenaBase, arch::ProcessorID& outCPU) {
         virt_addr va{uint64_t{0}};
+        // The message names ARENA exhaustion and that is now only one of three
+        // causes (D-070). Since D-060 made `tryAllocateSmallPage` genuinely
+        // failable, two of the ways to get false here are PHYSICAL exhaustion —
+        // `ensureLeafBitmapPageMapped` and `ensureSubtableInstalled` backing a
+        // lazily-installed page — so the most likely OOM panic in the kernel used
+        // to blame the wrong resource. D-060 applied this reasoning to
+        // `reserveStaticBufferImpl` and not to its siblings.
         if (!tryReserveFreeVA(va, outArenaBase, outCPU))
-            PANIC("VMSubstrate arena exhausted");
+            PANIC("VMSubstrate: allocPage could not reserve a VA — either the arena's "
+                  "VA space is exhausted or backing its lazily-installed page-table / "
+                  "occupancy pages ran out of PHYSICAL memory. The failable sibling is "
+                  "tryAllocPage; this form's contract is to panic");
         return va;
     }
 
@@ -1166,7 +1182,18 @@ namespace kernel::mm::VMSubstrate {
         // failable path leaves no partial state at all.
         if (staticBufferNextVA.value + pages * arch::smallPageSize > staticBufferSlotEnd.value) {
             if (failable) return nullptr;
-            assert(false, "reservePerDomainStaticBuffer: static-buffer region exhausted");
+            // `assertNotReached`, not `assert(false, ...)` — R-2's exact class, and
+            // it survived three lines above D-060's fix in this same function.
+            // `assert` compiles out in release (kassert.h), so the panicking form's
+            // documented contract ("panics on region exhaustion") became "returns
+            // null in release" — and its only caller, `VMSubstrateSlab.cpp`'s
+            // per-domain buffer reservation, does not null-check: a null there makes
+            // `vmsmallocLateInit` skip the domain, so a release kernel constructs no
+            // `PartialStack`s for it and later allocations run over unconstructed
+            // storage. Boot-only against a 1 GiB window, so unlikely — but "contract
+            // says panic, release silently returns" is the shape this branch failed
+            // review over, and one instance is not a fix.
+            assertNotReached("reservePerDomainStaticBuffer: static-buffer region exhausted");
             return nullptr;
         }
 
@@ -1182,6 +1209,20 @@ namespace kernel::mm::VMSubstrate {
         constexpr size_t kMaxFailablePages = 8;
         phys_addr frames[kMaxFailablePages];
         if (failable) {
+            // Over the bound is a SIZING error, not memory pressure, and the bare
+            // `return nullptr` made the two indistinguishable — a caller whose
+            // block outgrew this would see every reservation fail as ENOMEM with no
+            // diagnostic, on large machines only. Measured margin: the radix control
+            // block at `arch::MAX_PROCESSOR_COUNT` is 16,640 B = 5 pages, so three
+            // more 8-byte fields in `DeferredReleasePool` would cross it and nothing
+            // would say so. Debug names it; release still degrades to ENOMEM rather
+            // than panicking, because this path is reached from address-space
+            // creation on behalf of untrusted userspace.
+            assert(pages <= kMaxFailablePages,
+                   "tryReservePerDomainStaticBuffer: request exceeds the failable page "
+                   "bound, so it can never succeed — this is a sizing error in the "
+                   "caller's block, not memory pressure, and it fails identically to "
+                   "ENOMEM without this assert");
             if (pages > kMaxFailablePages) return nullptr;
             for (size_t i = 0; i < pages; i++) {
                 if (!PageAllocator::tryAllocateSmallPage(d, frames[i])) {

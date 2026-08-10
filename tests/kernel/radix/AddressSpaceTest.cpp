@@ -54,12 +54,19 @@ using ValidA    = TreeValidator<GA, CodecA>;
 
 constexpr uint64_t kPage = 4096;
 
-// The real ceiling, not a convenient small number. `CoreTree::bindToBucket`
-// asserts the pool is at least this deep — correctly, since a shallower one
-// turns every operation into a shortfall-and-barrier round trip — so a test that
-// wanted a cheaper sweep would have to weaken a load-bearing assert to get it.
-// The sweep is ~230 creations of ~230 allocations each and runs in well under a
-// second, so there was nothing to buy.
+// ─── This justification died with D-059 (D-070) ────────────────────────────
+//
+// It read: "`CoreTree::bindToBucket` asserts the pool is at least this deep …  so a
+// test that wanted a cheaper sweep would have to weaken a load-bearing assert."
+// There is no such assert any more — the population IS the budget, and `init`
+// records that the absence of a depth requirement is the point.
+//
+// The figure is kept anyway, for a different and weaker reason: it makes the
+// unwind sweep allocate ~230 records per creation, which is the widest failure
+// surface available. But note what it costs — this runner and `DescentCacheTest`
+// exercise a 230-record budget no address space will ever have, which is exactly
+// what `RadixHarness.h` was changed AWAY from. Worth revisiting with the R-20/R-21
+// fixture work.
 constexpr unsigned kTestRecords = rdx::deferredReleaseBound(GA);
 
 rdx::Mapping* makeMapping(uint64_t baseVA) {

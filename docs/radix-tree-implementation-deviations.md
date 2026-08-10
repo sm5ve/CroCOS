@@ -3136,8 +3136,16 @@ claim that had quietly become false.
 | | records | record bytes | pinned pool bytes | `tryMake` per fork |
 |---|---|---|---|---|
 | DEC-068 | 8×230 | 115 KiB | 512 | 1,840 |
-| ITEM-084 | 8×32 + 230 | 23 KiB | 576 | 486 |
-| **D-059** | 8×32 | **12 KiB** | **512** | **256** |
+| ITEM-084 | 8×32 + 230 | 30 KiB | 576 | 486 |
+| **D-059** | 8×32 | **16 KiB** | **512** | **256** |
+
+**Corrected by D-070 — the original mixed two bases.** It quoted DEC-068 on the
+REALISED basis (115 KiB = 1,840 × 64 B) but ITEM-084 and D-059 on bare
+`sizeof(DeferredRelease) == 48`, giving 23 and 12 KiB. A record realises **64 B**
+(vmsmalloc's classes are 8/16/32/64/…), which is the basis §7.1 itself uses, so on
+one basis the three rows are 115 / 30 / 16 KiB. Consequence: D-059 : DEC-068 is
+1/7.2 — the "one-seventh" claim is right against DEC-068 and wrong against ITEM-084,
+where the ratio is about a half.
 
 The pinned-storage saving is small but has a visible consequence: the control
 block's stride goes from 832 B back to 768 B, so **five address spaces share a
@@ -3187,12 +3195,25 @@ return to baseline were reporting `promote()` allocating records that lived unti
 teardown; `promote()` no longer exists. The failures were removed by deleting
 their cause, which is the only way D-058 permitted.
 
-### What this does NOT touch
+### What this does NOT touch — **WITHDRAWN, this was false (D-070)**
 
-§7.1 of the spec. Option D — one record per *attempt* carrying an inline array of
-`(Mapping*, delta)` pairs — would need a §7.1 amendment, because the section says
-one record per distinct `Mapping`; the budget does not. That is one of C's
-advantages over D and the reason it went first. D remains deferred, to be judged
+This said "§7.1 of the spec", and the pre-merge referee pass proved otherwise. §7.1
+normatively required the population to be **"at least the per-operation ceiling"**
+(≈230) while the code ships 32; ITEM-084's decision cell still recorded D-056's
+shared reserve as the answer; DEC-068 and DEC-077 both cited the ≈230 pool; and the
+record-budget overrun — a THIRD cause of `NeedsDecomposition` — appeared in neither
+§6.5's trigger list nor §9's failure table. **Zero radix spec files were touched by
+this commit.**
+
+The claim was inherited from the pre-implementation handoff and repeated here
+without checking it against the spec text — the exact failure this review pass
+exists to catch. D-070 amends the spec and marks every amendment **PENDING SPENCER
+REVIEW**, because §7.1 was Spencer-approved on 2026-08-09 and a population rule is
+normative rather than descriptive.
+
+What survives is the comparison with option D: D would additionally need §7.1's
+*one-record-per-distinct-`Mapping`* rule amended, a separate and larger change. C
+needed the *population* rule amended only. D remains deferred, to be judged
 on measurements once there is evidence about whether a 32-record pool ever
 shortfalls in practice.
 
@@ -3902,3 +3923,169 @@ Two halves, and only one is cheap:
   −50%, and lookup is the only row driving the descent cache and the `-icount`
   probes), because the two are one defect wearing two hats and want one measurement
   pass.
+
+---
+
+## D-070 — the adversarial pre-merge referee pass, and what it found
+
+Five referees, different focuses, run against `e2edd73`: concurrency/memory
+ordering, failure paths, test integrity, design-and-documentation truth, and
+whole-branch merge readiness. **The branch did not merge.** One merge blocker, ten
+should-fixes, and a long list of notes; everything below is fixed unless marked
+otherwise.
+
+**Process, first, because it cost real time.** Four of the five mutate production
+source to mutation-test, and they ran concurrently in one working tree. They
+interfered: one referee built against another's injected `throw` at the top of
+`Fixture::finishAndAssertNoLeaks` — which silently disables R-5's entire fix — and
+reported a false leak; another chased a false lead from a mutation that vanished
+mid-audit. Two of them independently flagged it. **Give each mutating referee its
+own `git worktree`.** The fixes below were made in one, for the same reason.
+
+### The merge blocker: D-059 claimed it did not touch §7.1, and never checked
+
+`specs/radix-tree.md:1205` required the per-CPU population to be **"at least the
+per-operation ceiling above"** — ≈230 — and the code ships 32. ITEM-084's decision
+cell still recorded D-056's shared reserve as the answer, complete with its ≈30 KiB
+/ ≈526 KiB figures and "adaptive promotion". DEC-068 and DEC-077 both cited "DEC-068's
+≈230 pool". And the record-budget overrun, which is the **third** cause of
+`NeedsDecomposition` in the shipping code, appears in neither §6.5's trigger list nor
+§9's failure table. `git diff` over `specs/` for that commit: two lines, both RCU.
+
+The claim came from the pre-implementation handoff and was repeated in D-059 without
+checking the spec text. That is the failure this review exists to catch, committed in
+the commit that closed six other instances of it.
+
+**Amended, and every amendment is marked `PENDING SPENCER REVIEW`** — §7.1's
+population paragraph, ITEM-084's cell, DEC-068's sizing clause, DEC-077's pool
+citation and its missing trigger. §7.1 was Spencer-approved on 2026-08-09 and a
+population rule is normative, so the *engineering* is settled but the *authority* is
+not: if the ceiling rule is meant to stand, the code is what must change.
+
+### Two ordering defects, both mine, both weak-memory-only
+
+**F1 — P1-DEC-019 fixed the timing and left the ordering open.** The commit made
+`bagHead == nullptr` mean "every deleter this bag owed has completed", and both ends
+of that channel were `kBagDrainAccess = RELAXED`. So `barrier` could exit off a
+`Claimed`-and-empty bag whose deleter's own release-store — radix pushing the record
+back to its pool — was not yet visible, and the caller would find its retiree still
+missing. Strictly better than before the fix (which could exit with the deleter
+*running*) but not the promised guarantee. Closed with a named pair,
+`kBagEmptyPublish = RELEASE` / `kBagEmptyObserve = ACQUIRE`. The constant block's
+claim that visibility "rides `kBagClaim`/`kBagReseal`/`kBagRelease` on `tagState`"
+was false for the path `barrier` actually exits through; corrected.
+
+**F2 — I turned `atFullPopulation()` into a correctness gate and left it RELAXED.**
+`push` release-CASes `head` and *then* bumps `depth`, so a remote observer can see the
+bump without the record; `depth` over-reports; the gate skips the barrier; the retry
+shortfalls; `consecutiveShortfalls <= 1` fires. Before D-059 the gate was one remedy
+among several and the RELAXED read genuinely cost "at most one extra retry" — which
+is what its comment said, and what D-059 falsified without revisiting. Closed with
+`kPoolDepthPublish`/`kPoolDepthObserve`, and the comment now says which direction is
+fatal (over-reporting) and which is free (under-reporting).
+
+Both are ARM-only. The unit tests run on ARM, so both were live-if-rare on the dev
+machine rather than theoretical.
+
+### R-2's defect class survived three lines above its own fix
+
+`reserveStaticBufferImpl`'s non-failable branch used `assert(false, …)` for window
+exhaustion — compiled out in release, falling through to `return nullptr` — while its
+documented contract is "panics", and its only caller does not null-check: a null there
+makes `vmsmallocLateInit` skip the domain, so a release kernel constructs no
+`PartialStack`s and later allocations run over unconstructed storage. D-060 put
+`assertNotReached` on the OOM branch of the same function and not on this one. Fixed.
+
+### The rest
+
+- **`kMaxFailablePages = 8`** refused oversized requests with a bare `return nullptr`,
+  indistinguishable from ENOMEM. Measured margin: the radix control block at 256 CPUs
+  is 5 pages, so three more 8-byte fields in `DeferredReleasePool` would make every
+  carve fail on >128-CPU machines silently. Now asserted.
+- **Two panics named the wrong resource.** D-060 made physical exhaustion reachable
+  through `reserveFreeVA` (which blames the arena) and `reserveLeafBit` (which blames
+  an invariant its boot caller never had). Both messages fixed.
+- **`destroy()` was idempotent only on the success path** — the conservation assert
+  threw before resetting state, so the next call re-fired and buried the original
+  failure. D-058's masking class in miniature, reintroduced by making the check
+  per-pool. State is reset before asserting now.
+- **The OnlyIfEmpty record floor.** `create`/`init` claimed any population ≥ 1 was
+  safe; a probed placement draws records via `Subdivide`, and an overrun hits
+  `applyOrDecompose`'s `OnlyIfEmpty` assert — release would decompose as Overwrite and
+  half-place the mapping. A first attempt asserted the floor at bind time and broke
+  every legitimately-starved fixture; the requirement is conditional on the MODE, so
+  it now sits where the mode is known.
+- **`DebugIntrospection::bag()`** is the one reader of `bagHead` that dereferences it,
+  so P1-DEC-019 turned a torn-view hazard into a use-after-free. Not reachable (all
+  call sites join first); the caveat now says *unsafe* rather than *imprecise*, and
+  `EpochDomain`'s "never dereferences it" note names the exception.
+- **D-059's termination chain is CPU-affinity, stated as structural.** The scheduler
+  predicates are file-local to `RCU.cpp`, so instead the `Attempt` records where its
+  first draw happened and every later draw and the retire assert against it — the same
+  move `claimsFullValence` made for R-9. Ties to R-12.
+- **Comment falsehoods introduced by the fix commits themselves**: `Ordering.h`
+  described the R-9 fix structure wrongly (zero of three sites assert
+  `holdsWholeNode`, and two — not one — need the mask-only form); `commit`'s rewritten
+  note led with "every site is frozen" while the same function handles unclaimed rows
+  changing under it (D-013, with a counter); `DeferredRelease.h`'s `DrawHistogram`
+  preamble still described ITEM-084 as open.
+- **Arithmetic**: the memory table mixed `sizeof` with realised size (23/12 KiB should
+  be 30/16); "one-seventh" is the ratio to DEC-068, not ITEM-084 (that one is a half);
+  "98% padding" is 95%. `singleNodeRecordBound` is **one short** for a cluster root,
+  which §6.5 clears per-slot rather than replacing — it fits only because the shipping
+  budget happens to equal 32.
+- **The per-address-space log line.** `Domain::init` logs once per domain, and RadixVM
+  made it a per-address-space call: an `OPS=24` Release boot emitted **1,025** lines.
+  Wired to `fork`, that is a global print-lock acquisition and a UART round trip per
+  process creation, in release, forever. Now once per domain NAME — keyed on the name
+  because the diagnostic is worth seeing the first time each consumer appears and
+  useless on the thousandth repeat. Verified: 1,025 → 1.
+- **The `:229` discard detector was weaker than D-064 claimed.** The barrier sat before
+  `growToCover` only, so `createCluster`'s discard site was still won by whoever
+  arrived first: 20/20 at the growth site but **17-18/20 under load** at the create
+  site, and the "+24 leaked nodes" figure is timing-dependent (+1..+22, median +7).
+  A second barrier before `createCluster` closes it; the claim is corrected.
+- **A FIFTH masking route in the record-deleter freshness test**, and it was live:
+  `first` and `second` are consecutive allocations in one size class and always share
+  a page, so `pageWasMadeFresh(first)` was satisfiable by a call on `second`. The
+  premise the test depended on and the one it did not check — routes #3 and #4 in a
+  new dress. Now separated by a second filler run and **asserted**.
+- **`radix_growth_over_an_empty_cluster_leaves_the_old_root_behind`** was the one
+  `Fixture` test D-064's sweep missed, and it is precisely a test about residual
+  nodes. Oracle call added; dead helper `fillNodeAndPartiallyClear` removed.
+
+### Left open, deliberately
+
+- **R-12** — Treiber ABA safety holds only because no scheduler exists. Not actionable
+  until preemption lands; F6's pinning assert is the cheap half.
+- **R-20 + R-21b** — widening the stress fixture. The label now derives from
+  `kWideGranules` so it cannot go stale, but the fixture itself still caps a wide
+  unmap at 16 granules, so the shipping detach budget has no in-kernel decomposition
+  coverage.
+- **`CLAUDE.md`** does not mention a 30k-line subsystem, two new kernel facilities,
+  five new build options or two new run targets. Worth a pass before merge.
+- **`RCU-proposal.md`** is a stray root-level file from the same `git add -A` as the
+  LibExt stubs — but it *is* cited by three specs, so it wants moving under `docs/`,
+  not deleting.
+- **Doc consolidation**: three overlapping handoffs land, one of which declares itself
+  superseded.
+- **`SafePtr`'s two move semantics** — `SafePtr<T>` nulls the source, the `void`
+  specialization copies. Same abstraction, opposite behaviour, no assertion.
+- **One unidentified transient** in ~16 radix-suite runs during heavy referee load;
+  10/10 clean afterwards. Most likely the known load-sensitive conflict-rate
+  assertion in `radix_concurrent_disjoint_writers_do_not_interfere`. Name not
+  captured — capture it if it recurs.
+
+### What the referees confirmed sound
+
+R-9's fix (all five `kClaimedSlotLoad` sites re-audited independently); D-059's core
+accounting (home pool never diverges, abandonment covers all four exits, the budget
+cannot be bypassed, decomposition converges, and at `perCpu == 1` both a 15-mapping
+wide clear and the coarse-replacement unit complete correctly); every
+`tryAllocateSmallPage` caller's unwind, with write-once verified across
+fail-then-retry; R-13's assert exact and un-false-positivable, and "nothing was doing
+it" true independently of the boot evidence; every static-buffer figure recomputed to
+the digit, including that a stride change reproduces the referee's independent
+~174,000; the ordering scanner catching a bare enumerator in **16/16** headers by
+injection; and every mutation claim in D-059/D-064/D-066/D-068 reproduced — one of
+them 10/10 where the record said 3/3.

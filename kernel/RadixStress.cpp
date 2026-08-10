@@ -102,6 +102,13 @@ namespace radix_stress {
     // all. A workload that only ever grows the tree exercises none of it.
     constexpr unsigned kLiveSlots     = 24;
 
+    // Granules in a WIDE unmap. Named rather than inlined because the detach
+    // histogram's label is derived from it (R-21/D-070): sixteen granules is one
+    // whole level-5 node, which detaches as 1 + 16 = 17, so `max` is this
+    // fixture's arithmetic and not a measurement. Widening the fixture — the open
+    // follow-up — must move the label with it, which deriving guarantees.
+    constexpr unsigned kWideGranules  = 16;
+
     // Placement sizes, in 64 KiB placement granules (DEC-013). Spread so the
     // tree subdivides to several depths rather than settling at one level:
     // leaves live at any level, and a workload that produces only one leaf level
@@ -473,7 +480,7 @@ namespace radix_stress {
                 // children and dispatches to DetachChild. Sixteen of them is a
                 // whole level-5 node, which detaches as 1 + 16 = 17.
                 const bool     wide  = ((r >> 33) & 7) == 0;
-                const unsigned gran  = wide ? 16u : 1u + static_cast<unsigned>((r >> 37) % 4);
+                const unsigned gran  = wide ? kWideGranules : 1u + static_cast<unsigned>((r >> 37) % 4);
                 const uint64_t base  = clusterLo + ((r >> 45) % 256) * kGranule * 16;
                 const uint64_t pages = kGranule / arch::smallPageSize;
                 unsigned built = 0;
@@ -807,7 +814,8 @@ namespace radix_stress {
     void detachHistogram() {
         const auto& h = rdx::gDetachHistogram;
         klog() << "radixStress: detachment size in nodes (DEC-077) — n=" << h.total()
-               << " max=" << h.max() << " (FIXTURE CEILING 17, not an observation — R-21)"
+               << " max=" << h.max() << " (fixture ceiling " << (1u + kWideGranules)
+               << ", not an observation — R-21)"
                << " budget=" << static_cast<uint64_t>(rdx::kDetachBudget)
                << " decompositions=" << rdx::gDecompositions.load(rdx::kCensusAccounting)
                << "\n  1:" << h.bucket(1) << " 2:" << h.bucket(2)

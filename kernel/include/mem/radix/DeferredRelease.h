@@ -75,8 +75,10 @@
 // retirees, `tryAdvance` never seals a foreign Open bag (I13), and
 // `drainAllQuiescent` force-seals universally but only at teardown. That one
 // coupling produced four separate liveness defects. The budget removes the
-// coupling instead of managing it, and at one-seventh ITEM-084's per-address-
-// space record memory.
+// coupling instead of managing it, and at **one-seventh DEC-068's** per-address-
+// space record memory (256 records against 1,840). Against ITEM-084 it is about a
+// half, 256 against 486 — this sentence named the wrong baseline, off by 3.7x
+// (D-070).
 //
 // ─── Freshness ───────────────────────────────────────────────────────────
 //
@@ -187,11 +189,15 @@ namespace kernel::mm::radix {
         Atomic<uint64_t> draws{0};
         Atomic<uint64_t> shortfalls{0};
 
-        // How many records are currently home. Not a correctness gate — see
-        // kPoolAccounting — but the replenish path needs to distinguish "the
-        // pump brought everything back" from "some records are still in flight",
-        // and `empty()` cannot: a pool holding three records when the operation
-        // needs five is not empty and is still short.
+        // How many records are currently home. **A correctness gate since D-059**
+        // — see kPoolDepthPublish, and note this comment used to say the opposite.
+        // `if (!atFullPopulation()) barrier()` is the only remedy in the shortfall
+        // path now that the reserve is gone, so over-reporting skips the barrier
+        // and trips `consecutiveShortfalls <= 1`. Hence the release/acquire pair
+        // rather than kPoolAccounting.
+        //
+        // Still needed as a COUNT rather than `empty()`: a pool holding three
+        // records when the operation needs five is not empty and is still short.
         Atomic<int64_t> depth{0};
 
         // §11's record-population conservation target: "each pool holds exactly
@@ -205,7 +211,9 @@ namespace kernel::mm::radix {
                 r->next.store(h, kPrivateInit);
                 if (head.compare_exchange(h, r, kPoolPush, kQuiescedRead)) break;
             }
-            depth.fetch_add(1, kPoolAccounting);
+            // RELEASE: publishes the head CAS above, so an observer that sees this
+            // increment can also find the record. See kPoolDepthPublish.
+            depth.fetch_add(1, kPoolDepthPublish);
         }
 
         [[nodiscard]] DeferredRelease* pop() {
@@ -225,7 +233,7 @@ namespace kernel::mm::radix {
         }
 
         [[nodiscard]] bool atFullPopulation() const {
-            return depth.load(kPoolAccounting) >= static_cast<int64_t>(population);
+            return depth.load(kPoolDepthObserve) >= static_cast<int64_t>(population);
         }
     };
 
@@ -267,13 +275,24 @@ namespace kernel::mm::radix {
 
     // ─── ITEM-084's evidence: the draw-count histogram ─────────────────────
     //
-    // DEC-068 sizes every (CPU x address space) pool at the PER-OPERATION
-    // ceiling — the edge sum, 230 records under the kernel geometry, ~14.4 KiB
-    // realised per CPU per address space. ITEM-084 asks whether that eager
-    // sizing is right or whether a smaller reserve behind the abandon-and-
-    // `barrier` replenish would do, and says the answer "cannot be answered from
-    // first principles — it needs the draw and shortfall distribution from a
-    // realistic workload".
+    // ─── Historical: this answered ITEM-084, which is now WITHDRAWN ────────
+    //
+    // Written when DEC-068 sized every (CPU x address space) pool at the
+    // PER-OPERATION ceiling — the edge sum, 230 records, ~14.4 KiB realised per CPU
+    // per address space — and ITEM-084 asked whether a smaller pool behind a shared
+    // reserve would do. **Neither of ITEM-084's two answers is what shipped**
+    // (D-059: the population is 32 and IS the per-attempt budget), so read the
+    // paragraphs below as the evidence that informed that decision, not as an open
+    // question. This block described the pre-D-059 world for two commits after it
+    // stopped being true — D-070.
+    //
+    // What the histogram is still FOR: the distribution of held counts, which is
+    // what says whether the population keeps the barrier off the common path.
+    // Note the top buckets (33-64, 65-128, 129-230, >230) are now structurally
+    // unreachable in the shipping configuration, since the budget caps a draw at
+    // 32 — so "a draw above the derived ceiling would mean the edge-sum bound is
+    // wrong" can no longer fire, and the budget's own gate is what carries that
+    // check instead.
     //
     // This is that distribution. What it records is the count an attempt HELD
     // when it committed, which is the quantity the pool must actually cover:
@@ -454,6 +473,14 @@ namespace kernel::mm::radix {
         return widest - 1u;
     }
 
+    // **One short for one shape** (D-070). The derivation assumes a full cover
+    // dispatches to detach, which is true of every node EXCEPT a cluster root: §6.5
+    // keeps a root's per-slot results rather than replacing it wholesale, so a
+    // full-span clear of a 32-valence cluster root takes 32 per-slot `ClearSlot`
+    // rows and therefore 32 records. It fits only because `kDefaultRecordsPerCpu`
+    // happens to equal 32 and the gate admits exactly `budget` records. So the
+    // "never decomposes" claim below holds at the shipping budget and would not at
+    // 31 — worth knowing before anyone tunes it down.
     static_assert(singleNodeRecordBound(kAmd64Geometry) == 31,
                   "the widest node in the kernel geometry has 32 slots, so its worst "
                   "partial cover displaces 31 distinct records. If this fires, the "
@@ -481,6 +508,31 @@ namespace kernel::mm::radix {
     // construction, because the budget IS the population.
     inline constexpr unsigned kDefaultRecordsPerCpu = 32;
 
+    // ─── The floor an OnlyIfEmpty placement needs (D-070) ──────────────────
+    //
+    // `create` accepts any population >= 1 and `init` used to say that was
+    // "correct: too small only means more decomposition, never a shortfall that
+    // cannot resolve". **That is false for `OnlyIfEmpty`.** A probed placement
+    // draws records — its occupancy gate passes a non-overlapping survivor, which
+    // dispatches `Subdivide` and displaces the old leaf — and if it overruns the
+    // budget it returns `NeedsDecomposition`, which `applyOrDecompose` hard-asserts
+    // against for `OnlyIfEmpty` (a decomposed placement cannot establish "the whole
+    // range was empty"). Debug panics; release silently decomposes as Overwrite,
+    // which is the half-placed mapping that assert exists to prevent.
+    //
+    // Two edge slots per level can be partially covered, each displacing at most
+    // one distinct record, so the floor is 2 per level. Twelve at the kernel
+    // geometry, comfortably under the shipping 32 — this is a guard for a
+    // deliberately starved pool, which the test suite already builds.
+    constexpr unsigned placementRecordFloor(const GeometryDescriptor& g) {
+        return 2u * g.levelCount;
+    }
+
+    static_assert(kDefaultRecordsPerCpu >= placementRecordFloor(kAmd64Geometry),
+                  "the shipping per-CPU population must clear the floor an OnlyIfEmpty "
+                  "placement can draw, or probed placement decomposes — which "
+                  "applyOrDecompose forbids for OnlyIfEmpty");
+
     static_assert(kDefaultRecordsPerCpu >= singleNodeRecordBound(kAmd64Geometry),
                   "the record budget must clear one node's worst partial cover, or §7.1's "
                   "own worked example — fifteen of a node's sixteen slots — decomposes "
@@ -492,7 +544,7 @@ namespace kernel::mm::radix {
         // It used to be `DeferredReleasePool pools[arch::MAX_PROCESSOR_COUNT]`
         // by value — 256 cache-line-aligned entries, **unconditionally**. That
         // is 16,448 bytes of a 16,704-byte control block: on an 8-CPU machine,
-        // 98% of the per-address-space pinned reservation was padding for CPUs
+        // 95% of the per-address-space pinned reservation was padding for CPUs
         // that do not exist, and it set the static-buffer window's ceiling at
         // roughly 44,000 concurrent address spaces instead of the ~180,000 it
         // reaches now. (That figure is DERIVED by
@@ -538,12 +590,20 @@ namespace kernel::mm::radix {
             // A population of zero is a budget of zero, and an attempt that may
             // hold no records can never make progress on any displacement: the
             // draw fails, the operation decomposes, and every unit fails the same
-            // way down to a single granule. So this is the one sizing mistake that
-            // is a livelock rather than a slowdown, and it is caught here rather
-            // than at the fifth unit of a decomposition.
+            // way down to a single granule.
+            //
+            // **In release that is a STACK OVERFLOW, not a livelock** (D-070) — all
+            // three guards on this (here, `CoreTree::init`, `bindToBucket`) are
+            // `assert`, and both of `decompose`'s progress checks are debug-only
+            // too, so nothing stops the recursion. Caught here because it is caller
+            // error, and the kernel never gets near it: it passes
+            // `kDefaultRecordsPerCpu`.
             assert(recordsPerCpu >= 1,
                    "radix DeferredReleasePools: a per-CPU population of zero is a record "
                    "budget of zero — no displacement can ever complete (D-059)");
+            // The GEOMETRY-derived floor is asserted where the geometry is known —
+            // `CoreTree::init` / `bindToBucket` — since this type is deliberately not
+            // templated on it. See `placementRecordFloor`.
             pools    = storage;
             for (size_t c = 0; c < cpus; c++) new (&pools[c]) DeferredReleasePool();
             cpuCount = cpus;
@@ -563,6 +623,8 @@ namespace kernel::mm::radix {
             return true;
         }
 
+        // Retained for symmetry with `recordBudget()` and because the two readings
+        // are conceptually distinct; it has no callers today (D-070 note N-2).
         [[nodiscard]] unsigned perCpuTarget() const { return perCpu; }
 
         // ─── The record budget (D-059) ─────────────────────────────────────
@@ -615,14 +677,22 @@ namespace kernel::mm::radix {
                     VMSubstrate::destroy(VMSubstrate::SafePtr<DeferredRelease>(r));
                     recovered++;
                 }
-                assert(recovered == pools[c].population,
-                       "radix DeferredReleasePools: a pool did not hold its creation "
-                       "population at teardown — a record was drawn and never returned, or "
-                       "drainAllQuiescent ran before every retire completed (§11)");
+                // State is reset BEFORE the assert, not after (D-070). In the test
+                // harness an assert throws, and resetting afterwards left the pool
+                // holding its old `population` with `pools` still non-null — so a
+                // second `destroy()` (which `~StarvedPools` and DEC-101's unwind both
+                // reach) re-fired on the same pool and buried the original failure.
+                // That is D-058's masking class in miniature, reintroduced by making
+                // this check per-pool.
+                const size_t expected = pools[c].population;
                 pools[c].population = 0;
                 pools[c].draws.store(0, kPoolAccounting);
                 pools[c].shortfalls.store(0, kPoolAccounting);
                 pools[c].depth.store(0, kPoolAccounting);
+                assert(recovered == expected,
+                       "radix DeferredReleasePools: a pool did not hold its creation "
+                       "population at teardown — a record was drawn and never returned, or "
+                       "drainAllQuiescent ran before every retire completed (§11)");
             }
             cpuCount = 0;
             perCpu   = 0;

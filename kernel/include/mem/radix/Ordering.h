@@ -89,10 +89,18 @@ namespace kernel::mm::radix {
     // `markSubtree`, `retireSubtree` — which run over nodes `planDetachment`
     // claimed with the full valence mask, so every slot they read is frozen and
     // every child pointer they decode was already acquired by the read pass that
-    // reached it. Two of the three assert `holdsWholeNode` on the way in; the
-    // third (`retireSubtree`) runs after `retainClaim` has cleared the set's
-    // bookkeeping, so the bit is still physically held but no longer assertable
-    // through that predicate.
+    // reached it.
+    //
+    // How each establishes that, precisely (this note got it wrong in the commit
+    // that made the fix, which is the reviewed defect class — D-070):
+    //
+    //   * `detachmentIsFrozen` GATES on `holdsWholeNode` — it returns false rather
+    //     than asserting, because a newcomer child is a legal retry, not a bug.
+    //     It is the only one of the three that uses that predicate at all.
+    //   * `markSubtree` and `retireSubtree` assert `claimsFullValence`, the
+    //     mask-only form. BOTH need it, not just one: `retainClaim` clears `held`
+    //     at the mark, so from `markSubtree`'s own body onward `holdsWholeNode` is
+    //     already false while the claim BIT is still set.
     //
     // A slot the attempt merely DESCENDS THROUGH is not claimed — "the interlock
     // lives in the child, not in the parent slot" — so a walk that mixes written
@@ -233,12 +241,37 @@ namespace kernel::mm::radix {
     inline constexpr MemoryOrder kPoolPush = RELEASE;
     inline constexpr MemoryOrder kPoolPop  = ACQUIRE;
 
-    // Pool depth and the draw/shortfall counters. RELAXED and named so, because
-    // nothing reads them for a correctness decision: the depth drives only the
-    // replenish heuristic ("not at full population -> `barrier`"), and `barrier`
-    // is unconditionally safe to call. A stale depth costs at most one
-    // unnecessary barrier or one extra shortfall retry, never a wrong answer.
+    // The draw and shortfall counters. RELAXED and named so, because nothing reads
+    // them for a correctness decision — they are evidence for sizing, not inputs
+    // to a branch.
     inline constexpr MemoryOrder kPoolAccounting = RELAXED;
+
+    // ─── Pool DEPTH is a correctness gate now (D-070) ──────────────────────
+    //
+    // It used to share `kPoolAccounting`, on the reasoning that "a stale depth
+    // costs at most one unnecessary barrier or one extra shortfall retry, never a
+    // wrong answer". **D-059 falsified the second half of that sentence.** With
+    // the shared reserve gone, `if (!pool.atFullPopulation()) barrier(...)` is the
+    // ONLY remedy in the shortfall path, and `consecutiveShortfalls <= 1` is an
+    // exact assert — so a skipped barrier is not "one extra retry", it is the
+    // assert firing in debug and a spin in release.
+    //
+    // The two directions are not symmetric, which is what the old comment missed:
+    //
+    //   * **under**-reporting depth costs a redundant barrier — harmless;
+    //   * **over**-reporting skips the barrier — fatal.
+    //
+    // And over-reporting was reachable. `push` release-CASes `head` and THEN bumps
+    // `depth`; a remote observer may see the bump without the CAS, so `depth` can
+    // exceed what `pop` is able to find. The pair below closes it: the bump
+    // publishes the CAS that preceded it, and the gate's load synchronizes with
+    // the bump. ARM-only, and the unit tests run on ARM.
+    //
+    // `pop`'s decrement stays RELAXED deliberately — only the owner pops and only
+    // the owner reads the gate, so its own decrements are already in program order,
+    // and the direction a stale value could move is the harmless one.
+    inline constexpr MemoryOrder kPoolDepthPublish = RELEASE;
+    inline constexpr MemoryOrder kPoolDepthObserve = ACQUIRE;
 
 }  // namespace kernel::mm::radix
 
