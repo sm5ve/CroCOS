@@ -85,6 +85,16 @@ endif()
 # The ASan and uninstrumented builds run them unconditionally either way, so the
 # tests themselves never stop being exercised — only their race-detector
 # coverage is opt-in.
+#
+# ─── Why there is a target for it (R-18) ───────────────────────────────────
+#
+# The referee pass re-raised the default as a coverage hole. It is not — the
+# decision above is deliberate and the trade-off is the one already written. What
+# WAS a hole is the distance between "run them deliberately" and doing so: the line
+# above reconfigures the tree, which nobody does casually, so in practice the
+# opt-in never happened. `run_tsan_stress` below closes that without touching the
+# default: it configures a SEPARATE build directory with the flag off and runs the
+# one runner the flag affects, leaving this build untouched.
 option(CROCOS_SKIP_TSAN_STRESS
        "Skip the load-sensitive concurrency stress tests in TSan builds" ON)
 
@@ -130,4 +140,32 @@ add_custom_target(run_all_tests
             kernel/radix/KernelRadixTestRunnerTSan
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     COMMENT "Running all CroCOS unit tests"
+)
+
+# ─── The deliberate race-detector run (R-18) ───────────────────────────────
+#
+# `CROCOS_SKIP_TSAN_STRESS` defaults ON for the reason documented at the option,
+# and this is how you take the other branch without reconfiguring your working
+# build. A separate binary directory, so switching back is not a rebuild.
+#
+# Only `CoreTestRunnerTSan` is affected — the sixteen gated tests all live in
+# `tests/core` (AtomicBitPool, SplitBitmap, TreiberStack, AtomicLinkedList and the
+# `Core::rcu::EpochDomain` concurrent trio), and `tests/core/CMakeLists.txt` sets
+# the define on that runner alone. Building the whole tree here would cost minutes
+# and add no coverage.
+#
+# **Run it on a quiet machine.** The gated tests' timeouts are liveness checks, and
+# under TSan on a loaded box they become performance assertions — which is the
+# entire finding behind the default. A red result here with other work running says
+# nothing.
+add_custom_target(run_tsan_stress
+    USES_TERMINAL
+    COMMAND ${CMAKE_COMMAND} -S ${CMAKE_CURRENT_SOURCE_DIR}
+                             -B ${CMAKE_CURRENT_BINARY_DIR}/tsan-stress
+                             -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+                             -DCROCOS_SKIP_TSAN_STRESS=OFF
+    COMMAND ${CMAKE_COMMAND} --build ${CMAKE_CURRENT_BINARY_DIR}/tsan-stress
+                             --target CoreTestRunnerTSan --parallel
+    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/tsan-stress/core/CoreTestRunnerTSan
+    COMMENT "Running the load-sensitive concurrency stress under TSan (quiet machine only)"
 )

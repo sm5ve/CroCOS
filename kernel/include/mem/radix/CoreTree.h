@@ -1540,14 +1540,28 @@ namespace kernel::mm::radix {
                 retiredAnything = retiredAnything || attempt.retired;
                 if (st != ApplyStatus::Ok) abandon(attempt);
 
-                // DEC-060/DEC-071's operation-exit pump, AFTER the section
-                // closes. It advances the epoch where possible so the
-                // just-filled bag stops being the open one and becomes drainable
-                // by any CPU's later pump (stealing), rather than sitting open on
-                // a CPU that may never mutate this domain again. In honest units
-                // that narrows the exposure from "one operation's retirees,
-                // forever, until teardown" to "one operation's retirees, until
-                // the next pump anywhere".
+                // DEC-060/DEC-071's operation-exit pump, AFTER the section closes.
+                //
+                // ─── What it does not achieve, corrected (R-19) ─────────────
+                //
+                // This used to say the pump makes the just-filled bag "stop being
+                // the open one and become drainable by any CPU's later pump". It
+                // does not: **`tryAdvance` never seals a bag.** Sealing is the
+                // owner's own act — a rotation on this CPU's NEXT retire (when it
+                // finds the open bag's tag stale), its own `barrier`, or
+                // `drainAllQuiescent` at teardown. An Open bag is unclaimable by
+                // anyone else, by I13, and `rcu_idle_slots_sealed_bags_are_drained_
+                // by_other_cpus` pins exactly that: the open bag is the residue.
+                //
+                // What the pump genuinely buys is the epoch advance, and that is
+                // worth two things. Everything ALREADY sealed on any CPU becomes
+                // reclaimable sooner, which is the stealing benefit. And this CPU's
+                // open bag is left with a stale tag, so its next retire rotates it
+                // out rather than accumulating into it.
+                //
+                // So the honest exposure bound is "one operation's retirees until
+                // this CPU's next retire, or until teardown" — not "until the next
+                // pump anywhere". Narrower than nothing, wider than it read.
                 if (retiredAnything) (void)kernel::rcu::tryAdvance(*domain);
                 return st;
             }
@@ -3130,12 +3144,39 @@ namespace kernel::mm::radix {
 
         // ─── Commit (nothing here may fail) ────────────────────────────────
         //
-        // Order is §6.1's: ALL marks, then the §7.2 `+1`s, then all publishes,
-        // then retires, then releases. An earlier formulation had the count
-        // "decremented per actually committed clear, bottom-up", which
-        // interleaves publishes with marks and contradicts the phase order; it
-        // computes the same answer, since everything is frozen, and the static
-        // form is the normative one.
+        // ─── What this does NOT do, corrected (R-19) ───────────────────────
+        //
+        // This used to claim it performs §6.1's phase order — "ALL marks, then the
+        // §7.2 `+1`s, then all publishes, then retires, then releases" — and cited
+        // a rejected formulation for *interleaving* them. **It interleaves them
+        // too.** There is one per-slot loop below, and each iteration does its own
+        // row's mark, its own `+1`s, its own publish and its own retire before the
+        // next slot is looked at. Occupancy is batched to the end of the node, and
+        // the record retires happen after the whole walk (`retireHeldRecords`), but
+        // nothing here executes five global phases.
+        //
+        // §6.1's order is **normative about the terminal state and about the
+        // boundary**, not about statement order. What it forbids is an irreversible
+        // step BEFORE the commit boundary, which `Attempt::phase` checks at every
+        // mark, publish and retire. After the boundary nothing can fail, so there
+        // is no unwind for an ordering to protect.
+        //
+        // What safety actually rests on, since it is worth naming rather than
+        // inferring from a phase list:
+        //
+        //   * **Every site is frozen.** The claims were acquired before the
+        //     boundary and are held across the whole walk, so no other writer can
+        //     be in any of these slots.
+        //   * **The atomicity unit is ONE SLOT WORD**, single-word and
+        //     release-stored (kSlotPublish), giving readers old-or-complete-new per
+        //     slot. Cross-slot atomicity was never promised to readers, so a reader
+        //     legitimately observing slot 3's new value and slot 4's old one is not
+        //     a torn state — it is a state the protocol permits.
+        //   * **Per-row order is still load-bearing where it is written**, and the
+        //     DetachChild row is the case: `markSubtree` before `publishAfterMark`,
+        //     so a descent-cache entry into an interior node of the subtree sees the
+        //     mark rather than resuming into unlinked structure. That is a local
+        //     sequencing requirement, not an instance of the global phase list.
         bool commit(NodeRef node, unsigned level, uint64_t nodeBase,
                     uint64_t lo, uint64_t hi, VMSubstrate::SafePtr<Mapping> value, Attempt& a) {
             const bool     writes = (value != nullptr);
