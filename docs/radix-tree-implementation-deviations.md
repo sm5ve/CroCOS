@@ -3664,3 +3664,84 @@ Both tests fail on it and pass without it.
 guarantee that nothing ELSE on that page was touched in the same window. Every
 freshness test added from here should assert the separation it depends on, not just
 the call it wants.
+
+---
+
+## D-067 — R-9: a RELAXED slot load consumed child pointers it had no claim on
+
+The last of the referee pass's latent findings, and the one it singled out as "the
+one to keep in mind for any port". Confirmed, fixed, and the audit that confirms it
+is below because the finding is really about a constant's documented precondition
+being false at a subset of its call sites.
+
+### The audit, all five sites
+
+`kClaimedSlotLoad` is RELAXED and documented as "a writer reading a slot it already
+holds the claim bit for. The claiming `fetch_or`'s acquire is what orders this."
+
+| site | precondition holds? | why |
+|---|---|---|
+| `detachmentIsFrozen` | **yes** | returns false unless `holdsWholeNode` — every slot claimed |
+| `markSubtree` | **yes** | `markUnderClaim` asserts `holdsWholeNode` on entry |
+| `retireSubtree` | **yes** | same subtree, `planDetachment` claimed it with the full valence mask |
+| `redispatchAgrees` | **NO** | iterates every intersected slot; `DescendIntoChild` takes no claim |
+| `commit` | **NO** | same walk, and its own comment lists `DescendIntoChild` as exempt from the `holdsSlot` guard |
+
+The two failing sites are the two the referee named. At both, the word is fed to
+`decodeChild` and the result is **dereferenced** — the recursion descends through
+it — so a RELAXED load is consuming a link with no ordering against the writer that
+published the node behind it.
+
+`kSlotLoad`'s own documentation already rejects the obvious defence: "the
+decode-then-load shape is weaker than a plain pointer load, so address dependencies
+cannot be relied on." That is exactly why the read pass's load of the same slots is
+ACQUIRE.
+
+### Why it sat wrong, in both directions
+
+x86-64 gives every load acquire semantics, so **no execution on the target can
+expose it**. And the unit tests run on ARMv8 under TSan, which **does not model a
+missing acquire on a well-formed atomic** — so the one platform that could
+in principle reorder it is the platform whose tooling is blind to it. A defect
+reachable only by a port, and findable only by reading.
+
+### The fix
+
+A new constant, `kAttemptSlotLoad = ACQUIRE`, used at those two sites, with the
+argument written where the ordering is chosen. Deliberately **not** spelled as
+`kSlotLoad`: that constant means "reached through `protectWord`", i.e.
+RCU-DEC-022's protected link load, and these sites are not that. Same ordering,
+different reason, so a different name — which is the whole point of §11's constant
+discipline.
+
+Cost: an `ldar` per slot on the mmap/munmap path, on a loop that already does a
+claim `fetch_or` per claimed slot. Nothing on the fault path, which takes
+`kSlotLoad` already. Free on x86.
+
+### And the precondition is CHECKED now, not asserted in prose
+
+The three legitimate sites gained `assert(claimsFullValence(...))`. That predicate
+is `holdsWholeNode` minus the `held` bookkeeping, and the distinction is load-bearing
+rather than pedantic: `retainClaim` clears `held` at the mark while the claim BIT
+stays set for the rest of the commit, so after marking `holdsWholeNode` is false and
+the *physical* precondition the RELAXED load depends on is still true.
+
+Having it as a runnable check is the part that stops this recurring — a comment
+saying "the caller holds the claim" is what let two sites use the constant without
+holding it.
+
+**Both asserts are proven live**: inverting either fails 23 tests, so each is on a
+real path and its predicate genuinely holds. Worth recording one measurement error
+made on the way, because it is an easy one — with a `PROBE` assert placed in BOTH
+`markSubtree` and `retireSubtree` in one build, only `markSubtree` ever reported,
+and the natural reading is "`retireSubtree` is dead". It is not: `markSubtree` is
+called four lines earlier in the same `DetachChild` row, so its probe aborted the
+operation first. One probe per build, or the second one measures nothing.
+
+### What is NOT claimed here
+
+This does not make the descend-slot read *unnecessary* to think about — it makes it
+ordered. Whether a descended child can be replaced under an attempt at all is a
+separate argument (it is pinned by the claims the attempt holds deeper, in the
+cases that matter), and it is not the argument this constant should have been
+resting on.

@@ -2794,6 +2794,23 @@ namespace kernel::mm::radix {
             if (auto* e = set.find(node)) e->held = false;
         }
 
+        // `holdsWholeNode` minus the `held` bookkeeping, and the distinction is
+        // real: `retainClaim` clears `held` at the mark, while the claim BIT stays
+        // set in the node's state word for the rest of the commit. So after marking,
+        // `holdsWholeNode` is false and the PHYSICAL precondition that
+        // `kClaimedSlotLoad` depends on — every slot of this node frozen by a bit
+        // this attempt owns — is still true.
+        //
+        // Exists so that precondition is CHECKED at each of the three sites that
+        // depend on it rather than asserted in a comment, which is what let R-9's
+        // two mixed-claim sites use the constant unnoticed.
+        static bool claimsFullValence(ClaimSet<G, DetachBudget>& set, NodeRef node,
+                                      unsigned level) {
+            const auto* e = set.find(node);
+            return e != nullptr &&
+                   (e->mask & valenceMask(G, level)) == valenceMask(G, level);
+        }
+
         // ─── The three commit-phase gate asserts (§11) ─────────────────────
         //
         // Every mark in the tree goes through here, on all three paths. Three
@@ -2938,7 +2955,10 @@ namespace kernel::mm::radix {
                 const uint64_t clipLo   = lo > slotBase ? lo : slotBase;
                 const uint64_t clipHi   = hi < slotEnd  ? hi : slotEnd;
 
-                const uint64_t word = node.slot(i).load(kClaimedSlotLoad);
+                // ACQUIRE, not RELAXED (R-9). This loop covers slots the attempt
+                // holds and slots it merely descends through, and only the former
+                // are ordered by the claiming `fetch_or` — see kAttemptSlotLoad.
+                const uint64_t word = node.slot(i).load(kAttemptSlotLoad);
                 const DispatchResult d =
                     dispatchSlot<G, Codec>(word, level, slotBase, clipLo, clipHi, writes);
 
@@ -3131,7 +3151,10 @@ namespace kernel::mm::radix {
                 const uint64_t clipLo   = lo > slotBase ? lo : slotBase;
                 const uint64_t clipHi   = hi < slotEnd  ? hi : slotEnd;
 
-                const uint64_t word = node.slot(i).load(kClaimedSlotLoad);
+                // ACQUIRE, not RELAXED (R-9) — same mixed-claim walk as
+                // re-dispatch, and the `DescendIntoChild` row below dereferences
+                // the child this word decodes to.
+                const uint64_t word = node.slot(i).load(kAttemptSlotLoad);
                 const DispatchResult d =
                     dispatchSlot<G, Codec>(word, level, slotBase, clipLo, clipHi, writes);
 
@@ -3454,6 +3477,10 @@ namespace kernel::mm::radix {
             // every displaced value then follows the rules an individual clear
             // already has, and no new lifetime concept appears.
             const unsigned n = valence(G, level);
+            assert(claimsFullValence(a.claims, node, level),
+                   "radix: retireSubtree reading slots with kClaimedSlotLoad (RELAXED) on a "
+                   "node this attempt does not hold the full valence mask for — the "
+                   "constant's ordering rests on that claim (R-9)");
             for (unsigned i = 0; i < n; i++) {
                 const uint64_t w = node.slot(i).load(kClaimedSlotLoad);
                 if (Codec::isChild(w)) {
@@ -3476,6 +3503,12 @@ namespace kernel::mm::radix {
             markUnderClaim(node, level, a);
             retainClaim(a.claims, node);
             const unsigned n = valence(G, level);
+            // `markUnderClaim` above asserted `holdsWholeNode`, but `retainClaim`
+            // has since cleared `held`, so the re-check below is the mask-only form
+            // — the physical claim the RELAXED load rests on.
+            assert(claimsFullValence(a.claims, node, level),
+                   "radix: markSubtree reading slots with kClaimedSlotLoad (RELAXED) "
+                   "without the full valence mask (R-9)");
             for (unsigned i = 0; i < n; i++) {
                 const uint64_t w = node.slot(i).load(kClaimedSlotLoad);
                 if (Codec::isChild(w)) {

@@ -83,7 +83,47 @@ namespace kernel::mm::radix {
     // named separately from kSlotLoad so the two cannot be conflated: a reader
     // path using THIS constant would be dropping the protected-link-load
     // primitive entirely.
+    //
+    // **The precondition is a WHOLE-NODE claim, and it is not decorative** (R-9).
+    // Legitimate uses are the three subtree walks — `detachmentIsFrozen`,
+    // `markSubtree`, `retireSubtree` — which run over nodes `planDetachment`
+    // claimed with the full valence mask, so every slot they read is frozen and
+    // every child pointer they decode was already acquired by the read pass that
+    // reached it. Two of the three assert `holdsWholeNode` on the way in; the
+    // third (`retireSubtree`) runs after `retainClaim` has cleared the set's
+    // bookkeeping, so the bit is still physically held but no longer assertable
+    // through that predicate.
+    //
+    // A slot the attempt merely DESCENDS THROUGH is not claimed — "the interlock
+    // lives in the child, not in the parent slot" — so a walk that mixes written
+    // and descended slots must use `kAttemptSlotLoad` below, not this.
     inline constexpr MemoryOrder kClaimedSlotLoad = RELAXED;
+
+    // ─── The attempt's own walk over its sites (R-9) ───────────────────────
+    //
+    // `redispatchAgrees` and `commit` iterate every slot the operation's range
+    // intersects, and the attempt holds the claim bit for the ones it will WRITE
+    // and **not** for the ones it only descends through. So the set of slots
+    // covered by the claiming `fetch_or`'s acquire is a strict subset of the set
+    // this load reads, and `kClaimedSlotLoad`'s precondition is simply false here.
+    //
+    // That matters because the word is fed to `decodeChild` and the result is
+    // dereferenced — the recursion descends through it. `kSlotLoad` above already
+    // records why an address dependency does not rescue this: "the decode-then-load
+    // shape is weaker than a plain pointer load, so address dependencies cannot be
+    // relied on."
+    //
+    // **Unobservable on the hardware we run on, in both directions**, which is why
+    // it sat wrong: x86-64 gives acquire semantics to every load, so no execution
+    // can expose it, and the unit tests run on ARMv8 under TSan, which does not
+    // model a missing acquire on a well-formed atomic. It is a defect for a port,
+    // found by audit, and fixable at the price of an `ldar` on the mmap/munmap
+    // path — not the fault path, which takes `kSlotLoad` already.
+    //
+    // Deliberately NOT spelled as `kSlotLoad`: that constant means "reached through
+    // `protectWord`", i.e. RCU-DEC-022's protected link load, and these sites are
+    // not that. Same ordering, different argument, so a different name.
+    inline constexpr MemoryOrder kAttemptSlotLoad = ACQUIRE;
 
     // ─── Refcounts ─────────────────────────────────────────────────────────
 
