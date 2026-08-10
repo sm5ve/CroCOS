@@ -743,11 +743,30 @@ namespace Core::rcu {
             size_t ran    = 0;
             const uint64_t e = globalEpoch.load(kSweepEpochLoad);   // ACQUIRE — RCU-DEC-021
 
-            for (size_t k = 0; k < slotCount && budget > 0; ++k) {
-                const size_t idx = (slot + k) % slotCount;          // own slot first — P1-DEC-008
+            // Own slot first, then wrapping — P1-DEC-008's order exactly, but
+            // reached by an increment-and-wrap rather than `(slot + k) %
+            // slotCount`. The visit sequence is identical; what changes is that
+            // `slotCount` is a runtime member, so the modulus compiled to a
+            // 64-bit `div` PER SLOT on the hottest path in the kernel. That is
+            // one instruction and 30-90 cycles, which is why it survived an
+            // instruction-count probe: at 8 CPUs it is 8 of ~645 instructions
+            // and plausibly the largest single CYCLE cost in the sweep.
+            //
+            // `base` and `n` are locals for a second codegen reason, not for
+            // brevity: `claimAndDrain` can call a deleter through a function
+            // pointer, so the compiler must assume that call may write to
+            // `this` and reloads `slots` and `slotCount` from memory on EVERY
+            // bag iteration, including the overwhelmingly common one where no
+            // deleter runs at all. Locals whose address is never taken cannot
+            // be written by a call, so the reloads hoist out of the loop.
+            ReaderSlot* const base = slots;
+            const size_t      n    = slotCount;
+            for (size_t k = 0, idx = slot; k < n && budget > 0; ++k) {
+                ReaderSlot& owner = base[idx];
                 for (size_t b = 0; b < kBagCount && budget > 0; ++b) {
-                    ran += claimAndDrain(slots[idx], idx, b, e, budget);
+                    ran += claimAndDrain(owner, idx, b, e, budget);
                 }
+                if (++idx == n) idx = 0;
             }
 
             self.inDrain = false;
