@@ -832,6 +832,24 @@ namespace radix_stress {
                                                gProbeLookupCount.load(RELAXED))
                << " lookupN=" << gProbeLookupCount.load(RELAXED)
 #endif
+#if defined(CROCOS_RADIX_INSN_PROBE) && CROCOS_RADIX_INSN_PROBE == 4
+               // The mode-2 total, split. `inner` is the cache probe plus, on a
+               // miss, the descent; `pump` is DEC-060's per-lookup tryAdvance.
+               // Read both net of splitBase. Accumulated in DescentCache.h,
+               // where the seam is.
+               << " splitBase=" << rdx::gProbeSplitBaseMin.load(RELAXED)
+               << " innerMin=" << rdx::gProbeInnerMin.load(RELAXED)
+               << " innerMean=" << (rdx::gProbeInnerCount.load(RELAXED) == 0
+                                        ? uint64_t{0}
+                                        : rdx::gProbeInnerTicks.load(RELAXED) /
+                                              rdx::gProbeInnerCount.load(RELAXED))
+               << " pumpMin=" << rdx::gProbePumpMin.load(RELAXED)
+               << " pumpMean=" << (rdx::gProbePumpCount.load(RELAXED) == 0
+                                       ? uint64_t{0}
+                                       : rdx::gProbePumpTicks.load(RELAXED) /
+                                             rdx::gProbePumpCount.load(RELAXED))
+               << " splitN=" << rdx::gProbePumpCount.load(RELAXED)
+#endif
                << "\n";
     }
 

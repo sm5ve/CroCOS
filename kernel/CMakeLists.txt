@@ -182,7 +182,7 @@ set(CROCOS_INSN_PROBE "" CACHE STRING "RCU retire-path instruction probe: unset,
 # be stated as a fraction of it. Never both: nesting them would inflate the
 # denominator by the inner probe's own cost. Deliberately the same shape as
 # CROCOS_INSN_PROBE above, so the two subsystems' figures are comparable.
-set(CROCOS_RADIX_INSN_PROBE "" CACHE STRING "radix descent instruction probe: unset, 1 (freshness call) or 2 (whole lookup)")
+set(CROCOS_RADIX_INSN_PROBE "" CACHE STRING "radix descent instruction probe: unset, 1 (freshness call), 2 (whole lookup), 3 (count freshness calls per lookup) or 4 (split lookup into descent vs DEC-060 pump)")
 
 # radix-tree Phase 5. Selects which in-kernel stress the smp_bringup slot runs:
 # RCU Phase 4's by default, the radix tree's when this is ON. **One at a time is

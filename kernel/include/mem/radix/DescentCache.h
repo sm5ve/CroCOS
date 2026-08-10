@@ -113,6 +113,50 @@
 
 namespace kernel::mm::radix {
 
+#if defined(CROCOS_RADIX_INSN_PROBE) && CROCOS_RADIX_INSN_PROBE == 4
+    // ─── Mode 4: where does a lookup's cost actually go? ───────────────────
+    //
+    // Modes 1-3 price a whole `lookup` and the freshness calls inside it. They
+    // left a question they cannot answer: mode 2 reported a MINIMUM of 568
+    // instructions over a run in which 81% of lookups HIT the descent cache. A
+    // hit indexes four entries, compares a range and returns — tens of
+    // instructions, not hundreds. So most of a lookup is not the tree walk, and
+    // modes 1-3 cannot say what it is.
+    //
+    // This brackets the two halves of `lookup` separately: `lookupInner` (the
+    // cache probe and, on a miss, the descent) against DEC-060's fault-path
+    // `tryAdvance` pump, which runs on EVERY lookup and is an epoch load, a
+    // conditional O(P) walk over every CPU's reader slot, and an unconditional
+    // sweepExpired. The split decides whether a heavy lookup is an algorithm
+    // question or a pump-placement one.
+    //
+    // Lives here rather than in RadixStress.cpp because the seam is inside this
+    // function; the stress only prints what these accumulate.
+    inline uint64_t probeInsnCounter() noexcept {
+        uint32_t lo, hi;
+        asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
+        return (static_cast<uint64_t>(hi) << 32) | lo;
+    }
+
+    // MINIMA for the P4-ITEM-002 reason: interrupts are live in the stress loop,
+    // so a timer inside a bracket inflates that sample by the whole handler and
+    // the contamination dilutes rather than averaging out.
+    inline Atomic<uint64_t> gProbeInnerMin{0};
+    inline Atomic<uint64_t> gProbeInnerTicks{0};
+    inline Atomic<uint64_t> gProbeInnerCount{0};
+    inline Atomic<uint64_t> gProbePumpMin{0};
+    inline Atomic<uint64_t> gProbePumpTicks{0};
+    inline Atomic<uint64_t> gProbePumpCount{0};
+    inline Atomic<uint64_t> gProbeSplitBaseMin{0};
+
+    inline void probeRecordMin(Atomic<uint64_t>& slot, uint64_t sample) noexcept {
+        uint64_t cur = slot.load(kCacheAccounting);
+        while ((cur == 0 || sample < cur) &&
+               !slot.compare_exchange_weak(cur, sample, kCacheAccounting,
+                                          kCacheAccounting)) {}
+    }
+#endif
+
     // DEC-079, Provisional: "provisionally 4 entries indexed by VA bits". A
     // template parameter rather than a constant because the entry count is
     // explicitly Phase 4/5 calibration and the residue bound of DEC-096 is
@@ -278,6 +322,28 @@ namespace kernel::mm::radix {
         // rather than inventing an answer.
         [[nodiscard]] LookupResult lookup(Block& block, uint64_t va) {
             counters.lookups.fetch_add(1, kCacheAccounting);
+#if defined(CROCOS_RADIX_INSN_PROBE) && CROCOS_RADIX_INSN_PROBE == 4
+            // The probe pairs are the only thing between the two brackets, so
+            // each half is stated net of `gProbeSplitBaseMin`.
+            const uint64_t b0 = probeInsnCounter();
+            const uint64_t b1 = probeInsnCounter();
+            probeRecordMin(gProbeSplitBaseMin, b1 - b0);
+
+            const uint64_t i0 = probeInsnCounter();
+            LookupResult r = lookupInner(block, va);
+            const uint64_t i1 = probeInsnCounter();
+            probeRecordMin(gProbeInnerMin, i1 - i0);
+            gProbeInnerTicks.fetch_add(i1 - i0, kCacheAccounting);
+            gProbeInnerCount.fetch_add(1, kCacheAccounting);
+
+            const uint64_t p0 = probeInsnCounter();
+            (void)kernel::rcu::tryAdvance(block.domain);
+            const uint64_t p1 = probeInsnCounter();
+            probeRecordMin(gProbePumpMin, p1 - p0);
+            gProbePumpTicks.fetch_add(p1 - p0, kCacheAccounting);
+            gProbePumpCount.fetch_add(1, kCacheAccounting);
+            return r;
+#else
             LookupResult r = lookupInner(block, va);
 
             // DEC-060's fault-path pump, after every section this call opened has
@@ -286,6 +352,7 @@ namespace kernel::mm::radix {
             // could run deleters while link-loaded pointers are still live.
             (void)kernel::rcu::tryAdvance(block.domain);
             return r;
+#endif
         }
 
         // Drop everything this CPU holds. Not part of the protocol — teardown

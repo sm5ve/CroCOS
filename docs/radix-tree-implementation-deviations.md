@@ -4394,3 +4394,85 @@ The two **mock substrates** remain forks of one another — same page primitives
 extra instrumentation. Merging them is a larger change than this one and wants its
 own baseline, so it is recorded here rather than done. `SafePtr` was the part that
 had already caused a defect.
+
+---
+
+## D-075 — where a lookup's 800 instructions actually go (probe mode 4)
+
+Spencer asked whether ~800 instructions per lookup is acceptable on a path every
+page fault takes. The existing probes could not answer it: modes 1-3 price a whole
+`lookup` and the freshness calls inside it, and the whole was the thing in question.
+
+The datum that made it worth splitting: **mode 2 reported `min=568` over a run in
+which 78-81% of lookups HIT the descent cache.** A hit that indexes four entries and
+compares a range is tens of instructions. Nothing came in under 568, so most of a
+lookup was not the tree walk, and no existing probe could say what it was.
+
+Mode 4 brackets the two halves of `lookup` separately.
+
+### The split, `-icount shift=0`, n=545, net of a 3-tick probe base
+
+| | min | mean | share of mean |
+|---|---|---|---|
+| `lookupInner` — cache probe, and on a miss the descent | 313 | 566 | **71%** |
+| `tryAdvance` — DEC-060's fault-path pump | 222 | 233 | **29%** |
+| total | | 799 | (mode 2 measured 800 independently) |
+
+The two halves reconstruct mode 2's mean to one instruction, which is the check that
+the brackets are measuring what they claim.
+
+### Three things it settled
+
+**1. The pump is a real fixed tax, but it is not the majority.** 233 instructions on
+every lookup, hit or miss. The instruction count *understates* it: `tryAdvance` is an
+epoch load, a conditional **O(P) walk over every CPU's reader slot**, and an
+unconditional `sweepExpired`. On 8 CPUs that is 8 remote cache lines touched per page
+fault, and TCG models no cache, so the cycle cost of those lines is invisible here.
+
+**2. A descent-cache hit is not a short-circuit, and the hit rate reads as better
+news than it is.** `lookupInner` on a hit calls `tree.resumeDescent(e.pin, va)` — the
+cache saves the TOP of the walk and the descent still runs from the pinned node down.
+That is DEC-016's design working as specified; the figure to correct is the intuition
+that "78% hit" means "78% nearly free". A hit costs ~313 instructions minimum.
+Solving `0.78 x 313 + 0.22 x M = 566` puts a miss around ~1,400, so the cache is worth
+roughly 4.5x on the covered fraction — but its floor is three hundred instructions,
+not thirty.
+
+**3. Freshness is not the story.** 3 calls x 24 instructions = 72, about 9% of a
+lookup, at the low end of D-053's 10-20% because a higher cache-hit rate means fewer
+levels and fewer calls.
+
+### The cost this method cannot see, which is probably the important one
+
+`DescentCacheStats counters` is **one shared struct** on the cache object
+(`DescentCache.h:556`), sixteen `Atomic<uint64_t>` fields, and the `fetch_add` sites
+are **unconditional in every build** — no `CROCOS_*` gate, unlike
+`CROCOS_RADIX_NODE_CENSUS`. A hit-path lookup bumps three of them (`lookups`,
+`freshnessLoads`, `hits`).
+
+`kCacheAccounting` is RELAXED, which removes the fences but not the lock prefix: a
+`fetch_add` is still a locked RMW that takes exclusive ownership of the line. So every
+CPU performs three locked RMWs on the **same** cache lines on every page fault. In
+instructions that is ~10 and invisible against 800; in cycles, a contended locked RMW
+on a line another core owns is hundreds, and it scales the wrong way with CPU count.
+
+**This is exactly the class the whole method is blind to** — the same wall that made
+ITEM-055 unanswerable — and it is a stronger candidate for "too heavy" than anything
+the instruction counts show. It is recorded, not fixed: the fix (gate them, or make
+them per-CPU rows like `Row rows[]` already is) is a design change and wants Spencer's
+call, and it wants a measurement instrument that models a cache, which this project
+does not yet have.
+
+### Caveats that travel with every figure above
+
+`-icount` forces `-accel tcg,thread=single`. Memory records the same descent cache
+reporting **~7% hits under MTTCG against the 74-82% seen here**, so these runs are a
+best case twice over: shorter walks than production, and no cache model. Every number
+here is a floor.
+
+Also: the mode-4 code tripped `radix_every_atomic_is_spelled_with_a_named_ordering` on
+six bare `RELAXED` enumerators. The scanner is textual, so `#ifdef`-guarded probe code
+is scanned like anything else — which is the detector working as designed, on the
+first new code written after it was built (D-062..D-069).
+
+Suite 1,667 green; kernel builds; boot clean.
