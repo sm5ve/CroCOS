@@ -15,11 +15,11 @@ defect they uncovered in the RCU engine. §4 and §5 are history — read them f
 reasoning, not for work to do. D-059, D-060 and D-061 in the deviations log are
 the long-form accounts, and `specs/rcu-phase-1.md` P1-DEC-019 carries the RCU one.
 
-**Both merge blockers are closed, and so are R-4, R-5, R-6, R-16 and R-17**
-(D-062..D-066). **Every detector gap the referee pass found is closed.** What
-remains is the latent items (**R-9, R-12, R-13** — all three real, none currently
-reachable, and R-9 is the one to re-read before any non-x86 port) and the rest of
-the hygiene list (**R-18** the TSan-stress default, **R-19**'s four surviving wrong
+**Both merge blockers are closed, and so are R-4, R-5, R-6, R-9, R-16 and R-17**
+(D-062..D-067). **Every detector gap and the port-blocking ordering defect are
+closed.** What remains is two latent items — **R-12** (Treiber ABA safety holds only
+because no scheduler exists) and **R-13** (`ensureTLBEntryFresh` on pinned memory
+RMWs into live data) — and the rest of the hygiene list (**R-18** the TSan-stress default, **R-19**'s four surviving wrong
 comments, **R-20** the displaced coverage, **R-21** the `detachBudget` retention).
 **R-5 is the one with a live hole behind it**: `GrowthTest.cpp` and
 `DecompositionTest.cpp` have zero oracle assertions, and an unpublished leaked node
@@ -110,20 +110,21 @@ at all (a barrier, not more rounds, is what made the detector reliable), and
 `discardUnusedAllocations` was already covered by the two concurrent-writer tests
 and the only single-threaded decomposition discard is structurally unreachable.
 
-### Latent — real, not currently reachable
+### Latent — real, not currently reachable (R-9 now FIXED)
 
 | ID | Finding | Anchor |
 |---|---|---|
-| **R-9** | `kClaimedSlotLoad` (RELAXED) consumes child pointers from **unclaimed** slots | `CoreTree.h:2889`, `:3074` |
+| **R-9** | **FIXED** (D-067). Audited all five sites: the other three genuinely hold whole-node claims and now ASSERT it. The two failing ones take a new `kAttemptSlotLoad = ACQUIRE` |
 | **R-12** | Treiber ABA safety holds only because **no scheduler exists** | `CoreTree.h:1412` |
 | **R-13** | `ensureTLBEntryFresh` on **pinned** memory RMWs into live data | `VMSubstrate.cpp:1235` |
 
-**R-9** is the one to keep in mind for any port. The constant is documented as
-"a writer reading a slot it already holds the claim bit for"; at both sites the
-attempt holds no bit (`DescendIntoChild` is exempt from the `holdsSlot` guard)
-and the word is then fed to `decodeChild` and dereferenced. `kSlotLoad`'s own
-comment already rejects the address-dependency defence. Safe on x86 TSO — but
-**the unit tests run on ARMv8**, and TSan does not model a missing acquire.
+**R-9 is fixed** (D-067). It is worth keeping the reasoning: the constant claimed
+"a writer reading a slot it already holds the claim bit for", and at two of five
+sites the attempt held no bit. Unobservable in both directions — x86-64 gives every
+load acquire semantics, and TSan on ARMv8 does not model a missing acquire on a
+well-formed atomic — so it was findable only by reading. The precondition is now a
+runnable `assert(claimsFullValence(...))` at the three sites that depend on it,
+which is the part that stops it recurring.
 
 **R-13**: the pinned exemption is documented everywhere as an absence of
 *obligation*, which invites the conclusion that a call there is merely wasted. It
