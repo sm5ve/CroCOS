@@ -3466,3 +3466,97 @@ Two other places presented the superseded figure as current and now say otherwis
 `docs/radix-tree-HANDOFF-impl.md`'s D-047/D-048 progression table (its last column
 is a historical endpoint, which the table did not say) and
 `DeferredRelease.h`'s "instead of half a million".
+
+---
+
+## D-064 — R-5: the lost-CAS test asserted everything except what it was named for
+
+The referee pass proved this by mutation: delete the growth loser's shallow discard
+at `ClusterTable.h:309` and the whole suite stays green. Reproduced — 173/173 with
+a live leak in raced code.
+
+### Why nothing saw it
+
+`radix_growth_lost_cas_leaks_nothing_and_corrupts_nothing` exists, is named for
+exactly this property, and its own comment says the leak half "is carried by the
+oracle: a loser that FORGOT to discard shows up as a live node at the end."
+
+**It never called the oracle.** What it checked was the validator, a `>=` bound on
+`nodeCount()`, a refcount and a lookup. None of those can see the leak, and each
+for its own reason worth keeping in mind:
+
+- `TreeValidator` and `nodeCount()` walk the **published** structure. A loser's
+  private node was never linked anywhere, so it is not in the walk.
+- The `nodeCount()` bound was `>=`, so it could not have seen an extra *published*
+  node either.
+- LSan sees nothing: the arena is one live `mmap` the fixture unmaps wholesale
+  (§10 names this).
+
+The allocation oracle is the only detector in the suite that can see it, because it
+counts allocations rather than reachability — and `GrowthTest.cpp` contained **zero
+oracle assertions across 10 tests**, `DecompositionTest.cpp` zero across 4.
+
+The blocker was structural, which is probably why it never got written: the
+assertion has to run after the fixture is torn down, and a destructor runs after
+the test body. Both fixtures now have a `finishAndAssertNoLeaks` that tears down
+explicitly and then asserts, with a `finished` flag so the destructor does not
+repeat it (`ClusterTable::destroy` is not idempotent) — set BEFORE the assertion,
+so a failing check cannot turn into a double free.
+
+### The single race was a coin toss, and the barrier is why
+
+Adding the oracle assertion caught the leak in **10 of 12 runs**. That is not a
+detector, and the reason is worth recording because it is counter-intuitive: the
+CAS was rarely being lost at all. Each CPU asks for a different width, so if the
+widest-target CPU happens to run first it climbs the whole way and every other
+CPU's `growToCover` returns without allocating anything — no loser, no leak, green.
+
+Adding 24 more rounds only reached **11 of 12**: rounds were not the problem.
+**A barrier immediately before each growth** was — it forces all four CPUs into the
+climb at the same instant instead of arriving whenever their creation finished,
+which is what had been serialising them. With the barrier and a maximal climb (to
+the whole zone, so each round offers several CAS steps to lose):
+
+| | detection |
+|---|---|
+| oracle assertion, 1 round | 10/12 |
+| + 24 unsynchronised rounds | 11/12 |
+| + barrier, maximal climb | **20/20** |
+
+And **20/20 pass on correct code**, so it is deterministic in both directions
+rather than trading false negatives for false positives.
+
+### Both discard sites of this class are now covered
+
+`createCluster` has the same shape at `ClusterTable.h:229`, and it is equally
+concurrency-only — the early `if (bucketIsOccupied(idx)) return AlreadyPresent;`
+means a single-threaded second caller allocates nothing, so only a caller that
+loses the publish CAS reaches the discard. The test races both: deleting `:229`'s
+discard now fails it with **+24 leaked nodes**, deleting `:309`'s with +1.
+
+The `nodeCount()` bound is also exact now — `nodesBeforeRace + (levels climbed)`,
+derived rather than transcribed, since growth adds one node per level and changes
+nothing else.
+
+### DecompositionTest: hygiene, and honestly not mutation-proven
+
+Its 4 tests gained the same assertion, closing the structural gap. But **no
+mutation was found that they uniquely catch**, and that is worth stating rather
+than implying otherwise:
+
+- `discardUnusedAllocations` — the leak class they would catch — turns out to be
+  **already covered** by `radix_concurrent_disjoint_writers_do_not_interfere` and
+  `radix_concurrent_contended_writers_all_complete`, which have had oracle
+  assertions all along. Neutering it fails those two (+3 and +127 nodes) and not
+  the decomposition tests, because a prebuilt subtree is only ever unused when a
+  concurrent writer changes the row under you; single-threaded, re-dispatch always
+  agrees and every prebuilt subtree is consumed.
+- The one discard reachable on a single-threaded decomposition path — the
+  `kMaxPending` overflow at `CoreTree.h:2597` — is **structurally unreachable**,
+  not merely untested: `kMaxPending` is `2 * (levelCount + 1)` and only the
+  operation's two edge slots can be partially covered at any level. Neutering it
+  changes nothing anywhere, correctly. It is defensive, and it should stay.
+
+So the decomposition assertions are a guard against a future decomposition-specific
+allocation, not a closed finding. The R-5 finding itself — the growth/creation
+lost-CAS discards — is closed and proven.

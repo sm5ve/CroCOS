@@ -105,18 +105,51 @@ struct Pair {
     // `faultVA >= baseVA` and would underflow for every address below the token.
     std::map<const rdx::Mapping*, uint64_t> tokenOf;
 
+    Harness* harness = nullptr;
+
     Pair(Harness& h, unsigned rootLevel)
-        : modelSmall(rootLevel, 0), modelUnit(rootLevel, 0) {
+        : modelSmall(rootLevel, 0), modelUnit(rootLevel, 0), harness(&h) {
         if (!decomposed.init(rootLevel, 0, h.domain, h.releasePools) ||
             !unitPath.init(rootLevel, 0, h.domain, h.releasePools)) {
             throw AssertionFailure(std::string("Pair: root allocation failed"));
         }
     }
 
+    // ─── The leak check these tests were missing entirely (R-5) ─────────────
+    //
+    // Every assertion in this file compares the two trees' CONTENT — which is the
+    // property decomposition exists to preserve, and rightly the focus. But content
+    // agreement cannot see an allocation that was never published, and §6.5's
+    // decomposition path allocates: `readPass` prebuilds a subtree per Subdivide
+    // row, and re-dispatch can then decline to use it. `discardUnusedAllocations`
+    // is what frees those, and it surfaced as a real defect once already — "a
+    // single 288 B node outstanding after a four-CPU disjoint-writer run"
+    // (`CoreTree.h`'s note on the success path).
+    //
+    // Decomposition multiplies the number of prebuilt-and-maybe-unused subtrees by
+    // the unit count, so it is the path most exposed to that class, and it had no
+    // detector at all: 0 oracle assertions across 4 tests. The oracle is the only
+    // thing that can see it — `nodeCount()` and the validator walk published
+    // structure, and LSan sees one live arena mmap.
+    //
+    // Must run after BOTH trees are torn down, which a destructor cannot do because
+    // it runs after the test body. `finished` keeps the destructor from repeating
+    // it, and is set before the assertion so a failure cannot become a double free.
+    void finishAndAssertNoLeaks(const char* what) {
+        decomposed.destroyTree();
+        unitPath.destroyTree();
+        quiesce(*harness);
+        finished = true;
+        assertNoLiveObjects(what);
+    }
+
     ~Pair() {
+        if (finished) return;
         decomposed.destroyTree();
         unitPath.destroyTree();
     }
+
+    bool finished = false;
 
     // `token` is 0 for an unmap, otherwise an identity carried into each tree's
     // own record as its baseVA.
@@ -280,6 +313,9 @@ TEST(radix_decomposition_over_budget_subtree_converges_to_the_unit_path) {
     ASSERT_EQ(size_t{1}, censusUnit.size());
     ASSERT_EQ(censusUnit.begin()->second, censusSmall.begin()->second);
     ASSERT_EQ(uint64_t{1}, censusSmall.begin()->first->refcountRelaxed());
+
+
+    p.finishAndAssertNoLeaks("over-budget subtree converges");
 }
 
 // ─── Case 2: a range edge deep inside a populated child ────────────────────
@@ -369,6 +405,9 @@ TEST(radix_decomposition_partial_child_edge_maps_the_tail_in_a_sparse_sibling) {
         ASSERT_TRUE(static_cast<bool>(r));
         ASSERT_EQ(uint64_t{2000}, p.tokenOf.at(r.mapping().address()));
     }
+
+
+    p.finishAndAssertNoLeaks("partial child edge");
 }
 
 // ─── Case 3: a decomposed munmap over holes ────────────────────────────────
@@ -439,6 +478,9 @@ TEST(radix_decomposition_munmap_over_holes_touches_no_empty_slot) {
     for (uint64_t va = 0; va <= 63; va += kUnit) {
         ASSERT_TRUE(!p.decomposed.lookup(va));
     }
+
+
+    p.finishAndAssertNoLeaks("munmap over holes");
 }
 
 // ─── The MAP_FIXED variant §11 names in passing ────────────────────────────
@@ -488,4 +530,7 @@ TEST(radix_decomposition_map_fixed_over_holes_fills_them) {
     for (uint64_t va = 52; va <= 63; va += kUnit) {
         ASSERT_TRUE(!p.decomposed.lookup(va));
     }
+
+
+    p.finishAndAssertNoLeaks("map fixed over holes");
 }

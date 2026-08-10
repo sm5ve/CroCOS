@@ -33,6 +33,7 @@
 #include <mem/radix/CoreTree.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <mutex>
 #include <string>
@@ -80,10 +81,38 @@ struct Fixture {
             throw AssertionFailure(std::string("cluster table init failed"));
         }
     }
+    // ─── Why teardown is a METHOD and not only a destructor (R-5) ───────────
+    //
+    // The allocation oracle is the only detector in this suite that can see a node
+    // that was allocated and never published: `nodeCount()` and `TreeValidator`
+    // both walk the PUBLISHED tree, and LSan sees nothing because the whole arena
+    // is one live mmap that the fixture unmaps wholesale.
+    //
+    // Growth and creation both allocate a private node, try to publish it with a
+    // CAS, and **shallow-discard it on the losing side** (`ClusterTable.h:229` and
+    // `:309`). A loser that forgot to discard is therefore invisible to every
+    // check these tests were making — verified by mutation: deleting the discard
+    // left the suite at 173/173 green.
+    //
+    // The oracle assertion has to run AFTER the table is torn down, and a
+    // destructor runs after the test body, so it cannot be there. Hence this: tear
+    // down explicitly, then assert. `finished` keeps the destructor from doing it
+    // twice, since `ClusterTable::destroy` is not idempotent — and it is set
+    // BEFORE the assertion, so a failure does not turn into a double free.
+    void finishAndAssertNoLeaks(const char* what) {
+        table.destroy();
+        quiesce(h);
+        finished = true;
+        assertNoLiveObjects(what);
+    }
+
     ~Fixture() {
+        if (finished) return;
         table.destroy();
         quiesce(h);
     }
+
+    bool finished = false;
 };
 
 }  // namespace
@@ -132,6 +161,8 @@ TEST(radix_cluster_creation_publishes_an_empty_root) {
     ASSERT_TRUE(static_cast<bool>(t.lookup(kVA)));
     quiesce(f.h);
     ValidA::validate(t, "creation");
+
+    f.finishAndAssertNoLeaks("cluster creation");
 }
 
 TEST(radix_cluster_creation_is_idempotent_per_bucket) {
@@ -146,6 +177,8 @@ TEST(radix_cluster_creation_is_idempotent_per_bucket) {
 
     TreeA t = f.table.treeFor(rdx::bucketIndexFor<GA>(kVA));
     ASSERT_EQ(size_t{1}, t.nodeCount());
+
+    f.finishAndAssertNoLeaks("creation idempotence");
 }
 
 // ─── Growth: one level at a time, and it only ever widens ──────────────────
@@ -175,6 +208,8 @@ TEST(radix_growth_widens_the_cluster_to_cover_the_range) {
     const unsigned grown = t.rootLevel();
     ASSERT_TRUE(f.table.growToCover(kVA, target) == rdx::ClusterStatus::Ok);
     ASSERT_EQ(grown, t.rootLevel());
+
+    f.finishAndAssertNoLeaks("growth widens");
 }
 
 // The clause with no symptom: the old root is now a child of the new one, and
@@ -216,6 +251,8 @@ TEST(radix_growth_moves_no_count_and_retires_nothing) {
 
     ValidA::validate(t, "growth accounting");
     ASSERT_TRUE(static_cast<bool>(t.lookup(kVA)));   // and nothing moved
+
+    f.finishAndAssertNoLeaks("growth accounting");
 }
 
 // Growth is repeatable up to the zone, which is where DEC-080 takes over.
@@ -235,6 +272,8 @@ TEST(radix_growth_walks_up_to_the_zone_and_stops) {
     // One node per level from the new root down to the original: growing from
     // the default root level to level 1 ADDS nodes, it does not replace them.
     ASSERT_EQ(static_cast<size_t>(GA.defaultRootLevel), t.nodeCount());
+
+    f.finishAndAssertNoLeaks("growth to the zone");
 }
 
 // ─── ensureCovers: the shape a fixed-address placement wants ───────────────
@@ -256,6 +295,8 @@ TEST(radix_ensure_covers_creates_then_grows) {
     ValidA::validate(t, "ensureCovers");
     ASSERT_TRUE(static_cast<bool>(t.lookup(lo)));
     ASSERT_TRUE(static_cast<bool>(t.lookup(hi)));
+
+    f.finishAndAssertNoLeaks("ensureCovers");
 }
 
 // A request too large for the default cluster is rooted high at creation
@@ -273,6 +314,8 @@ TEST(radix_ensure_covers_roots_an_oversized_request_high) {
     // Rooted directly at the covering level, so no growth was needed and the
     // cluster is a single node.
     ASSERT_EQ(size_t{1}, t.nodeCount());
+
+    f.finishAndAssertNoLeaks("oversized request");
 }
 
 // ─── The exit gate's lost-CAS row ──────────────────────────────────────────
@@ -286,8 +329,22 @@ TEST(radix_ensure_covers_roots_an_oversized_request_high) {
 // The leak/double-free half is carried by the oracle: a loser that FORGOT to
 // discard shows up as a live node at the end, and one that discarded
 // RECURSIVELY takes the winner's cluster with it and fails long before that.
+//
+// **That sentence was true of the intent and false of the code (R-5).** The test
+// never called the oracle. What it actually checked was the validator, a `>=`
+// bound on `nodeCount()` and two refcounts — none of which can see an unpublished
+// allocation, and a `>=` bound cannot see an extra published one either. Deleting
+// the discard at `ClusterTable.h:309` left the whole suite green.
+//
+// Both halves are now asserted, and the test races BOTH discard sites of this
+// class: every CPU's `createCluster` loses (the cluster is seeded, so all four
+// adopt and each discards a private root at `:229`), and then their growths race
+// (`:309`). Four CPUs times two sites is what makes one leaked node visible.
 TEST(radix_growth_lost_cas_leaks_nothing_and_corrupts_nothing) {
     constexpr size_t kCpus = 4;
+    // Rounds beyond the asserted first one, purely to make the leak detector
+    // reliable rather than probabilistic — see the note at the loop.
+    constexpr size_t kExtraRounds = 24;
     Fixture f(kCpus);
     const size_t idx = rdx::bucketIndexFor<GA>(kVA);
 
@@ -309,6 +366,28 @@ TEST(radix_growth_lost_cas_leaks_nothing_and_corrupts_nothing) {
         ASSERT_TRUE(t.apply(kVA, kVA + kPage - 1, seed) == rdx::ApplyStatus::Ok);
         quiesce(f.h);
     }
+
+    // Measured before the race, so the exact post-race count below is derived
+    // rather than transcribed: growth ADDS one node per level walked and changes
+    // nothing else (which `radix_growth_walks_up_to_the_zone_and_stops`
+    // establishes), so whatever the seed's placement built stays put.
+    const size_t nodesBeforeRace = f.table.treeFor(idx).nodeCount();
+
+    // A rendezvous per round, so every CPU enters the growth climb at the same
+    // instant. Bounded, so a worker that throws cannot wedge the others — the
+    // waiter reports a fixture failure instead, which is the honest outcome: a run
+    // where one CPU died proves nothing about the discard.
+    std::atomic<size_t> arrived{0};
+    auto roundBarrier = [&](size_t round) {
+        const size_t target = kCpus * round;
+        arrived.fetch_add(1, std::memory_order_acq_rel);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+        while (arrived.load(std::memory_order_acquire) < target) {
+            if (std::chrono::steady_clock::now() >= deadline) return false;
+            std::this_thread::yield();
+        }
+        return true;
+    };
 
     std::vector<std::thread> workers;
     for (size_t c = 0; c < kCpus; c++) {
@@ -332,6 +411,50 @@ TEST(radix_growth_lost_cas_leaks_nothing_and_corrupts_nothing) {
                 if (f.table.growToCover(kVA, want) != rdx::ClusterStatus::Ok) {
                     throw AssertionFailure(std::string("growth failed"));
                 }
+
+                // ─── Extra rounds, because ONE race is not a detector ───────
+                //
+                // The round above is the one with the exact shape assertions, and
+                // on its own it is only a probabilistic detector of a missed growth
+                // discard: the CAS has to actually be LOST, and the window is
+                // narrow. If the widest-target CPU happens to run first it climbs
+                // all the way and every other CPU's `growToCover` returns without
+                // allocating anything, so there is no loser to leak. Measured with
+                // the discard deleted: one round caught it in **10 of 12 runs**, and
+                // 24 unsynchronised rounds only reached 11 of 12 — a coin toss
+                // dressed as a test either way.
+                //
+                // Two changes make it reliable rather than lucky:
+                //
+                //   * **a barrier immediately before each growth**, so all four
+                //     CPUs are inside the climb at the same instant rather than
+                //     arriving whenever their creation finished — which is what
+                //     was actually serialising them;
+                //   * **the maximal climb** (to the whole zone, level 1), so each
+                //     round offers several CAS steps to lose rather than one.
+                //
+                // These rounds are deliberately NOT seeded with a mapping: their
+                // old roots are left behind empty by D-030, which is legitimate
+                // PUBLISHED residue that teardown reclaims, so it does not disturb
+                // the leak accounting. Only the first bucket needs the seed,
+                // because only it has shape assertions.
+                for (size_t r = 1; r <= kExtraRounds; r++) {
+                    const uint64_t va       = kVA + r * kZone;
+                    const uint64_t zoneBase = rdx::bucketIndexFor<GA>(va) * kZone;
+                    const auto cst = f.table.createCluster(va, GA.defaultRootLevel);
+                    if (cst == rdx::ClusterStatus::OutOfMemory) {
+                        throw AssertionFailure(std::string("extra-round creation OOM"));
+                    }
+                    if (!roundBarrier(r)) {
+                        throw AssertionFailure(std::string(
+                            "round barrier timed out — another CPU died mid-round, so this "
+                            "run proves nothing about the discard"));
+                    }
+                    if (f.table.growToCover(zoneBase, zoneBase + kZone - 1)
+                            != rdx::ClusterStatus::Ok) {
+                        throw AssertionFailure(std::string("extra-round growth failed"));
+                    }
+                }
             } catch (const std::exception& e) {
                 failures.fetch_add(1, std::memory_order_relaxed);
                 std::lock_guard<std::mutex> lock(errorMutex);
@@ -354,13 +477,22 @@ TEST(radix_growth_lost_cas_leaks_nothing_and_corrupts_nothing) {
     TreeA t = f.table.treeFor(idx);
     ValidA::validate(t, "lost CAS");
 
-    // No loser's private parent is still linked, and none was destroyed while
-    // linked (which would have crashed the validate above). The spine from the
-    // new root down to the original is exactly one node per level walked; the
-    // seeded mapping contributes whatever its own placement built beneath it.
-    ASSERT_TRUE(t.nodeCount() >= static_cast<size_t>(GA.defaultRootLevel - t.rootLevel() + 1));
+    // No loser's private parent is still LINKED, and none was destroyed while
+    // linked (which would have crashed the validate above). Exact, not a `>=`
+    // bound: growth adds one node per level walked, so the count is the pre-race
+    // count plus the levels the winner climbed. A bound cannot see an extra node,
+    // which is the whole failure mode.
+    ASSERT_EQ(nodesBeforeRace + static_cast<size_t>(GA.defaultRootLevel - t.rootLevel()),
+              t.nodeCount());
     ASSERT_EQ(uint64_t{1}, t.root().refcount().load(RELAXED));
     ASSERT_TRUE(static_cast<bool>(t.lookup(kVA)));   // the seed survived it all
+
+    // **And the assertion the comment above always promised.** A loser's
+    // undiscarded private node is not linked anywhere, so nothing above can see
+    // it; the oracle counts allocations, so it can. Four CPUs each discarded a
+    // root at `createCluster` and raced a parent at `growToCover`, so a single
+    // missed discard at either site lands here.
+    f.finishAndAssertNoLeaks("growth lost CAS");
 }
 
 // ─── D-030: growing an EMPTY cluster leaves an empty node behind ───────────
