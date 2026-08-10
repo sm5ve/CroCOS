@@ -128,8 +128,12 @@ introduced, R-2's class surviving three lines above its own fix, and a long tail
    instruction**: it told the reader to `brew install x86_64-elf-gcc`, which silently
    discards every global constructor. Note `CLAUDE.md` is gitignored, so that fix is
    local-only and does not travel with the repo.
-4. **`RCU-proposal.md`** is a stray root-level file from the same `git add -A` as the
-   LibExt stubs — but three specs cite it, so **move** it under `docs/`, do not delete.
+4. ~~**`RCU-proposal.md`**~~ — **CLOSED 2026-08-10.** Moved into the spec tree rather
+   than into `docs/` as originally planned: it is a superseded *proposal* ("not yet a
+   spec", and `rcu.md` supersedes it) and every citation of it comes from inside
+   `specs/`. The `docs/` plan predated the spec tree becoming its own private repo,
+   after which `docs/` is specifically the public record of decisions and not a home
+   for drafting. Citations that said "project root" now say "this directory".
 5. **R-12** — Treiber ABA safety holds only because no scheduler exists. Tie to the
    preemption milestone; `Attempt::drawCpu` is the cheap half, already in.
 6. **`SafePtr`'s two move semantics** — `SafePtr<T>` nulls the source, the `void`

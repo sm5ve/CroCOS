@@ -4064,9 +4064,9 @@ makes `vmsmallocLateInit` skip the domain, so a release kernel constructs no
   coverage.
 - **`CLAUDE.md`** does not mention a 30k-line subsystem, two new kernel facilities,
   five new build options or two new run targets. Worth a pass before merge.
-- **`RCU-proposal.md`** is a stray root-level file from the same `git add -A` as the
-  LibExt stubs — but it *is* cited by three specs, so it wants moving under `docs/`,
-  not deleting.
+- ~~**`RCU-proposal.md`**~~ — closed 2026-08-10; moved into the spec tree (not `docs/`
+  as first planned — it is a superseded proposal cited only from within `specs/`, and
+  `docs/` is the public decision record rather than a home for drafting).
 - **Doc consolidation**: three overlapping handoffs land, one of which declares itself
   superseded.
 - **`SafePtr`'s two move semantics** — `SafePtr<T>` nulls the source, the `void`
