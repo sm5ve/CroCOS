@@ -3815,3 +3815,90 @@ Two incidental findings from writing it:
   reservation, which is why `radix_pinned_storage_stays_exempt` can asserts about
   pool heads without tripping anything and why this test had to reserve its own
   block. Worth knowing before writing another pinned-storage test.
+
+---
+
+## D-069 — the hygiene pass: R-18, R-19, R-21's honest half
+
+Three of the referee pass's four hygiene items. The fourth, and the half of R-21
+that costs something, is deliberately left open — see the end.
+
+### R-18 is not a coverage hole, and was not treated as one
+
+`CROCOS_SKIP_TSAN_STRESS` defaults ON, and `tests/CMakeLists.txt` already carried
+the decision ("**Default ON** (Spencer's call, 2026-08-08)"), the diagnosis behind
+it (starvation, 441/441 idle vs 425/441 loaded, reproducible in both directions),
+and the exact trade-off the referee re-raised — *"these are the only tests
+exercising the lock-free structures under a race detector — so run them
+deliberately, on a quiet machine"* — with the command to do it.
+
+So nothing was flipped. What WAS a hole is the distance between that sentence and
+anyone acting on it: the documented command reconfigures the working tree, so in
+practice the opt-in never happened.
+
+**`run_tsan_stress`** closes that without touching the default. It configures a
+separate binary directory with the flag off and runs the one runner the flag
+affects — `CoreTestRunnerTSan`, since all sixteen gated tests live in `tests/core`
+(AtomicBitPool, SplitBitmap, TreiberStack, AtomicLinkedList, and the
+`Core::rcu::EpochDomain` concurrent trio). Verified: **441/441 against the default
+gate's 425**, so it really does add the sixteen, and switching back is not a
+rebuild.
+
+### R-19's last two comments
+
+**`commit` does not perform §6.1's phase order.** It claimed to — "ALL marks, then
+the §7.2 `+1`s, then all publishes, then retires, then releases" — and cited a
+rejected formulation for interleaving them. There is one per-slot loop, and each
+iteration does its own row's mark, `+1`s, publish and retire before the next slot
+is looked at; occupancy is batched to the end of the node and the record retires
+happen after the whole walk.
+
+§6.1's order is normative about the **terminal state and the boundary**, not about
+statement order — after the boundary nothing can fail, so there is no unwind for an
+ordering to protect. What safety actually rests on is now written down: the claims
+freeze every site; the atomicity unit is ONE release-stored slot word, so
+old-or-complete-new is a per-slot promise and cross-slot atomicity was never
+offered to readers; and per-row order is load-bearing only where it is written —
+`markSubtree` before `publishAfterMark`, so a descent-cache entry into an interior
+node of the subtree sees the mark instead of resuming into unlinked structure.
+
+**The operation-exit pump does not make the bag drainable by others.** It claimed
+the pump makes the just-filled bag "stop being the open one and become drainable by
+any CPU's later pump". `tryAdvance` never seals — sealing is the owner's next
+retire (rotation on a stale tag), its own `barrier`, or `drainAllQuiescent` — and an
+Open bag is unclaimable by anyone else by I13, which
+`rcu_idle_slots_sealed_bags_are_drained_by_other_cpus` pins directly. This session's
+D-061 made the sealing semantics concrete enough to state the replacement
+confidently: what the pump buys is the epoch advance, so everything already sealed
+anywhere becomes reclaimable and this CPU's open bag is left stale-tagged for its
+next retire to rotate out. The honest bound is "until this CPU's next retire, or
+teardown", not "until the next pump anywhere".
+
+### R-21, split along the risk line
+
+The stress printed `detachment size in nodes — max=17 budget=64 decompositions=0`,
+which reads as evidence that 64 is comfortable. It is not evidence of anything: the
+workload caps a wide unmap at 16 granules and the comment at that site does the
+arithmetic itself — "sixteen of them is a whole level-5 node, which detaches as
+1 + 16 = 17". `max=17` is the fixture's ceiling; `decompositions=0` follows
+structurally.
+
+The consequence the filing did not state: **the shipping budget's decomposition
+path has no in-kernel coverage at all.** It is exercised only by
+`DecompositionTest`, at a synthetic budget of 1 on the tiny geometry.
+
+Two halves, and only one is cheap:
+
+- **Done now** — the line says what the number is (`max=17 (FIXTURE CEILING 17,
+  not an observation — R-21)`), and `Claim.h`'s `kDetachBudget` records that the
+  analytic bracket is what retains 64, because "Phase 5 measures it" was a promise
+  the measurement did not keep. A structural ceiling presented as a measurement is
+  worse than no measurement.
+- **Deliberately open** — widening the fixture. It retunes the whole distribution
+  of this instrument, so it needs its own baseline, and doing that in the same
+  breath as eleven deviations while the stress is the reference telling us those
+  deviations are sound is the wrong order. Named as a follow-up in the handoff,
+  together with **R-20** (D-055's workload change cut MAP_FIXED −33% and lookup
+  −50%, and lookup is the only row driving the descent cache and the `-icount`
+  probes), because the two are one defect wearing two hats and want one measurement
+  pass.

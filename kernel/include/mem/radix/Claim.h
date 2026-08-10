@@ -61,8 +61,15 @@ namespace kernel::mm::radix {
     // 1 + 32 = 33 nodes (under budget, never decomposes) and a full C0 subtree is
     // 1057 (decomposes into 32 C1 units of 33 plus a final unit). So real
     // munmap/MAP_FIXED shapes below the multi-MiB range almost never decompose,
-    // while a unit's mark pass and claim set stay cache-resident. Phase 5
-    // measures it.
+    // while a unit's mark pass and claim set stay cache-resident.
+    //
+    // **The bracket above is what retains 64, and it has to be** (R-21). Phase 5
+    // was supposed to measure it and the measurement is vacuous: the in-kernel
+    // stress caps a wide unmap at 16 granules, which detaches as 1 + 16 = 17, so
+    // its reported `max=17` is the fixture's arithmetic and its
+    // `decompositions=0` is structural. The budget is therefore held by analysis,
+    // not by evidence — which is sound, but it is not what "Phase 5 measures it"
+    // promised, and widening that fixture is an open follow-up.
     inline constexpr unsigned kDetachBudget = 64;
 
     // DEC-095's `scanChunk`: the most slots a chunked scan or enumeration

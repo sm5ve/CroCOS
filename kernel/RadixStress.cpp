@@ -788,10 +788,26 @@ namespace radix_stress {
                << "\n";
     }
 
+    // ─── This line's `max` is NOT an observation (R-21) ────────────────────
+    //
+    // It reads like evidence that `kDetachBudget = 64` is comfortable. It is not:
+    // the workload caps a wide unmap at `gran = 16` granules, and the comment at
+    // that site does the arithmetic itself — "sixteen of them is a whole level-5
+    // node, which detaches as 1 + 16 = 17". So `max=17` is the FIXTURE's ceiling
+    // and `decompositions=0` follows structurally rather than empirically.
+    //
+    // Which means the shipping budget's decomposition path has no in-kernel
+    // coverage at all — it is exercised only by `DecompositionTest`, at a synthetic
+    // budget of 1 on the tiny geometry. Widening the fixture is the fix and is a
+    // deliberate follow-up (it retunes this instrument's whole distribution, so it
+    // wants its own baseline); until then the label says what the number is, because
+    // a structural ceiling presented as a measurement is worse than no measurement.
+    // The retention argument for 64 is the analytic bracket at `Claim.h`'s
+    // `kDetachBudget` — a full C1 subtree is 33 and a full C0 is 1,057 — not this.
     void detachHistogram() {
         const auto& h = rdx::gDetachHistogram;
         klog() << "radixStress: detachment size in nodes (DEC-077) — n=" << h.total()
-               << " max=" << h.max()
+               << " max=" << h.max() << " (FIXTURE CEILING 17, not an observation — R-21)"
                << " budget=" << static_cast<uint64_t>(rdx::kDetachBudget)
                << " decompositions=" << rdx::gDecompositions.load(rdx::kCensusAccounting)
                << "\n  1:" << h.bucket(1) << " 2:" << h.bucket(2)
