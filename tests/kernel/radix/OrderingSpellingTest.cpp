@@ -33,6 +33,7 @@
 #include <cstdio>
 #include <dirent.h>
 #include <string>
+#include <map>
 #include <vector>
 
 using namespace CroCOSTest;
@@ -247,7 +248,12 @@ TEST(radix_every_atomic_is_spelled_with_a_named_ordering) {
 
     std::vector<Finding> findings;
     size_t primitivesSeen = 0;
-    for (const std::string& h : headers) scanHeader(h.c_str(), findings, primitivesSeen);
+    std::map<std::string, size_t> perHeader;
+    for (const std::string& h : headers) {
+        const size_t before = primitivesSeen;
+        scanHeader(h.c_str(), findings, primitivesSeen);
+        perHeader[h] = primitivesSeen - before;
+    }
 
     // A scanner that matched NOTHING would pass this test vacuously and report
     // the codebase as clean — which is exactly the failure mode a static check
@@ -277,6 +283,41 @@ TEST(radix_every_atomic_is_spelled_with_a_named_ordering) {
             " headers but not both Ordering.h and Claim.h — CROCOS_RADIX_HEADER_DIR is "
             "not the radix header directory, so whatever was scanned is not the "
             "subsystem under test");
+    }
+
+    // ─── The total floor cannot detect a missing SUBSET ────────────────────
+    //
+    // The floor above is on the TOTAL, and this project has already been bitten
+    // by exactly that shape: the old hand-maintained header list omitted two
+    // files, and the scanner's own self-check never noticed, because the headers
+    // it DID scan cleared the floor on their own.
+    //
+    // So the load-bearing headers are checked individually. Not with a count —
+    // counts move for legitimate reasons, and did: routing seventeen accounting
+    // bumps through one `bump()` helper took `DescentCache.h` from 29 primitives
+    // to 12, which NARROWED the surface that can be spelled wrong rather than
+    // weakening the check. The property worth asserting is the one that cannot
+    // move for a good reason: **this header was actually scanned at all**.
+    //
+    // Headers with genuinely no atomics (Geometry.h, Dispatch.h, SlotCodec.h,
+    // Ordering.h, KernelInstance.h) are deliberately absent from this list — a
+    // blanket per-file floor would fail on them for being what they are.
+    static const char* const kMustBeScanned[] = {
+        "Claim.h",           // the claim protocol — the edge this file exists for
+        "CoreTree.h",        // slot publish/load, the marks, the refcounts
+        "Node.h",            // stateWord and the node refcount
+        "DeferredRelease.h", // the MPSC pool protocol
+        "DescentCache.h",    // the pin and the dying-mark load
+    };
+    for (const char* need : kMustBeScanned) {
+        const auto it = perHeader.find(std::string(need));
+        if (it == perHeader.end() || it->second == 0) {
+            throw AssertionFailure(
+                std::string("§11 ordering-spelling check scanned ZERO atomic primitives in ") +
+                need + " — that header carries part of the protocol, so either the matcher "
+                "stopped seeing it or its atomics moved somewhere unscanned. A green result "
+                "for it means nothing until this is explained.");
+        }
     }
 
     if (!findings.empty()) {
