@@ -20,6 +20,7 @@
 #define CROCOS_MOCK_VMSUBSTRATE_H
 
 #include <stddef.h>
+#include <mem/SafePtr.h>   // the shared definition; this file supplies only ensureTLBEntryFresh
 #include <mem/MemTypes.h>
 #include <mem/NUMA.h>
 #include <arch.h>
@@ -46,7 +47,11 @@ namespace kernel::mm::VMSubstrate {
 
     // No-op in userspace: no TLB, no dirty bitmap. The call site in
     // vmsmalloc.cpp is still exercised (source-order correctness).
-    inline bool ensureTLBEntryFresh(void*) noexcept { return false; }  // userspace: never stale
+    // `noexcept` matches the shared declaration in <mem/SafePtr.h>. It briefly did
+    // not: this file was the only one of the three substrates that had it, and
+    // nothing could catch that while each declared the function privately. Sharing
+    // the declaration turned the drift into a compile error on the first build.
+    inline bool ensureTLBEntryFresh(void*) CROCOS_FRESHNESS_NOEXCEPT { return false; }  // userspace: never stale
 
     // Phase-3 storage primitives.
     void* reservePerDomainStaticBuffer(size_t byteSize, numa::DomainID d);
@@ -63,111 +68,9 @@ namespace kernel::mm::VMSubstrate {
     void* vmsmallocTry(size_t size);
     void  vmsfree(void*);
 
-        // ─── SafePtr ───────────────────────────────────────────────────────────
-    //
-    // A pointer into VMSubstrate-backed memory that discharges its freshness
-    // obligation on every access. RCU says the object has not been recycled;
-    // `ensureTLBEntryFresh` says THIS CPU's view of its bytes is current. The two
-    // are orthogonal, and a pointer that carries only the first is the DEC-047
-    // bug class waiting to happen — silently, since the userspace harness's
-    // `ensureTLBEntryFresh` is a no-op and every test passes without it.
-    //
-    // **Per ACCESS, not per pointer, and that is the whole design.** A single
-    // call at acquisition is not equivalent: freshness is a property of one
-    // CPU's mapping, so a reference that outlives a section and crosses a
-    // blocking round-trip (radix DEC-015's lookup result is exactly this) can
-    // resume on a CPU that never made the call. Every `operator*`, `operator->`
-    // and `at<U>` therefore pays it, and the ones that deliberately do not —
-    // `address()`, `raw()`, the comparisons — say so in their names.
-    //
-    // The API grows with its consumer on purpose. The VMM is the only consumer,
-    // so there is nothing to calcify around: when a site cannot be expressed
-    // ergonomically, the answer is to widen this rather than to reach past it
-    // for a bare `ensureTLBEntryFresh`, which is how the radix tree ended up
-    // with five unguarded sites that an in-kernel stress had to find.
-
-    template <typename T>
-    struct SafePtr {
-    private:
-        T* ptr;
-    public:
-        SafePtr() : ptr(nullptr) {}
-        SafePtr(T* p) : ptr(p) {}
-        // Move is a copy: a NON-OWNING view has nothing to transfer. Mirrors the
-        // real header, where the reasoning lives. All five spelled out so the
-        // `void` specialization cannot silently differ again.
-        SafePtr(const SafePtr& other) = default;
-        SafePtr(SafePtr&& other) = default;
-        SafePtr<T>& operator=(const SafePtr<T>& other) = default;
-        SafePtr<T>& operator=(SafePtr<T>&& other) = default;
-
-        T& operator*() const { ensureTLBEntryFresh(ptr); return *ptr; }
-        T* operator->() const { ensureTLBEntryFresh(ptr); return ptr; }
-
-        // A sub-object at a byte offset, made fresh on ITS OWN page rather than
-        // on the base's — which matters for anything that can straddle a page
-        // boundary, and costs nothing when it cannot.
-        template <typename U>
-        U& at(size_t byteOffset) const {
-            auto* const p = reinterpret_cast<unsigned char*>(ptr) + byteOffset;
-            ensureTLBEntryFresh(p);
-            return *reinterpret_cast<U*>(p);
-        }
-
-        // ── The deliberate non-accesses ────────────────────────────────────
-        //
-        // Comparison, encoding into a slot word, handing to `retire`, and
-        // computing an address discharge NOTHING, because they read no bytes.
-        // Named apart from the accessors so that "this one genuinely does not
-        // need it" is sayable in the vocabulary rather than by omission.
-        [[nodiscard]] T* address() const { return ptr; }
-        [[nodiscard]] void* raw() const { return ptr; }
-
-        // Hidden friends so a raw pointer on EITHER side works without the
-        // caller reaching for `address()`. Comparison reads no bytes, so this
-        // costs the discipline nothing — and an identity check that had to be
-        // spelled `a.address() == b` would push people towards holding raw
-        // pointers, which is the habit this type exists to break.
-        friend bool operator==(const SafePtr& a, const SafePtr& b) { return a.ptr == b.ptr; }
-        friend bool operator!=(const SafePtr& a, const SafePtr& b) { return a.ptr != b.ptr; }
-        explicit operator bool() const { return ptr != nullptr; }
-    };
-
-    // The type-erased form, for a pointee whose type is decided per access
-    // rather than by the pointer. The radix tree's `NodeRef` is the motivating
-    // consumer and the reason this exists: a descent stands on nodes of mixed
-    // valence and cannot name a concrete `Node<G, V>` (DEC-062's level->type map
-    // is what avoids needing to), so `SafePtr<Node<...>>` cannot be formed —
-    // yet the freshness obligation is identical. Without this the only way to
-    // write that code is a bare `ensureTLBEntryFresh` plus a `reinterpret_cast`,
-    // which is precisely the unguarded shape this type exists to prevent.
-    template <>
-    struct SafePtr<void> {
-    private:
-        void* ptr;
-    public:
-        SafePtr() : ptr(nullptr) {}
-        SafePtr(void* p) : ptr(p) {}
-        SafePtr(const SafePtr& other) = default;
-        SafePtr(SafePtr&& other) = default;
-        SafePtr<void>& operator=(const SafePtr<void>& other) = default;
-        SafePtr<void>& operator=(SafePtr<void>&& other) = default;
-
-        // The whole surface: a typed reference to a sub-object, fresh.
-        template <typename U>
-        U& at(size_t byteOffset) const {
-            auto* const p = static_cast<unsigned char*>(ptr) + byteOffset;
-            ensureTLBEntryFresh(p);
-            return *reinterpret_cast<U*>(p);
-        }
-
-        [[nodiscard]] void* address() const { return ptr; }
-        [[nodiscard]] void* raw() const { return ptr; }
-
-        bool operator==(const SafePtr& other) const { return ptr == other.ptr; }
-        bool operator!=(const SafePtr& other) const { return ptr != other.ptr; }
-        explicit operator bool() const { return ptr != nullptr; }
-    };
+    // SafePtr is shared with the kernel and the other mock — <mem/SafePtr.h>,
+    // included above. This file keeps only `ensureTLBEntryFresh`, which is the
+    // one thing a mock substrate legitimately defines differently.
 
     template <typename T, typename... Ts>
     SafePtr<T> make(Ts&&... args) {

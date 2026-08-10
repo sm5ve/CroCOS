@@ -1346,7 +1346,7 @@ namespace kernel::mm::VMSubstrate {
     // release build must not pay for a bounds test. Debug catches the first call on
     // the first boot. `SafePtr` is the only way to reach here by accident, and the
     // pinned regions are exactly the ones the headers tell you not to wrap.
-    bool ensureTLBEntryFresh(void* ptr) {
+    bool ensureTLBEntryFresh(void* ptr) CROCOS_FRESHNESS_NOEXCEPT {
 #if defined(CROCOS_RADIX_INSN_PROBE) && CROCOS_RADIX_INSN_PROBE == 3
         gFreshnessCallCount.fetch_add(1, RELAXED);
 #endif

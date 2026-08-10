@@ -4323,3 +4323,74 @@ Suite 1,667 green; kernel builds Debug and Release/LTO; all three boot configs c
 **R-12's design half is closed.** What remains is genuinely scheduler-dependent: the
 preempt-count in `CpuLocal`, the migrate-disable count per thread, and filling in
 four function bodies.
+
+---
+
+## D-074 — three copies of `SafePtr` become one, and the drift that was hiding
+
+`SafePtr` was defined three times, byte-identically: the real header and one in each
+of the two userspace mock substrates. Two of those are defensible — a kernel
+definition and a harness definition. The third is a **fork**, and the radix mock's own
+header says so: it describes itself as a "sibling" of the vmsmalloc one, forked in
+Phase 0 to add the DEC-052 poison oracle, per-type live accounting and fault
+injection. `SafePtr` was collateral: 47 lines of subtle semantics kept in step by
+hand.
+
+D-072 is what settled it. Fixing the move-semantics divergence meant applying the
+same edit three times, correctly, manually — and the divergence D-072 fixed was
+itself two copies disagreeing.
+
+The type now lives in `kernel/include/mem/SafePtr.h`, included by all three. Net
+−345/+22 lines. What the mocks still own is exactly one function,
+`ensureTLBEntryFresh`, which is the entire point of a mock substrate and the only
+part that legitimately differs.
+
+### Consolidation found drift immediately
+
+The vmsmalloc mock declared `ensureTLBEntryFresh` **`noexcept`**; the kernel and the
+radix mock did not. Nothing could catch that while each substrate declared the
+function privately — sharing the declaration turned it into a compile error on the
+first build. Two copies of a thing do not merely risk drifting; these already had.
+
+### The noexcept question, and the trap under it
+
+Spencer's call was that `ensureTLBEntryFresh` should be `noexcept` — right on the
+merits: it invalidates a TLB entry, it cannot throw, and the kernel is built
+`-fno-exceptions`.
+
+Applying it unconditionally aborted the radix suite. Under `CORE_LIBRARY_TESTING` the
+harness's `assert` **throws**, and the radix mock asserts on purpose — R-13's guard,
+that a freshness call on a PINNED static-buffer address read-modify-writes another
+tenant's live data. `radix_a_safeptr_over_pinned_storage_is_refused` catches that
+throw through `EXPECT_ASSERT_FAILURE`, so a `noexcept` implementation converts a
+reported test failure into `std::terminate`.
+
+**This is the third time the project has hit this exact trap** — `CROCOS_RCU_NOEXCEPT`
+in `core/rcu/EpochDomain.h` exists for it, and `rcu/RCU.h` reuses it and documents the
+reasoning, including the separate `CROCOS_RCU_DTOR_NOEXCEPT` needed because
+destructors are implicitly `noexcept(true)`. `CROCOS_FRESHNESS_NOEXCEPT` follows the
+established pattern: kernel and release builds get the noexcept the contract
+specifies, the throwing-assert harness does not.
+
+A conditional `noexcept` is only as good as its condition, so the condition is
+asserted rather than assumed:
+
+```cpp
+#if !defined(CORE_LIBRARY_TESTING)
+static_assert(noexcept(ensureTLBEntryFresh(nullptr)), ...);
+#endif
+```
+
+If `CORE_LIBRARY_TESTING` ever leaks into a kernel target the build fails, instead of
+the kernel quietly losing the contract. It passes in Debug and Release/LTO, which is
+what proves the macro resolves the way the comment claims.
+
+Suite 1,667 green; both kernel configs build; three boot configs clean.
+
+### Still duplicated, and deliberately left
+
+The two **mock substrates** remain forks of one another — same page primitives, same
+`MockVMSubstrate.cpp`, same `kWindowAddressBits`, differing only in the radix one's
+extra instrumentation. Merging them is a larger change than this one and wants its
+own baseline, so it is recorded here rather than done. `SafePtr` was the part that
+had already caused a defect.
