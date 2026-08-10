@@ -3195,3 +3195,79 @@ one record per distinct `Mapping`; the budget does not. That is one of C's
 advantages over D and the reason it went first. D remains deferred, to be judged
 on measurements once there is evidence about whether a 32-record pool ever
 shortfalls in practice.
+
+---
+
+## D-060 — R-2: the failable allocation path was not failable
+
+The referee pass's second merge blocker, and it is larger than the pass described.
+It anchored the defect at the static-buffer subtable installer using the panicking
+`allocateSmallPage`; that is real, but underneath it **`tryAllocateSmallPage`
+itself panicked**, so every failable page allocation in the tree was a
+userspace-triggerable panic and every unwind written around one was unreachable
+code.
+
+### The defect
+
+```cpp
+bool tryAllocateSmallPage(numa::DomainID targetDomain, phys_addr& out) {
+    const size_t got = gPageAllocator->allocatePages(1, cb, targetDomain);   // no flags
+    if (got != 1) return false;     // <-- unreachable
+    ...
+}
+```
+
+`allocatePages` without `AllocBehavior::GRACEFUL_OOM` ends at `assertNotReached`,
+and **`assertNotReached` is `PANIC_NO_STACKTRACE` in release as well as debug**
+(`kassert.h:52`) — unlike `assert`, which release compiles out. So the panic fired
+one frame below the `return false` that made the function read as if it worked.
+
+Address-space creation reaches this through the radix control block's
+`tryReservePerDomainStaticBuffer`, so **a fork storm at low memory panicked the
+kernel instead of returning ENOMEM.**
+
+Two things made it survive. `mm.h:59` stated the opposite of the truth — that the
+family "hands back a default-constructed `phys_addr` and the caller cannot tell",
+which describes a caller that gets control back. And the arena path's unwind
+(`tryEnsureSubtableInstalled`, with its pre-drawn dirty pages and its careful
+free-what-you-took loop) is written correctly and has been all along; it simply
+could never run.
+
+### The fix, in three parts
+
+1. **Both `tryAllocateSmallPage` overloads pass `GRACEFUL_OOM`.** That flag is
+   checked in exactly two places in the allocator, both the panic guard, so this
+   changes nothing but reachability. One line each; it is the root fix and it
+   repairs the arena path, `tryAllocPage`, `ensureLeafBitmapPageMapped` and the
+   radix data-page draw at once.
+2. **`ensureStaticBufferSubtable` is failable**, and the caller **hoists it out of
+   the leaf-writing loop**. The hoist is the fix rather than tidying: the subtable
+   install allocates, so leaving it inside meant a failure could occur after leaf
+   PTEs had been written — at VAs the failed reservation never returns and, since
+   the bump pointer does not advance, VAs the NEXT reservation writes again.
+   Rewriting a present leaf entry is exactly what DEC-051b's no-shootdown argument
+   forbids, and the pre-drawn `frames` array exists to make it unreachable; the
+   subtable allocation was the one remaining way to reach it. With the subtable
+   pass ahead of every leaf write, the leaf loop is infallible and the unwind is
+   "free the frames, touch nothing else".
+   **Partial subtable chains are deliberately left in place.** Subtable installs
+   are `isPresent()`-guarded, write-once and immutable, and a failed reservation
+   does not advance the bump pointer — so the next reservation lands on the same
+   VA, finds those levels present and completes the chain. Rolling them back would
+   be the actual defect. Leaf entries are the opposite case, which is why they are
+   the ones that must never be stranded.
+3. **`mm.h`'s contract corrected** to say the family panics, with the release
+   `assertNotReached` asymmetry named, plus the rule the defect illustrates: a
+   failable path must reach exhaustion through nothing but the `try` family,
+   because one `allocateSmallPage` anywhere reinstates the panic and the
+   surrounding unwind goes on looking correct.
+
+### Tests
+
+`PAI_TryAllocateSmallPage_ReturnsFalseOnExhaustion` and its `ProcessorID` sibling.
+They drive the wrappers through `gPageAllocator` — what production calls — rather
+than through the test fixture's `impl`, because the defect lived in the wrapper and
+a test reaching past it cannot see it. Both reproduced the panic before the fix and
+pass after. The overloads are tested separately on purpose: a fix applied to one
+and not the other would leave every VMSubstrate arena allocation still panicking.
+

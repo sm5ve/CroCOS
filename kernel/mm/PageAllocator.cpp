@@ -1182,11 +1182,27 @@ namespace kernel::mm::PageAllocator {
         return result;
     }
 
+    // ---- Failable single-page allocation ----
+    //
+    // **GRACEFUL_OOM is the whole mechanism, not a hint.** Without it
+    // `allocatePages` calls `assertNotReached` on exhaustion, and
+    // `assertNotReached` is `PANIC_NO_STACKTRACE` in release as well as debug
+    // (`kassert.h:52`) — unlike `assert`, which release compiles out. So these
+    // wrappers forwarded default flags for their whole existence, the panic fired
+    // one frame down, and `if (got != 1) return false` was unreachable code that
+    // made the functions read as if they worked.
+    //
+    // The consequence was not theoretical: address-space creation reaches here
+    // through the radix control block's static-buffer reservation, so a fork
+    // storm at low memory panicked the kernel instead of returning ENOMEM. That
+    // is a userspace-triggerable panic, which is the one outcome the failable
+    // family exists to prevent. Pinned by
+    // `PAI_TryAllocateSmallPage_ReturnsFalseOnExhaustion`.
     bool tryAllocateSmallPage(numa::DomainID targetDomain, phys_addr& out) {
         phys_addr result{};
         const size_t got =
             gPageAllocator->allocatePages(1, [&](PageRef ref) { result = ref.addr(); },
-                                          targetDomain);
+                                          targetDomain, AllocBehavior::GRACEFUL_OOM);
         if (got != 1) return false;
         out = result;
         return true;
@@ -1196,7 +1212,7 @@ namespace kernel::mm::PageAllocator {
         phys_addr result{};
         const size_t got =
             gPageAllocator->allocatePages(1, [&](PageRef ref) { result = ref.addr(); },
-                                          targetProc);
+                                          targetProc, AllocBehavior::GRACEFUL_OOM);
         if (got != 1) return false;
         out = result;
         return true;

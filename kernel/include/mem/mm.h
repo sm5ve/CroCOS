@@ -57,15 +57,24 @@ namespace kernel::mm{
 
         // ---- Failable single-page allocation ----
         //
-        // The `allocateSmallPage` family above discards allocatePages' return
-        // count, so an exhausted allocator hands back a default-constructed
-        // phys_addr and the caller cannot tell. Every existing caller is a
-        // never-fails path where that is acceptable; the runtime static-buffer
-        // reservation (vmsmalloc DEC-051) is the first that must FAIL CLEANLY,
-        // because untrusted userspace reaches it through address-space creation
-        // and the alternative is a userspace-triggerable panic.
+        // The `allocateSmallPage` family above **PANICS** on exhaustion. It does
+        // not return a default-constructed `phys_addr` for the caller to check —
+        // this comment said it did, and that was wrong in the direction that
+        // matters. `allocatePages` without `GRACEFUL_OOM` ends at
+        // `assertNotReached`, which is `PANIC_NO_STACKTRACE` in RELEASE too
+        // (`kassert.h:52`), unlike `assert`. There is no null to inspect because
+        // control never comes back.
         //
-        // Returns false and leaves `out` untouched on exhaustion.
+        // That is acceptable for the boot-time and never-fails callers, and it is
+        // the reason this family exists: the runtime static-buffer reservation
+        // (vmsmalloc DEC-051) must FAIL CLEANLY, because untrusted userspace
+        // reaches it through address-space creation and the alternative is a
+        // userspace-triggerable panic.
+        //
+        // Returns false and leaves `out` untouched on exhaustion. A caller on a
+        // failable path must reach exhaustion through NOTHING BUT these — one
+        // `allocateSmallPage` anywhere on the path reinstates the panic, and the
+        // surrounding unwind code goes on looking correct (R-2).
         [[nodiscard]] bool tryAllocateSmallPage(numa::DomainID targetDomain, phys_addr& out);
 
         // Processor-homed sibling, added by vmsmalloc DEC-048. Every page

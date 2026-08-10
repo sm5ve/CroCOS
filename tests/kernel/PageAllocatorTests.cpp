@@ -2302,6 +2302,98 @@ TEST(PAI_MultiDomain_FreeRoutesToCorrectPool) {
 }
 
 // ============================================================================
+// The failable single-page wrappers (R-2)
+// ============================================================================
+//
+// `tryAllocateSmallPage` exists so that a caller reached by untrusted userspace
+// — address-space creation, via the radix control block's static-buffer
+// reservation — can turn exhaustion into ENOMEM instead of a panic. Its whole
+// contract is one bool.
+//
+// It is worth testing precisely because it LOOKS tested: it has a `return false`
+// on a short count, so reading the function tells you nothing about whether that
+// line can be reached. It could not. The wrapper forwarded to `allocatePages`
+// with default flags, and default flags panic on OOM (`PAI_NonGracefulOOM_Panics`
+// above pins exactly that) — so the panic fired one frame down and the `return
+// false` was dead code. `GRACEFUL_OOM` is the flag that makes a short count a
+// return value rather than a panic, and the failable wrappers are the only
+// callers in the tree that need it.
+//
+// These drive the wrappers through `gPageAllocator`, which is what production
+// calls, rather than through `impl.impl` — the defect lived in the wrapper, so a
+// test that reaches past it cannot see it.
+
+namespace {
+    // Swap the global allocator in for the duration of a test and always put it
+    // back: the wrappers read the global, and a leaked pointer to a destroyed
+    // fixture would make the NEXT test in this file fail somewhere unrelated.
+    struct GlobalAllocatorFor {
+        PageAllocatorImpl* saved;
+        explicit GlobalAllocatorFor(PageAllocatorImpl& impl) : saved(gPageAllocator) {
+            gPageAllocator = &impl;
+        }
+        ~GlobalAllocatorFor() { gPageAllocator = saved; }
+    };
+}
+
+TEST(PAI_TryAllocateSmallPage_ReturnsFalseOnExhaustion) {
+    TestPageAllocatorImpl impl({ DomainSpec::simple(0, 1, {0, 1, 2, 3}) });
+    GlobalAllocatorFor bind(impl.impl);
+
+    // One page must come out cleanly, so the failure below is exhaustion and
+    // not a miswired fixture.
+    phys_addr first{};
+    ASSERT_TRUE(PageAllocator::tryAllocateSmallPage(kernel::numa::DomainID{0}, first));
+    ASSERT_TRUE(first.value != 0);
+
+    // Drain the rest. GRACEFUL_OOM on the bulk call, because the point of this
+    // test is the failable wrapper and a panic in the setup would prove nothing.
+    impl.impl.allocatePages(4 * PageAllocator::smallPagesPerBigPage,
+                            [](PageRef){}, AllocBehavior::GRACEFUL_OOM);
+
+    // **The contract**: false, not a panic, and `out` untouched.
+    phys_addr out{0xdeadbeef};
+    bool returned = false;
+    try {
+        returned = PageAllocator::tryAllocateSmallPage(kernel::numa::DomainID{0}, out);
+    } catch (const AssertionFailure& e) {
+        throw AssertionFailure(
+            std::string("tryAllocateSmallPage panicked instead of returning false — the "
+                        "failable path is not failable, and address-space creation under "
+                        "memory pressure is a userspace-triggerable panic (R-2): ") + e.what());
+    }
+    ASSERT_TRUE(!returned);
+    ASSERT_EQ(uint64_t{0xdeadbeef}, out.value);
+    ASSERT_TRUE(impl.impl.numaPools[0]->checkInvariants());
+}
+
+// The ProcessorID sibling, added by vmsmalloc DEC-048 for the arena paths. Same
+// defect, same fix, and it is a separate overload — so a fix applied to one and
+// not the other would leave every VMSubstrate arena allocation still panicking.
+TEST(PAI_TryAllocateSmallPage_ProcessorOverload_ReturnsFalseOnExhaustion) {
+    TestPageAllocatorImpl impl({ DomainSpec::simple(0, 1, {0, 1, 2, 3}) });
+    GlobalAllocatorFor bind(impl.impl);
+
+    phys_addr first{};
+    ASSERT_TRUE(PageAllocator::tryAllocateSmallPage(arch::ProcessorID{0}, first));
+
+    impl.impl.allocatePages(4 * PageAllocator::smallPagesPerBigPage,
+                            [](PageRef){}, AllocBehavior::GRACEFUL_OOM);
+
+    phys_addr out{0xdeadbeef};
+    bool returned = false;
+    try {
+        returned = PageAllocator::tryAllocateSmallPage(arch::ProcessorID{0}, out);
+    } catch (const AssertionFailure& e) {
+        throw AssertionFailure(
+            std::string("tryAllocateSmallPage(ProcessorID) panicked instead of returning "
+                        "false (R-2): ") + e.what());
+    }
+    ASSERT_TRUE(!returned);
+    ASSERT_EQ(uint64_t{0xdeadbeef}, out.value);
+}
+
+// ============================================================================
 // PageAllocatorImpl — Concurrent stress (single domain)
 // ============================================================================
 

@@ -667,11 +667,34 @@ namespace VMSubstrateHelper {
     // `slotBase` is the static-buffer slot's base VA (arenaVirtualBase(N)).
     // `va` is the buffer-page VA the leaf PTE will eventually map.
     // `cpu` is the placement hint for the subtable allocation itself.
+    //
+    // ─── Failable, and why a partial chain needs no unwind (R-2) ────────────
+    //
+    // Returns false on physical exhaustion. It used to call the PANICKING
+    // `allocateSmallPage` — so `tryReservePerDomainStaticBuffer`, whose entire
+    // reason for existing is that untrusted userspace reaches it through
+    // address-space creation, could panic here after carefully pre-drawing its
+    // data pages a few lines up.
+    //
+    // On failure, whatever levels this already installed are **left in place**,
+    // and that is correct rather than a leak. Subtable installs are
+    // `isPresent()`-guarded, write-once and immutable (see DEC-051b on
+    // `reserveStaticBufferImpl`), and a failed reservation does not advance the
+    // bump pointer — so the next reservation lands on the same VA, finds those
+    // levels present, skips them and completes the chain. The pages are
+    // permanently part of the static-buffer page tables either way, which is
+    // exactly what they would have been had the reservation succeeded.
+    //
+    // Rolling them back would be the actual defect: it would rewrite a present
+    // entry, which is the one thing the no-shootdown argument forbids.
+    //
+    // **Leaf entries are the opposite case** and must never be left behind, which
+    // is why the caller hoists this whole pass ahead of any leaf write.
     // ────────────────────────────────────────────────────────────────────────
     template <size_t level>
-    inline void ensureStaticBufferSubtable(kernel::mm::virt_addr slotBase,
-                                           kernel::mm::virt_addr va,
-                                           arch::ProcessorID cpu)
+    [[nodiscard]] inline bool ensureStaticBufferSubtable(kernel::mm::virt_addr slotBase,
+                                                         kernel::mm::virt_addr va,
+                                                         arch::ProcessorID cpu)
         requires (level >= kernel::mm::pageTableLevelForKMemRegion())
               && (level <  leafLevel)
     {
@@ -691,8 +714,8 @@ namespace VMSubstrateHelper {
         auto& parentEntry = *reinterpret_cast<arch::PTE<level>*>(parentEntryAddr);
 
         if (!parentEntry.isPresent()) {
-            const kernel::mm::phys_addr physAddr =
-                kernel::mm::PageAllocator::allocateSmallPage(cpu);
+            kernel::mm::phys_addr physAddr{};
+            if (!kernel::mm::PageAllocator::tryAllocateSmallPage(cpu, physAddr)) return false;
             parentEntry = arch::PTE<level>::subtableEntry(physAddr, kFlags);
 
             const uint64_t childEntryAddr =
@@ -709,8 +732,9 @@ namespace VMSubstrateHelper {
         }
 
         if constexpr (level + 1 < leafLevel) {
-            ensureStaticBufferSubtable<level + 1>(slotBase, va, cpu);
+            return ensureStaticBufferSubtable<level + 1>(slotBase, va, cpu);
         }
+        return true;
     }
 
 } // VMSubstrateHelper
@@ -1173,12 +1197,43 @@ namespace kernel::mm::VMSubstrate {
         constexpr auto kLeafFlags = Flag::Write | Flag::Global | Flag::NoExecute;
         const arch::ProcessorID cpu = arch::getCurrentProcessorID();
 
+        // ─── Pass 1: the subtable chains, which are the last fallible step ──
+        //
+        // Hoisted out of the leaf loop below, and that separation is the fix for
+        // R-2 rather than a tidying of it. The subtable install allocates, so
+        // leaving it inside the loop meant a failure could occur after leaf
+        // entries had already been written — at VAs the failed reservation never
+        // returns and, because the bump pointer does not advance, VAs the NEXT
+        // reservation will write again. Rewriting a present leaf entry is exactly
+        // what DEC-051b's no-shootdown argument forbids, and the pre-drawn
+        // `frames` above exist to make that unreachable. The subtable allocation
+        // was the one remaining way to reach it.
+        //
+        // With this pass ahead of every leaf write, the leaf loop is infallible
+        // and the unwind is complete: free the frames, touch nothing else. The
+        // partial subtable chains stay — see `ensureStaticBufferSubtable` for why
+        // that is correct and rolling them back would not be.
         for (size_t i = 0; i < pages; i++) {
             const virt_addr pageVA = staticBufferNextVA + i * arch::smallPageSize;
+            if (VMSubstrateHelper::ensureStaticBufferSubtable<pageTableLevelForKMemRegion()>(
+                    staticBufferSlotBase, pageVA, cpu)) {
+                continue;
+            }
+            if (failable) {
+                for (size_t k = 0; k < pages; k++) PageAllocator::freeSmallPage(frames[k]);
+                return nullptr;
+            }
+            // The boot-time form's contract is that it panics, and saying so here
+            // names the condition instead of leaving it to fire inside the page
+            // allocator two frames down.
+            assertNotReached("reservePerDomainStaticBuffer: out of memory backing the "
+                             "static-buffer page tables");
+            return nullptr;
+        }
 
-            // Lazy-install any missing subtables (PD → leaf PT chain).
-            VMSubstrateHelper::ensureStaticBufferSubtable<pageTableLevelForKMemRegion()>(
-                staticBufferSlotBase, pageVA, cpu);
+        // ─── Pass 2: leaf entries and zero-fill. Nothing here may fail ──────
+        for (size_t i = 0; i < pages; i++) {
+            const virt_addr pageVA = staticBufferNextVA + i * arch::smallPageSize;
 
             // Place the data page on the requested NUMA domain.
             const phys_addr phys =
