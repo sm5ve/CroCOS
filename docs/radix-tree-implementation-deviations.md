@@ -4176,3 +4176,62 @@ Release/LTO, zero panics, `oom=0`, residue gate satisfied. Suite 1,665 green
 the analytic bracket at `Claim.h` — a full C1 subtree is 33 and a full C0 is 1,057 —
 and no stress figure replaces it. What changed is that the budget's decomposition
 path is now exercised on the target instead of only being argued about.
+
+---
+
+## D-072 — `SafePtr`'s two move semantics, and why the fix is to remove one
+
+The last of D-070's notes. `SafePtr<T>` and `SafePtr<void>` disagreed about what a
+move means, with nothing asserting either behaviour:
+
+- `SafePtr<T>` had a hand-written move constructor and move assignment that **nulled
+  the source**.
+- `SafePtr<void>` declared a copy constructor as `= default`, which **suppresses the
+  implicit move**, so every "move" of it bound to the copy and left the source live.
+
+Same abstraction, same spelling at the call site, opposite behaviour — and the
+divergence was replicated identically in all three copies of the type (the real
+header and both test mocks).
+
+### Which way to resolve it
+
+Toward copying, in both. `SafePtr` is a **non-owning view**: it has no destructor,
+copying is unrestricted, and `destroy()` is an explicit call the type does not drive.
+Nulling the source is unique-ownership semantics on a type that owns nothing — and
+because copies are unrestricted it enforced no uniqueness anyway, so it bought nothing
+while making `auto b = move(a); use(a);` a null dereference for one specialization and
+correct for the other.
+
+The deeper reason is the type's own stated design: freshness attaches to an **access**,
+not to a pointer (the header says so directly — "per ACCESS, not per pointer, and that
+is the whole design"). A move therefore has no obligation to hand over. There was
+nothing for the nulling to mean.
+
+Nothing in the tree ever moved a `SafePtr` explicitly, so the nulling only ever fired
+on implicit moves — which is why an inconsistency this sharp survived to a referee
+pass. All five special members are now declared explicitly in both specializations, so
+which operations exist is readable rather than inferred from what a user-declared copy
+constructor happens to suppress.
+
+### The assertion the finding asked for
+
+`radix_safeptr_move_is_a_copy_in_both_specializations` pins both halves.
+**Mutation-tested in both directions**, which matters because the two halves are not
+symmetric — only one of them changed behaviour:
+
+| mutation | result |
+|---|---|
+| restore the nulling move on `SafePtr<T>` | **fails** on `a.address() == m` |
+| add a nulling move to `SafePtr<void>` | **fails** on `v.address() == m` |
+
+The second is the one worth having. `SafePtr<void>`'s behaviour did *not* change here —
+it copied before and copies now — so without that half, a later "let's make these
+consistent" pass could unify them the wrong way, on the nulling semantics, and no test
+would object. Asserting the behaviour that stayed the same is what makes the pair a
+specification rather than a changelog.
+
+Suite 1,667 green (the new test runs in both the ASan and TSan radix runners); kernel
+builds Debug and Release/LTO and boots clean.
+
+**Closes the `SafePtr` item.** Of D-070's open list only R-12 remains, which is tied to
+the preemption milestone by design.

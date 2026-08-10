@@ -136,8 +136,14 @@ introduced, R-2's class surviving three lines above its own fix, and a long tail
    for drafting. Citations that said "project root" now say "this directory".
 5. **R-12** — Treiber ABA safety holds only because no scheduler exists. Tie to the
    preemption milestone; `Attempt::drawCpu` is the cheap half, already in.
-6. **`SafePtr`'s two move semantics** — `SafePtr<T>` nulls the source, the `void`
-   specialization copies. Same abstraction, opposite behaviour, no assertion.
+6. ~~**`SafePtr`'s two move semantics**~~ — **CLOSED 2026-08-10 (D-072).** Resolved
+   toward copying in both: `SafePtr` is a non-owning view with no destructor and
+   unrestricted copying, and freshness attaches to an access rather than to a pointer,
+   so a move has nothing to transfer. All five special members are now explicit in
+   both specializations. Pinned by
+   `radix_safeptr_move_is_a_copy_in_both_specializations`, mutation-tested in **both**
+   directions — including the half whose behaviour did not change, so a later
+   "consistency" pass cannot unify them onto the nulling semantics unopposed.
 7. One unidentified transient in ~16 suite runs at peak referee load (10/10 clean
    after). Most likely the known load-sensitive conflict-rate assertion in
    `radix_concurrent_disjoint_writers_do_not_interfere`. Capture the name if it

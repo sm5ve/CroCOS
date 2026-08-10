@@ -565,6 +565,50 @@ TEST(radix_a_safeptr_over_pinned_storage_is_refused) {
     VS::destroy(p);
 }
 
+TEST(radix_safeptr_move_is_a_copy_in_both_specializations) {
+    // The referee pass found `SafePtr<T>` and `SafePtr<void>` disagreeing about
+    // what a move means: the primary template nulled the source, while the `void`
+    // specialization declared a copy constructor — which suppresses the implicit
+    // move — so its "moves" silently bound to the copy and left the source live.
+    // One abstraction, two behaviours, and nothing asserting either. This is the
+    // assertion.
+    //
+    // Move is a COPY for both, because `SafePtr` is a non-owning view: no
+    // destructor, unrestricted copying, and freshness attaches to an access rather
+    // than to a pointer, so a move has nothing to hand over. Nulling was
+    // unique-ownership semantics on a type with no ownership, and since copies are
+    // unrestricted it enforced no uniqueness either.
+    Harness h;
+
+    auto* m = makeMapping(0x4000);
+    ASSERT_TRUE(m != nullptr);
+
+    // Primary template: the source must survive the move intact.
+    VS::SafePtr<rdx::Mapping> a(m);
+    VS::SafePtr<rdx::Mapping> b(::move(a));
+    ASSERT_TRUE(a.address() == m);          // would be nullptr under the old move
+    ASSERT_TRUE(b.address() == m);
+    ASSERT_TRUE(a == b);
+
+    VS::SafePtr<rdx::Mapping> c;
+    c = ::move(b);
+    ASSERT_TRUE(b.address() == m);          // ...and likewise for move-assignment
+    ASSERT_TRUE(c.address() == m);
+
+    // The `void` specialization: same answer, which is the point of the test.
+    VS::SafePtr<void> v(static_cast<void*>(m));
+    VS::SafePtr<void> w(::move(v));
+    ASSERT_TRUE(v.address() == static_cast<void*>(m));
+    ASSERT_TRUE(w.address() == static_cast<void*>(m));
+
+    VS::SafePtr<void> x;
+    x = ::move(w);
+    ASSERT_TRUE(w.address() == static_cast<void*>(m));
+    ASSERT_TRUE(x.address() == static_cast<void*>(m));
+
+    VS::destroy(VS::SafePtr<rdx::Mapping>(m));
+}
+
 TEST(radix_root_bucket_page_is_exempt) {
     // D-051's whole point, and the reason it is worth 4,096 B of window per
     // address space. Every descent opens by loading a bucket word; while the

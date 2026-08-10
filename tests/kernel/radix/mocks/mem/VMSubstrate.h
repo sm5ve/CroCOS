@@ -170,12 +170,13 @@ namespace kernel::mm::VMSubstrate {
     public:
         SafePtr() : ptr(nullptr) {}
         SafePtr(T* p) : ptr(p) {}
+        // Move is a copy: a NON-OWNING view has nothing to transfer. Mirrors the
+        // real header, where the reasoning lives. All five spelled out so the
+        // `void` specialization cannot silently differ again.
         SafePtr(const SafePtr& other) = default;
-        SafePtr(SafePtr&& other) noexcept : ptr(other.ptr) { other.ptr = nullptr; }
+        SafePtr(SafePtr&& other) = default;
         SafePtr<T>& operator=(const SafePtr<T>& other) = default;
-        SafePtr<T>& operator=(SafePtr<T>&& other) noexcept {
-            ptr = other.ptr; other.ptr = nullptr; return *this;
-        }
+        SafePtr<T>& operator=(SafePtr<T>&& other) = default;
 
         T& operator*() const { ensureTLBEntryFresh(ptr); return *ptr; }
         T* operator->() const { ensureTLBEntryFresh(ptr); return ptr; }
@@ -225,7 +226,9 @@ namespace kernel::mm::VMSubstrate {
         SafePtr() : ptr(nullptr) {}
         SafePtr(void* p) : ptr(p) {}
         SafePtr(const SafePtr& other) = default;
+        SafePtr(SafePtr&& other) = default;
         SafePtr<void>& operator=(const SafePtr<void>& other) = default;
+        SafePtr<void>& operator=(SafePtr<void>&& other) = default;
 
         // The whole surface: a typed reference to a sub-object, fresh.
         template <typename U>

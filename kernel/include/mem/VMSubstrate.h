@@ -230,12 +230,31 @@ namespace kernel::mm::VMSubstrate {
     public:
         SafePtr() : ptr(nullptr) {}
         SafePtr(T* p) : ptr(p) {}
+
+        // ── Move is a copy, deliberately, and all five are spelled out ─────
+        //
+        // This is a NON-OWNING view: no destructor, unrestricted copying, and
+        // `destroy()` is an explicit call rather than anything this type drives.
+        // So there is nothing for a move to transfer — freshness is a property of
+        // an ACCESS, not of a pointer (see the note above), so holding one confers
+        // no obligation that could change hands.
+        //
+        // It used to null the source on move, which is unique-ownership semantics
+        // on a type that has none: since copies are unrestricted it enforced no
+        // uniqueness, and it made `auto b = move(a); use(a);` a null dereference
+        // for `SafePtr<T>` while being perfectly fine for `SafePtr<void>` — which
+        // declared a copy constructor, suppressing its implicit move, so its
+        // "moves" silently bound to the copy. One abstraction, two behaviours,
+        // nothing asserting either. Nothing in the tree ever moved a `SafePtr`
+        // explicitly, so the nulling only ever fired on implicit moves.
+        //
+        // All five special members are declared here, and identically in the
+        // `void` specialization, so which operations exist is readable rather than
+        // inferred from what a user-declared copy constructor suppresses.
         SafePtr(const SafePtr& other) = default;
-        SafePtr(SafePtr&& other) noexcept : ptr(other.ptr) { other.ptr = nullptr; }
+        SafePtr(SafePtr&& other) = default;
         SafePtr<T>& operator=(const SafePtr<T>& other) = default;
-        SafePtr<T>& operator=(SafePtr<T>&& other) noexcept {
-            ptr = other.ptr; other.ptr = nullptr; return *this;
-        }
+        SafePtr<T>& operator=(SafePtr<T>&& other) = default;
 
         T& operator*() const { ensureTLBEntryFresh(ptr); return *ptr; }
         T* operator->() const { ensureTLBEntryFresh(ptr); return ptr; }
@@ -284,8 +303,13 @@ namespace kernel::mm::VMSubstrate {
     public:
         SafePtr() : ptr(nullptr) {}
         SafePtr(void* p) : ptr(p) {}
+
+        // All five, matching the primary template — move is a copy here too. See
+        // the note there for why, and for the divergence this spelling removes.
         SafePtr(const SafePtr& other) = default;
+        SafePtr(SafePtr&& other) = default;
         SafePtr<void>& operator=(const SafePtr<void>& other) = default;
+        SafePtr<void>& operator=(SafePtr<void>&& other) = default;
 
         // The whole surface: a typed reference to a sub-object, fresh.
         template <typename U>
