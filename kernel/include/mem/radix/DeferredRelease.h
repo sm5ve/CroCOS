@@ -80,13 +80,26 @@
 //
 // ─── Freshness ───────────────────────────────────────────────────────────
 //
-// RCU's `onPreTouch` covers a retire subject's `RetireHead` and nothing else,
-// so a deleter's accesses to the rest of the record body are cross-CPU accesses
-// to vmsmalloc-backed memory and need the `ensureTLBEntryFresh` discipline —
-// the DEC-047 stale-TLB bug class. **The same applies to each record's first
-// draw**: records are allocated by the CREATING CPU, so the owning CPU's first
-// draw is a cross-CPU first touch of possibly-recycled arena memory, with no
-// deleter in sight. Paid at the draw site.
+// RCU's `onPreTouch` covers a retire subject's `RetireHead`, and **because
+// freshness is PAGE-granular it thereby covers the whole record** — a
+// `DeferredRelease` is 48 B inside one page. This note used to say "and nothing
+// else", which is true of bytes and false of pages, and it mattered: R-6 was filed
+// as "the deleter's freshness is not asserted" when the truth is that the deleter's
+// `SafePtr` over the RECORD is redundant and no test can distinguish it from the
+// hook. It is kept for uniformity, which is cheap and better than an exception
+// justified by an allocator's size classes.
+//
+// **What genuinely needs the discipline is the `Mapping`** the record names: a
+// separate allocation on a separate page, reached through a pointer read out of the
+// record, that `onPreTouch` never touched. `releaseMappingRefs` takes a
+// `SafePtr<Mapping>` by value so a caller cannot skip it, and
+// `radix_release_record_deleter_discharges_freshness_on_the_record` is what
+// notices if the signature changes.
+//
+// **The same applies to each record's first draw**: records are allocated by the
+// CREATING CPU, so the owning CPU's first draw is a cross-CPU first touch of
+// possibly-recycled arena memory, with no deleter and no hook in sight. Paid at
+// the draw site, and NOT redundant there.
 //
 // The pool HEADS are exempt: they live in pinned per-address-space storage
 // whose mapping never changes.
@@ -219,9 +232,10 @@ namespace kernel::mm::radix {
     // free the record (see the header comment: freeing re-creates the
     // allocating-`munmap` hazard one step removed).
     inline void deleteDeferredRelease(DeferredRelease* r) {
-        // onPreTouch covered `head` and nothing else. Everything below is a
-        // cross-CPU access to the record's body, so it goes through a SafePtr
-        // rather than through a bare freshness call and a raw pointer.
+        // Uniformity, not necessity — see the header note (R-6). `onPreTouch` ran
+        // on this record's `RetireHead` and freshness is PAGE-granular, so a 48 B
+        // record's whole body was already covered. The call that matters is the one
+        // on the `Mapping` further down.
         const VMSubstrate::SafePtr<DeferredRelease> rec(r);
 
         Mapping* const m               = rec->mapping;

@@ -29,7 +29,9 @@
 #include "../../test.h"
 #include <harness/TestHarness.h>
 
+#include <algorithm>
 #include <cstdio>
+#include <dirent.h>
 #include <string>
 #include <vector>
 
@@ -42,12 +44,40 @@ namespace {
 #error "CROCOS_RADIX_HEADER_DIR must be defined for the ordering spelling check"
 #endif
 
-const char* const kHeaders[] = {
-    "Geometry.h", "Ordering.h", "SlotCodec.h", "Node.h",
-    "Mapping.h", "DeferredRelease.h", "BucketCodec.h", "ClusterTable.h",
-    "Placement.h", "AddressSpace.h", "Dispatch.h", "CoreTree.h",
-    "DescentCache.h",
-};
+// ─── The header set is ENUMERATED, not listed (R-4) ────────────────────────
+//
+// This was a hand-maintained array, and it had gone stale in the way a
+// hand-maintained array does: **`Claim.h` was never in it** — the claim protocol's
+// own atomics, i.e. precisely the edge this whole file exists to defend — and
+// neither was `ProgressAudit.h` with its 35 more. A bare `ACQUIRE` in `Claim.h`
+// passed the check; the identical edit in a scanned header failed it.
+//
+// The existing coverage floor could not catch that. It asserts a minimum number of
+// PRIMITIVES, and the thirteen listed headers supply hundreds — so dropping two
+// headers never came close to the floor. A floor on the total cannot detect a
+// missing subset.
+//
+// So the list is gone. Every `.h` in the directory is scanned, which makes a new
+// radix header covered on the day it is created rather than on the day someone
+// remembers this file. The old handoff even carried "new radix headers need to be
+// added to OrderingSpellingTest.cpp" as a standing chore — that chore was the bug.
+std::vector<std::string> enumerateRadixHeaders() {
+    std::vector<std::string> out;
+    DIR* dir = opendir(CROCOS_RADIX_HEADER_DIR);
+    if (dir == nullptr) {
+        throw AssertionFailure(std::string("cannot open the radix header directory: ") +
+                               CROCOS_RADIX_HEADER_DIR);
+    }
+    while (const dirent* e = readdir(dir)) {
+        const std::string n = e->d_name;
+        if (n.size() > 2 && n.compare(n.size() - 2, 2, ".h") == 0) out.push_back(n);
+    }
+    closedir(dir);
+    // Sorted so a failure report reads the same way twice; `readdir` order is
+    // filesystem-dependent.
+    std::sort(out.begin(), out.end());
+    return out;
+}
 
 std::string readHeader(const char* name) {
     std::string path = std::string(CROCOS_RADIX_HEADER_DIR) + "/" + name;
@@ -213,9 +243,11 @@ void scanHeader(const char* name, std::vector<Finding>& out, size_t& primitivesS
 }  // namespace
 
 TEST(radix_every_atomic_is_spelled_with_a_named_ordering) {
+    const std::vector<std::string> headers = enumerateRadixHeaders();
+
     std::vector<Finding> findings;
     size_t primitivesSeen = 0;
-    for (const char* h : kHeaders) scanHeader(h, findings, primitivesSeen);
+    for (const std::string& h : headers) scanHeader(h.c_str(), findings, primitivesSeen);
 
     // A scanner that matched NOTHING would pass this test vacuously and report
     // the codebase as clean — which is exactly the failure mode a static check
@@ -226,9 +258,25 @@ TEST(radix_every_atomic_is_spelled_with_a_named_ordering) {
     if (primitivesSeen < 20) {
         throw AssertionFailure(
             "§11 ordering-spelling check scanned only " + std::to_string(primitivesSeen) +
-            " atomic primitives across " + std::to_string(sizeof(kHeaders) / sizeof(*kHeaders)) +
+            " atomic primitives across " + std::to_string(headers.size()) +
             " headers — the scanner is not seeing the source, so its green result means "
-            "nothing. Check CROCOS_RADIX_HEADER_DIR and kHeaders.");
+            "nothing. Check CROCOS_RADIX_HEADER_DIR.");
+    }
+
+    // Coverage of the DIRECTORY, which the primitive floor cannot check: a path
+    // pointing somewhere else entirely could still hold enough atomics to clear the
+    // floor. These two names are the load-bearing ones — `Ordering.h` defines the
+    // constants and `Claim.h` holds the protocol whose edge is the whole reason
+    // this file exists, and was the header the old hand-maintained list omitted.
+    const auto has = [&](const char* n) {
+        return std::find(headers.begin(), headers.end(), std::string(n)) != headers.end();
+    };
+    if (!has("Ordering.h") || !has("Claim.h")) {
+        throw AssertionFailure(
+            "§11 ordering-spelling check enumerated " + std::to_string(headers.size()) +
+            " headers but not both Ordering.h and Claim.h — CROCOS_RADIX_HEADER_DIR is "
+            "not the radix header directory, so whatever was scanned is not the "
+            "subsystem under test");
     }
 
     if (!findings.empty()) {

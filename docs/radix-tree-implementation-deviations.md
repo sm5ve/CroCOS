@@ -3560,3 +3560,107 @@ than implying otherwise:
 So the decomposition assertions are a guard against a future decomposition-specific
 allocation, not a closed finding. The R-5 finding itself — the growth/creation
 lost-CAS discards — is closed and proven.
+
+---
+
+## D-065 — R-4: the ordering check's header list had gone stale
+
+§11's static spelling check is the only detector for the claim→slot-read edge —
+x86-64's `lock or` is a full barrier so no execution can expose a missing acquire,
+and TSan does not model a missing acquire on a well-formed atomic. It scanned a
+**hand-maintained array of header names**, and the array was missing two files:
+
+| unscanned | atomic ops |
+|---|---|
+| `Claim.h` | 12 — **the claim protocol's own**, i.e. the edge the file exists for |
+| `ProgressAudit.h` | 35 |
+
+A bare `ACQUIRE` in `Claim.h` passed; the identical edit in a listed header failed.
+
+**The existing coverage floor could not have caught it.** It asserts a minimum
+number of PRIMITIVES seen, and thirteen listed headers supply hundreds — so
+dropping two headers never came near the floor. A floor on a total cannot detect a
+missing subset, which is worth remembering the next time a scanner is given a
+self-check.
+
+### The fix is that there is no list
+
+Every `.h` in the directory is enumerated and scanned, so a new radix header is
+covered the day it is created. The old handoff carried "new radix headers need to
+be added to `OrderingSpellingTest.cpp`" as a standing chore — **that chore was the
+bug**, and a chore is not a mechanism.
+
+Two anti-vacuity guards, because an enumerating scanner has its own failure mode: a
+directory that yields nothing, or the wrong directory. The primitive floor stays,
+and the scan now also requires `Ordering.h` and `Claim.h` to be among the names it
+found — a wrong path could still hold enough atomics to clear a numeric floor.
+
+**Neither newly-scanned header needed a single fix**: both already spelled every
+ordering with a named constant. The gap was entirely in the detector, which is the
+good case — nothing to repair, and now it cannot regress. Mutation-proven: a bare
+`ACQUIRE` in `Claim.h:91` and a bare `RELAXED` in `ProgressAudit.h:148` are both
+reported, with file and line.
+
+---
+
+## D-066 — R-6: the deleters' freshness, and why the filed mutation was green for a CORRECT reason
+
+R-6 reported that neither deleter's freshness discipline was asserted: delete the
+`SafePtr` at `CoreTree.h:112` or `DeferredRelease.h:193` and the suite stays green.
+Both mutations reproduce. **Investigating why is the whole finding.**
+
+### Those two calls are redundant, and no test can say otherwise
+
+Both wrap the RETIRE SUBJECT ITSELF — the node, the record. RCU's `onPreTouch`
+already ran `ensureTLBEntryFresh` on that object before the deleter was invoked,
+and **freshness is PAGE-granular**: a node is 160 or 288 B and a record 48 B, each
+inside one page, so the hook covered the entire body.
+
+Three headers said `onPreTouch` covers the `RetireHead` "and NOTHING else". At byte
+granularity that is true; at the granularity that exists it is not, and the wrong
+version is what made R-6 look like a coverage gap. All three are corrected in
+place, which also closes R-19's `CoreTree.h:107` row. The calls stay — uniformity
+across every cross-CPU pointer in the subsystem is worth one redundant refresh, and
+an exception justified by an allocator's size classes would be a worse trade — but
+they are now labelled as uniformity so nobody defends them as load-bearing.
+
+### What IS load-bearing, and is now asserted
+
+The `Mapping` each deleter reaches: a separate allocation on a separate page,
+reached through a pointer read out of a slot word or a record field, that
+`onPreTouch` never touched. `releaseMappingRefs` takes a `SafePtr<Mapping>` **by
+value**, so no caller can skip it without editing that signature — structurally
+enforced, which is stronger than a test. The two new tests are what notice if the
+signature changes.
+
+### Getting them non-vacuous took four attempts, all measured
+
+Every failed attempt passed with the discipline removed — the exact condition this
+file's own header calls "worse than no test". Recording them because each is a
+distinct way a page-granular assertion goes hollow:
+
+1. **Asserting the retire subject's own page.** Satisfied by `onPreTouch`. This is
+   the redundancy above, discovered by mutating and getting green.
+2. **Asserting the `Mapping`'s page, with the record on the same page.** Measured:
+   `DeferredRelease` is 48 B and a `Mapping` shares its size class, so the
+   fixture's whole 32-record population and the first mappings a test makes all
+   land on ONE page. Fixed by filling the size class past the pool's page before
+   creating the record under test — and by asserting the two pages differ, so the
+   premise cannot silently lapse again.
+3. **Letting the `Mapping` reach refcount zero.** The counting mechanism's
+   `destroy` discharges freshness itself, so a record destroyed during the drain
+   has its page refreshed regardless of what the deleter did. Fixed by giving each
+   record a SECOND naming slot outside the cleared range, so the release takes the
+   count 2 → 1 and destroys nothing.
+4. **Letting a NEIGHBOUR reach zero.** In the node test, `a` and `b` are
+   consecutive allocations in one size class and therefore share a page, so
+   `destroy(b)` satisfied an assertion about `a`. Fixed by making both survive.
+
+The mutation that finally discriminates is reaching the count word through
+`m.address()` instead of `m->`, i.e. skipping exactly the RMW's freshness call.
+Both tests fail on it and pass without it.
+
+**The transferable lesson**: a page-granular assertion is only as strong as its
+guarantee that nothing ELSE on that page was touched in the same window. Every
+freshness test added from here should assert the separation it depends on, not just
+the call it wants.

@@ -104,11 +104,29 @@ namespace kernel::mm::radix {
 
     template <GeometryDescriptor G, typename Codec, unsigned V>
     void deleteRadixNode(Node<G, V>* n) {
-        // §7.1 / RCU-DEC-006: `onPreTouch` covered this node's `RetireHead` and
-        // NOTHING else, so the slot reads below and the refcount RMW at the end
-        // are cross-CPU accesses to vmsmalloc-backed memory. Deleters run
-        // wherever a pump runs, which under RCU-DEC-006 stealing is usually not
-        // the CPU that allocated the node.
+        // ─── What onPreTouch DOES cover, corrected (R-6) ────────────────
+        //
+        // This used to say `onPreTouch` covered the `RetireHead` "and NOTHING
+        // else, so the slot reads below and the refcount RMW are cross-CPU
+        // accesses". At byte granularity that is true; at the granularity that
+        // exists it is not. **Freshness is PAGE-granular**, and a node is 160 or
+        // 288 B inside one page, so the hook that ran before this deleter already
+        // covered the whole node body.
+        //
+        // So this `SafePtr` is UNIFORMITY, not necessity — every cross-CPU pointer
+        // in this subsystem is wrapped, and carving out an exception whose
+        // justification is an allocator's size classes would be a worse trade than
+        // one redundant call. Do not read it as load-bearing: deleting it is
+        // undetectable by construction, which is how R-6 was filed as a coverage
+        // gap when it was really a wrong comment.
+        //
+        // **The load-bearing call is the one on the `Mapping` below**, which is a
+        // separate allocation on a separate page that `onPreTouch` never touched.
+        // That one is asserted by
+        // `radix_node_deleter_discharges_freshness_on_the_retired_node`.
+        //
+        // Deleters run wherever a pump runs, which under RCU-DEC-006 stealing is
+        // usually not the CPU that allocated anything involved.
         const VMSubstrate::SafePtr<Node<G, V>> node(n);
         for (unsigned i = 0; i < V; i++) {
             const uint64_t w = node->slots[i].load(kQuiescedRead);

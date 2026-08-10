@@ -58,6 +58,14 @@ struct FreshnessRecorder {
     ~FreshnessRecorder() { VS::test::disarmFreshnessRecording(); }
 };
 
+// Freshness is page-granular, so every claim about "this object's call" is really
+// a claim about its page — which makes "are these two objects on the same page?"
+// the precondition of any such assertion rather than a detail.
+const void* pageOf(const void* p) {
+    return reinterpret_cast<const void*>(
+        reinterpret_cast<uintptr_t>(p) & ~static_cast<uintptr_t>(kPage - 1));
+}
+
 rdx::Mapping* makeMapping(uint64_t baseVA) {
     auto p = VS::tryMake<rdx::Mapping>(nullptr, uint64_t{0}, baseVA,
                                        rdx::Protection::Read, rdx::Protection::Read);
@@ -279,6 +287,193 @@ TEST(radix_descent_pays_the_discipline_at_every_level) {
 
     ASSERT_TRUE(shallow > 0);
     ASSERT_TRUE(deep > shallow);
+}
+
+// ─── The two DELETERS, and what R-6 actually turned out to be ──────────────
+//
+// R-6 reported that neither deleter's freshness discipline was asserted: delete the
+// `SafePtr` at `CoreTree.h:112` or `DeferredRelease.h:193` and the suite stays
+// green. Both mutations reproduce. **But they are green for a correct reason**, and
+// finding that out is the substance of the finding.
+//
+// Those two `SafePtr`s are over the RETIRE SUBJECT ITSELF — the node, the record.
+// RCU's `onPreTouch` already fired `ensureTLBEntryFresh` on that object before the
+// deleter ran, and **freshness is PAGE-granular**, so the whole node body is
+// already covered. The headers say `onPreTouch` covered "the `RetireHead` and
+// NOTHING else", and at byte granularity that is true and at page granularity —
+// the granularity that exists — it is not. So those calls are uniformity, not
+// necessity, and no test can distinguish them from the hook that precedes them.
+// (Their comments are corrected in place; this was also R-19's `CoreTree.h:107`
+// row.)
+//
+// **The load-bearing call in each deleter is the one on the `Mapping`** — a
+// separate allocation on a separate page that `onPreTouch` never touched, reached
+// through a pointer read out of a slot word or a record field. That one is what
+// these tests assert, and each begins by asserting its own premise: that the record
+// really is on a different page from the retire subject, without which the
+// assertion would be satisfied by `onPreTouch` and prove nothing.
+//
+// It is also worth knowing that the `Mapping` call is enforced STRUCTURALLY as
+// well: `releaseMappingRefs` takes a `SafePtr<Mapping>` **by value**, so no caller
+// can skip it without editing that signature. The tests below are what notice if
+// someone does.
+//
+// Both tests clear the freshness record AFTER the retire, so what is measured is
+// the deleter's own accesses and not the operation's.
+
+TEST(radix_node_deleter_discharges_freshness_on_the_retired_node) {
+    Harness h;
+    TreeA   tree;
+    ASSERT_TRUE(tree.init(5, 0, h.domain, h.releasePools));
+    FreshnessRecorder rec;
+
+    // Two disjoint pages inside one slot force a subdivision, so slot 0 holds a
+    // CHILD NODE. Clearing the whole slot then detaches and retires that child —
+    // which is what puts `deleteRadixNode` on a real retire path rather than on
+    // teardown's synchronous walk.
+    const uint64_t slotSpan5 = rdx::slotSpan(GA, 5);
+
+    auto* a = makeMapping(0);
+    auto* b = makeMapping(2 * kPage);
+    ASSERT_TRUE(a != nullptr && b != nullptr);
+    ASSERT_TRUE(tree.apply(0, kPage - 1, a) == rdx::ApplyStatus::Ok);
+    ASSERT_TRUE(tree.apply(2 * kPage, 3 * kPage - 1, b) == rdx::ApplyStatus::Ok);
+    // A SECOND naming slot for EACH record, in a different level-5 slot, so the
+    // releases below take their counts 2 -> 1 and destroy neither. Both matter, and
+    // for the same reason twice over: the counting mechanism's `destroy` discharges
+    // freshness itself, so a record that reached zero would have its page made
+    // fresh by `destroy` rather than by the deleter's RMW — and because `a` and `b`
+    // are consecutive allocations in one size class they share a page, so
+    // destroying EITHER would satisfy an assertion about the other. Both maskings
+    // were measured, not supposed: earlier versions of this test passed with the
+    // discipline removed, first via `destroy(a)` and then via `destroy(b)`.
+    ASSERT_TRUE(tree.apply(slotSpan5, slotSpan5 + kPage - 1, a) == rdx::ApplyStatus::Ok);
+    ASSERT_TRUE(tree.apply(slotSpan5 + 2 * kPage, slotSpan5 + 3 * kPage - 1, b)
+                == rdx::ApplyStatus::Ok);
+    quiesce(h);
+    ASSERT_TRUE(tree.nodeCount() > 1);            // the subdivision really happened
+    ASSERT_EQ(uint64_t{2}, a->refcountRelaxed());
+    ASSERT_EQ(uint64_t{2}, b->refcountRelaxed());
+
+    // The child's address, captured while it is still linked. After the clear it
+    // is retired and the pointer is the only way to name the page. Read before the
+    // record is cleared, so this read's own freshness call cannot be mistaken for
+    // the deleter's.
+    const void* child = nullptr;
+    {
+        const uint64_t w = tree.root().slot(0).load(RELAXED);
+        ASSERT_TRUE(CodecA::isChild(w));
+        child = CodecA::decodeChild(w);
+    }
+    ASSERT_TRUE(child != nullptr);
+
+    // The premise. If the node and the record it names shared a page, `onPreTouch`
+    // on the node would satisfy everything below and the test would pass on a
+    // deleter that never touched the record at all.
+    ASSERT_TRUE(pageOf(child) != pageOf(a));
+
+    ASSERT_TRUE(tree.apply(0, slotSpan5 - 1, nullptr) == rdx::ApplyStatus::Ok);
+
+    // Retired, deleter not yet run. Clearing here is what makes the assertions
+    // below about the DELETER: everything the operation itself touched is
+    // forgotten at this point.
+    VS::test::clearFreshnessRecord();
+    ASSERT_FALSE(VS::test::pageWasMadeFresh(a));
+    quiesce(h);                                   // the deleter runs here
+
+    // **The claim.** A detached subtree's releases ride its node deleters (§7.1
+    // draws no record for a fully-covered child), so this is `deleteRadixNode`
+    // reading a leaf slot, decoding a record pointer and RMW-ing its count word —
+    // a first touch of a page this CPU may hold a stale entry for.
+    ASSERT_TRUE(VS::test::pageWasMadeFresh(a));
+    // The node's own page is fresh too, but that says nothing: `onPreTouch` did it.
+    ASSERT_TRUE(VS::test::pageWasMadeFresh(child));
+    // Both survived, so no `destroy` ran anywhere on that page and the call above
+    // can only have come from the deleter's own RMW.
+    ASSERT_EQ(uint64_t{1}, a->refcountRelaxed());
+    ASSERT_EQ(uint64_t{1}, b->refcountRelaxed());
+
+    tree.destroyTree();
+    quiesce(h);
+    assertNoLiveObjects("node deleter freshness");
+}
+
+TEST(radix_release_record_deleter_discharges_freshness_on_the_record) {
+    Harness h;
+    TreeA   tree;
+    ASSERT_TRUE(tree.init(6, 0, h.domain, h.releasePools));
+    FreshnessRecorder rec;
+
+    // ─── Getting the Mapping OFF the record pool's page ──────────────────
+    //
+    // The premise of the assertion below is that the record and the `Mapping` it
+    // names sit on different pages. By default they do not: `DeferredRelease` is
+    // 48 B and a `Mapping` falls in the same vmsmalloc size class, so the
+    // fixture's whole 32-record population and the first few mappings a test
+    // makes all land on ONE page — measured, not assumed; the first version of
+    // this test tripped its own premise check.
+    //
+    // On that layout `onPreTouch` on the record already covers the `Mapping`, and
+    // the assertion would hold on a deleter that never touched it. That is the
+    // vacuity this file's header warns about: "a freshness test that passes with
+    // the SafePtr removed is worse than no test."
+    //
+    // So the size class is filled past the pool's page before the record under
+    // test is created. The filler is kept alive — freeing it would let the
+    // allocator hand the vacated slots straight back — and destroyed at the end.
+    std::vector<rdx::Mapping*> filler;
+    for (unsigned i = 0; i < 128; i++) {
+        auto* f = makeMapping(0);
+        ASSERT_TRUE(f != nullptr);
+        filler.push_back(f);
+    }
+
+    // TWO naming slots, so the deferred release takes `first`'s count 2 -> 1 rather
+    // than to zero. At zero the counting mechanism's `destroy` runs, and `destroy`
+    // discharges freshness itself — which would satisfy the assertion below on a
+    // deleter whose count RMW skipped it. Measured: the first version of this test
+    // passed with the discipline removed for exactly that reason.
+    auto* first = makeMapping(0);
+    ASSERT_TRUE(first != nullptr);
+    ASSERT_TRUE(tree.apply(0, 2 * kPage - 1, first) == rdx::ApplyStatus::Ok);
+    quiesce(h);
+    ASSERT_EQ(uint64_t{2}, first->refcountRelaxed());
+
+    // The pool is a LIFO Treiber stack, so the head is exactly the record the next
+    // draw will take — which is how the test learns the address of a record it
+    // never holds. One draw, so this is the record that gets retired.
+    kernel::mm::radix::DeferredReleasePool& pool = h.releasePools.forCpu(0);
+    const void* record = pool.head.load(RELAXED);
+    ASSERT_TRUE(record != nullptr);
+
+    // The premise, asserted rather than hoped for.
+    ASSERT_TRUE(pageOf(record) != pageOf(first));
+
+    // Overwrite, so `first` is displaced from a directly-written slot: one record
+    // drawn, charged and retired.
+    auto* second = makeMapping(0);
+    ASSERT_TRUE(second != nullptr);
+    ASSERT_TRUE(tree.apply(0, kPage - 1, second) == rdx::ApplyStatus::Ok);
+
+    VS::test::clearFreshnessRecord();
+    ASSERT_FALSE(VS::test::pageWasMadeFresh(first));
+    quiesce(h);                                   // deleteDeferredRelease runs here
+
+    // **The claim.** §7.1: "the record was made fresh above; the RECORD IT NAMES is
+    // a separate allocation on a separate page and owes its own call."
+    ASSERT_TRUE(VS::test::pageWasMadeFresh(first));
+    ASSERT_TRUE(VS::test::pageWasMadeFresh(record));   // again, `onPreTouch`'s doing
+    // `first` survived, so no `destroy` ran and the call above is the deleter's.
+    ASSERT_EQ(uint64_t{1}, first->refcountRelaxed());
+    // ...and it came home, so the record the address names is the one that ran.
+    ASSERT_TRUE(pool.atFullPopulation());
+
+    ASSERT_TRUE(tree.apply(0, tree.span() - 1, nullptr) == rdx::ApplyStatus::Ok);
+    quiesce(h);
+    tree.destroyTree();
+    quiesce(h);
+    for (auto* f : filler) VS::destroy(VS::SafePtr<rdx::Mapping>(f));
+    assertNoLiveObjects("record deleter freshness");
 }
 
 TEST(radix_pinned_storage_stays_exempt) {
