@@ -207,15 +207,14 @@ TEST(radix_deferred_release_records_return_to_their_home_pool) {
     TreeA tree;
     ASSERT_TRUE(tree.init(5, 0, h.domain, h.releasePools));
 
-    // ITEM-084 split the population: the per-CPU pool holds the common-case
-    // default and the RESERVE holds the per-attempt ceiling, which is what
-    // carries §7.1's termination argument. Both are asserted, because a change
-    // that quietly moved the ceiling out of the reserve would leave this test
-    // passing on the per-CPU half alone.
+    // There is ONE population, per CPU, and it is also the per-attempt record
+    // budget (D-059). Both readings are asserted, because a change that moved
+    // the budget onto a second constant would leave the first assertion passing
+    // and quietly reintroduce the possibility of an attempt wanting more records
+    // than a barrier can bring home.
     const size_t population = poolOf(h, 0).population;
     ASSERT_EQ(static_cast<size_t>(rdx::kDefaultRecordsPerCpu), population);
-    ASSERT_EQ(static_cast<size_t>(rdx::deferredReleaseBound(GA)),
-              h.releasePools.reserve().population);
+    ASSERT_EQ(static_cast<unsigned>(population), h.releasePools.recordBudget());
     ASSERT_TRUE(poolOf(h, 0).atFullPopulation());
 
     // Churn well past the population, so a mechanism that consumed a record per
@@ -306,14 +305,9 @@ TEST(radix_deferred_release_a_shortfall_is_replenished_and_the_retry_succeeds) {
 
     // The churn cap is derived rather than guessed: each displacing operation
     // draws exactly one record, so running well past the population with the
-    // epoch stalled must exhaust it. **Since ITEM-084 the population is in two
-    // parts** — the per-CPU pool and the address space's reserve, which a
-    // shortfall refills from — so the quantity to exhaust is their sum. Deriving
-    // it from the per-CPU half alone left the writer finishing before the
-    // reader's stall could bite, and the test then failed for want of rounds
-    // rather than for want of the mechanism.
-    const size_t population =
-        poolOf(h, 0).population + h.releasePools.reserve().population;
+    // epoch stalled must exhaust it. One population again since D-059 — there is
+    // no reserve to drain first, which is why this is the per-CPU figure alone.
+    const size_t population = poolOf(h, 0).population;
 
     std::vector<std::thread> workers;
 
@@ -487,28 +481,34 @@ TEST(radix_draw_count_report) {
     std::printf("\n");
 }
 
-// ─── ITEM-084: the reserve, and what it is for ─────────────────────────────
+// ─── D-059: the record budget, and what it replaced ────────────────────────
 //
-// The per-CPU pools are sized for the common case (D-054: max 2 draws over 4.77M
-// attempts) and the RESERVE carries §7.1's termination argument. That division
-// is the whole design, so it is tested directly rather than inferred from the
-// absence of hangs — a livelock in this path presents as no output at all.
+// The per-CPU pool's population is ALSO the most records one attempt may hold.
+// Exceeding it is `NeedsDecomposition`, not a shortfall: §6.5 splits the
+// operation into units that fit, and termination stays local — every record an
+// attempt can want is this CPU's own, so this CPU's own `barrier` brings it home.
 //
-// The fixture deliberately starves the per-CPU pool. With the shipping default
-// of 32 the single-node dense shape fits without ever touching the reserve,
-// which is exactly what the default is chosen for and exactly why it cannot
-// exercise what happens when it does not fit.
+// That identity is the whole design, so it is tested directly rather than
+// inferred from the absence of hangs. A livelock in this path presents as no
+// output at all, which is how ITEM-084's version of it survived a full suite:
+// the previous answer was a shared per-address-space reserve, which made one
+// CPU's progress depend on another CPU's records coming home and produced four
+// separate liveness defects.
+//
+// The fixture deliberately starves the per-CPU pool, because at the shipping
+// default of 32 the single-node dense shape fits in one attempt — which is
+// exactly what the default is chosen for and exactly why it cannot exercise the
+// mechanism for when it does not fit.
 
 namespace {
 
 struct StarvedPools {
-    // +1 for the reserve slot.
     alignas(arch::CACHE_LINE_SIZE)
-    rdx::DeferredReleasePool storage[arch::MAX_PROCESSOR_COUNT + 1];
+    rdx::DeferredReleasePool storage[arch::MAX_PROCESSOR_COUNT];
     rdx::DeferredReleasePools pools{};
 
     explicit StarvedPools(unsigned perCpu, size_t cpus = 1) {
-        if (!pools.create(storage, cpus, perCpu, rdx::deferredReleaseBound(GA))) {
+        if (!pools.create(storage, cpus, perCpu)) {
             throw AssertionFailure(std::string("starved pool creation failed"));
         }
         // The record population is fixture infrastructure, exactly as the
@@ -516,100 +516,159 @@ struct StarvedPools {
         // the TEST allocated rather than what the fixture did.
         setAccountingBaseline();
     }
-    ~StarvedPools() { pools.destroy(); }
+    // Same guard, and for the same reason, as `~Harness` — see the note there.
+    // `destroy()` asserts §11's conservation target, and an unguarded throw from
+    // a destructor either terminates the process during an unwind (masking the
+    // test's real failure) or, at best, reports the wrong one. Re-raised only
+    // when nothing else is in flight.
+    ~StarvedPools() noexcept(false) {
+        try {
+            pools.destroy();
+        } catch (const std::exception& e) {
+            if (std::uncaught_exceptions() > 0) {
+                std::fprintf(stderr,
+                             "[StarvedPools] teardown assert suppressed so the "
+                             "failure already in flight is not masked: %s\n",
+                             e.what());
+                return;
+            }
+            throw;
+        }
+    }
 };
 
 // Fill one level-6 node's sixteen page slots with distinct records, then clear
-// fifteen of them: §7.1's expensive shape, needing fifteen records in ONE
-// attempt.
-void fillNodeAndPartiallyClear(TreeA& tree, Harness& h) {
+// fifteen of them: §7.1's expensive shape, which WANTS fifteen records in one
+// attempt. Whether it gets them is what the budget decides.
+//
+// The sixteen mappings are handed back so a caller can use them as its oracle:
+// the whole point of a budget that decomposes is that the terminal state must be
+// indistinguishable from the one attempt's, and "it did not hang" is not that.
+void fillNode(TreeA& tree, std::vector<rdx::Mapping*>& made) {
     for (unsigned i = 0; i < 16; i++) {
         auto* m = makeMapping(i * kPage);
         ASSERT_TRUE(m != nullptr);
+        made.push_back(m);
         ASSERT_TRUE(tree.apply(i * kPage, (i + 1) * kPage - 1, m) == rdx::ApplyStatus::Ok);
     }
+}
+
+void fillNodeAndPartiallyClear(TreeA& tree, Harness& h) {
+    std::vector<rdx::Mapping*> made;
+    fillNode(tree, made);
     ASSERT_TRUE(tree.apply(0, 15 * kPage - 1, nullptr) == rdx::ApplyStatus::Ok);
     quiesce(h);
 }
 
 }  // namespace
 
-TEST(radix_a_starved_per_cpu_pool_completes_through_the_reserve) {
+// ─── The budget's own claim, stated as an inequality ───────────────────────
+//
+// "No attempt holds more records than the pool it draws from owns." Everything
+// else about D-059 follows from it: it is what makes one `barrier` enough, and
+// therefore what makes `consecutiveShortfalls <= 1` exact.
+//
+// Asserted against a shape that WANTS fifteen while the pool holds two, because
+// the inequality is trivially true of a shape that fits — and a fixture where it
+// fits is how the previous version of this test managed to be vacuous (R-7:
+// `promo=3, perCpu=16`, so promotion covered the demand and the mechanism under
+// test was never entered).
+TEST(radix_no_attempt_exceeds_the_record_budget) {
     Harness h(1, 1);
     StarvedPools sp{2};                       // two records per CPU: far too few
     TreeA tree;
     ASSERT_TRUE(tree.init(5, 0, h.domain, sp.pools));
+    ASSERT_EQ(unsigned{2}, sp.pools.recordBudget());
 
-    // Fifteen distinct records displaced in one attempt against a two-record
-    // pool. Without the reserve this is the livelock D-054 warns about: the
-    // draw fails, the attempt abandons, the barrier brings back two records,
-    // and the retry fails identically forever.
-    fillNodeAndPartiallyClear(tree, h);
+    std::vector<rdx::Mapping*> made;
+    fillNode(tree, made);
 
-    ASSERT_TRUE(sp.pools.shortfallCount() > 0);   // it really did starve
-    ASSERT_TRUE(sp.pools.reserveDepth() >= rdx::deferredReleaseBound(GA));
+    rdx::gDrawHistogram.reset();
+    const uint64_t decompositionsBefore =
+        tree.stats().decompositions.load(RELAXED);
+
+    // Fifteen distinct records displaced, against a two-record budget.
+    ASSERT_TRUE(tree.apply(0, 15 * kPage - 1, nullptr) == rdx::ApplyStatus::Ok);
+
+    // **The inequality.** Without the budget gate this reads 15 — which is what
+    // the same shape draws at the default budget, pinned by
+    // `radix_partial_cover_draws_one_record_per_distinct_displaced_mapping`.
+    ASSERT_TRUE(rdx::gDrawHistogram.max() <= sp.pools.recordBudget());
+
+    // Non-vacuity, two ways. The overrun counter says the gate actually fired —
+    // without it the operation would have completed as one attempt and this
+    // test would be asserting the budget of a shape that never approached it.
+    ASSERT_TRUE(tree.stats().recordBudgetOverruns.load(RELAXED) > 0);
+    ASSERT_TRUE(tree.stats().decompositions.load(RELAXED) > decompositionsBefore);
+
+    // **And the answer is still right.** A budget that decomposes is only
+    // acceptable if the terminal state is the one attempt's: fifteen pages
+    // cleared, the sixteenth untouched, and the survivor still naming its own
+    // record with the count the single naming slot implies.
+    quiesce(h);
+    for (unsigned i = 0; i < 15; i++) {
+        ASSERT_EQ(static_cast<rdx::Mapping*>(nullptr),
+                  tree.lookup(i * kPage).mapping().address());
+    }
+    ASSERT_EQ(made[15], tree.lookup(15 * kPage).mapping().address());
+    ASSERT_EQ(uint64_t{1}, made[15]->refcountRelaxed());
+    ValidA::validate(tree, "record budget decomposition");
 
     ASSERT_TRUE(tree.apply(0, tree.span() - 1, nullptr) == rdx::ApplyStatus::Ok);
     quiesce(h);
     tree.destroyTree();
     quiesce(h);
-    assertNoLiveObjects("starved pool via reserve");
+    sp.pools.destroy();
+    assertNoLiveObjects("record budget");
 }
 
-TEST(radix_repeated_shortfalls_promote_the_per_cpu_population) {
+// The budget holds at the SHIPPING population too, and there it holds without
+// decomposing — which is the other half of the claim and the reason 32 is the
+// number. §7.1's own worked example must stay a single attempt.
+TEST(radix_the_shipping_budget_absorbs_one_nodes_dense_shape) {
     Harness h(1, 1);
-    StarvedPools sp{2};
     TreeA tree;
-    ASSERT_TRUE(tree.init(5, 0, h.domain, sp.pools));
+    ASSERT_TRUE(tree.init(5, 0, h.domain, h.releasePools));
+    ASSERT_EQ(rdx::kDefaultRecordsPerCpu, h.releasePools.recordBudget());
+    // 31 records for a 32-slot node, and the budget must clear it.
+    ASSERT_TRUE(h.releasePools.recordBudget() >= rdx::singleNodeRecordBound(GA));
 
-    const unsigned before = sp.pools.perCpuTarget();
-    ASSERT_EQ(unsigned{2}, before);
+    std::vector<rdx::Mapping*> made;
+    fillNode(tree, made);
 
-    // Enough dense operations to cross the promotion threshold several times.
-    for (unsigned round = 0; round < 4 * rdx::kPromotionThreshold; round++) {
-        fillNodeAndPartiallyClear(tree, h);
-        ASSERT_TRUE(tree.apply(0, tree.span() - 1, nullptr) == rdx::ApplyStatus::Ok);
-        quiesce(h);
-    }
+    rdx::gDrawHistogram.reset();
+    ASSERT_TRUE(tree.apply(0, 15 * kPage - 1, nullptr) == rdx::ApplyStatus::Ok);
 
-    // Promotion is an OPTIMISATION — it reduces how often the reserve is
-    // touched and never carries correctness — so what is asserted is that it
-    // reacted and stayed within its cap, not a particular size.
-    ASSERT_TRUE(sp.pools.perCpuTarget() > before);
-    ASSERT_TRUE(sp.pools.perCpuTarget() <= sp.pools.reserveDepth());
-    ASSERT_TRUE(sp.pools.promotionCount() > 0);
+    // One attempt, fifteen records, no overrun and no decomposition.
+    ASSERT_EQ(uint64_t{15}, rdx::gDrawHistogram.max());
+    ASSERT_EQ(uint64_t{0}, tree.stats().recordBudgetOverruns.load(RELAXED));
 
+    quiesce(h);
+    ASSERT_TRUE(tree.apply(0, tree.span() - 1, nullptr) == rdx::ApplyStatus::Ok);
+    quiesce(h);
     tree.destroyTree();
     quiesce(h);
-    // Promotion ALLOCATES — that is what it is — so the pools must be released
-    // before the live-object check, which would otherwise read a grown
-    // population as a leak. Releasing here rather than in the destructor is
-    // also the assertion that promotion's extra records are properly owned:
-    // `destroy()`'s conservation check counts them.
-    sp.pools.destroy();
-    assertNoLiveObjects("promotion");
+    assertNoLiveObjects("shipping budget absorbs the dense shape");
 }
 
-TEST(radix_concurrent_wide_draws_contend_for_the_reserve_and_both_finish) {
-    // **The shape every other reserve test structurally cannot see.** The rest
-    // are single-CPU, and a single CPU never contends with itself for the
-    // shared reserve — which is exactly how D-057's broken bound slipped past
-    // them: `consecutiveShortfalls <= 1` was an invariant under the old
-    // per-CPU-ceiling design and became false the moment two CPUs could want a
-    // wide draw at once, and no single-CPU test could tell.
+TEST(radix_two_cpus_over_budget_at_once_both_finish) {
+    // **The shape no single-CPU test can see**, kept from the version of this
+    // test that covered the shared reserve — because the property being defended
+    // has changed but the reason a single CPU cannot check it has not. D-057's
+    // broken bound slipped past every single-CPU test in this file: a single CPU
+    // never meets another at a shared resource.
     //
-    // What is asserted is LIVENESS, because that is what the shared reserve puts
-    // at risk: the first CPU to take the lock refills with the WHOLE reserve and
-    // its records then sit in RCU bags until a grace period ends, so the second
-    // CPU finds nothing and cannot be rescued by its own `barrier` — a barrier
-    // drives only the calling CPU's retirees. Progress comes from RCU's sweep
-    // being domain-wide (RCU-DEC-006 stealing), which lets the waiter's own
-    // drain run the borrower's deleters.
+    // What is asserted now is that there IS no shared resource. Both CPUs run
+    // over-budget shapes at once against a two-record-per-CPU population, and
+    // each must finish using only its own pool and its own barrier —
+    // `consecutiveShortfalls <= 1` in `runToCompletion` is a live assertion
+    // during this run, so a CPU that needed a second round to recover throws
+    // rather than passing quietly.
     constexpr size_t   kCpus   = 2;
     constexpr unsigned kRounds = 24;
 
     Harness h(kCpus, 1);
-    StarvedPools sp{2, kCpus};                // both CPUs must reach the reserve
+    StarvedPools sp{2, kCpus};
     TreeA tree;
     ASSERT_TRUE(tree.init(5, 0, h.domain, sp.pools));
 
@@ -619,9 +678,9 @@ TEST(radix_concurrent_wide_draws_contend_for_the_reserve_and_both_finish) {
     std::mutex            errorMutex;
 
     // Disjoint level-6 children under the same level-5 root: the two CPUs share
-    // an address space — and therefore a reserve — without fighting over the
-    // same slots, so what this measures is reserve contention and not ordinary
-    // claim contention.
+    // an address space — and therefore the pool ARRAY and the RCU domain —
+    // without fighting over the same slots, so what this measures is the record
+    // machinery and not ordinary claim contention.
     auto worker = [&](unsigned cpu, uint64_t basePage) {
         kernel::test::bindThreadToCpu(cpu);
         try {
@@ -634,8 +693,8 @@ TEST(radix_concurrent_wide_draws_contend_for_the_reserve_and_both_finish) {
                         throw AssertionFailure(std::string("dense fill got a non-Ok status"));
                     }
                 }
-                // Fifteen of the sixteen: one attempt, fifteen distinct records
-                // displaced, against a two-record pool.
+                // Fifteen of the sixteen: fifteen distinct records wanted,
+                // against a two-record budget.
                 const uint64_t lo = basePage * kPage;
                 if (tree.apply(lo, lo + 15 * kPage - 1, nullptr) != rdx::ApplyStatus::Ok) {
                     throw AssertionFailure(std::string("wide clear got a non-Ok status"));
@@ -660,18 +719,17 @@ TEST(radix_concurrent_wide_draws_contend_for_the_reserve_and_both_finish) {
 
     if (failures.load() != 0) throw AssertionFailure("worker failure: " + firstError);
 
-    // **Liveness**: every round on both CPUs finished. A hang here would be the
-    // livelock D-056's `returnSurplus` exists to prevent; a thrown status would
-    // be the bound D-057 corrected.
+    // **Liveness**: every round on both CPUs finished.
     ASSERT_EQ(kRounds * 2, completed.load());
 
-    // Non-vacuity: if the pools never ran short, the two CPUs never met at the
-    // reserve and this ran the ordinary path twice.
-    ASSERT_TRUE(sp.pools.shortfallCount() > 0);
+    // Non-vacuity: both CPUs really went over budget, so both really exercised
+    // decomposition while the other was doing the same.
+    ASSERT_TRUE(tree.stats().recordBudgetOverruns.load(RELAXED) >= 2 * kRounds);
 
     quiesce(h);
     tree.destroyTree();
     quiesce(h);
     sp.pools.destroy();
-    assertNoLiveObjects("concurrent wide draws");
+    assertNoLiveObjects("two CPUs over budget at once");
 }
+

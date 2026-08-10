@@ -321,11 +321,10 @@ namespace kernel::mm::radix {
         }
 
         // ─── 4. The per-CPU record pools ───────────────────────────────────
-        // The reserve is sized at the per-operation ceiling and the per-CPU
-        // pools are not: that split is ITEM-084's answer, and which of the two
-        // carries §7.1's termination argument is stated on `refillFromReserve`.
-        if (!block->pools.create(block->poolStorage(), cpuCount, perCpuRecords,
-                                 deferredReleaseBound(G))) {
+        // One number, and it is both the memory each CPU holds and the most
+        // records one attempt may draw (D-059). There is no second, larger
+        // population anywhere: an operation that would want more decomposes.
+        if (!block->pools.create(block->poolStorage(), cpuCount, perCpuRecords)) {
             block->clusters.destroy();
             (void)block->domain.deinit();
             kernel::rcu::DomainManagementLockGuard guard;

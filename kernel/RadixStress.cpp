@@ -735,17 +735,25 @@ namespace radix_stress {
                << "\n";
     }
 
-    // ── ITEM-084's histogram (CPU 0, once per liveness print) ──────────────
+    // ── The draw histogram (CPU 0, once per liveness print) ────────────────
     //
     // Its own statement rather than fields on the liveness line, because a
     // twelve-bucket distribution is a table and the liveness line is already at
     // the width where a reader stops parsing it. One `klog` statement, so it
     // cannot interleave with another CPU's.
+    //
+    // Two numbers to read it against since D-059, and they answer different
+    // questions. `budget` is the one that BINDS: a draw cannot exceed it, so
+    // `max` approaching it means operations are decomposing. `ceiling` is the
+    // edge sum an unbudgeted attempt could have wanted — the gap between the two
+    // is what the budget saves, and a bucket above it would mean the derivation
+    // is wrong.
 #ifdef CROCOS_RADIX_DRAW_HISTOGRAM
     void drawHistogram() {
         const auto& h = rdx::gDrawHistogram;
-        klog() << "radixStress: DeferredRelease draws/attempt (ITEM-084) — n="
+        klog() << "radixStress: DeferredRelease draws/attempt (§7.1) — n="
                << h.total() << " max=" << h.max()
+               << " budget=" << static_cast<uint64_t>(rdx::kDefaultRecordsPerCpu)
                << " ceiling=" << static_cast<uint64_t>(rdx::deferredReleaseBound(rdx::kAmd64Geometry))
                << "\n  0:" << h.bucket(0) << " 1:" << h.bucket(1) << " 2:" << h.bucket(2)
                << " 3:" << h.bucket(3) << " 4:" << h.bucket(4) << " 5-8:" << h.bucket(5)
@@ -797,9 +805,13 @@ namespace radix_stress {
     // ── One-time setup, CPU 0 ──────────────────────────────────────────────
     [[nodiscard]] rdx::KernelBlock* createSpace() {
         rdx::KernelBlock* block = nullptr;
+        // `kDefaultRecordsPerCpu`, which is what the kernel will actually ship —
+        // this used to pass the 230-record edge sum, i.e. DEC-068's eager sizing,
+        // so the stress ran against a population no real address space would get
+        // and could not have observed a budget overrun if one existed (D-059).
         const auto st = rdx::createAddressSpace(
             *gStore, numa::DomainID{0}, arch::processorCount(),
-            rdx::deferredReleaseBound(rdx::kAmd64Geometry), block);
+            rdx::kDefaultRecordsPerCpu, block);
         if (st != rdx::CreateStatus::Ok) {
             klog() << "\nradixStress: address-space creation failed (ENOMEM)\n";
             exitToHost(ExitStatus::Panic);

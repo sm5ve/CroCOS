@@ -281,25 +281,36 @@ namespace kernel::mm::radix {
         // machinery can say WHY it is unwinding.
         Retry,
         // §6.5 / DEC-077: the operation's summed detachment count exceeds the
-        // budget, or its claim set exceeds the fixed capacity. The operation
+        // budget, its claim set exceeds the fixed capacity, or (D-059) its
+        // deferred-release demand exceeds the record budget. The operation
         // must decompose per child slot at the site node rather than take the
         // unit path — which is not a tuning nicety: the unit path here is an
         // unbounded all-or-nothing acquisition running non-preemptibly inside
         // ONE open read section, i.e. a scheduling-latency defect AND a
         // domain-wide EBR reclamation stall, both reachable by an ordinary
         // MAP_FIXED over a subdivided region.
+        //
+        // The three causes share one status deliberately: they are three
+        // different resources whose exhaustion has the same cure, and each
+        // decomposition step reduces all three at once.
         NeedsDecomposition,
         // vmsmalloc DEC-048 / radix DEC-075: allocation is failable and every
         // site handles null. §10's inverted hazard is that a site written
         // against never-null `make<T>` re-imports the userspace-triggerable
         // panic through the back door.
         OutOfMemory,
-        // §7.1 / DEC-068: this CPU's DeferredRelease pool could not satisfy the
-        // attempt. Never surfaced to the caller and NOT a failure — the records
-        // are in flight through this CPU's own earlier retires, and `barrier`
-        // brings them home deterministically. A distinct value from `Retry`
-        // because the remedy is a blocking call that must run between attempts
-        // and outside any section; retrying without it just re-fails.
+        // §7.1 / DEC-068: this CPU's DeferredRelease pool was momentarily EMPTY.
+        // Never surfaced to the caller and NOT a failure — the records are in
+        // flight through this CPU's own earlier retires, and `barrier` brings
+        // them home deterministically. A distinct value from `Retry` because the
+        // remedy is a blocking call that must run between attempts and outside
+        // any section; retrying without it just re-fails.
+        //
+        // Note the narrowness: "the pool is empty right now", never "the attempt
+        // wants more than the pool holds". The second is `NeedsDecomposition`,
+        // and D-059 is the record of what happens when the two are conflated —
+        // no grace period can satisfy a demand the population cannot hold, so
+        // the replenish loop spins.
         NeedsRecords,
         // `OnlyIfEmpty` found the range occupied. A normal placement outcome —
         // the probe moves on — and never a failure.
@@ -542,14 +553,19 @@ namespace kernel::mm::radix {
         // shape that decomposes when the geometry says it should not is a
         // budget-tuning signal, not a correctness one.
         Atomic<uint64_t> decompositions{0};
-        // §7.1 / ITEM-084: attempts abandoned because this CPU's DeferredRelease
-        // pool was short. The open question is whether the eager
-        // worst-case-per-operation sizing is right or a smaller reserve backed by
-        // the `barrier` fallback suffices, and this is half the evidence — the
-        // other half is the per-pool draw count. A steady zero under realistic
-        // churn is the argument for shrinking the reserve; anything else is the
-        // argument against.
+        // §7.1: attempts abandoned because this CPU's DeferredRelease pool was
+        // momentarily short — the records exist and are in flight. Each one costs
+        // a grace period, so this is the number that says whether the per-CPU
+        // POPULATION is big enough for the workload.
         Atomic<uint64_t> recordShortfalls{0};
+        // D-059: attempts refused because their record demand exceeded the budget,
+        // and therefore decomposed. Counted apart from `decompositions` and from
+        // `recordShortfalls` because it is a third phenomenon and the three want
+        // opposite responses: a shortfall says grow the population, an overrun says
+        // the workload legitimately displaces more distinct mappings in one attempt
+        // than a pool holds, and a plain decomposition is about detachment size.
+        // Confusing the first two is what ITEM-084 did.
+        Atomic<uint64_t> recordBudgetOverruns{0};
 
         void reset() {
             attempts.store(0, kPrivateInit);
@@ -560,6 +576,7 @@ namespace kernel::mm::radix {
             unheldRowsSkipped.store(0, kPrivateInit);
             decompositions.store(0, kPrivateInit);
             recordShortfalls.store(0, kPrivateInit);
+            recordBudgetOverruns.store(0, kPrivateInit);
         }
     };
 
@@ -594,12 +611,16 @@ namespace kernel::mm::radix {
         [[nodiscard]] bool init(unsigned rootLevel, uint64_t base, kernel::rcu::Domain& d,
                                 DeferredReleasePools& pools) {
             assert(d.initialized(), "radix: the tree's RCU domain must be initialised first");
-            assert(pools.reserveDepth() >= deferredReleaseBound(G),
-                   "radix: the DeferredRelease RESERVE is shallower than this geometry's "
-                   "per-ATTEMPT ceiling (§7.1's edge sum) — the reserve is what carries the "
-                   "replenish loop's termination argument now that the per-CPU pools are "
-                   "sized for the common case, so a short reserve is a livelock, not a "
-                   "slow path (ITEM-084)");
+            // There is no depth requirement on the pool, and its ABSENCE is the
+            // point of D-059. The pool's population IS the per-attempt record
+            // budget, so a pool of any size >= 1 is correct: too small only means
+            // more §6.5 decomposition, never a shortfall that cannot resolve.
+            // What used to be here — "the reserve must be at least the edge sum,
+            // or the replenish loop is a livelock" — was a sizing obligation the
+            // caller had to get right from a derivation in another header.
+            assert(pools.recordBudget() >= 1,
+                   "radix: the DeferredRelease pool holds no records, so no displacing "
+                   "operation can ever complete (D-059)");
             domain = &d;
             releasePools = &pools;
             assert(rootLevel >= 1 && rootLevel <= G.levelCount,
@@ -622,9 +643,8 @@ namespace kernel::mm::radix {
         void bindToBucket(BucketTable& t, size_t index, kernel::rcu::Domain& d,
                           DeferredReleasePools& pools) {
             assert(d.initialized(), "radix: the tree's RCU domain must be initialised first");
-            assert(pools.reserveDepth() >= deferredReleaseBound(G),
-                   "radix: the DeferredRelease RESERVE is shallower than this geometry's "
-                   "per-operation ceiling (§7.1's edge sum)");
+            assert(pools.recordBudget() >= 1,
+                   "radix: the DeferredRelease pool holds no records (D-059) — see init");
             assert(index < kBucketCount, "radix: bucket index out of range");
             domain       = &d;
             releasePools = &pools;
@@ -1396,21 +1416,6 @@ namespace kernel::mm::radix {
         // somebody's decomposition.
         [[nodiscard]] ApplyStatus runToCompletion(uint64_t lo, uint64_t hi, VMSubstrate::SafePtr<Mapping> value,
                                                   ApplyMode mode = ApplyMode::Overwrite) {
-            // Whatever a replenish borrowed from the reserve goes back when this
-            // operation ends, by whichever of the several exits it takes. See
-            // `returnSurplus` — without this the first CPU to borrow starves
-            // every later one, which is a livelock and not a slow path.
-            struct SurplusGuard {
-                DeferredReleasePools* pools;
-                size_t                cpu;
-                bool                  borrowed = false;
-                ~SurplusGuard() {
-                    if (!borrowed) return;
-                    kernel::rcu::DomainManagementLockGuard guard;
-                    pools->returnSurplus(cpu);
-                }
-            } surplus{releasePools, static_cast<size_t>(arch::getCurrentProcessorID())};
-
             unsigned retryCount = 0;
             unsigned consecutiveShortfalls = 0;
             bool retiredAnything = false;
@@ -1452,50 +1457,31 @@ namespace kernel::mm::radix {
                     retiredAnything = retiredAnything || attempt.retired;
                     abandon(attempt);
                     replenishRecords();
-                    // A shortfall that survives a `barrier` is not contention
-                    // and no amount of retrying will fix it: `barrier` returns
-                    // only once every record this CPU retired is home, and the
-                    // pool's population is one operation's ceiling, so the
-                    // retried attempt must fit. Firing here means the ceiling
-                    // derivation is wrong — which would otherwise present as a
-                    // livelock with no output.
                     ++consecutiveShortfalls;
-                    surplus.borrowed = true;
-                    // ─── Why this is no longer "at most one round" (D-056) ──
+                    // ─── At most ONE round, exactly (D-059 restores this) ───
                     //
-                    // It used to be exact: every CPU's own pool held the full
-                    // ceiling, so one barrier — which brings this CPU's retirees
-                    // home — always sufficed, and a second consecutive shortfall
-                    // could only mean the ceiling derivation was wrong.
+                    // Every link in the chain is local to this CPU. The records
+                    // the attempt wants belong to this CPU's pool; only this CPU
+                    // draws from it; only this CPU retires them; `barrier` drives
+                    // this CPU's own retirees to completion, so every one of them
+                    // is pushed home. And the attempt cannot want more than the
+                    // pool holds, because D-059's record budget IS the population
+                    // — over-budget is `NeedsDecomposition`, handled elsewhere,
+                    // not a shortfall. So the retried draw fits.
                     //
-                    // With ONE reserve shared by every CPU of an address space,
-                    // a second round is legitimate contention. Two CPUs both
-                    // needing a wide draw: the first to take the lock refills
-                    // and takes the WHOLE reserve, and its records are then in
-                    // flight in RCU bags until a grace period ends. The second
-                    // CPU finds the reserve empty and cannot be rescued by its
-                    // own barrier, which drives only its own retirees.
-                    //
-                    // **Progress is still guaranteed, by two properties.**
-                    // First, a refill asks for the whole reserve, so two CPUs
-                    // can never each hold half and stall — the loser gets
-                    // nothing and retries intact, rather than both deadlocking
-                    // on fragments. Second, RCU's sweep is domain-wide
-                    // (RCU-DEC-006 stealing), so the waiting CPU's own `drain`
-                    // runs the borrower's expired deleters and pushes the
-                    // records back to the reserve. What is lost is only the
-                    // BOUND: the wait is paced by a grace period, not by one
-                    // replenish.
-                    //
-                    // So the check becomes a defect detector rather than an
-                    // invariant. Many consecutive rounds means records are not
-                    // coming back at all — a leak, a stalled epoch, or a
-                    // `homePool` that no longer points anywhere real — which is
-                    // a bug in a way that a handful of contended rounds is not.
-                    assert(consecutiveShortfalls <= kShortfallRoundLimit,
-                           "radix: DeferredRelease shortfalls are not resolving — after this "
-                           "many replenish rounds the records are not merely contended, they "
-                           "are not coming home at all (§7.1 / ITEM-084)");
+                    // A second consecutive shortfall is therefore not contention
+                    // and no amount of retrying will fix it: it means a record
+                    // did not come home, which is a leak, a stalled epoch, or a
+                    // `homePool` pointing at nothing. Worth keeping exact —
+                    // ITEM-084 had to weaken this to 64 rounds (D-056/D-057)
+                    // because a shared reserve made a CPU's progress depend on
+                    // another CPU's records, and a bound loose enough to tolerate
+                    // that detects almost nothing.
+                    assert(consecutiveShortfalls <= 1,
+                           "radix: a DeferredRelease shortfall survived a barrier — every "
+                           "record this attempt can want is this CPU's own and comes home "
+                           "when its retirees are driven, so this is a record that is not "
+                           "coming home at all (§7.1 / D-059)");
                     continue;
                 }
                 consecutiveShortfalls = 0;
@@ -1701,6 +1687,18 @@ namespace kernel::mm::radix {
                     // no subtree to blow the detachment budget. A sub-range that
                     // is still over budget with nowhere to descend is a geometry
                     // defect, not a decomposable shape.
+                    //
+                    // **The same argument covers D-059's record budget**, and it
+                    // is worth spelling out because the resource is different. A
+                    // range inside one childless slot writes exactly that ONE
+                    // slot: the walk from the cluster root reaches it through
+                    // `DescendIntoChild` rows, which draw nothing, and there is
+                    // nothing below it to draw for. One written slot displaces at
+                    // most one distinct `Mapping`, so it needs at most one record
+                    // — and `create` refuses a population below one. So the
+                    // record budget can never be the cause of an unsplittable
+                    // over-budget range either, and record-driven decomposition
+                    // converges on the same bound as detachment-driven.
                     assert(!(clipLo == lo && clipHi == hi),
                            "radix: decomposition cannot make the range smaller — the site "
                            "is not the deepest node containing it (§6.5)");
@@ -2051,10 +2049,23 @@ namespace kernel::mm::radix {
         // boundary — which is also why the accounting is COMPLETE there and
         // commit does no counting of its own.
         //
-        // Returns false ONLY on pool exhaustion, which the caller must not treat
-        // as an ordinary retry: the remedy is a blocking replenish that has to
-        // run between attempts and outside any section.
-        [[nodiscard]] bool deferMappingRelease(Mapping* m, Attempt& a) {
+        // ─── The two ways a draw can fail, which need opposite remedies ────
+        //
+        // `Shortfall` means the records exist but are in flight — the pool is
+        // momentarily empty. The remedy is a grace period, and the retried
+        // attempt is identical.
+        //
+        // `OverBudget` means the attempt wants more records than a pool holds, so
+        // no grace period helps and retrying is a livelock. The remedy is to make
+        // the OPERATION smaller: §6.5 decomposition. (D-059.)
+        //
+        // Conflating them is the defect ITEM-084 was built around rather than
+        // fixed: it answered "the attempt wants more than the pool has" with "get
+        // more records", which needs a shared reserve, which couples one CPU's
+        // progress to another's.
+        enum class DrawResult : uint8_t { Ok, Shortfall, OverBudget };
+
+        [[nodiscard]] DrawResult deferMappingRelease(Mapping* m, Attempt& a) {
             assert(m != nullptr, "radix: a deferred release of no record");
             assert(a.phase == Attempt::Phase::Planning,
                    "radix: a release record drawn after the commit boundary — the draw "
@@ -2076,14 +2087,30 @@ namespace kernel::mm::radix {
             // record from many slots.
             for (DeferredRelease* r = a.heldReleases; r != nullptr;
                  r = r->next.load(kPrivateInit)) {
-                if (r->mapping == m) { r->delta++; return true; }
+                if (r->mapping == m) { r->delta++; return DrawResult::Ok; }
+            }
+
+            // ─── The budget, checked BEFORE the pool is touched (D-059) ─────
+            //
+            // Ahead of the `pop` so an over-budget attempt consumes nothing: it is
+            // about to be discarded and decomposed, and a record drawn here would
+            // only be handed straight back. Also ahead of it because the two
+            // conditions must not be able to mask each other — an attempt that is
+            // over budget AND meets a momentarily empty pool must report
+            // `OverBudget`, since a grace period would not help it.
+            //
+            // The budget is the per-CPU population, and that identity is what
+            // makes the shortfall path terminate in one round. See
+            // `DeferredReleasePools::recordBudget`.
+            if (a.heldReleaseCount >= releasePools->recordBudget()) {
+                return DrawResult::OverBudget;
             }
 
             DeferredReleasePool& pool = releasePools->forCpu(arch::getCurrentProcessorID());
             DeferredRelease* r = pool.pop();
             if (r == nullptr) {
                 pool.shortfalls.fetch_add(1, kPoolAccounting);
-                return false;
+                return DrawResult::Shortfall;
             }
             pool.draws.fetch_add(1, kPoolAccounting);
 
@@ -2096,11 +2123,11 @@ namespace kernel::mm::radix {
             r->next.store(a.heldReleases, kPrivateInit);
             a.heldReleases = r;
             a.heldReleaseCount++;
-            assert(a.heldReleaseCount <= deferredReleaseBound(G),
-                   "radix: one attempt drew more DeferredRelease records than the edge sum "
-                   "allows — either the bound is wrong or the draw and the rows that "
-                   "justify it have come apart (§7.1)");
-            return true;
+            assert(a.heldReleaseCount <= releasePools->recordBudget(),
+                   "radix: an attempt holds more DeferredRelease records than the budget "
+                   "permits — the gate above is the only way to draw, so this means the "
+                   "held list was extended somewhere else (§7.1 / D-059)");
+            return DrawResult::Ok;
         }
 
         // Abandonment: every drawn record goes home, and it does so BEFORE the
@@ -2169,52 +2196,38 @@ namespace kernel::mm::radix {
             assert(!kernel::interrupts::currentCpuInterruptDepths().inAnyInterruptContext(),
                    "radix: record replenish from interrupt or #PF context — `barrier` "
                    "carries the strict mask");
-            const arch::ProcessorID cpu = arch::getCurrentProcessorID();
-            DeferredReleasePool& pool = releasePools->forCpu(cpu);
+            DeferredReleasePool& pool =
+                releasePools->forCpu(arch::getCurrentProcessorID());
 
-            // ─── 1. The reserve, first (ITEM-084) ──────────────────────────
+            // The pump first, because it is cheap and sometimes enough: a bag
+            // that another CPU has already left drainable costs no grace period
+            // to collect, and RCU's sweep is domain-wide (RCU-DEC-006 stealing).
             //
-            // Ahead of the pump and the barrier because it is the only remedy
-            // that costs no grace period: the records exist, they are simply in
-            // the address space's reserve rather than this CPU's pool. A whole
-            // operation's worth moves at once — see `refillFromReserve` for why
-            // a per-record fallback would let two CPUs deadlock over fragments.
-            //
-            // This is also where §7.1's termination argument now lives: the
-            // reserve holds one operation's worst case, so a retry after a
-            // successful refill has enough for any shape.
-            {
-                kernel::rcu::DomainManagementLockGuard guard;
-                releasePools->noteShortfall(static_cast<size_t>(cpu));
-                // Up to ONE ATTEMPT'S WORST CASE, not the per-CPU default. The
-                // per-attempt bound is 228 against a 230 ceiling, and a refill
-                // of `perCpu` would leave a wide attempt shortfalling round
-                // after round, accumulating 32 at a time. One refill has to be
-                // enough for any shape or the retry is not bounded.
-                (void)releasePools->refillFromReserve(static_cast<size_t>(cpu),
-                                                      releasePools->reserveDepth());
-                // Promotion is judged HERE, on the shortfall itself, and not
-                // after the barrier below. A refill that rescues the operation
-                // is precisely the "touching the reserve too often" condition
-                // promotion exists to reduce — gating it behind the barrier
-                // meant it could only fire when the reserve had ALSO run dry,
-                // which is the one case a bigger per-CPU pool would not help.
-                if (releasePools->shouldPromote()) releasePools->promote();
-            }
-            if (pool.atFullPopulation()) return;
-
-            // ─── 2. The pump, then the barrier ─────────────────────────────
-            //
-            // Reached when the reserve is itself drained — every record is in
-            // flight through this address space's own retires — and then only a
-            // grace period brings them home.
+            // **Unconditional, both of them.** There used to be an
+            // `if (pool.atFullPopulation()) return;` early return above this and
+            // it was a reproduced livelock (D-058): the predicate asks whether the
+            // pool holds all the records it OWNS, which under ITEM-084's small
+            // pools read TRUE in exactly the state that produces a shortfall —
+            // abandonment returns every drawn record before this runs, so the CPU
+            // arrives holding precisely its native population. The gate fired, the
+            // pump never ran, and the retry re-entered the identical state. There
+            // is no timer-driven RCU pump in the kernel — every `tryAdvance` call
+            // site is on an operation path — so nothing else recovers it, and in
+            // release `assert` compiles out and it is an unbounded silent spin
+            // inside `munmap`.
             (void)kernel::rcu::tryAdvance(*domain);
             (void)kernel::rcu::drain(*domain);
-            // "If still short" — measured against the full population rather
-            // than against emptiness, because a pool holding three records when
-            // the operation needs five is not empty and is still short.
-            if (!pool.atFullPopulation()) kernel::rcu::barrier(*domain);
 
+            // "If still short" — against the full population rather than against
+            // emptiness, because a pool holding three records when the operation
+            // needs five is not empty and is still short.
+            //
+            // With D-059's budget this predicate is finally EXACT rather than
+            // conservative: the budget is the population, so "at full population"
+            // and "enough for any attempt this tree will run" are the same
+            // sentence. Under ITEM-084 they were not, and the gap was a redundant
+            // barrier on every wide draw.
+            if (!pool.atFullPopulation()) kernel::rcu::barrier(*domain);
         }
 
         // ─── One attempt (§3.2: one attempt is ONE read section) ───────────
@@ -2342,6 +2355,14 @@ namespace kernel::mm::radix {
             // re-dispatch can stay a plain bool.
             bool recordShortfall = false;
 
+            // Set only by a draw refused for exceeding the record budget (D-059).
+            // A SECOND flag rather than a shared "the draw failed" one, because the
+            // two remedies are opposite and mutually exclusive: a shortfall retries
+            // the identical attempt after a grace period, while this one must never
+            // retry the identical attempt — the demand is a property of the shape,
+            // so retrying is a livelock. Decomposing is what fixes it.
+            bool recordsOverBudget = false;
+
             // §5.6's fused verify-is-install. `mode` is the caller's; `occupied`
             // is set by re-dispatch, under the claims, which is the only place
             // the answer is exact — the read pass runs unclaimed, so a range it
@@ -2441,6 +2462,19 @@ namespace kernel::mm::radix {
                     // Not a retry: the answer is stable. Something is mapped
                     // there, and retrying would only re-discover it.
                     return ApplyStatus::Occupied;
+                }
+                // Before the shortfall, because it is the stabler answer of the
+                // two. Only one of the flags can be set — the walk returns as
+                // soon as either fires — so the order is determinism rather than
+                // precedence, and it is written as an order so a later change
+                // that lets both be set does not silently pick the wrong remedy.
+                if (a.recordsOverBudget) {
+                    // §6.5's own status, not a new one. The operation is too big
+                    // for one attempt, which is exactly what the detachment
+                    // budget already says with the same word, and the caller's
+                    // decompose-then-retry machinery is already correct for it.
+                    counters.recordBudgetOverruns.fetch_add(1, kRefcountAcquire);
+                    return ApplyStatus::NeedsDecomposition;
                 }
                 if (a.recordShortfall) {
                     counters.recordShortfalls.fetch_add(1, kRefcountAcquire);
@@ -3021,9 +3055,17 @@ namespace kernel::mm::radix {
                 } else if (d.action == DispatchAction::Subdivide && Codec::isLeaf(word)) {
                     displaced = static_cast<Mapping*>(Codec::decodeLeaf(word));
                 }
-                if (displaced != nullptr && !deferMappingRelease(displaced, a)) {
-                    a.recordShortfall = true;
-                    return false;
+                if (displaced != nullptr) {
+                    switch (deferMappingRelease(displaced, a)) {
+                    case DrawResult::Ok:
+                        break;
+                    case DrawResult::Shortfall:
+                        a.recordShortfall = true;
+                        return false;
+                    case DrawResult::OverBudget:
+                        a.recordsOverBudget = true;
+                        return false;
+                    }
                 }
             }
             return true;

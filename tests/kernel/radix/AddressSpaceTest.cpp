@@ -464,15 +464,16 @@ TEST(radix_address_space_store_packs_blocks_into_a_page) {
                                             kTestRecords, b) == rdx::CreateStatus::Ok);
     }
 
-    // Four, not five: ITEM-084's reserve adds one more cache-line-aligned
-    // `DeferredReleasePool` to the block's trailing array, taking the stride
-    // from 768 B to 832 B. The reserve buys back far more than it costs — the
-    // per-CPU record populations drop from 230/CPU to 32/CPU — but it does cost
-    // one block per page here, and the number is asserted rather than assumed.
-    ASSERT_TRUE(store.pool.blocksPerPage() >= 4);
-    // Two pages for five blocks at four per page, where the old
-    // whole-reservation-per-block scheme took five pages.
-    ASSERT_EQ(size_t{2}, store.pool.pagesReserved());
+    // Five per page at a 768 B stride. This asserted FOUR while ITEM-084's
+    // reserve was in the trailing array: one extra cache-line-aligned
+    // `DeferredReleasePool` took the stride to 832 B and 4,096/832 is 4. D-059
+    // deleted the reserve — the record budget makes a per-address-space ceiling
+    // unnecessary rather than relocating it — so the stride and this number both
+    // go back, and the per-CPU population stays at 32 rather than 230.
+    ASSERT_TRUE(store.pool.blocksPerPage() >= 5);
+    // One page for five blocks, where the old whole-reservation-per-block scheme
+    // took five.
+    ASSERT_EQ(size_t{1}, store.pool.pagesReserved());
 
     // Distinct, and each cache-line aligned so two address spaces never share a
     // line — these blocks hold the generation and pool heads every CPU reads.

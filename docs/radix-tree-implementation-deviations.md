@@ -2925,3 +2925,273 @@ subsystem has produced the same lesson: a test that cannot produce a shape
 reports success, and success looks like evidence.
 
 Green on both sanitizers (172x2).
+
+---
+
+## D-058 — the replenish gate was a livelock, and the suite is RED on purpose
+
+Found by the pre-merge referee pass, not by a test. Four independent derivations
+converged on it and a fifth reproduced it empirically.
+
+### The defect
+
+`CoreTree.h:2204` — `if (pool.atFullPopulation()) return;`, sitting between the
+reserve refill and the pump.
+
+`atFullPopulation()` asks whether the pool holds all the records it OWNS. The
+question that matters is whether the attempt can proceed. Under DEC-068 those
+were the same sentence, because a per-CPU pool held the whole 230-record
+per-operation ceiling. ITEM-084 shrank the pool to `kDefaultRecordsPerCpu = 32`
+and left the predicate spelled as "full population".
+
+**The line is new.** `git log -L` on the function shows the pre-ITEM-084 body ran
+`tryAdvance` + `drain` unconditionally and used `atFullPopulation()` only to gate
+the `barrier`, where it was sound. `45c13bb` ADDED the early return in the same
+commit that invalidated the predicate — which is why it survived review: a
+correct two-year-old use of the same predicate sits three lines below it.
+
+It reads TRUE in exactly the state that produces a shortfall. A shortfall is
+raised only when `pop()` returns null, and `returnHeldRecords` puts every drawn
+record back before the replenish runs, so the CPU arrives holding precisely its
+native population. The gate fires, the pump never runs, the retry re-enters the
+identical state.
+
+Nothing else recovers it: **there is no timer-driven RCU pump in this kernel** —
+every `tryAdvance` call site is on an operation path — so a spinning CPU advances
+nothing, and §7.1's domain-wide-sweep termination argument is on the far side of
+the gate. Debug trips `kShortfallRoundLimit`; release compiles `assert` out
+(`kassert.h:51`) and it is an unbounded silent spin inside `munmap`.
+
+Reproduced: with the gate present and the reserve drained, the workload ran to a
+300-second timeout. With it removed, the same workload completes.
+
+### The fix
+
+The pump and the drain are unconditional again. `barrier` keeps its own guard.
+
+This is a stop-gap, not the answer. The predicate at `:2216` is still not
+"enough for the attempt", and termination still crosses CPUs — a borrower that
+retires the reserve and goes quiet leaves records in an Open bag that no other
+CPU can seal (`EpochDomain.h:211`, and `tryAdvance` never seals). The real fix is
+**option C: let a record budget drive §6.5 decomposition**, which bounds a unit's
+draw below the per-CPU population, restores DEC-068's LOCAL termination argument,
+and deletes the reserve, promotion and surplus outright.
+
+### The suite is red, and must stay red
+
+With this fix in, `radix_concurrent_readers_never_observe_a_torn_state` and
+`radix_concurrent_disjoint_writers_do_not_interfere` fail non-deterministically:
+`DeferredRelease` live-object accounting does not return to baseline (+384 and
++128 records across two runs).
+
+**This is not a regression and must not be baselined away.** Isolated: with the
+harness fix alone the suite is 172/172 twice; adding this fix produces the
+failures. The cause is `promote()`. The unconditional pump changes shortfall
+timing, promotion starts firing in the concurrent tests, and promotion ALLOCATES
+records that are never freed until teardown — so `assertNoLiveObjects` correctly
+reports growth above the baseline taken at `Harness` construction. 128 is exactly
+one 64→128 promotion step at two CPUs.
+
+So the accounting is doing its job, and what it caught is the companion finding:
+**termination has migrated into `promote()`, i.e. into an allocation on the
+`munmap` path**, which is the one thing DEC-068 exists to forbid
+(`DeferredRelease.h:26`). `DeferredRelease.h:585`'s "failure is harmless by
+construction" is false while the coupling stands.
+
+Option C removes the cause. Until then the red is the evidence, and suppressing
+it would destroy exactly the signal that justifies the change.
+
+### A harness defect found on the way
+
+`~Harness` (`RadixHarness.h`) and `~StarvedPools` called `pools.destroy()`, whose
+conservation assert throws, from implicitly-`noexcept` destructors. Two failures:
+a throw during an unwind from a test-body assertion is `std::terminate`, so the
+REAL failure was lost and every diagnostic blamed conservation instead; and an
+escaping throw skipped `domain.deinit()`, `resetDomainManagementState()` and
+`shutdown()`, so one failing test corrupted the next.
+
+Both are now `noexcept(false)`, capture the teardown failure, always complete
+cleanup, and re-raise only when nothing else is in flight. Verified with a
+temporary test that failed a body assertion and violated conservation at once:
+previously `terminate()` with no results, now the runner reports the real
+assertion and demotes the teardown one to a stderr note.
+
+### A trap for whoever writes the regression test
+
+`setPageAllocFailAt` does NOT close promotion's escape hatch. It fails the page
+allocator beneath vmsmalloc, but a 64 B record is served from an existing partial
+slab — and a wide clear has just freed many same-size-class mappings. A first
+attempt at the test asserted `promotionCount() == 0` and got `promo=3,
+perCpu=16`: promotion had covered the demand and the drained reserve never
+mattered. Use `oracle::shouldInjectFailure`, which fails `tryMake` itself.
+
+That first attempt was the fifth instance of this subsystem's recurring lesson,
+this time in the reviewer's own work: a test that cannot produce a shape reports
+success.
+
+---
+
+## D-059 — ITEM-084 withdrawn: a record budget replaces the shared reserve
+
+The follow-up D-058 named, implemented. It closes findings R-3, R-10, R-11 and
+R-14 from the pre-merge referee pass at once, and it does so by deleting the
+mechanism all four live in rather than by fixing them.
+
+### The root cause, stated once
+
+DEC-068's per-CPU pool had a property nobody named, because it was invisible
+until it was gone: **the termination argument was LOCAL.** Each CPU held a full
+per-operation ceiling, and `barrier` drives the caller's own retirees, so "short
+→ barrier → my records come home → proceed" involved exactly one CPU from start
+to finish.
+
+ITEM-084 (D-056) replaced that with small per-CPU pools behind one shared
+per-address-space reserve. The sizing argument was sound — D-054 measured the
+realistic draw at 2 against a 230-record provision — and it still missed the
+thing that mattered: **a shared reserve makes CPU A's progress depend on CPU B's
+records coming home**, and the RCU engine has no primitive for that.
+
+- `barrier` completes only the caller's retirees.
+- `tryAdvance` never seals a foreign Open bag (invariant I13, `EpochDomain.h`).
+- `drainAllQuiescent` force-seals universally, but only at teardown with no
+  readers.
+
+That single coupling is why ITEM-084 produced *four* liveness defects rather than
+one. R-1 (the `atFullPopulation` gate), R-3 (termination migrating into
+`promote()`, i.e. an allocation on the `munmap` path), R-10 (`returnSurplus`'s
+`depth <= perCpu` early-out stranding loans) and the Open-bag stranding are all
+symptoms of it. **The coupling was the defect.**
+
+### The fix: the pool's population IS the per-attempt record budget
+
+`deferMappingRelease` refuses to draw past `releasePools->recordBudget()` and
+reports `OverBudget`; `runAttempt` maps that to `ApplyStatus::NeedsDecomposition`,
+and §6.5 splits the operation into units that fit. So the sentence "the pool
+covers one attempt's worst case" holds **by construction** rather than by sizing
+every pool at a ceiling, and termination is local again.
+
+Two details carry the design:
+
+- **The budget is the population itself, not a second constant.** Spelled as its
+  own accessor (`recordBudget()`) because "how much memory a CPU holds" and "how
+  much one attempt may want" are different questions with deliberately the same
+  answer — but they are one number, so they cannot drift apart.
+- **`OverBudget` and `Shortfall` are separate results with opposite remedies.**
+  A shortfall retries the identical attempt after a grace period; an overrun must
+  never retry the identical attempt, because the demand is a property of the
+  shape. Conflating them is precisely what ITEM-084 did: it answered "the attempt
+  wants more than the pool has" with "get more records", which needs a shared
+  reserve. The gate is checked *before* the `pop`, so an over-budget attempt
+  consumes nothing and the two conditions cannot mask each other.
+
+**`kDefaultRecordsPerCpu = 32` was already the right number, for a mechanism that
+was never built.** It is `singleNodeRecordBound(kAmd64Geometry)` — 31, the worst
+partial cover of the widest node the geometry has — rounded up to a power of two,
+so §7.1's own worked example stays a single attempt. Both facts are now
+static_asserts; setting the constant to 8 fails the build.
+
+### Termination of record-driven decomposition
+
+`decompose` splits at the site node — the deepest node containing the whole range
+— per intersected slot. Either the range straddles several of the site's slots,
+in which case every sub-range is strictly smaller, or it lies in one slot that
+holds no child. **In the second case the operation writes exactly one slot**: the
+walk from the cluster root reaches it through `DescendIntoChild` rows, which draw
+nothing, and there is nothing below it to draw for. One written slot displaces at
+most one distinct `Mapping`, and `create` refuses a population below one. So the
+record budget can never be the cause of an unsplittable over-budget range, and
+the recursion converges on the same bound as the detachment budget's.
+
+### What was deleted
+
+`refillFromReserve`, `returnSurplus`, `SurplusGuard`, `promote`, `shouldPromote`,
+`kPromotionThreshold`, `kShortfallRoundLimit`, `shortfallEvents`, `noteShortfall`,
+`reserve()`, `reserveDepth()`, `promotionCount()`, and the `+1` reserve slot in
+`deferredReleasePoolBytes`. `replenishRecords` collapses to pump, drain,
+conditional barrier.
+
+### Three invariants that come back exact
+
+1. **`consecutiveShortfalls <= 1`.** Reverses D-057. Every link is local — the
+   records belong to this CPU's pool, only this CPU draws, only this CPU retires,
+   `barrier` drives this CPU's retirees — and the attempt cannot want more than
+   the pool holds. So a second consecutive shortfall means a record is not coming
+   home at all, which is what the assert should say. D-057's 64-round bound was
+   forced by the coupling and detected almost nothing.
+2. **`destroy()`'s conservation check is per-pool again.** Refills used to move
+   records between pools, so only the total balanced; the exact form says *which*
+   pool lost the record.
+3. **`replenishRecords`'s `atFullPopulation()` predicate is now exact rather than
+   conservative.** Because the budget is the population, "at full population" and
+   "enough for any attempt" are the same sentence. Under ITEM-084 they were not,
+   and the gap was a redundant barrier on every wide draw (R-8).
+
+R-19's `DeferredRelease.h:124` finding also resolves itself: single-consumer is
+true **by construction** again, since `refillFromReserve` was the second popper
+and it is gone. The comment now records that history rather than restating a
+claim that had quietly become false.
+
+### The corrected numbers, per address space at 8 CPUs
+
+| | records | record bytes | pinned pool bytes | `tryMake` per fork |
+|---|---|---|---|---|
+| DEC-068 | 8×230 | 115 KiB | 512 | 1,840 |
+| ITEM-084 | 8×32 + 230 | 23 KiB | 576 | 486 |
+| **D-059** | 8×32 | **12 KiB** | **512** | **256** |
+
+The pinned-storage saving is small but has a visible consequence: the control
+block's stride goes from 832 B back to 768 B, so **five address spaces share a
+page of the static-buffer window again instead of four**
+(`radix_address_space_store_packs_blocks_into_a_page` asserts it, and asserted 4
+while the reserve stood).
+
+`RadixStress.cpp` was passing `deferredReleaseBound(kAmd64Geometry)` — 230 — as
+`perCpuRecords`, i.e. DEC-068's eager sizing. It now passes
+`kDefaultRecordsPerCpu`, so the in-kernel stress runs against the population the
+kernel will actually ship and *could* observe an overrun if one existed.
+
+### Tests: what replaced the reserve tests, and how each was proven
+
+`radix_a_starved_per_cpu_pool_completes_through_the_reserve`,
+`radix_repeated_shortfalls_promote_the_per_cpu_population` and
+`radix_concurrent_wide_draws_contend_for_the_reserve_and_both_finish` are gone.
+In their place:
+
+- **`radix_no_attempt_exceeds_the_record_budget`** — a two-record budget against
+  a fifteen-record shape. Asserts the inequality, the overrun counter and the
+  decomposition counter (non-vacuity, the R-7 lesson), **and the terminal state**:
+  fifteen pages cleared, the sixteenth still naming its own record with the count
+  one naming slot implies. A budget that decomposes is only acceptable if the
+  answer is unchanged, and "it did not hang" is not that.
+- **`radix_the_shipping_budget_absorbs_one_nodes_dense_shape`** — the other half:
+  at 32 the same shape is one attempt, fifteen records, zero overruns. This is
+  what guards the constant at runtime.
+- **`radix_two_cpus_over_budget_at_once_both_finish`** — kept from the reserve
+  version because the reason a single-CPU test cannot see this has not changed
+  (it is how D-057's broken bound slipped past every other test in the file).
+  What it defends now is that there IS no shared resource: both CPUs run
+  over-budget shapes at once and each finishes on its own pool and its own
+  barrier, with `consecutiveShortfalls <= 1` live throughout.
+
+**Mutation-proven, three ways.** Deleting the budget gate fails both new
+concurrent-capable tests — and fails them *through the restored exact shortfall
+assert*, which is the ITEM-084 livelock class reproducing itself and being caught.
+Weakening the boundary by one (`>=` to `>`) fails the same two, so the boundary is
+exact rather than approximately right. Setting `kDefaultRecordsPerCpu` to 8 fails
+the build at the `singleNodeRecordBound` static_assert.
+
+### D-058's red is now green, legitimately
+
+172/172. The two concurrent tests whose `DeferredRelease` accounting would not
+return to baseline were reporting `promote()` allocating records that lived until
+teardown; `promote()` no longer exists. The failures were removed by deleting
+their cause, which is the only way D-058 permitted.
+
+### What this does NOT touch
+
+§7.1 of the spec. Option D — one record per *attempt* carrying an inline array of
+`(Mapping*, delta)` pairs — would need a §7.1 amendment, because the section says
+one record per distinct `Mapping`; the budget does not. That is one of C's
+advantages over D and the reason it went first. D remains deferred, to be judged
+on measurements once there is evidence about whether a 32-record pool ever
+shortfalls in practice.

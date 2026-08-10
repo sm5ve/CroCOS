@@ -27,6 +27,8 @@
 
 #include "mocks/RadixOracle.h"
 #include <assert_support.h>
+#include <cstdio>       // the teardown-failure report, which must not be swallowed
+#include <exception>    // std::uncaught_exceptions — see ~Harness
 #include <string>
 
 namespace CroCOSTest::radix {
@@ -55,12 +57,12 @@ namespace CroCOSTest::radix {
         // the DEC-082 control block owns it — so one per harness here, alongside
         // the domain it shares a lifetime with.
         //
-        // Sized at the amd64 geometry's ceiling for every fixture, including the
-        // tiny-geometry ones whose own ceiling is 16. Over-provisioning is the
-        // right default for a harness: an undersized pool does not fail, it just
-        // turns every operation into a shortfall-and-barrier round trip, which
-        // would read as a mysterious slowdown rather than as a bug. The tests
-        // that WANT the shortfall path arm it deliberately.
+        // Sized at `kDefaultRecordsPerCpu`, which is what the kernel ships, and
+        // that matters more since D-059 than it did before: the population is
+        // also the per-attempt RECORD BUDGET, so a harness that over-provisioned
+        // it would run every fixture with a budget no address space ever has and
+        // would never see a decomposition the kernel will take. The tests that
+        // want a small budget arm it deliberately (see `StarvedPools`).
         kernel::mm::radix::DeferredReleasePools releasePools{};
 
         // Storage for the pool array. In production this is the tail of the
@@ -70,7 +72,7 @@ namespace CroCOSTest::radix {
         // per-address-space reservation cannot — which is the whole point of the
         // change that made this a pointer.
         alignas(arch::CACHE_LINE_SIZE)
-        kernel::mm::radix::DeferredReleasePool poolStorage[arch::MAX_PROCESSOR_COUNT + 1];
+        kernel::mm::radix::DeferredReleasePool poolStorage[arch::MAX_PROCESSOR_COUNT];
 
         // The root bucket page's pinned pool (D-051). Per ADDRESS-SPACE STORE in
         // production; a fixture that constructs a `ClusterTable` directly needs
@@ -100,13 +102,10 @@ namespace CroCOSTest::radix {
                 VS::test::shutdown();
                 throw AssertionFailure(std::string("radix Harness: domain init failed"));
             }
-            // Per-CPU at the amd64 default, reserve at the ceiling — the same
-            // split the kernel uses, so the harness exercises the refill path
-            // rather than a fixture-only shape.
+            // The shipping per-CPU population, so the harness runs against the
+            // record budget the kernel runs against.
             if (!releasePools.create(
-                    poolStorage, cpus, kernel::mm::radix::kDefaultRecordsPerCpu,
-                    kernel::mm::radix::deferredReleaseBound(
-                        kernel::mm::radix::kAmd64Geometry))) {
+                    poolStorage, cpus, kernel::mm::radix::kDefaultRecordsPerCpu)) {
                 (void)domain.deinit();
                 VS::test::shutdown();
                 throw AssertionFailure(
@@ -117,7 +116,33 @@ namespace CroCOSTest::radix {
             setAccountingBaseline();
         }
 
-        ~Harness() {
+        // ─── Why this destructor is noexcept(false) and catches ───────────
+        //
+        // `releasePools.destroy()` asserts §11's record-conservation target, and
+        // an assert in this harness THROWS. Left unguarded in a destructor that
+        // is implicitly `noexcept`, that throw is fatal twice over:
+        //
+        //   * If a test-body assertion is already propagating, a second throw
+        //     during unwinding is `std::terminate`. The original failure is lost
+        //     and every diagnostic blames conservation instead — so a test that
+        //     failed for one reason reports a different, misleading one. That
+        //     masking is real and it cost a debugging session: an
+        //     `ASSERT_EQ(0, promotionCount())` failure surfaced as "the pools did
+        //     not hold their creation population at teardown".
+        //   * Either way an escaping throw skips everything below it, so the
+        //     domain is never deinitialised, the process-global RCU freelist is
+        //     never reset and the arena is never shut down — and the NEXT test
+        //     starts against a live domain and a block pointing into munmapped
+        //     memory. One failing test would cascade into the rest of the file.
+        //
+        // So the conservation failure is captured rather than thrown, the rest
+        // of teardown ALWAYS runs, and the failure is re-raised only when it is
+        // the sole one in flight — which requires opting out of the implicit
+        // `noexcept`.
+        ~Harness() noexcept(false) {
+            bool        teardownFailed = false;
+            std::string teardownError;
+
             // Teardown order matters and is the consumer's obligation:
             // drainAllQuiescent (its no-new-users precondition discharged here by
             // the tests being single-threaded at this point, and by joined
@@ -128,7 +153,12 @@ namespace CroCOSTest::radix {
                 // pools, THEN deinit. Freeing the pools first would destroy
                 // records still linked into an undrained bag.
                 (void)kernel::rcu::drainAllQuiescent(domain);
-                releasePools.destroy();
+                try {
+                    releasePools.destroy();
+                } catch (const std::exception& e) {
+                    teardownFailed = true;
+                    teardownError  = e.what();
+                }
                 (void)domain.deinit();
             }
             // The RCU block freelist is process-global while the arena is
@@ -137,6 +167,18 @@ namespace CroCOSTest::radix {
             kernel::rcu::test::resetDomainManagementState();
             resetInjection();
             VS::test::shutdown();
+
+            if (!teardownFailed) return;
+            if (std::uncaught_exceptions() > 0) {
+                // A failure is already on its way to the runner. Report this one
+                // where it cannot displace that one.
+                std::fprintf(stderr,
+                             "[radix Harness] teardown assert suppressed so the "
+                             "failure already in flight is not masked: %s\n",
+                             teardownError.c_str());
+                return;
+            }
+            throw AssertionFailure(teardownError);
         }
 
         Harness(const Harness&) = delete;
