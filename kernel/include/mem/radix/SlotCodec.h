@@ -248,12 +248,20 @@ namespace kernel::mm::radix {
 
         // ─── Leaf words ────────────────────────────────────────────────────
 
+        // ─── Every level-dependent quantity comes off the table (D-076) ────
+        //
+        // These are called with a RUNTIME level on every descent step, and the
+        // free-function derivations compile to loops there — `decodeRange`
+        // alone reached `rangeEndpointBits` three times and `covers` reached
+        // `rangeUnitBits` a fourth. `Geo<G>` is those same derivations
+        // evaluated once at compile time; see Geometry.h for the measurement
+        // and for the static_asserts that keep the table honest.
         static constexpr unsigned endpointBits(unsigned level) {
-            return rangeEndpointBits(G, level);
+            return Geo<G>::rangeEndpointBits(level);
         }
 
         static constexpr uint64_t endpointMask(unsigned level) {
-            return (uint64_t{1} << endpointBits(level)) - 1;
+            return Geo<G>::endpointMask(level);
         }
 
         static uint64_t encodeLeaf(const void* mapping, SubRange r, unsigned level) {
@@ -291,7 +299,7 @@ namespace kernel::mm::radix {
 
         // A leaf covering its slot's entire span — the ordinary placement shape.
         static constexpr SubRange fullSpan(unsigned level) {
-            return SubRange{0, static_cast<uint32_t>(rangeUnitCount(G, level) - 1)};
+            return SubRange{0, static_cast<uint32_t>(Geo<G>::rangeUnitCount(level) - 1)};
         }
 
         // ─── The `covers` hook (DEC-022 / DEC-023) ─────────────────────────
@@ -304,7 +312,7 @@ namespace kernel::mm::radix {
         static bool covers(uint64_t word, uint64_t keyWithinSlot, unsigned level) {
             if (!isLeaf(word)) return false;
             const SubRange r = decodeRange(word, level);
-            const uint64_t unitBits = rangeUnitBits(G, level);
+            const uint64_t unitBits = Geo<G>::rangeUnitBits(level);
             const uint64_t unit = keyWithinSlot >> unitBits;
             return unit >= r.lo && unit <= r.hi;
         }
@@ -316,7 +324,7 @@ namespace kernel::mm::radix {
         static void absoluteRange(uint64_t word, uint64_t slotBase, unsigned level,
                                   uint64_t& lo, uint64_t& hi) {
             const SubRange r = decodeRange(word, level);
-            const unsigned unitBits = rangeUnitBits(G, level);
+            const unsigned unitBits = Geo<G>::rangeUnitBits(level);
             lo = slotBase + (static_cast<uint64_t>(r.lo) << unitBits);
             hi = slotBase + ((static_cast<uint64_t>(r.hi) + 1) << unitBits) - 1;
         }
@@ -330,7 +338,7 @@ namespace kernel::mm::radix {
         static bool subRangeFor(uint64_t slotBase, unsigned level,
                                 uint64_t lo, uint64_t hi, SubRange& out) {
             if (hi < lo) return false;
-            const unsigned unitBits = rangeUnitBits(G, level);
+            const unsigned unitBits = Geo<G>::rangeUnitBits(level);
             const uint64_t unitSize = uint64_t{1} << unitBits;
             const uint64_t relLo = lo - slotBase;
             const uint64_t relEnd = hi - slotBase + 1;          // exclusive

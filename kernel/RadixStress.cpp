@@ -785,6 +785,11 @@ namespace radix_stress {
     }
 
     void liveness(arch::ProcessorID me) {
+        // One snapshot for the whole line. Since D-076 the counters live in the
+        // cache's per-CPU rows and `stats()` sums them, so it is a walk over
+        // every row rather than a field read — calling it six times inside one
+        // `klog` would do that walk six times and print six different moments.
+        const rdx::DescentCacheStats cacheStats = gCache->stats();
         klog() << "radixStress: cpu=" << static_cast<uint64_t>(me)
                << " cycles=" << gCycles.load(RELAXED)
                << " place=" << gPlacements.load(RELAXED)
@@ -797,14 +802,12 @@ namespace radix_stress {
                << " clusters=" << gClusters.load(RELAXED)
                << " noSpace=" << gNoSpace.load(RELAXED)
                << " oom=" << gOom.load(RELAXED)
-               << " hit%=" << (gCache->stats().lookups.load(rdx::kCacheAccounting) == 0
+               << " hit%=" << (cacheStats.lookups == 0
                                    ? uint64_t{0}
-                                   : 100 * gCache->stats().hits.load(rdx::kCacheAccounting) /
-                                         gCache->stats().lookups.load(rdx::kCacheAccounting))
-               << " pinAtomics=" << (gCache->stats().pinAcquires.load(rdx::kCacheAccounting) +
-                                     gCache->stats().pinReleases.load(rdx::kCacheAccounting))
-               << " detEvict=" << gCache->stats().detachedEvictions.load(rdx::kCacheAccounting)
-               << " genEvict=" << gCache->stats().generationEvictions.load(rdx::kCacheAccounting)
+                                   : 100 * cacheStats.hits / cacheStats.lookups)
+               << " pinAtomics=" << (cacheStats.pinAcquires + cacheStats.pinReleases)
+               << " detEvict=" << cacheStats.detachedEvictions
+               << " genEvict=" << cacheStats.generationEvictions
 #ifdef CROCOS_RADIX_NODE_CENSUS
                << " nodesLive=" << rdx::gNodeCensus.liveQuiesced()
                << " residuePinned=" << gResiduePinned.load(RELAXED)
@@ -849,6 +852,20 @@ namespace radix_stress {
                                        : rdx::gProbePumpTicks.load(RELAXED) /
                                              rdx::gProbePumpCount.load(RELAXED))
                << " splitN=" << rdx::gProbePumpCount.load(RELAXED)
+#endif
+#if defined(CROCOS_RADIX_INSN_PROBE) && CROCOS_RADIX_INSN_PROBE == 5
+               // Mode 4's `inner`, opened up on the HIT path. `resume` is the
+               // whole `resumeDescent`; the three that follow are its parts, so
+               // resume - (range + guard + descend) - 3*base is the seam's own
+               // overhead and innerMin - resume is `lookupInner`'s preamble and
+               // tail. Accumulated in CoreTree.h, where two of the four
+               // brackets live. Read every figure net of probe5Base.
+               << " probe5Base=" << rdx::gProbe5BaseMin.load(RELAXED)
+               << " resumeMin=" << rdx::gProbe5ResumeMin.load(RELAXED)
+               << " rangeMin=" << rdx::gProbe5RangeMin.load(RELAXED)
+               << " guardMin=" << rdx::gProbe5GuardMin.load(RELAXED)
+               << " descendMin=" << rdx::gProbe5DescendMin.load(RELAXED)
+               << " resumeN=" << rdx::gProbe5Count.load(RELAXED)
 #endif
                << "\n";
     }

@@ -164,9 +164,11 @@ namespace kernel::mm::radix {
     inline constexpr unsigned kDescentCacheEntries = 4;
 
     // How wide a cache the per-entry instrumentation can describe. Only the
-    // stats array is sized by it; calibration instantiates the cache at several
-    // widths in one run, and per-entry counters that stopped at the default
-    // would answer for the default alone.
+    // SNAPSHOT's array is sized by it — the live per-CPU counters are sized by
+    // the instantiation's own `Entries`, since they live inside the template.
+    // The snapshot is not, because it is one type shared by every width, and
+    // calibration instantiates the cache at several widths in one run: a
+    // snapshot that stopped at the default would answer for the default alone.
     inline constexpr unsigned kMaxDescentCacheEntries = 16;
 
     // How many sightings of a range install it, counting the one that created
@@ -192,73 +194,127 @@ namespace kernel::mm::radix {
     // faults, so cost scales with miss rate", so the atomic counts are broken
     // out per kind — a build where `pinAcquires` tracks `lookups` rather than
     // `installs` has lost the property the design was chosen for.
-    struct DescentCacheStats {
-        Atomic<uint64_t> lookups{0};
-        Atomic<uint64_t> hits{0};
-        Atomic<uint64_t> misses{0};
+    //
+    // ─── Why one struct template and two instantiations (D-076) ────────────
+    //
+    // This used to be ONE struct of `Atomic<uint64_t>` hanging off the cache
+    // object, incremented with `fetch_add`. That made the instrument the single
+    // most contended object in the whole design: `kCacheAccounting` is RELAXED,
+    // which removes the fences but **not the lock prefix**, so every increment
+    // was a locked read-modify-write taking exclusive ownership of a line every
+    // other CPU also wrote. A hit-path lookup bumps three of them. On P CPUs
+    // taking page faults, that is 3P locked RMWs per fault-storm on the same
+    // three lines — a cost that grows with CPU count on the one path the whole
+    // subsystem exists to make fast, and one that D-075's `-icount` method is
+    // constitutionally blind to (TCG models no cache, so a locked RMW prices at
+    // three instructions there no matter who owns the line).
+    //
+    // The fix is the layout the rest of this file already uses: the counters
+    // move INTO `Row`, which is per-CPU and cache-line aligned, and the
+    // increment stops being an RMW. See `DescentCache::bump`.
+    //
+    // The same field list has to be readable two ways — live (`Atomic<uint64_t>`,
+    // written by one CPU, read by any) and as a summed snapshot (plain
+    // `uint64_t`, what `stats()` hands back) — so it is written ONCE, here, and
+    // instantiated twice. `DescentCacheStats` keeps its name and every field
+    // name it had, so the §11 test surface and the stress report are unchanged
+    // apart from no longer needing a `.load()`.
+    //
+    // Field order is deliberate: the three the HIT path bumps come first and
+    // adjacent, so a hit dirties one counter line rather than three.
+    template <typename T, unsigned N>
+    struct CacheCounters {
+        // The hit path, in the order `lookup` touches them.
+        T lookups{};
+        T hits{};
+        T freshnessLoads{};
+
+        T misses{};
 
         // Misses by kind. `emptyEntry` is a cold cache; `rangeMiss` is the entry
         // holding a different range at this index — the thrash signal; the two
         // eviction counts are §7.5's forced-miss cases.
-        Atomic<uint64_t> emptyEntryMisses{0};
-        Atomic<uint64_t> rangeMisses{0};
-        Atomic<uint64_t> detachedEvictions{0};
-        Atomic<uint64_t> generationEvictions{0};
+        T emptyEntryMisses{};
+        T rangeMisses{};
+        T detachedEvictions{};
+        T generationEvictions{};
         // A resume that the seam refused because the key was outside the pinned
         // node. Unreachable through this cache — the entry's VA range is the
         // node's span — and counted rather than asserted so a future caller of
         // the seam that gets it wrong shows up as a number instead of silence.
-        Atomic<uint64_t> outOfRangeResumes{0};
+        T outOfRangeResumes{};
 
         // Install machinery.
-        Atomic<uint64_t> candidatesRecorded{0};
-        Atomic<uint64_t> candidateSightings{0};
-        Atomic<uint64_t> installs{0};
+        T candidatesRecorded{};
+        T candidateSightings{};
+        T installs{};
         // Installs that displaced a live entry. The other half of the thrash
         // picture: high `rangeMisses` with high `installEvictions` is two hot
         // regions fighting over one index, which is what more entries buys.
-        Atomic<uint64_t> installEvictions{0};
+        T installEvictions{};
         // Eviction releases that took a node's count to zero and destroyed it —
         // §7.5's in-section, `#PF`-context `destroy<Node>`. The residue of
         // DEC-096 coming home.
-        Atomic<uint64_t> releasesThatDestroyed{0};
+        T releasesThatDestroyed{};
 
         // Atomics this cache performed, by kind.
-        Atomic<uint64_t> pinAcquires{0};
-        Atomic<uint64_t> pinReleases{0};
-        Atomic<uint64_t> freshnessLoads{0};
+        T pinAcquires{};
+        T pinReleases{};
 
         // Per-entry thrash: a miss at an index whose entry held a different
         // range. Per index rather than summed, because the question calibration
         // asks is whether the pressure is spread or concentrated.
-        Atomic<uint64_t> entryThrash[kMaxDescentCacheEntries]{};
-
-        void reset() {
-            lookups.store(0, kCacheAccounting);
-            hits.store(0, kCacheAccounting);
-            misses.store(0, kCacheAccounting);
-            emptyEntryMisses.store(0, kCacheAccounting);
-            rangeMisses.store(0, kCacheAccounting);
-            detachedEvictions.store(0, kCacheAccounting);
-            generationEvictions.store(0, kCacheAccounting);
-            outOfRangeResumes.store(0, kCacheAccounting);
-            candidatesRecorded.store(0, kCacheAccounting);
-            candidateSightings.store(0, kCacheAccounting);
-            installs.store(0, kCacheAccounting);
-            installEvictions.store(0, kCacheAccounting);
-            releasesThatDestroyed.store(0, kCacheAccounting);
-            pinAcquires.store(0, kCacheAccounting);
-            pinReleases.store(0, kCacheAccounting);
-            freshnessLoads.store(0, kCacheAccounting);
-            for (unsigned i = 0; i < kMaxDescentCacheEntries; i++) {
-                entryThrash[i].store(0, kCacheAccounting);
-            }
-        }
-
-        [[nodiscard]] uint64_t get(const Atomic<uint64_t>& a) const {
-            return a.load(kCacheAccounting);
-        }
+        T entryThrash[N]{};
     };
+
+    // The number of scalar counters above, i.e. everything but `entryThrash`.
+    // Named because two things are checked against it and both are silent
+    // failures otherwise — see the static_assert below and `zipCounterScalars`.
+    inline constexpr unsigned kCacheScalarCounters = 16;
+
+    // What `stats()` returns: every CPU's row summed, as plain integers.
+    using DescentCacheStats = CacheCounters<uint64_t, kMaxDescentCacheEntries>;
+
+    // The forcing function for the one staleness hazard this shape introduces.
+    // `zipCounterScalars` below enumerates the scalar counters by name, and a
+    // counter added to the struct but not to the zip would simply never appear
+    // in a snapshot — a number that reads as zero rather than as a build error,
+    // which is the failure mode R-4 caught in the ordering scanner's header
+    // list. Adding a field changes this size and breaks the build instead.
+    static_assert(sizeof(DescentCacheStats) ==
+                      (kCacheScalarCounters + kMaxDescentCacheEntries) * sizeof(uint64_t),
+                  "a counter was added to or removed from CacheCounters — update "
+                  "kCacheScalarCounters AND zipCounterScalars, or the new counter will "
+                  "silently read as zero in every snapshot");
+
+    // The ONE place the counter names are enumerated outside the declaration.
+    // Both directions of traffic run through it — summing a CPU's row into a
+    // snapshot, and clearing a row — so the two cannot drift apart. `entryThrash`
+    // is deliberately NOT here: the two sides have different extents (a snapshot
+    // is `kMaxDescentCacheEntries` wide, a row is `Entries` wide), so its loop
+    // belongs to the caller that knows both.
+    //
+    // Untyped in both arguments so one template serves `(snapshot, const row)`
+    // and `(row, row)`; the static_assert above is what keeps it honest.
+    template <typename A, typename B, typename F>
+    inline void zipCounterScalars(A& a, B& b, F&& f) {
+        f(a.lookups, b.lookups);
+        f(a.hits, b.hits);
+        f(a.freshnessLoads, b.freshnessLoads);
+        f(a.misses, b.misses);
+        f(a.emptyEntryMisses, b.emptyEntryMisses);
+        f(a.rangeMisses, b.rangeMisses);
+        f(a.detachedEvictions, b.detachedEvictions);
+        f(a.generationEvictions, b.generationEvictions);
+        f(a.outOfRangeResumes, b.outOfRangeResumes);
+        f(a.candidatesRecorded, b.candidatesRecorded);
+        f(a.candidateSightings, b.candidateSightings);
+        f(a.installs, b.installs);
+        f(a.installEvictions, b.installEvictions);
+        f(a.releasesThatDestroyed, b.releasesThatDestroyed);
+        f(a.pinAcquires, b.pinAcquires);
+        f(a.pinReleases, b.pinReleases);
+    }
 
     // ─── The cache ─────────────────────────────────────────────────────────
     //
@@ -270,9 +326,15 @@ namespace kernel::mm::radix {
     //
     // Per-CPU rather than per-thread mirrors the pinned-writer/faulting-CPU
     // discipline vmsmalloc's arenas already established. Each CPU touches only
-    // its own row, so the row's fields are plain: the only shared state here is
-    // the instrumentation, which is atomic and RELAXED because nothing reads it
-    // for a correctness decision.
+    // its own row, so the row's fields are plain — **including the counters**
+    // (D-076). They are `Atomic` only because `stats()` reads them from a
+    // foreign CPU and a plain word written here and read there is a data race
+    // TSan is right to flag; nothing about them is shared-write, and nothing
+    // reads them for a correctness decision.
+    //
+    // There is therefore NO shared mutable state on this object at all. That is
+    // a property worth stating, because it is what makes a page fault on CPU 7
+    // generate no coherence traffic against CPU 3's fault.
     template <GeometryDescriptor G, typename Codec, unsigned DetachBudget = kDetachBudget,
               unsigned Entries = kDescentCacheEntries>
     class DescentCache {
@@ -311,8 +373,51 @@ namespace kernel::mm::radix {
         DescentCache(const DescentCache&)            = delete;
         DescentCache& operator=(const DescentCache&) = delete;
 
-        [[nodiscard]] DescentCacheStats& stats() { return counters; }
-        [[nodiscard]] const DescentCacheStats& stats() const { return counters; }
+        // Every CPU's row, summed. **By value, and that is the interface** — the
+        // counters no longer exist as one object that could be handed out by
+        // reference, and a caller that wants two of them consistent with each
+        // other must take one snapshot and read both fields from it.
+        //
+        // Two honesty notes that the old shared struct also owed but never said:
+        // the sum is not an instant, since the rows are read one after another;
+        // and a row can be written while it is being read. Neither matters for
+        // what these are for — "a hit rate computed from two counters sampled a
+        // nanosecond apart is still a hit rate" (`kCacheAccounting`) — and every
+        // §11 assertion that wants an EXACT number takes it on a quiesced cache.
+        //
+        // Summed over the whole array rather than `arch::processorCount()`: rows
+        // are indexed by logical processor ID with no bound but the array's, so
+        // the array is the only bound that cannot be wrong. It costs a few
+        // thousand relaxed loads on a path that is a report, never a fault.
+        [[nodiscard]] DescentCacheStats stats() const {
+            DescentCacheStats s{};
+            for (size_t c = 0; c < arch::MAX_PROCESSOR_COUNT; c++) {
+                const Counters& k = rows[c].counters;
+                zipCounterScalars(s, k, [](uint64_t& dst, const Atomic<uint64_t>& src) {
+                    dst += src.load(kCacheAccounting);
+                });
+                for (unsigned i = 0; i < Entries; i++) {
+                    s.entryThrash[i] += k.entryThrash[i].load(kCacheAccounting);
+                }
+            }
+            return s;
+        }
+
+        // Zero every CPU's row. Calibration wants a clean baseline between
+        // sweeps; nothing on the fault path calls it.
+        void resetStats() {
+            for (size_t c = 0; c < arch::MAX_PROCESSOR_COUNT; c++) {
+                Counters& k = rows[c].counters;
+                // Same row on both sides: the zip exists to name the counters
+                // once, and clearing needs only one of the pair.
+                zipCounterScalars(k, k, [](Atomic<uint64_t>& dst, Atomic<uint64_t>&) {
+                    dst.store(0, kCacheAccounting);
+                });
+                for (unsigned i = 0; i < Entries; i++) {
+                    k.entryThrash[i].store(0, kCacheAccounting);
+                }
+            }
+        }
 
         // ─── The lookup ────────────────────────────────────────────────────
         //
@@ -321,7 +426,11 @@ namespace kernel::mm::radix {
         // on a miss; and every failure path falls through to a full descent
         // rather than inventing an answer.
         [[nodiscard]] LookupResult lookup(Block& block, uint64_t va) {
-            counters.lookups.fetch_add(1, kCacheAccounting);
+            // The `lookups` bump lives at the top of `lookupInner` rather than
+            // here, because the counter is now in the row and finding the row
+            // costs an out-of-line `arch::getCurrentProcessorID()` — doing it
+            // twice per lookup to keep one increment outside the probe bracket
+            // would cost more than the increment.
 #if defined(CROCOS_RADIX_INSN_PROBE) && CROCOS_RADIX_INSN_PROBE == 4
             // The probe pairs are the only thing between the two brackets, so
             // each half is stated net of `gProbeSplitBaseMin`.
@@ -361,7 +470,7 @@ namespace kernel::mm::radix {
         void evictAllOnThisCpu() {
             Row& row = rowForThisCpu();
             for (unsigned i = 0; i < Entries; i++) {
-                evict(row.entries[i]);
+                evict(row.counters, row.entries[i]);
                 row.candidates[i] = Candidate{};
             }
         }
@@ -409,9 +518,20 @@ namespace kernel::mm::radix {
             unsigned sightings = 0;   // 0 == no candidate
         };
 
+        // The live counters. Sized by this instantiation's `Entries`, not by
+        // `kMaxDescentCacheEntries` — only the snapshot has to answer for every
+        // width, and a row that carried twelve unused words would be twelve
+        // words of every CPU's working set.
+        using Counters = CacheCounters<Atomic<uint64_t>, Entries>;
+
+        // `alignas(CACHE_LINE_SIZE)` is what stops CPU 3's counters and CPU 4's
+        // entries sharing a line — the false sharing that would put back, in a
+        // subtler place, exactly the coherence traffic moving the counters here
+        // removed. It was already required for `entries`; it now covers more.
         struct alignas(arch::CACHE_LINE_SIZE) Row {
             Entry     entries[Entries];
             Candidate candidates[Entries];
+            Counters  counters{};
         };
 
         [[nodiscard]] Row& rowForThisCpu() {
@@ -421,28 +541,50 @@ namespace kernel::mm::radix {
             return rows[static_cast<size_t>(arch::getCurrentProcessorID())];
         }
 
+        // A counter increment on a row **only this CPU writes**.
+        //
+        // Not `fetch_add`, and the difference is the whole point of D-076: a
+        // locked read-modify-write is what makes an increment cost a cache line
+        // instead of a register, and there is nothing for it to arbitrate here.
+        // One writer cannot lose an update to itself, so load/add/store says
+        // exactly as much and compiles to an unlocked `inc` on a line this CPU
+        // already owns.
+        //
+        // `Atomic` rather than plain `uint64_t` because `stats()` reads these
+        // from a FOREIGN CPU. A plain word written here and read there is a data
+        // race — undefined by the standard and flagged by TSan, which is this
+        // project's default release gate — and relaxed atomics are the cheapest
+        // spelling that is not one. They also cost nothing extra: on both
+        // targets a relaxed 64-bit load and store are a plain load and store.
+        static void bump(Atomic<uint64_t>& c) {
+            c.store(c.load(kCacheAccounting) + 1, kCacheAccounting);
+        }
+
         // The one place a pin is released. Counted here rather than at the call
         // sites so no eviction path can forget to account for its atomic.
-        void evict(Entry& e) {
+        void evict(Counters& counters, Entry& e) {
             if (!e.pin) { e = Entry{}; return; }
-            counters.pinReleases.fetch_add(1, kCacheAccounting);
+            bump(counters.pinReleases);
             // A zero-observing release DESTROYS, and this is the site §7.5 says
             // may do so inside an open section in `#PF` context — legal because
             // it is the destructor and not a deleter. Counted, because that is
             // DEC-096's residue actually coming home and DEC-016's cost claim is
             // stated in exactly these atomics.
             if (e.pin.release()) {
-                counters.releasesThatDestroyed.fetch_add(1, kCacheAccounting);
+                bump(counters.releasesThatDestroyed);
             }
             e = Entry{};
         }
 
         [[nodiscard]] LookupResult lookupInner(Block& block, uint64_t va) {
             Row&        row  = rowForThisCpu();
+            Counters&   ctr  = row.counters;
             const unsigned i = indexFor(va);
             Entry&      e    = row.entries[i];
             Candidate&  cand = row.candidates[i];
             const uint64_t generation = block.generation;
+
+            bump(ctr.lookups);
 
             // The cluster this VA belongs to. A bucket index is a pure prefix of
             // the VA (DEC-033), so this needs no load and cannot be stale — which
@@ -459,31 +601,41 @@ namespace kernel::mm::radix {
             // longer exists.
             if (e.pin && va >= e.lo && va <= e.hi) {
                 if (e.generation == generation) {
-                    counters.freshnessLoads.fetch_add(1, kCacheAccounting);
+                    bump(ctr.freshnessLoads);
+#if defined(CROCOS_RADIX_INSN_PROBE) && CROCOS_RADIX_INSN_PROBE == 5
+                    // The whole resume, so the three sub-brackets in CoreTree.h
+                    // can be stated as a fraction of it and the residue
+                    // attributed to this function's own preamble and tail.
+                    const uint64_t rs0 = probe5Counter();
+#endif
                     auto resumed = tree.resumeDescent(e.pin, va);
+#if defined(CROCOS_RADIX_INSN_PROBE) && CROCOS_RADIX_INSN_PROBE == 5
+                    const uint64_t rs1 = probe5Counter();
+                    probe5RecordMin(gProbe5ResumeMin, rs1 - rs0);
+#endif
                     if (resumed.status == Tree::ResumeStatus::Ok) {
-                        counters.hits.fetch_add(1, kCacheAccounting);
+                        bump(ctr.hits);
                         return static_cast<LookupResult&&>(resumed.result);
                     }
                     if (resumed.status == Tree::ResumeStatus::OutOfRange) {
-                        counters.outOfRangeResumes.fetch_add(1, kCacheAccounting);
+                        bump(ctr.outOfRangeResumes);
                     } else {
-                        counters.detachedEvictions.fetch_add(1, kCacheAccounting);
+                        bump(ctr.detachedEvictions);
                     }
-                    evict(e);
+                    evict(ctr, e);
                 } else {
-                    counters.generationEvictions.fetch_add(1, kCacheAccounting);
-                    evict(e);
+                    bump(ctr.generationEvictions);
+                    evict(ctr, e);
                 }
             } else if (e.pin) {
                 // Occupied, but by a different range at this index. The thrash
                 // signal the entry count is calibrated against.
-                counters.rangeMisses.fetch_add(1, kCacheAccounting);
-                counters.entryThrash[i].fetch_add(1, kCacheAccounting);
+                bump(ctr.rangeMisses);
+                bump(ctr.entryThrash[i]);
             } else {
-                counters.emptyEntryMisses.fetch_add(1, kCacheAccounting);
+                bump(ctr.emptyEntryMisses);
             }
-            counters.misses.fetch_add(1, kCacheAccounting);
+            bump(ctr.misses);
 
             // ─── Miss: the VA-range-deferred install ───────────────────────
             //
@@ -509,25 +661,25 @@ namespace kernel::mm::radix {
                 result = tree.descendLocked(tree.currentBinding(), va, pinAtLevel, &site);
                 if (site.valid) {
                     nodeLo = site.base;
-                    nodeHi = site.base + nodeSpan(G, site.level) - 1;
+                    nodeHi = site.base + Geo<G>::nodeSpan(site.level) - 1;
                     if (install) {
                         // §7.3's acquisition law: inside the section that
                         // observed the link, which is this one.
-                        counters.pinAcquires.fetch_add(1, kCacheAccounting);
+                        bump(ctr.pinAcquires);
                         pin = tree.pinLocked(site);
                         // ...and the eviction it forces happens here too, so the
                         // zero-observing destroy runs inside this descent's open
                         // section. §7.5 says that is legal; the harness exercises
                         // it deliberately rather than letting it happen by
                         // accident on some future path.
-                        if (e.pin) counters.installEvictions.fetch_add(1, kCacheAccounting);
-                        evict(e);
+                        if (e.pin) bump(ctr.installEvictions);
+                        evict(ctr, e);
                         e.pin        = static_cast<Pin&&>(pin);
                         e.generation = generation;
                         e.lo         = nodeLo;
                         e.hi         = nodeHi;
                         cand = Candidate{};
-                        counters.installs.fetch_add(1, kCacheAccounting);
+                        bump(ctr.installs);
                     }
                 }
             }
@@ -535,7 +687,7 @@ namespace kernel::mm::radix {
             if (!install && site.valid) {
                 if (inCandidate) {
                     cand.sightings++;
-                    counters.candidateSightings.fetch_add(1, kCacheAccounting);
+                    bump(ctr.candidateSightings);
                 } else {
                     // A fresh candidate. Recorded even when the entry is
                     // occupied by someone else's range: that is precisely the
@@ -544,7 +696,7 @@ namespace kernel::mm::radix {
                     cand.lo = nodeLo;
                     cand.hi = nodeHi;
                     cand.sightings = 1;
-                    counters.candidatesRecorded.fetch_add(1, kCacheAccounting);
+                    bump(ctr.candidatesRecorded);
                 }
             }
             return result;
@@ -554,8 +706,9 @@ namespace kernel::mm::radix {
         const unsigned threshold;
         const unsigned indexShift;
 
-        DescentCacheStats counters{};
-        Row               rows[arch::MAX_PROCESSOR_COUNT]{};
+        // The whole of this cache's mutable state, and every byte of it is
+        // owned by exactly one CPU.
+        Row rows[arch::MAX_PROCESSOR_COUNT]{};
     };
 
 }  // namespace kernel::mm::radix

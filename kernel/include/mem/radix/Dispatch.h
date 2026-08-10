@@ -147,7 +147,7 @@ namespace kernel::mm::radix {
     template <GeometryDescriptor G, typename Codec>
     DispatchResult dispatchSlot(uint64_t word, unsigned level, uint64_t slotBase,
                                 uint64_t opLo, uint64_t opHi, bool writesValue) {
-        const uint64_t span    = slotSpan(G, level);
+        const uint64_t span    = Geo<G>::slotSpan(level);
         const uint64_t slotEnd = slotBase + span - 1;
 
         assert(opLo <= opHi, "radix dispatch: empty operation range");

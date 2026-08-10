@@ -156,7 +156,7 @@ namespace kernel::mm::radix {
     template <GeometryDescriptor G>
     struct NodeOps {
         static void* alloc(unsigned level, uint64_t initialRefcount) {
-            switch (valence(G, level)) {
+            switch (Geo<G>::valence(level)) {
 #define RADIX_NODE_CASE(V)                                                        \
                 case V: {                                                         \
                     auto p = VMSubstrate::tryMake<Node<G, V>>(initialRefcount);   \
@@ -184,7 +184,7 @@ namespace kernel::mm::radix {
         // node's LEVEL, which every walk already has.
         template <typename Codec>
         static void retire(kernel::rcu::Domain& d, unsigned level, NodeRef n) {
-            switch (valence(G, level)) {
+            switch (Geo<G>::valence(level)) {
 #define RADIX_NODE_CASE(V)                                                          \
                 case V:                                                             \
                     kernel::rcu::retire<Node<G, V>, &Node<G, V>::head,               \
@@ -210,7 +210,7 @@ namespace kernel::mm::radix {
         // releases" stated in exactly one place.
         template <typename Codec>
         static void runDeleter(unsigned level, NodeRef n) {
-            switch (valence(G, level)) {
+            switch (Geo<G>::valence(level)) {
 #define RADIX_NODE_CASE(V)                                                          \
                 case V:                                                             \
                     deleteRadixNode<G, Codec, V>(static_cast<Node<G, V>*>(n.raw()));\
@@ -227,7 +227,7 @@ namespace kernel::mm::radix {
         }
 
         static void destroy(unsigned level, NodeRef n) {
-            switch (valence(G, level)) {
+            switch (Geo<G>::valence(level)) {
 #define RADIX_NODE_CASE(V)                                                        \
                 case V:                                                           \
                     destroyNode<G, V>(static_cast<Node<G, V>*>(n.raw()));          \
@@ -537,6 +537,54 @@ namespace kernel::mm::radix {
         unsigned nodeLevel = 0;
     };
 
+#if defined(CROCOS_RADIX_INSN_PROBE) && CROCOS_RADIX_INSN_PROBE == 5
+    // ─── Mode 5: inside a descent-cache HIT ────────────────────────────────
+    //
+    // Mode 4 split a lookup into `lookupInner` versus DEC-060's pump and left
+    // `lookupInner` at a MINIMUM of ~334 instructions over a run that hit the
+    // descent cache 83% of the time. A hit is supposed to be "index four
+    // entries, compare a range, resume" — so 334 says most of a hit is
+    // somewhere inside `resumeDescent`, and mode 4 cannot say where.
+    //
+    // This brackets the three parts of a resume separately:
+    //
+    //   range   — the seam's own out-of-range guard, which is pure geometry
+    //             arithmetic: `nodeSpan(G, pin.nodeLevel)` at a RUNTIME level.
+    //   guard   — the RCU section entry (interrupt-masked, RCU-DEC-024) plus
+    //             the acquire mark load through `SafePtr`.
+    //   descend — `descendFromLocked`: one level on a hit, so this is the price
+    //             of a single slot load, one codec decode, one `acquireRef`
+    //             and the `LookupResult`.
+    //
+    // Lives here rather than in DescentCache.h because two of the three
+    // brackets are inside this header's `resumeDescent`. The brackets NEST
+    // inside mode 4's `inner` bracket, which is why this is a separate mode
+    // rather than more fields on that one — probe pairs inside a bracket
+    // inflate it, and mode 4's total is the figure that must stay honest.
+    inline uint64_t probe5Counter() noexcept {
+        uint32_t lo, hi;
+        asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
+        return (static_cast<uint64_t>(hi) << 32) | lo;
+    }
+
+    // MINIMA, for the P4-ITEM-002 reason mode 4 records: interrupts are live in
+    // the stress loop, so a timer inside a bracket inflates that sample by the
+    // whole handler and the contamination dilutes rather than averaging out.
+    inline Atomic<uint64_t> gProbe5BaseMin{0};
+    inline Atomic<uint64_t> gProbe5RangeMin{0};
+    inline Atomic<uint64_t> gProbe5GuardMin{0};
+    inline Atomic<uint64_t> gProbe5DescendMin{0};
+    inline Atomic<uint64_t> gProbe5ResumeMin{0};
+    inline Atomic<uint64_t> gProbe5Count{0};
+
+    inline void probe5RecordMin(Atomic<uint64_t>& slot, uint64_t sample) noexcept {
+        uint64_t cur = slot.load(kCacheAccounting);
+        while ((cur == 0 || sample < cur) &&
+               !slot.compare_exchange_weak(cur, sample, kCacheAccounting,
+                                          kCacheAccounting)) {}
+    }
+#endif
+
     // §11's counters. Three of the progress targets are stated as COUNTERS
     // rather than asserts, and the distinction is load-bearing: phantom-bit and
     // terminal-mask failures are LEGAL executions, so asserting on them fires on
@@ -547,35 +595,49 @@ namespace kernel::mm::radix {
     // pairs should not conflict AT ALL — a conflict counter near zero is the
     // stronger signal, and a HIGH ONE MEANS THE ONE-CONFLICT-SITE ANALYSIS IS
     // WRONG." Acceptance is instrumented, not silent.
+    // ─── `{}` and not `{0}`, on every counter here (D-076) ─────────────────
+    //
+    // `Atomic<T>::Atomic(T)` performs a SEQ_CST store, so `Atomic<uint64_t> x{0}`
+    // compiles to a LOCKED `xchg` — and a `TreeStats` is not a singleton. A tree
+    // is "a VALUE, deliberately" (ClusterTable::treeFor), so every lookup
+    // constructs one, and these member initializers were nine locked
+    // read-modify-writes on a stack object per FAULT. Empty braces
+    // value-initialize instead: `Atomic`'s default constructor is `= default`
+    // and therefore not user-provided, so `{}` zero-initializes the storage with
+    // a plain store and the value is identical.
+    //
+    // No ordering is lost, because there is none to lose: an object still under
+    // construction is not reachable by any other CPU, which is exactly what
+    // `kPrivateInit` means everywhere else in this tree.
     struct TreeStats {
-        Atomic<uint64_t> attempts{0};
-        Atomic<uint64_t> completions{0};
+        Atomic<uint64_t> attempts{};
+        Atomic<uint64_t> completions{};
         // Retries caused by a failed claim acquisition — the genuine conflicts.
-        Atomic<uint64_t> claimConflicts{0};
+        Atomic<uint64_t> claimConflicts{};
         // Retries caused by re-dispatch finding a changed row. Counted apart
         // because it is a DIFFERENT phenomenon: the claim set was computed
         // against a tree that has since moved, not a contended bit.
-        Atomic<uint64_t> redispatchChanges{0};
+        Atomic<uint64_t> redispatchChanges{};
         // The longest retry run any single operation needed. §9 accepts that
         // individual starvation is unbounded in principle (DEC-097 adds no bound
         // beyond backoff), so this is a COUNTER and never an assert — but a test
         // that sees thousands is looking at a livelock, not at bad luck.
-        Atomic<uint64_t> maxRetries{0};
+        Atomic<uint64_t> maxRetries{};
         // Slots commit declined to act on because the attempt holds no claim bit
         // for them — a clearing row that appeared in the window between
         // re-dispatch and commit (D-013). A legal execution, so a counter rather
         // than an assert, but a number that climbs into the operation count means
         // the read pass is under-claiming rather than losing a genuine race.
-        Atomic<uint64_t> unheldRowsSkipped{0};
+        Atomic<uint64_t> unheldRowsSkipped{};
         // §6.5 decompositions entered (including recursive ones). A `MAP_FIXED`
         // shape that decomposes when the geometry says it should not is a
         // budget-tuning signal, not a correctness one.
-        Atomic<uint64_t> decompositions{0};
+        Atomic<uint64_t> decompositions{};
         // §7.1: attempts abandoned because this CPU's DeferredRelease pool was
         // momentarily short — the records exist and are in flight. Each one costs
         // a grace period, so this is the number that says whether the per-CPU
         // POPULATION is big enough for the workload.
-        Atomic<uint64_t> recordShortfalls{0};
+        Atomic<uint64_t> recordShortfalls{};
         // D-059: attempts refused because their record demand exceeded the budget,
         // and therefore decomposed. Counted apart from `decompositions` and from
         // `recordShortfalls` because it is a third phenomenon and the three want
@@ -583,7 +645,7 @@ namespace kernel::mm::radix {
         // the workload legitimately displaces more distinct mappings in one attempt
         // than a pool holds, and a plain decomposition is about detachment size.
         // Confusing the first two is what ITEM-084 did.
-        Atomic<uint64_t> recordBudgetOverruns{0};
+        Atomic<uint64_t> recordBudgetOverruns{};
 
         void reset() {
             attempts.store(0, kPrivateInit);
@@ -615,7 +677,10 @@ namespace kernel::mm::radix {
         // the conceptual full-depth tree, so prefix indexing inside it is free
         // and growth is exact (the old root becomes precisely one child slot of
         // its new parent, so no mapping moves).
-        CoreTree() = default;
+        // Seeds `backoffSequence` and nothing else; every other member has an
+        // initializer. A body rather than a member initializer because that one
+        // is an `Atomic` with a non-zero seed — see the member's own note.
+        CoreTree() { backoffSequence.store(0x243F6A8885A308D3ull, kPrivateInit); }
 
         // The tree's domain is per-address-space (DEC-072 / RCU-DEC-043). One
         // global domain was rejected on the merits: teardown's no-new-users
@@ -644,7 +709,7 @@ namespace kernel::mm::radix {
             releasePools = &pools;
             assert(rootLevel >= 1 && rootLevel <= G.levelCount,
                    "radix: root level out of range");
-            assert(base % nodeSpan(G, rootLevel) == 0,
+            assert(base % Geo<G>::nodeSpan(rootLevel) == 0,
                    "radix: cluster base must be span-aligned — prefix indexing inside the "
                    "cluster depends on it");
             void* p = Ops::alloc(rootLevel, /*initialRefcount=*/1);
@@ -732,7 +797,7 @@ namespace kernel::mm::radix {
                             NodeRef parent, unsigned parentSlot, bool isRoot) {
             // Children first: a node's unit unlinks it from ITS parent, so the
             // parent must still be linked when the child's unit runs.
-            const unsigned n = valence(G, level);
+            const unsigned n = Geo<G>::valence(level);
             for (unsigned i = 0; i < n; i++) {
                 const uint64_t w = node.slot(i).load(kQuiescedRead);
                 if (Codec::isChild(w)) {
@@ -830,12 +895,12 @@ namespace kernel::mm::radix {
         [[nodiscard]] bool valid() const { return static_cast<bool>(quiescedBinding()); }
         [[nodiscard]] unsigned rootLevel() const { return quiescedBinding().level; }
         [[nodiscard]] uint64_t base() const { return quiescedBinding().base; }
-        [[nodiscard]] uint64_t span() const { return nodeSpan(G, quiescedBinding().level); }
+        [[nodiscard]] uint64_t span() const { return Geo<G>::nodeSpan(quiescedBinding().level); }
         [[nodiscard]] NodeRef root() const { return quiescedBinding().root; }
         [[nodiscard]] bool contains(uint64_t va) const {
             const RootBinding b = quiescedBinding();
             if (!b) return false;
-            return va >= b.base && va < b.base + nodeSpan(G, b.level);
+            return va >= b.base && va < b.base + Geo<G>::nodeSpan(b.level);
         }
 
         // ─── Lookup (§5.5) ─────────────────────────────────────────────────
@@ -978,7 +1043,7 @@ namespace kernel::mm::radix {
         [[nodiscard]] LookupResult descendLocked(const RootBinding& bind, uint64_t va,
                                                  unsigned pinLevel, PinSite* outSite) const {
             if (!bind) return {};
-            if (va < bind.base || va >= bind.base + nodeSpan(G, bind.level)) return {};
+            if (va < bind.base || va >= bind.base + Geo<G>::nodeSpan(bind.level)) return {};
             return descendFromLocked(bind.root, bind.level, bind.base, va, pinLevel, outSite);
         }
 
@@ -1003,7 +1068,7 @@ namespace kernel::mm::radix {
                 // and the codec supplies the decode. That composite is this
                 // consumer's RcuPtr (DEC-073); there is no exception.
                 const uint64_t word = kernel::rcu::protectWord(*domain, node.slot(idx));
-                const uint64_t slotBase = nodeBase + uint64_t{idx} * slotSpan(G, level);
+                const uint64_t slotBase = nodeBase + uint64_t{idx} * Geo<G>::slotSpan(level);
 
                 switch (Codec::kindOf(word)) {
                 case SlotKind::Empty:
@@ -1105,25 +1170,52 @@ namespace kernel::mm::radix {
             assert(static_cast<bool>(pin), "radix: a resume from an empty pin");
             ResumeResult out;
 
+#if defined(CROCOS_RADIX_INSN_PROBE) && CROCOS_RADIX_INSN_PROBE == 5
+            const uint64_t pb0 = probe5Counter();
+            const uint64_t pb1 = probe5Counter();
+            probe5RecordMin(gProbe5BaseMin, pb1 - pb0);
+            const uint64_t r0 = probe5Counter();
+#endif
             // The entry's own tag check, re-done at the seam so the seam is
             // total rather than trusting. Free — no atomic, no section — and
             // deliberately NOT part of §7.5's generation-then-mark-then-descend
             // sequence: it answers "is this handle even about this key", which
             // the caller has already answered from the entry's VA range.
-            const uint64_t span = nodeSpan(G, pin.nodeLevel);
-            if (key < pin.nodeBase || key >= pin.nodeBase + span) {
+            const uint64_t span = Geo<G>::nodeSpan(pin.nodeLevel);
+            const bool outOfRange = (key < pin.nodeBase || key >= pin.nodeBase + span);
+#if defined(CROCOS_RADIX_INSN_PROBE) && CROCOS_RADIX_INSN_PROBE == 5
+            const uint64_t r1 = probe5Counter();
+            probe5RecordMin(gProbe5RangeMin, r1 - r0);
+#endif
+            if (outOfRange) {
                 out.status = ResumeStatus::OutOfRange;
                 return out;
             }
 
+#if defined(CROCOS_RADIX_INSN_PROBE) && CROCOS_RADIX_INSN_PROBE == 5
+            const uint64_t g0 = probe5Counter();
+#endif
             kernel::rcu::ReadGuard guard(*domain);
-            if (state::isMarked(pin.node.stateWord().load(kCacheFreshnessLoad))) {
+            const bool marked = state::isMarked(pin.node.stateWord().load(kCacheFreshnessLoad));
+#if defined(CROCOS_RADIX_INSN_PROBE) && CROCOS_RADIX_INSN_PROBE == 5
+            const uint64_t g1 = probe5Counter();
+            probe5RecordMin(gProbe5GuardMin, g1 - g0);
+#endif
+            if (marked) {
                 out.status = ResumeStatus::Detached;
                 return out;
             }
             out.status = ResumeStatus::Ok;
+#if defined(CROCOS_RADIX_INSN_PROBE) && CROCOS_RADIX_INSN_PROBE == 5
+            const uint64_t d0 = probe5Counter();
+#endif
             out.result = descendFromLocked(pin.node, pin.nodeLevel, pin.nodeBase, key,
                                            kPinAtDeepest, nullptr);
+#if defined(CROCOS_RADIX_INSN_PROBE) && CROCOS_RADIX_INSN_PROBE == 5
+            const uint64_t d1 = probe5Counter();
+            probe5RecordMin(gProbe5DescendMin, d1 - d0);
+            gProbe5Count.fetch_add(1, kCacheAccounting);
+#endif
             return out;
         }
 
@@ -1159,7 +1251,7 @@ namespace kernel::mm::radix {
 
         [[nodiscard]] ScanStep scanStepLocked(const RootBinding& bind, uint64_t va) const {
             ScanStep out;
-            const uint64_t clusterEnd = bind.base + nodeSpan(G, bind.level) - 1;
+            const uint64_t clusterEnd = bind.base + Geo<G>::nodeSpan(bind.level) - 1;
             if (!bind || va < bind.base || va > clusterEnd) {
                 out.lo = va;
                 out.hi = va;
@@ -1172,7 +1264,7 @@ namespace kernel::mm::radix {
 
             for (;;) {
                 const unsigned idx      = slotIndexFor(level, nodeBase, va);
-                const uint64_t span     = slotSpan(G, level);
+                const uint64_t span     = Geo<G>::slotSpan(level);
                 const uint64_t slotBase = nodeBase + uint64_t{idx} * span;
                 const uint64_t slotEnd  = slotBase + span - 1;
                 const uint64_t word     = kernel::rcu::protectWord(*domain, node.slot(idx));
@@ -1652,7 +1744,7 @@ namespace kernel::mm::radix {
                 const uint64_t word = s.node.slot(first).load(kSlotLoad);
                 // A leaf or an empty slot has no node beneath it to be the site.
                 if (!Codec::isChild(word)) return s;
-                s.nodeBase += uint64_t{first} * slotSpan(G, s.level);
+                s.nodeBase += uint64_t{first} * Geo<G>::slotSpan(s.level);
                 s.node = NodeRef(Codec::decodeChild(word));
                 s.level++;
             }
@@ -1714,7 +1806,7 @@ namespace kernel::mm::radix {
                 site = findSiteLocked(bind, lo, hi);
             }
 
-            const uint64_t span  = slotSpan(G, site.level);
+            const uint64_t span  = Geo<G>::slotSpan(site.level);
             const unsigned first = slotIndexFor(site.level, site.nodeBase, lo);
             const unsigned last  = slotIndexFor(site.level, site.nodeBase, hi);
 
@@ -1783,7 +1875,7 @@ namespace kernel::mm::radix {
             // Since the site is by construction the deepest node CONTAINING the
             // range, "the site is fully covered" is exactly "the range is the
             // site's whole span".
-            const uint64_t siteSpan = nodeSpan(G, site.level);
+            const uint64_t siteSpan = Geo<G>::nodeSpan(site.level);
             const bool siteFullyCovered =
                 (lo <= site.nodeBase) && (hi >= site.nodeBase + siteSpan - 1);
             // Against the binding THIS decomposition descended from, not
@@ -1877,7 +1969,12 @@ namespace kernel::mm::radix {
         TreeStats counters{};
         // Jitter state for the retry backoff. Shared rather than per-CPU because
         // it only needs to decorrelate, and the CPU id is mixed in at use.
-        Atomic<uint64_t> backoffSequence{0x243F6A8885A308D3ull};
+        //
+        // Seeded by `CoreTree()`'s body rather than by a member initializer, for
+        // the reason spelled out above `TreeStats`: a non-empty `Atomic{...}`
+        // initializer is a SEQ_CST store, i.e. a locked `xchg`, and this member
+        // is constructed once per lookup along with the rest of the tree value.
+        Atomic<uint64_t> backoffSequence;
         // DEC-060: whether this operation retired anything, so operation exit
         // knows whether to pump. Pumping unconditionally would be harmless but
         // dishonest — the site exists to stop a just-filled bag sitting OPEN on
@@ -1885,9 +1982,14 @@ namespace kernel::mm::radix {
         // retired nothing has no bag to advance.
         bool retiredThisOperation = false;
 
+        // `Geo<G>` rather than the free derivations, and for a measured reason
+        // (D-076): `level` here is a descent's loop variable, so
+        // `slotSpanBits(G, level)` compiles to a LOOP over `levelBits[]` and
+        // this one-line function cost about thirty instructions per step. See
+        // Geometry.h — the table is those same derivations, folded.
         static unsigned slotIndexFor(unsigned level, uint64_t nodeBase, uint64_t va) {
-            return static_cast<unsigned>(((va - nodeBase) >> slotSpanBits(G, level)) &
-                                         (valence(G, level) - 1));
+            return static_cast<unsigned>(((va - nodeBase) >> Geo<G>::slotSpanBits(level)) &
+                                         (Geo<G>::valence(level) - 1));
         }
 
         // ─── Occupancy (§6.3) ──────────────────────────────────────────────
@@ -1959,8 +2061,8 @@ namespace kernel::mm::radix {
             if (!raw) return nullptr;
             NodeRef node(raw);
 
-            const uint64_t childSpan = slotSpan(G, childLevel);
-            const unsigned n = valence(G, childLevel);
+            const uint64_t childSpan = Geo<G>::slotSpan(childLevel);
+            const unsigned n = Geo<G>::valence(childLevel);
             unsigned occupancy = 0;
 
             for (unsigned i = 0; i < n; i++) {
@@ -2024,7 +2126,7 @@ namespace kernel::mm::radix {
         // taken (DEC-067). Distinct from releaseSubtree, which is the published
         // case and must release the Mapping references.
         static void destroyUnpublishedSubtree(NodeRef node, unsigned level) {
-            const unsigned n = valence(G, level);
+            const unsigned n = Geo<G>::valence(level);
             for (unsigned i = 0; i < n; i++) {
                 const uint64_t w = node.slot(i).load(kQuiescedRead);
                 if (Codec::isChild(w)) {
@@ -2049,7 +2151,7 @@ namespace kernel::mm::radix {
         // plus +1 per naming leaf slot on the Mapping it names.
         static void takeSubtreeReferences(NodeRef node, unsigned level) {
             node.refcount().fetch_add(1, kRefcountAcquire);
-            const unsigned n = valence(G, level);
+            const unsigned n = Geo<G>::valence(level);
             for (unsigned i = 0; i < n; i++) {
                 const uint64_t w = node.slot(i).load(kQuiescedRead);
                 if (Codec::isLeaf(w)) {
@@ -2079,7 +2181,7 @@ namespace kernel::mm::radix {
         // is that nothing recurses through a destructor and that the release
         // rules are the deleter's, stated once.
         static void releaseSubtree(NodeRef node, unsigned level) {
-            const unsigned n = valence(G, level);
+            const unsigned n = Geo<G>::valence(level);
             for (unsigned i = 0; i < n; i++) {
                 const uint64_t w = node.slot(i).load(kQuiescedRead);
                 if (Codec::isChild(w)) {
@@ -2503,7 +2605,7 @@ namespace kernel::mm::radix {
                    "the caller's to do first (§5.6), and it publishes an EMPTY root "
                    "precisely so that placing into it is an ordinary operation");
             assert(lo >= a.binding.base &&
-                   hi < a.binding.base + nodeSpan(G, a.binding.level),
+                   hi < a.binding.base + Geo<G>::nodeSpan(a.binding.level),
                    "radix: the operation's range escapes the cluster's current span — the "
                    "caller owes a growToCover first. Growth only ever WIDENS, so a range "
                    "that fitted when the caller checked still fits here");
@@ -2610,7 +2712,7 @@ namespace kernel::mm::radix {
         ReadOutcome readPass(NodeRef node, unsigned level, uint64_t nodeBase,
                              uint64_t lo, uint64_t hi, VMSubstrate::SafePtr<Mapping> value, Attempt& a) {
             const bool     writes = (value != nullptr);
-            const uint64_t span   = slotSpan(G, level);
+            const uint64_t span   = Geo<G>::slotSpan(level);
             const unsigned first  = slotIndexFor(level, nodeBase, lo);
             const unsigned last   = slotIndexFor(level, nodeBase, hi);
 
@@ -2742,8 +2844,8 @@ namespace kernel::mm::radix {
                                      /*wholeNode=*/true)) {
                 return ApplyStatus::NeedsDecomposition;
             }
-            const unsigned n = valence(G, level);
-            const uint64_t span = slotSpan(G, level);
+            const unsigned n = Geo<G>::valence(level);
+            const uint64_t span = Geo<G>::slotSpan(level);
             for (unsigned i = 0; i < n; i++) {
                 const uint64_t w = node.slot(i).load(kSlotLoad);
                 if (Codec::isChild(w)) {
@@ -3010,7 +3112,7 @@ namespace kernel::mm::radix {
         bool redispatchAgrees(NodeRef node, unsigned level, uint64_t nodeBase,
                               uint64_t lo, uint64_t hi, VMSubstrate::SafePtr<Mapping> value, Attempt& a) {
             const bool     writes = (value != nullptr);
-            const uint64_t span   = slotSpan(G, level);
+            const uint64_t span   = Geo<G>::slotSpan(level);
             const unsigned first  = slotIndexFor(level, nodeBase, lo);
             const unsigned last   = slotIndexFor(level, nodeBase, hi);
 
@@ -3181,7 +3283,7 @@ namespace kernel::mm::radix {
         // is now over budget).
         static bool detachmentIsFrozen(NodeRef node, unsigned level, ClaimSet<G, DetachBudget>& set) {
             if (!holdsWholeNode(set, node, level)) return false;
-            const unsigned n = valence(G, level);
+            const unsigned n = Geo<G>::valence(level);
             for (unsigned i = 0; i < n; i++) {
                 const uint64_t w = node.slot(i).load(kClaimedSlotLoad);
                 if (Codec::isChild(w)) {
@@ -3239,7 +3341,7 @@ namespace kernel::mm::radix {
         bool commit(NodeRef node, unsigned level, uint64_t nodeBase,
                     uint64_t lo, uint64_t hi, VMSubstrate::SafePtr<Mapping> value, Attempt& a) {
             const bool     writes = (value != nullptr);
-            const uint64_t span   = slotSpan(G, level);
+            const uint64_t span   = Geo<G>::slotSpan(level);
             const unsigned first  = slotIndexFor(level, nodeBase, lo);
             const unsigned last   = slotIndexFor(level, nodeBase, hi);
 
@@ -3576,7 +3678,7 @@ namespace kernel::mm::radix {
             // slot and unlinking every node, executed as one parent-slot store":
             // every displaced value then follows the rules an individual clear
             // already has, and no new lifetime concept appears.
-            const unsigned n = valence(G, level);
+            const unsigned n = Geo<G>::valence(level);
             assert(claimsFullValence(a.claims, node, level),
                    "radix: retireSubtree reading slots with kClaimedSlotLoad (RELAXED) on a "
                    "node this attempt does not hold the full valence mask for — the "
@@ -3602,7 +3704,7 @@ namespace kernel::mm::radix {
         static void markSubtree(NodeRef node, unsigned level, Attempt& a) {
             markUnderClaim(node, level, a);
             retainClaim(a.claims, node);
-            const unsigned n = valence(G, level);
+            const unsigned n = Geo<G>::valence(level);
             // `markUnderClaim` above asserted `holdsWholeNode`, but `retainClaim`
             // has since cleared `held`, so the re-check below is the mask-only form
             // — the physical claim the RELAXED load rests on.
@@ -3619,8 +3721,8 @@ namespace kernel::mm::radix {
 
         template <typename F>
         static void walkNode(NodeRef node, unsigned level, uint64_t nodeBase, F& fn) {
-            const unsigned n = valence(G, level);
-            const uint64_t span = slotSpan(G, level);
+            const unsigned n = Geo<G>::valence(level);
+            const uint64_t span = Geo<G>::slotSpan(level);
             fn(level, nodeBase, node);
             for (unsigned i = 0; i < n; i++) {
                 const uint64_t w = node.slot(i).load(kQuiescedRead);
@@ -3633,7 +3735,7 @@ namespace kernel::mm::radix {
 
         static void countNodes(NodeRef node, unsigned level, size_t& n) {
             n++;
-            const unsigned v = valence(G, level);
+            const unsigned v = Geo<G>::valence(level);
             for (unsigned i = 0; i < v; i++) {
                 const uint64_t w = node.slot(i).load(kQuiescedRead);
                 if (Codec::isChild(w)) countNodes(NodeRef(Codec::decodeChild(w)), level + 1, n);

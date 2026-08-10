@@ -204,6 +204,129 @@ namespace kernel::mm::radix {
         return nodeSpan(g, g.defaultRootLevel);
     }
 
+    // ─── The same derivations, at a RUNTIME level (D-076) ──────────────────
+    //
+    // Everything above is a derivation, and at a level the compiler knows it
+    // folds to a constant. **A descent's level is not such a level.** It is a
+    // loop variable, so GCC emits each derivation literally, and the shapes it
+    // emits are loops:
+    //
+    //     slotSpanBits   a loop over `levelBits[]`, reloaded from .rodata,
+    //                    5 instructions per level below the current one
+    //     rangeUnitBits  a second loop, up to `budget/2` iterations, sitting
+    //                    BEHIND a slotSpanBits loop that computes its bound
+    //
+    // and they compose. One leaf-terminating step of `descendFromLocked` was
+    // measured at 134 instructions under `-icount`, of which eleven separate
+    // loop bodies — seven `slotSpanBits`, four `rangeUnitBits` — are the
+    // majority; the descent-cache seam's own out-of-range check, which is
+    // nothing but `nodeSpan(G, level)`, cost 50 on its own.
+    //
+    // The fix is not to hard-code anything, which §12 forbids and DEC-093
+    // depends on: it is to evaluate the SAME derivations once, at compile time,
+    // into a table indexed by level. `build()` calls the functions above and
+    // nothing else, and the static_asserts below check every row against them,
+    // so a retune still costs an edit to the descriptor and nothing more.
+    //
+    // Only the five BIT counts are stored. The byte-valued quantities
+    // (`slotSpan`, `nodeSpan`, `valence`, `rangeUnitCount`, the endpoint mask)
+    // are recovered with one shift, which is cheaper than an eight-byte load
+    // and keeps the whole table inside one cache line — the point being to
+    // remove memory traffic from the fault path, not to relocate it.
+    //
+    // `valenceMask` is deliberately absent: at level 0 the valence is 512 and
+    // `1 << 512` is undefined, so a table row for it could not be built. Level 0
+    // is the root bucket table, which carries no claim word (§5.1), so nothing
+    // asks — and the free function above stays the only spelling.
+    template <GeometryDescriptor G>
+    struct Geo {
+        // Levels run 0..levelCount; sized at the descriptor's own bound so a
+        // row exists for every level any geometry can name.
+        static constexpr unsigned kRows = kMaxLevels + 1;
+
+        struct Rows {
+            uint8_t slotSpanBits[kRows]{};
+            uint8_t nodeSpanBits[kRows]{};
+            uint8_t levelIndexBits[kRows]{};
+            uint8_t rangeUnitBits[kRows]{};
+            uint8_t rangeEndpointBits[kRows]{};
+        };
+
+        static constexpr Rows build() {
+            Rows r{};
+            for (unsigned l = 0; l < kRows; l++) {
+                // Qualified, or each call would find the member function of the
+                // same name and the table would be defined in terms of itself.
+                r.slotSpanBits[l] =
+                    static_cast<uint8_t>(radix::slotSpanBits(G, l));
+                r.nodeSpanBits[l] =
+                    static_cast<uint8_t>(radix::nodeSpanBits(G, l));
+                r.levelIndexBits[l] =
+                    static_cast<uint8_t>(radix::levelIndexBits(G, l));
+                r.rangeUnitBits[l] =
+                    static_cast<uint8_t>(radix::rangeUnitBits(G, l));
+                r.rangeEndpointBits[l] =
+                    static_cast<uint8_t>(radix::rangeEndpointBits(G, l));
+            }
+            return r;
+        }
+
+        static constexpr Rows rows = build();
+
+        static constexpr unsigned slotSpanBits(unsigned level) {
+            return rows.slotSpanBits[level];
+        }
+        static constexpr unsigned nodeSpanBits(unsigned level) {
+            return rows.nodeSpanBits[level];
+        }
+        static constexpr unsigned levelIndexBits(unsigned level) {
+            return rows.levelIndexBits[level];
+        }
+        static constexpr unsigned rangeUnitBits(unsigned level) {
+            return rows.rangeUnitBits[level];
+        }
+        static constexpr unsigned rangeEndpointBits(unsigned level) {
+            return rows.rangeEndpointBits[level];
+        }
+
+        static constexpr uint64_t slotSpan(unsigned level) {
+            return uint64_t{1} << rows.slotSpanBits[level];
+        }
+        static constexpr uint64_t nodeSpan(unsigned level) {
+            return uint64_t{1} << rows.nodeSpanBits[level];
+        }
+        static constexpr unsigned valence(unsigned level) {
+            return 1u << rows.levelIndexBits[level];
+        }
+        static constexpr uint64_t rangeUnitCount(unsigned level) {
+            return uint64_t{1} << rows.rangeEndpointBits[level];
+        }
+        // The mask of ONE endpoint field, which is what the codec's decode
+        // wants; spelled here so the shift and the row cannot drift apart.
+        static constexpr uint64_t endpointMask(unsigned level) {
+            return (uint64_t{1} << rows.rangeEndpointBits[level]) - 1;
+        }
+    };
+
+    // The table IS the derivation, checked rather than asserted in a comment.
+    // A row that disagreed would be a silent wrong-geometry bug on the hot path
+    // — the one place nothing else would catch it.
+    template <GeometryDescriptor G>
+    constexpr bool geoTableAgrees() {
+        for (unsigned l = 0; l <= G.levelCount; l++) {
+            if (Geo<G>::slotSpanBits(l)      != slotSpanBits(G, l))      return false;
+            if (Geo<G>::nodeSpanBits(l)      != nodeSpanBits(G, l))      return false;
+            if (Geo<G>::levelIndexBits(l)    != levelIndexBits(G, l))    return false;
+            if (Geo<G>::rangeUnitBits(l)     != rangeUnitBits(G, l))     return false;
+            if (Geo<G>::rangeEndpointBits(l) != rangeEndpointBits(G, l)) return false;
+            if (Geo<G>::slotSpan(l)          != slotSpan(G, l))          return false;
+            if (Geo<G>::nodeSpan(l)          != nodeSpan(G, l))          return false;
+            if (Geo<G>::valence(l)           != valence(G, l))           return false;
+            if (Geo<G>::rangeUnitCount(l)    != rangeUnitCount(G, l))    return false;
+        }
+        return true;
+    }
+
     // ─── Well-formedness ───────────────────────────────────────────────────
     //
     // Checked as a predicate rather than as scattered static_asserts so a
@@ -337,6 +460,10 @@ namespace kernel::mm::radix {
     // §6.1: 11 sites fully grown, 7 un-grown.
     static_assert(siteBound(kAmd64Geometry) == 11);
 
+    static_assert(geoTableAgrees<kAmd64Geometry>(),
+                  "the per-level table must reproduce the derivations exactly — a row that "
+                  "disagreed is a silent wrong-geometry bug on the fault path");
+
     // ─── Test geometries (§12) ─────────────────────────────────────────────
     //
     // "Instantiating on a tiny geometry — a handful of bits per level over a toy
@@ -366,6 +493,7 @@ namespace kernel::mm::radix {
     static_assert(rangeUnitBits(kTinyGeometry, 1) == 2,
                   "the tiny geometry's budget must reach the floor at every level, or "
                   "the exhaustive check silently loses the sub-range dispatch rows");
+    static_assert(geoTableAgrees<kTinyGeometry>());
 
     // A second tiny geometry that deliberately DOES have a resolution shortfall,
     // so the shortfall-driven subdivision rows (§6.1, §6.3) are reachable
@@ -385,6 +513,7 @@ namespace kernel::mm::radix {
     static_assert(isWellFormed(kTinyShortfallGeometry));
     static_assert(resolutionShortfall(kTinyShortfallGeometry, 1) > 0,
                   "kTinyShortfallGeometry exists to make the shortfall rows reachable");
+    static_assert(geoTableAgrees<kTinyShortfallGeometry>());
 
 }  // namespace kernel::mm::radix
 

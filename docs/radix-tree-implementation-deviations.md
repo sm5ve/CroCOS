@@ -4476,3 +4476,125 @@ is scanned like anything else — which is the detector working as designed, on 
 first new code written after it was built (D-062..D-069).
 
 Suite 1,667 green; kernel builds; boot clean.
+
+## D-076 — the descent cache's counters were the most contended object in the design
+
+D-075 ended by recording a cost it could not measure: `DescentCacheStats` was ONE
+shared struct of sixteen `Atomic<uint64_t>` hanging off the cache object, its
+`fetch_add` sites unconditional in every build (no `CROCOS_*` gate, unlike
+`CROCOS_RADIX_NODE_CENSUS`). `kCacheAccounting` is RELAXED, which drops the fences
+but **not the lock prefix**, so every CPU performed several locked
+read-modify-writes on the *same* lines on every page fault. Recorded, not fixed,
+because the project had no instrument that could see it.
+
+It has an instrument now — the native SMP contention benchmark
+(`tests/kernel/radix/ContentionBench.cpp`) — so this is the fix, measured rather
+than argued.
+
+### What the counters actually cost
+
+Measured on the M1, `KernelRadixBenchRunner` (-O2, no sanitizers), 8 threads over
+DISJOINT per-thread regions, six alternating A/B runs on an idle machine:
+
+| | 1 thr | 2 thr | 4 thr | 8 thr |
+|---|---|---|---|---|
+| before (min ns/lookup/thread) | 131.3 | 332.4 | 802.9 | **1408.6** |
+| after | 117.8 | 259.3 | 620.9 | **958.5** |
+
+Every one of the six `after` runs came in below every one of the six `before`
+runs — the arms do not overlap. On means, 8-thread per-thread cost falls
+1552 -> 1025 ns, and aggregate throughput rises 5.15 -> 7.80 Mlookup/s (+51%).
+
+### The attribution, corrected
+
+The obvious model is "a hit-path lookup bumps three counters, so the cost is
+3 x the contended-RMW tax". The benchmark's own calibration puts that tax at
+~80 ns/RMW at 8 threads, predicting ~240 ns — well short of the ~500 ns measured.
+
+**The model was wrong because the workload is not all hits.** Instrumenting the
+bench temporarily to count bumps rather than assume them: 62.6% hit rate and
+**4.31 counter bumps per lookup**. A hit bumps 3; a miss bumps 5, and a miss that
+installs bumps 8-9 (`lookups`, `rangeMisses`, `entryThrash[i]`, `misses`,
+`pinAcquires`, `pinReleases`, `installEvictions`, `installs`, sometimes
+`releasesThatDestroyed`). 4.31 x 80 = ~344 ns, which is ~70% of the measured
+~500. The unexplained remainder is not claimed; the candidates are the
+uncontended-RMW saving that shows up even at one thread (~10%, at the edge of
+that column's noise), and the fact that the calibration ping-pongs ONE line while
+these counters span two to four.
+
+So the counters were roughly **a third of the 8-thread degradation**, not the
+majority. DEC-060's `tryAdvance` — an O(P) walk over every CPU's reader slot, on
+every lookup — remains the larger share and is somebody else's item.
+
+### The fix
+
+The counters move INTO `Row`, which is per-CPU and `alignas(CACHE_LINE_SIZE)`
+already, and the increment stops being an RMW:
+
+```
+static void bump(Atomic<uint64_t>& c) { c.store(c.load(kCacheAccounting) + 1, kCacheAccounting); }
+```
+
+An RMW arbitrates between writers and there are none to arbitrate — the row has
+exactly one writer by the same discipline that already lets `Entry` and
+`Candidate` be plain fields. They stay `Atomic` only because `stats()` reads them
+from a FOREIGN CPU, and a plain word written here and read there is a data race
+TSan is right to flag. **There is now no shared mutable state on the cache object
+at all.**
+
+Consequences:
+
+* `stats()` returns a summed snapshot **by value**. A caller wanting two figures
+  consistent with each other must take one snapshot — `RadixStress::liveness` and
+  the calibration sweep were both reading `stats()` several times and now do not.
+* The field list is written once, as `CacheCounters<T, N>`, instantiated at
+  `Atomic<uint64_t>` (live, per-CPU, sized by `Entries`) and `uint64_t` (the
+  snapshot, sized by `kMaxDescentCacheEntries` because one snapshot type answers
+  for every instantiated width). `zipCounterScalars` is the one place the names
+  are enumerated outside that declaration, and a `static_assert` on
+  `sizeof(DescentCacheStats)` is what stops a new counter being added to the
+  struct and silently reading as zero in every snapshot — R-4's failure mode.
+* Hit-path counters are declared first and adjacent, so a hit dirties one counter
+  line rather than three.
+* `Row` grows 320 -> 448 B, so `rows[MAX_PROCESSOR_COUNT]` grows 80 -> 112 KiB of
+  BSS for the machine. The cache is machine-global, not per-address-space, so
+  that is 32 KiB once.
+
+### Gating was considered and rejected
+
+The alternative D-075 named was a `CROCOS_RADIX_CACHE_STATS` flag on the
+`CROCOS_RADIX_NODE_CENSUS` model. Rejected on three grounds: the §11 tests and the
+stress report both read these counters, so every build that instantiates a
+`DescentCache` today would define the flag and the gated-off shape would be
+untested code; DEC-016's cost claim is *stated in these counters*
+(`pinAcquires` tracking `installs` and not `lookups`), so a release kernel with
+them compiled out cannot check the property the design was chosen for; and
+per-CPU rows make the instrument cheap enough that there is nothing left to buy.
+A gate can still be layered on later if the 32 KiB ever matters — the two are
+independent.
+
+### Honest measurement notes
+
+`-icount` **cannot see this fix and did not**: innerMin 334 (before) vs 342 and
+324 (two after runs), innerMean 569 vs 574 and 581. Those deltas are inside the
+instrument's own noise, and the control that proves it is `pumpMin`, which moved
+225 -> 237 between two runs of code this change does not touch. TCG models no
+cache, so the lock prefix it removes is free there while the load/add/store that
+replaces the `lock inc` is not — if anything the instruction count should rise
+slightly. It is a check that nothing got worse, and nothing more.
+
+The benchmark's caveat travels with every figure above: `bindThreadToCpu` binds a
+LOGICAL cpu (the mock `CpuLocal` page and RCU slot) and does no physical affinity,
+which macOS does not offer on Apple Silicon. So the table is an A/B at fixed
+thread counts on one machine, and the scaling curve down its rows is partly
+P-core/E-core placement. Read the rows against each other, never down.
+
+`resetStats` has no production caller, and a member of a class template that
+nothing calls is never instantiated and so never type-checked — code that compiles
+by not existing. `radix_cache_stats_sum_every_cpu_row_and_reset_clears_them` is
+what makes it exist, and it doubles as the check that `stats()` really sums rows
+other than the calling CPU's (it bumps four CPUs' rows and reads from one).
+
+Suite 1,673 green, 11 runners: 1,667 baseline, +4 from the cherry-picked bench's
+two opt-in reports across both radix runners, +2 from the test above. Kernel
+builds; boot clean, `hit%` still in its historical 74-82% band.

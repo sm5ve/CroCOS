@@ -173,7 +173,12 @@ void fill(CacheA& cache, BlockA& block, uint64_t va) {
     (void)cache.lookup(block, va);   // miss: install, inside this descent
 }
 
-uint64_t stat(const Atomic<uint64_t>& a) { return a.load(rdx::kCacheAccounting); }
+// `stats()` returns a SUMMED SNAPSHOT of every CPU's row (D-076), not a
+// reference to a shared struct of atomics, so its fields are already plain
+// integers. This survives as an identity because it is spelled at ~35 call
+// sites and reads better than a bare field access next to an ASSERT — and
+// because keeping it makes the D-076 diff say only what it changed.
+uint64_t stat(uint64_t v) { return v; }
 
 }  // namespace
 
@@ -229,6 +234,65 @@ TEST(radix_cache_install_is_deferred_by_one_miss) {
     ASSERT_TRUE(stat(cache->stats().freshnessLoads) == 1);
 
     cache->evictAllOnThisCpu();
+}
+
+// D-076 moved the counters into the per-CPU `Row` and `stats()` became a sum
+// over every row. Two things about that shape are worth a test rather than a
+// comment.
+//
+// The first is that the sum is REAL — a counter bumped on a row this thread
+// happens not to be bound to still has to appear. The second is `resetStats`,
+// which has no production caller and, being a member of a class template, is
+// therefore never instantiated and never type-checked unless something here
+// calls it. An uninstantiated template member is code that compiles by not
+// existing; this is what makes it exist.
+TEST(radix_cache_stats_sum_every_cpu_row_and_reset_clears_them) {
+    constexpr size_t kCpus = 4;
+    BareArena arena(kCpus);
+    Space     space(kCpus);
+    auto      cache = std::make_unique<CacheA>();
+
+    // Each CPU faults on its own VA, so each bumps its OWN row and nothing else.
+    // Serially and on one thread — this is a test of the accounting, not of
+    // concurrency, and binding is what selects the row.
+    for (size_t c = 0; c < kCpus; c++) {
+        kernel::test::bindThreadToCpu(static_cast<arch::ProcessorID>(c));
+        const uint64_t va = uint64_t{16 + c} * kLeafNodeSpan;
+        (void)space.mapPair(va);
+        fill(*cache, *space.block, va);            // 2 lookups: candidate, install
+        (void)cache->lookup(*space.block, va);     // 1 lookup: hit
+    }
+    kernel::test::bindThreadToCpu(0);
+
+    // Read from CPU 0, which contributed only a quarter of this. A per-CPU
+    // counter read as though it were the whole would report 3 and 1.
+    const rdx::DescentCacheStats s = cache->stats();
+    ASSERT_EQ(uint64_t{3 * kCpus}, s.lookups);
+    ASSERT_EQ(uint64_t{1 * kCpus}, s.hits);
+    ASSERT_EQ(uint64_t{1 * kCpus}, s.installs);
+    ASSERT_EQ(uint64_t{1 * kCpus}, s.pinAcquires);
+
+    // Drop the pins before resetting, so the release accounting is not what the
+    // cleared counters are hiding.
+    for (size_t c = 0; c < kCpus; c++) {
+        kernel::test::bindThreadToCpu(static_cast<arch::ProcessorID>(c));
+        cache->evictAllOnThisCpu();
+    }
+    kernel::test::bindThreadToCpu(0);
+
+    cache->resetStats();
+    const rdx::DescentCacheStats z = cache->stats();
+    ASSERT_EQ(uint64_t{0}, z.lookups);
+    ASSERT_EQ(uint64_t{0}, z.hits);
+    ASSERT_EQ(uint64_t{0}, z.installs);
+    ASSERT_EQ(uint64_t{0}, z.pinAcquires);
+    ASSERT_EQ(uint64_t{0}, z.pinReleases);
+    ASSERT_EQ(uint64_t{0}, z.misses);
+    for (unsigned i = 0; i < rdx::kMaxDescentCacheEntries; i++) {
+        ASSERT_EQ(uint64_t{0}, z.entryThrash[i]);
+    }
+
+    space.quiesceSpace();
 }
 
 // A hit is a descent SHORTCUT, not a memo of one address: the entry covers the
@@ -766,12 +830,16 @@ SweepResult<Entries> sweep(unsigned regions, unsigned rounds, unsigned threshold
         }
     }
 
+    // One snapshot, read five ways — the five figures in a report row have to
+    // describe the same moment, and `stats()` is a sum over every CPU's row
+    // rather than a reference, so calling it five times would be five moments.
+    const rdx::DescentCacheStats s = cache->stats();
     SweepResult<Entries> out;
-    out.lookups    = stat(cache->stats().lookups);
-    out.hits       = stat(cache->stats().hits);
-    out.installs   = stat(cache->stats().installs);
-    out.pinAtomics = stat(cache->stats().pinAcquires) + stat(cache->stats().pinReleases);
-    for (unsigned i = 0; i < Entries; i++) out.thrash += stat(cache->stats().entryThrash[i]);
+    out.lookups    = stat(s.lookups);
+    out.hits       = stat(s.hits);
+    out.installs   = stat(s.installs);
+    out.pinAtomics = stat(s.pinAcquires) + stat(s.pinReleases);
+    for (unsigned i = 0; i < Entries; i++) out.thrash += stat(s.entryThrash[i]);
     cache->evictAllOnThisCpu();
     space.quiesceSpace();
     return out;

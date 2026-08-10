@@ -195,6 +195,19 @@ namespace kernel::mm::radix {
     // deliberately allowed to be a little stale relative to each other; a hit
     // rate computed from two counters sampled a nanosecond apart is still a hit
     // rate.
+    //
+    // **Single-writer, since D-076.** The counters live in the descent cache's
+    // per-CPU `Row`, so each one has exactly one writer and any number of
+    // readers, and the increment is a relaxed load/add/store rather than a
+    // `fetch_add`. That is not a weakening of this constant, it is the reason it
+    // can stay RELAXED under an even weaker primitive: an RMW is for arbitrating
+    // between writers, and there are none to arbitrate. The atomicity that
+    // remains is doing one job only — keeping the foreign-CPU READ out of
+    // data-race territory, which matters because TSan is the release gate.
+    //
+    // Anything sharing this constant must satisfy the same premise. A counter
+    // written by more than one CPU needs `fetch_add` back, and the name would
+    // then be hiding the difference — so give it its own.
     inline constexpr MemoryOrder kCacheAccounting = RELAXED;
 
     // ─── The node census (Phase 5) ─────────────────────────────────────────
