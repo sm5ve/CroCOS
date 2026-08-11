@@ -300,6 +300,15 @@ TEST(radix_concurrent_readers_never_observe_a_torn_state) {
             // the original — so every address stays mapped throughout, and any
             // reader observing "unmapped" has caught a hole.
             auto rng = streamFor(13000);
+            // See the expansion/reclamation scenario: wait for a reader to be
+            // demonstrably running before mutating, or on a loaded machine the
+            // whole exchange can finish before any reader is scheduled. Bounded,
+            // and not required for correctness — the readers' do-while below
+            // guarantees a read either way.
+            for (unsigned spins = 0; spins < 100000 && reads.load(std::memory_order_acquire) == 0;
+                 spins++) {
+                std::this_thread::yield();
+            }
             for (unsigned k = 0; k < 600; k++) {
                 const uint64_t lo = (1 + rng.below(6)) * kPage;
                 const uint64_t hi = lo + (1 + rng.below(4)) * kPage - 1;
@@ -316,9 +325,11 @@ TEST(radix_concurrent_readers_never_observe_a_torn_state) {
         }
         // Readers. Bounded as well as flag-driven: an unbounded consumer loop
         // turns any producer failure into a hang, and a hang carries no
-        // diagnosis.
-        for (unsigned round = 0; round < 200000 && !stop.load(std::memory_order_acquire);
-             round++) {
+        // diagnosis. A do-while so `stop` is consulted only after a sweep —
+        // checking it first lets a late-scheduled reader do nothing at all and
+        // makes the reads > 0 guard below a report on the scheduler.
+        unsigned round = 0;
+        do {
             for (uint64_t va = 0; va < tree.span(); va += kPage) {
                 const auto r = tree.lookup(va);
                 reads.fetch_add(1, std::memory_order_relaxed);
@@ -337,10 +348,13 @@ TEST(radix_concurrent_readers_never_observe_a_torn_state) {
                     throw AssertionFailure("reader saw a range not containing its query");
                 }
             }
-        }
+            round++;
+        } while (round < 200000 && !stop.load(std::memory_order_acquire));
     });
 
     ASSERT_EQ(uint64_t{0}, holes.load());
+    // Structural now, not scheduling-dependent — see the note on the other
+    // scenario's identical guard.
     ASSERT_TRUE(reads.load() > 0);
 
     quiesce(h);
@@ -452,6 +466,18 @@ TEST(radix_concurrent_expansion_and_reclamation_are_invisible_to_a_reader) {
 
     onEachCpu(kCpus, [&](size_t cpu) {
         if (cpu == 0) {
+            // Do not start mutating until the reader is demonstrably running.
+            // onEachCpu's `go` gate releases the threads together, but that only
+            // makes them runnable — on a loaded machine the reader can sit
+            // unscheduled while this thread completes all 1500 cycles and sets
+            // `stop`, after which the reader observes `stop` on its very first
+            // check and the run proves nothing. Bounded, and never required for
+            // correctness: if the reader really never arrives we proceed anyway
+            // rather than hang, since the loop below guarantees a read regardless.
+            for (unsigned spins = 0; spins < 100000 && reads.load(std::memory_order_acquire) == 0;
+                 spins++) {
+                std::this_thread::yield();
+            }
             for (unsigned k = 0; k < 1500; k++) {
                 auto* punch = makeMapping(4 * kPage);
                 if (!punch) break;
@@ -465,15 +491,26 @@ TEST(radix_concurrent_expansion_and_reclamation_are_invisible_to_a_reader) {
             stop.store(true, std::memory_order_release);
             return;
         }
-        for (unsigned round = 0; round < 2000000 && !stop.load(std::memory_order_acquire);
-             round++) {
+        // A do-while, deliberately: `stop` is consulted only AFTER a read, so at
+        // least one read happens however the threads are scheduled. Checking it
+        // first made the assertion below a report on the scheduler — under ten
+        // concurrent runners this test failed with reads == 0 while every
+        // correctness property in it was satisfied.
+        unsigned round = 0;
+        do {
             const auto r = tree.lookup(4 * kPage + 128);
             reads.fetch_add(1, std::memory_order_relaxed);
             if (!r) throw AssertionFailure("the pinned address was observed unmapped");
             (void)r.mapping()->offsetFor(4 * kPage + 128);
-        }
+            round++;
+        } while (round < 2000000 && !stop.load(std::memory_order_acquire));
     });
 
+    // Now structural rather than scheduling-dependent — the do-while guarantees
+    // it. Kept because the guard is the right instinct: without it a reader that
+    // never ran would let this test pass while proving nothing, which is the
+    // failure mode where a workload that cannot produce a shape reports zero and
+    // the zero reads as evidence.
     ASSERT_TRUE(reads.load() > 0);
     quiesce(h);
     ValidA::validate(tree, "expand then reclaim");
