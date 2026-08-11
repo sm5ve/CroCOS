@@ -4786,3 +4786,109 @@ answer had already stopped being true.
 Suite 1,673 green; Debug and Release/LTO+stress build; three boot configs clean;
 decompositions still 149.
 
+
+---
+
+## D-081 — the fault-path pump gated on sealed-bag population
+
+**The change: `pumpIfWork`, a new engine entry that is `tryAdvance` behind one
+relaxed load.** `EpochDomain` gains a domain-level `sealedBagCount` — bumped
+before every `Open -> Sealed` and `Claimed -> Sealed` store, dropped by the
+`Sealed -> Claimed` claim winner, zeroed at the end of `drainAllQuiescent`,
+which leaves every bag Free. `pumpIfWork` returns immediately when the count
+reads zero and is a full `tryAdvance` otherwise. DEC-060's fault-path pump in
+`DescentCache::lookup` now calls it; nothing else changed callers.
+
+### Why this and not a cheaper sweep
+
+D-076 already made the sweep cheaper (the per-slot `div`) and measured the
+result: the pump was still 96% sweep at 8 CPUs, and the sweep found work in
+**9 of 2121 pumps** — every mutation path already pumps, and `tryAdvance`
+cannot seal a bag (R-19), so a read-steady-state fault pump walks 8 slots x 4
+bags of empty `claimAndDrain` checks to discover, every time, that there is
+nothing. A `sample` flame graph of the bench's hit path (new
+`KernelRadixProfileRunner`, `-O2 -fno-inline` so frames survive; new
+`radix_lookup_profile_loop` to hold the path on-CPU long enough to sample) put
+the pump at **39% of the lookup** — the largest single bucket. The evidence
+said rare, not cheaper: a pump with nothing sealed has nothing to do, and
+"nothing sealed" is one counter away from being checkable.
+
+### Why the gate is a separate entry and not inside `tryAdvance`
+
+`synchronize` spins `tryAdvance` to drive the epoch to e0+2 whether or not
+anything is sealed; a gate inside `tryAdvance` hangs it by construction. The
+gate is only for pull sites — callers whose sole purpose is reclamation
+progress. The veneer exports `kernel::rcu::pumpIfWork` beside `tryAdvance`
+with the same context contract.
+
+### The ordering argument (all RELAXED, deliberately)
+
+The counter is a liveness hint, never evidence: no claim happens because the
+count said so — every claim still goes through `kBagTagLoad` ACQUIRE and the
+`kBagClaim` CAS. Reading high spuriously costs one wasted pump (yesterday's
+behavior). Reading low while a Sealed bag exists is transient by construction:
+the bump is sequenced before its bag's `kBagSeal` store in the same thread, so
+the sealer's own later pumps see it by program order, and every other CPU sees
+it when coherence propagates the line. RCU-DEC-006's boundedness survives:
+while any Sealed bag exists the count is eventually nonzero everywhere, and
+every pump is a full `tryAdvance` until it drains.
+
+### A semantic difference, disclosed rather than hidden
+
+With fault pumps gated, an epoch that previously advanced at fault rate now
+waits for a retire-threshold crossing (`kRetireAdvanceThreshold` = 64, per
+slot), a completion primitive, or an existing sealed bag. Rotation seals on
+"tag < epoch at the next retire", so a retire-light slot can now hold up to
+the threshold's worth of retirees in its OPEN bag before the engine advances
+on its own — where before, any fault traffic would have advanced the epoch and
+the next retire would have sealed. Sealed bags are unaffected (gate open), and
+Open-bag residue was never sweep-claimable in either world; the residue bound
+widens from "open-bag contents" to "open-bag contents up to one threshold",
+drained at the same barrier/teardown points. `rcuPumpIfWorkGatesOnSealedBags`
+pins both halves: gate closed = epoch frozen; gate open = one pump expires,
+claims and drains.
+
+### A layout lesson paid for in a failing test
+
+The counter's first draft took `alignas(64)` — its own line, so epoch CASes
+could not invalidate the gate load. That grew the engine to two lines, which
+grew `kEngineStorageBytes`, which grew every address-space control block, and
+`radix_address_space_store_packs_blocks_into_a_page`'s `blocksPerPage() >= 5`
+floor caught it. The dedicated line was defending the gate against traffic the
+gate itself makes rare: in read-steady state nothing is sealed, so nothing
+pumps, so nothing CASes the epoch, and globalEpoch's line is clean in every
+cache precisely when the gate load is hottest. It now shares that line, the
+engine stays one line, and the comment at the member says why so nobody
+"fixes" it back.
+
+### Measured
+
+Single-thread hit path (`CROCOS_RCU_RELEASE_CHECKS` bench, the honest baseline
+per the CMakeLists note): **91.0 -> 57.1 ns/lookup (-37%)**. The flame graph's
+pump bucket went 39% -> 3.4%. Against the maple ruler (min-of-4 alternating
+rounds, aggregate ns/lookup, load average 8-10 — a quiet-machine rerun is
+owed, and these were taken under HEAVIER load than the 4.42x baseline run):
+
+| threads | maple | CroCOS before | CroCOS after | ratio before | **ratio after** |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 20.7 | 90.2 | 54.5 | 4.42x | **2.63x** |
+| 2 | 12.6 | 68.2 | 27.7 | 5.41x | **2.20x** |
+| 4 | 7.0 | 47.8 | 14.4 | 6.83x | **2.06x** |
+| 8 | 5.7 | 62.4 | 13.2 | 10.95x | **2.32x** |
+
+The multi-thread collapse is the gate's second effect: the ungated pump's
+epoch CAS and O(P) remote-slot scan were machine-wide coherence traffic at
+fault rate, which is why "CroCOS agg" previously ROSE from 4 to 8 threads.
+D-079's open item "globalEpoch is CAS'd at fault rate" is closed by this.
+
+### What the gated profile says is left (57 ns, single thread)
+
+descent proper ~49%, freshness/`SafePtr` ~22%, read-section enter/exit ~13%,
+`CoreTree`-temporary construction ~7% (the D-079 dead-`TreeStats` item — its
+repair forks on where live stats may LIVE: +72B in the control block breaks
+the packing floor; vmsmalloc memory acquires a freshness obligation; u32
+counters halve the size; per-CPU rows dodge D-076 but multiply it. Catalogued
+for a decision, not actioned). Pump 3.4%.
+
+Suite 1,685 green (the +2 is the gate test, present in both core runners); all
+runners, ASan+TSan.

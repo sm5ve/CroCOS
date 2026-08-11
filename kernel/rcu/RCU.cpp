@@ -868,6 +868,20 @@ bool tryAdvance(Domain& d) CROCOS_RCU_NOEXCEPT {
     return detail::Access::engine(d).tryAdvance(kernel::getLogicalProcessorID());
 }
 
+bool pumpIfWork(Domain& d) CROCOS_RCU_NOEXCEPT {
+#if CROCOS_RCU_DEBUG_CHECKS
+    // Same context contract as tryAdvance — the gate changes whether the pump
+    // runs, never where it is legal to attempt one.
+    assert(d.initialized(), "rcu: pumpIfWork on a Domain that was never init()'d");
+    assert(!inAllocForbiddenContext(),
+           "rcu: pumpIfWork from a forbidden interrupt context "
+           "(IRQ/NMI/#UD/#DF/#GP/#MC — #PF is legal)");
+    assert(preemptionDisabled(), "rcu: pumpIfWork with preemption enabled");
+    assert(cpuPinned(), "rcu: pumpIfWork without CPU pinning");
+#endif
+    return detail::Access::engine(d).pumpIfWork(kernel::getLogicalProcessorID());
+}
+
 size_t drain(Domain& d) CROCOS_RCU_NOEXCEPT {
 #if CROCOS_RCU_DEBUG_CHECKS
     assert(d.initialized(), "rcu: drain on a Domain that was never init()'d");

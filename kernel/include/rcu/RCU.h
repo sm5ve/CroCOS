@@ -481,6 +481,16 @@ namespace kernel::rcu {
     // every other CPU from reclaiming.
     bool tryAdvance(Domain& d) CROCOS_RCU_NOEXCEPT;
 
+    // tryAdvance behind a one-load gate: a no-op unless some bag somewhere is
+    // Sealed. This is the entry for PULL sites — places that pump purely for
+    // reclamation progress (radix DEC-060's fault path, operation exit) — where
+    // a pump with nothing sealed does nothing but pay for the scan and sweep.
+    // NOT for completion primitives' spin loops: synchronize and barrier need
+    // the epoch driven whether or not anything is sealed, and they call the
+    // engine's ungated form themselves. Returns whether the epoch moved (false
+    // when gated off).
+    bool pumpIfWork(Domain& d) CROCOS_RCU_NOEXCEPT;
+
     // Sweep expired bags only, no advance attempt. Returns the number of objects
     // destroyed.
     size_t drain(Domain& d) CROCOS_RCU_NOEXCEPT;

@@ -474,6 +474,28 @@ namespace Core::rcu {
     inline constexpr MemoryOrder kBagEmptyPublish       = RELEASE;
     inline constexpr MemoryOrder kBagEmptyObserve       = ACQUIRE;
     inline constexpr MemoryOrder kEpochObserve          = ACQUIRE;
+    //
+    //   kSealCount / kPumpGateLoad — the sealed-bag population counter and the
+    //                  pumpIfWork gate that reads it. ALL RELAXED, and that is an
+    //                  argument, not an oversight: the counter is a LIVENESS hint,
+    //                  never evidence. Nothing reclaims because the count said so —
+    //                  every claim still goes through kBagTagLoad ACQUIRE and the
+    //                  kBagClaim CAS, so a count that reads high spuriously costs
+    //                  one wasted pump (yesterday's behavior on every lookup). The
+    //                  dangerous direction is reading LOW while a Sealed bag
+    //                  exists, and that is transient by construction: the bump is
+    //                  sequenced before its bag's kBagSeal store in the SAME
+    //                  thread, so the sealing CPU's own later pumps see it
+    //                  (program order), and every other CPU sees it when coherence
+    //                  propagates the line — the same eventual-visibility clock
+    //                  the seal itself rides. A permanently-invisible increment
+    //                  would require a store that never propagates, which
+    //                  coherence forbids. Boundedness (RCU-DEC-006) therefore
+    //                  survives: while any Sealed bag exists, the count is
+    //                  eventually nonzero everywhere, and every pump is a full
+    //                  tryAdvance until the bag drains.
+    inline constexpr MemoryOrder kSealCount             = RELAXED;
+    inline constexpr MemoryOrder kPumpGateLoad          = RELAXED;
 
     template <typename Hooks>
     struct DebugIntrospection;   // core/rcu/DebugIntrospection.h
@@ -709,6 +731,27 @@ namespace Core::rcu {
             // has no dependency whatsoever on this call's advance succeeding.
             sweepExpired(slot);
             return advanced;
+        }
+
+        // ─── The gated pump — for pull sites, not completion primitives ──────
+        //
+        // The fault-path pump (radix DEC-060) exists to pull reclamation forward
+        // on machines with no scheduler tick and no reclamation daemon. When no
+        // bag anywhere is Sealed, there is nothing to pull: tryAdvance's sweep
+        // can claim only Sealed bags, and an epoch advance with nothing sealed
+        // reclaims nothing — the D-076 probe measured the unconditional form at
+        // 0 productive sweeps in 545 at 2 CPUs and 9 in 2121 at 8. This entry
+        // makes that case one relaxed load of a read-mostly line instead of an
+        // SC fence, an O(P) remote-slot scan, an epoch CAS and an O(P x bags)
+        // bag walk, per lookup.
+        //
+        // NOT a substitute for tryAdvance in completion primitives: synchronize
+        // and barrier pump to drive the EPOCH, whose advance must not require
+        // sealed bags to exist — gating their spins here would hang them. The
+        // gate is only for callers whose sole purpose is reclamation progress.
+        bool pumpIfWork(size_t slot) CROCOS_RCU_NOEXCEPT {
+            if (sealedBagCount.load(kPumpGateLoad) == 0) return false;  // RELAXED — liveness hint
+            return tryAdvance(slot);
         }
 
         // ─── Sweep ───────────────────────────────────────────────────────────
@@ -948,6 +991,12 @@ namespace Core::rcu {
                 if (!didWork) break;
             }
 
+            // Every bag is Free now, and the universal-owner drain above bypassed
+            // the bump/drop pairing (it seals and claims with plain stores), so
+            // re-zero rather than reconcile. Sound only here, for the same
+            // no-concurrency precondition that licenses the plain stores.
+            sealedBagCount.store(0, kSealCount);                    // RELAXED
+
             teardownActive = false;
             return ran;
         }
@@ -983,6 +1032,20 @@ namespace Core::rcu {
         ReaderSlot*      slots;
         size_t           slotCount;
         Atomic<uint64_t> globalEpoch{0};
+        // How many bags are currently Sealed, domain-wide — pumpIfWork's gate.
+        // Bumped by every Open->Sealed and Claimed->Sealed transition, dropped by
+        // every Sealed->Claimed win, zeroed by drainAllQuiescent (which leaves
+        // every bag Free). Shares globalEpoch's line DELIBERATELY, not by
+        // neglect: a dedicated alignas(64) line was tried first and grew the
+        // engine to two lines — which grew every address-space control block and
+        // broke the store's blocks-per-page floor — to defend the gate load
+        // against epoch-CAS invalidations that the gate itself makes rare: in
+        // read-steady state nothing is sealed, so nothing pumps, so nothing
+        // CASes the epoch, and this line stays clean in every cache precisely
+        // when the gate load is hottest. Under mutation the line does bounce,
+        // but a pump with real work pays O(P) either way and the extra load is
+        // noise there.
+        Atomic<uint64_t> sealedBagCount{0};
         size_t           drainBatchBound = kUnboundedDrainBatch;
         bool             teardownActive  = false;
         [[no_unique_address]] Hooks hooks{};
@@ -1121,6 +1184,9 @@ namespace Core::rcu {
                     const uint64_t opened = packBag(e, BagState::Open);
                     s.bagTagState[j].store(opened, kBagOpen);            // RELAXED
                     hooks.onBeforeSeal(slot, i);
+                    // Bump precedes the seal so the sealing CPU's own later gate
+                    // loads see it by program order (see kSealCount).
+                    sealedBagCount.fetch_add(1, kSealCount);             // RELAXED
                     // RELEASE, and load-bearing: it orders every push into bag i
                     // before the seal, which is what the claimer's kBagClaim
                     // ACQUIRE synchronizes with. A relaxed seal severs that edge.
@@ -1186,6 +1252,7 @@ namespace Core::rcu {
                     const uint64_t e = globalEpoch.load(kEpochObserve);  // ACQUIRE
                     s.bagTagState[j].store(packBag(e, BagState::Open), kBagOpen);
                     hooks.onBeforeSeal(slot, i);
+                    sealedBagCount.fetch_add(1, kSealCount);             // RELAXED — before the seal
                     s.bagTagState[i].store(packBag(bagTagOf(v), BagState::Sealed), kBagSeal);
                     s.openBagIndex = j;
                     return;
@@ -1217,6 +1284,9 @@ namespace Core::rcu {
                                      kBagClaimFailure)) {           // RELAXED
                 return 0;   // another CPU won; benign
             }
+            // Exactly the claim winner drops the count — losers returned above —
+            // so bump/drop pair one-to-one with Sealed-state entry/exit.
+            sealedBagCount.fetch_sub(1, kSealCount);                // RELAXED
             hooks.onAfterClaim(ownerIndex, bag);
 
             const size_t ran = drainClaimedBag(owner, bag, budget);
@@ -1232,6 +1302,7 @@ namespace Core::rcu {
                 // claimer would read a stale remainder head and re-run freed
                 // deleters, and the tagState value is bit-identical before and
                 // after the drain, so coherence rescues nothing.
+                sealedBagCount.fetch_add(1, kSealCount);   // RELAXED — re-entering Sealed
                 ts.store(packBag(tag, BagState::Sealed), kBagReseal);   // RELEASE
             } else {
                 ts.store(packBag(tag, BagState::Free), kBagRelease);    // RELEASE

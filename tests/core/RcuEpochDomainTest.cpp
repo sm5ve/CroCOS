@@ -453,6 +453,67 @@ TEST(rcuNoBagDrainedBeforeTagPlusTwo) {
     ASSERT_EQ(4, gDestroyCount);
 }
 
+TEST(rcuPumpIfWorkGatesOnSealedBags) {
+    // pumpIfWork is the fault-path pump: a full tryAdvance when any bag in the
+    // domain is Sealed, a no-op otherwise. Both halves are load-bearing. The
+    // no-op half is the optimisation (a read-steady-state lookup pays one
+    // relaxed load, not an O(P) scan and an O(P x bags) sweep); the
+    // full-tryAdvance half is RCU-DEC-006's boundedness (while sealed work
+    // exists, every pumping CPU drives expiry and drains it, exactly as the
+    // ungated form did).
+    ReaderSlot slots[2]{};
+    Owned<PlainDomain> owned(slots, size_t{2});
+    PlainDomain& d = *owned;
+    resetTracking();
+
+    // Fresh domain: nothing sealed, so the gate is closed and — unlike
+    // tryAdvance, which advances freely from this same state — the epoch must
+    // not move. A pump that "helpfully" advanced here would put the epoch CAS
+    // back on every fault of a read-only workload, which is the cost the gate
+    // exists to remove.
+    for (int i = 0; i < 3; ++i) ASSERT_FALSE(d.pumpIfWork(0));
+    ASSERT_EQ(uint64_t{0}, d.currentEpoch());
+
+    // A retiree in an OPEN bag does not open the gate: sweeps cannot claim an
+    // Open bag (R-19), so there is still nothing a pump could reclaim.
+    // (Residue note, stated because the gate slightly widens it: with fault
+    // pumps gated, an epoch that would previously have advanced at fault rate
+    // now waits for a retire-threshold crossing or a completion primitive, so
+    // a retire-light slot can hold up to kRetireAdvanceThreshold retirees in
+    // its open bag before the engine advances on its own. Sealed bags — the
+    // ones a sweep can actually take — are unaffected.)
+    retireInSection(d, 0, makeNode(0));
+    ASSERT_FALSE(d.pumpIfWork(0));
+    ASSERT_FALSE(d.pumpIfWork(1));
+    ASSERT_EQ(uint64_t{0}, d.currentEpoch());
+    ASSERT_EQ(0, gDestroyCount);
+
+    // Seal via rotation: advance once (ungated form — its epoch-driving duty
+    // is exactly why pumpIfWork must not replace it in completion primitives),
+    // then retire again so prepareOpenBag seals the stale bag.
+    ASSERT_TRUE(d.tryAdvance(0));
+    retireInSection(d, 0, makeNode(1));
+    ASSERT_TRUE(PlainDI::bag(d, 0, 0).state == BagState::Sealed);
+
+    // Gate open. One pump advances 1 -> 2, which expires the sealed bag
+    // (tag 0 + 2), and the same call's sweep claims and drains it.
+    ASSERT_TRUE(d.pumpIfWork(0));
+    ASSERT_EQ(uint64_t{2}, d.currentEpoch());
+    ASSERT_EQ(1, gDestroyCount);
+    ASSERT_TRUE(gDestroyed[0]);
+    ASSERT_TRUE(PlainDI::bag(d, 0, 0).state == BagState::Free);
+
+    // Drained, so the gate is closed again and the epoch is frozen — node 1
+    // sits in an Open bag, which is outside the gate's jurisdiction just as it
+    // is outside the sweep's.
+    for (int i = 0; i < 3; ++i) ASSERT_FALSE(d.pumpIfWork(0));
+    ASSERT_EQ(uint64_t{2}, d.currentEpoch());
+    ASSERT_EQ(1, gDestroyCount);
+
+    owned.finish();
+    ASSERT_EQ(2, gDestroyCount);
+}
+
 TEST(rcuRotationKeepsExactlyOneOpenBagPerSlot) {
     ReaderSlot slots[1]{};
     Owned<PlainDomain> owned(slots, size_t{1});

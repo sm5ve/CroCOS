@@ -446,7 +446,7 @@ namespace kernel::mm::radix {
             gProbeInnerCount.fetch_add(1, kCacheAccounting);
 
             const uint64_t p0 = probeInsnCounter();
-            (void)kernel::rcu::tryAdvance(block.domain);
+            (void)kernel::rcu::pumpIfWork(block.domain);
             const uint64_t p1 = probeInsnCounter();
             probeRecordMin(gProbePumpMin, p1 - p0);
             gProbePumpTicks.fetch_add(p1 - p0, kCacheAccounting);
@@ -459,7 +459,10 @@ namespace kernel::mm::radix {
             // closed. Placement is forced, not stylistic: deleters run outside
             // any section (RCU-DEC-038), and a pump inside a descent's section
             // could run deleters while link-loaded pointers are still live.
-            (void)kernel::rcu::tryAdvance(block.domain);
+            // Gated on sealed-bag population (pumpIfWork): the D-076 probe put
+            // the unconditional pump's sweep at 0-of-545 productive at 2 CPUs,
+            // so the common case is one relaxed load and nothing else.
+            (void)kernel::rcu::pumpIfWork(block.domain);
             return r;
 #endif
         }
