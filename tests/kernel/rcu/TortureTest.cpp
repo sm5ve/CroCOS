@@ -749,11 +749,6 @@ TEST_WITH_TIMEOUT_NO_TRACKING(rcuTortureDeadSlotDoesNotUnboundLimbo, 90000) {
     constexpr size_t   kChurnPerCpu = 5000;
     constexpr size_t   kChurners    = kCpus - 1;          // slots 0..2
     constexpr size_t   kTotal       = kChurners * kChurnPerCpu + kDeadBatch;
-    // O(slots), NOT O(retires) — each slot contributes at most its own Open bag.
-    // Deliberately generous: the discriminating statement is that kTotal retires
-    // leave under kResidueBound behind, a ratio of well under 1%. A build where a
-    // dead slot blocked advancement would leave residue in the thousands.
-    constexpr size_t   kResidueBound = 8 * Core::rcu::kRetireAdvanceThreshold;   // 512
 
     resetAccounting(kTotal + 1024);
     resetFailures();
@@ -807,10 +802,36 @@ TEST_WITH_TIMEOUT_NO_TRACKING(rcuTortureDeadSlotDoesNotUnboundLimbo, 90000) {
     // (1) The dead slot did not freeze the epoch.
     ASSERT_GT(epochAfter, epochBefore + 1);
 
-    // (2) Residue is O(slots), not O(retires). THE assertion of this scenario.
-    ASSERT_GT(kTotal, kResidueBound * 4);      // the test is only meaningful if
-                                               // churn dwarfs the bound
-    ASSERT_TRUE(residue <= kResidueBound);
+    // (2) THE assertion of this scenario: the dead slot's contribution is O(1)
+    // in the churn, not O(retires). Stated as an exact equality against what it
+    // retired before dying — 15,050 retires later, its bag is untouched.
+    //
+    // This deliberately does NOT bound total residue. That was the original
+    // formulation and it measured the wrong thing. Total residue includes the
+    // open bags of LIVE churners, and a live churner's open bag is sealed lazily
+    // by its owner on its next retire after the epoch moves — so if any reader
+    // stalls inside a section, the epoch cannot advance and whichever churner is
+    // still scheduled piles retires into a bag it has no opportunity to seal.
+    // Measured under 10 concurrent runners: one churner reached 3272 while the
+    // other two sat at 7 and the dead slot sat at exactly 50. That is the
+    // stalled-READER weakness, which this test explicitly does not own —
+    // rcuTortureForcedStall does — so a total-residue bound made this test fail
+    // for a reason it had carved out, and only under machine load. The dead-slot
+    // property was healthy in every one of those failures.
+    ASSERT_GT(kTotal, kDeadBatch * 100);  // meaningful only if churn dwarfs the
+                                          // dead slot's one-time contribution
+    if (rcu::test::openBagResidue(d, kDeadSlot) != deadResidue0) {
+        // Print the shape before failing: which slot holds the residue is the
+        // whole diagnosis, and it is unrecoverable from the assertion alone.
+        std::fprintf(stderr, "[dead-slot] epoch %llu -> %llu  residue=%zu\n",
+                     (unsigned long long)epochBefore, (unsigned long long)epochAfter, residue);
+        for (size_t s = 0; s < kCpus; ++s)
+            std::fprintf(stderr, "[dead-slot]   slot %zu open=%zu%s\n",
+                         s, rcu::test::openBagResidue(d, s),
+                         s == kDeadSlot ? "   (the dead slot)" : "");
+        std::fflush(stderr);
+    }
+    ASSERT_EQ(deadResidue0, rcu::test::openBagResidue(d, kDeadSlot));
 
     // (3) ...and it is exactly the per-slot Open bags — everything stealable was
     // stolen, including the dead slot's sealed bags (RCU-DEC-006).
@@ -818,10 +839,8 @@ TEST_WITH_TIMEOUT_NO_TRACKING(rcuTortureDeadSlotDoesNotUnboundLimbo, 90000) {
     for (size_t s = 0; s < kCpus; ++s) openFloor += rcu::test::openBagResidue(d, s);
     ASSERT_EQ(openFloor, residue);
 
-    // (4) The dead slot's own contribution cannot have grown past what it
-    // retired before dying, and it never re-entered.
+    // (4) ...and it never re-entered. (Its residue is pinned exactly by (2).)
     ASSERT_FALSE(rcu::test::inSection(d, kDeadSlot));
-    ASSERT_TRUE(rcu::test::openBagResidue(d, kDeadSlot) <= deadResidue0);
 
     // (5) So nearly everything was reclaimed WITHOUT the teardown drain.
     ASSERT_EQ(kTotal - residue, gDestroyed.load());
