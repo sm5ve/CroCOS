@@ -923,19 +923,20 @@ namespace kernel::mm::radix {
                 r = descendLocked(currentBinding(), va);
             }
 
-            // DEC-060's fault-path pump: tryAdvance AFTER the section closes.
-            // Placement is forced, not stylistic — deleters run outside any
-            // section (RCU-DEC-038), and a pump inside the descent's section
-            // could run deleters while link-loaded pointers are still live.
+            // DEC-060's fault-path pump: AFTER the section closes. Placement is
+            // forced, not stylistic — deleters run outside any section
+            // (RCU-DEC-038), and a pump inside the descent's section could run
+            // deleters while link-loaded pointers are still live.
             //
             // The fault path is chosen because it is the one path that runs on
-            // every CPU that touches the tree, READERS INCLUDED: a CPU that
-            // stops mutating but keeps faulting pumps its own bag out. Without
-            // it, a CPU that performs the last munmap and never retires again
-            // strands its open bag indefinitely, and an open bag pins one
-            // operation's retirees — transitively their Mappings, VMObjects and
-            // frames, not merely nodes.
-            (void)kernel::rcu::tryAdvance(*domain);
+            // every CPU that touches the tree, READERS INCLUDED: expired bags
+            // sealed by CPUs that have since gone quiet get swept by whoever
+            // keeps faulting. Gated on sealed-bag population (D-081), the same
+            // policy as the descent cache's site — and note the gate costs this
+            // coverage nothing, because a pump could never take an OPEN bag in
+            // the first place (R-19): what a fault pump can ever reclaim is
+            // exactly what the gate counts.
+            (void)kernel::rcu::pumpIfWork(*domain);
             return r;
         }
 

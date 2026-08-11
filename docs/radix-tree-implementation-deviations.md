@@ -4796,8 +4796,15 @@ relaxed load.** `EpochDomain` gains a domain-level `sealedBagCount` — bumped
 before every `Open -> Sealed` and `Claimed -> Sealed` store, dropped by the
 `Sealed -> Claimed` claim winner, zeroed at the end of `drainAllQuiescent`,
 which leaves every bag Free. `pumpIfWork` returns immediately when the count
-reads zero and is a full `tryAdvance` otherwise. DEC-060's fault-path pump in
-`DescentCache::lookup` now calls it; nothing else changed callers.
+reads zero and is a full `tryAdvance` otherwise. BOTH fault-path pump sites now
+call it — `DescentCache::lookup` and `CoreTree::lookup` — which answers the
+sub-question the pump-interval knob left open ("should `CoreTree::lookup`'s
+site share the interval?") with one policy instead of two: fault pumps run
+exactly when a sweep could take something. The `CoreTree::lookup` comment's
+old coverage claim ("a CPU that keeps faulting pumps its own bag out")
+overstated the ungated pump — a pump can never take an OPEN bag (R-19), so
+what a fault pump can ever reclaim is exactly what the gate counts, and the
+gate costs that coverage nothing. Nothing else changed callers.
 
 ### Why this and not a cheaper sweep
 
