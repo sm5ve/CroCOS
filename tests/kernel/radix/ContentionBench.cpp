@@ -87,6 +87,7 @@
 #include <cstdlib>
 #include <memory>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 using namespace CroCOSTest;
@@ -265,6 +266,84 @@ TEST(radix_lookup_contention_scaling_report) {
                 "  E-core placement is mixed into every row.\n"
                 "  Sound use: A/B two builds at ONE thread count, alternating, idle\n"
                 "  machine, compare minima.\n\n");
+}
+
+// ─── Profiling loop: the hit path, held on-CPU for `sample` ────────────────
+//
+// The throughput report above finishes its single-thread phase in ~a tenth of a
+// second, which is an order of magnitude under `sample`'s default window — a
+// profiler attached to it mostly captures thread startup and the harness. This
+// keeps the SAME steady-state hit path (same geometry, same 8 registered CPUs so
+// `tryAdvance` walks the same reader slots, same stride, same region span) on
+// one thread for a requested number of seconds, so that
+//
+//   CROCOS_RADIX_PROFILE_SECS=20 ./KernelRadixBenchRunner radix_lookup_profile_loop &
+//   sample <pid> 10 -file /tmp/radix.txt
+//   python3 tools/sample_to_flamegraph.py /tmp/radix.txt
+//
+// yields thousands of on-CPU samples that are all lookup. It prints its own
+// ns/lookup at the end as a cross-check against the report's single-thread row;
+// if the two disagree badly, the profile captured something the bench does not
+// run, and the flame graph should be distrusted accordingly.
+//
+// Opt-in via its own variable rather than CROCOS_RADIX_BENCH because a run of
+// the full bench should not also burn N seconds feeding a profiler nobody
+// attached.
+
+TEST(radix_lookup_profile_loop) {
+    const char* secsEnv = std::getenv("CROCOS_RADIX_PROFILE_SECS");
+    if (secsEnv == nullptr) {
+        std::printf("\n  SKIP profile loop — set CROCOS_RADIX_PROFILE_SECS=<seconds> to run it\n\n");
+        return;
+    }
+    const long secs = std::strtol(secsEnv, nullptr, 10);
+    if (secs <= 0) throw AssertionFailure("profile loop: CROCOS_RADIX_PROFILE_SECS must be a positive integer");
+
+    Harness h(kMaxThreads, 1);
+    Space   space(kMaxThreads);
+    auto    cache = std::make_unique<CacheA>();
+
+    // One thread's region, populated exactly as the report populates it, so
+    // every lookup is a hit and the measured path is the report's hit path.
+    const uint64_t regionSpan = uint64_t{1} << 22;
+    for (uint64_t off = 0; off < regionSpan; off += kPage * 3) {
+        rdx::Mapping* m = makeMapping(off);
+        if (m == nullptr) throw AssertionFailure("profile loop: out of mappings");
+        space.map(off, off + kPage - 1, m);
+    }
+
+    kernel::test::bindThreadToCpu(0);
+
+    std::printf("\n  profile loop: pid %d, ~%ld s of single-thread hit-path lookups — attach `sample` now\n",
+                static_cast<int>(getpid()), secs);
+    std::fflush(stdout);
+
+    // Deadline checked once per batch so the clock read stays out of the
+    // profiled loop (at ~100 ns/lookup a batch is ~0.4 ms).
+    constexpr unsigned kBatch = 4096;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(secs);
+    uint64_t total = 0, hits = 0, va = 0;
+    const auto t0 = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() < deadline) {
+        for (unsigned k = 0; k < kBatch; k++) {
+            auto r = cache->lookup(*space.block, va);
+            if (r) hits++;
+            va += kPage * 3;
+            if (va >= regionSpan) va = 0;
+        }
+        total += kBatch;
+    }
+    const auto t1 = std::chrono::steady_clock::now();
+
+    // Every probed address was mapped above, so a miss means the loop wandered
+    // off the population pattern and profiled a different path than claimed.
+    if (hits != total) throw AssertionFailure("profile loop: a lookup missed — wrong path profiled");
+
+    const double ns = static_cast<double>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+    std::printf("  profile loop: %llu lookups, %.1f ns/lookup (cross-check vs the report's 1-thread row)\n\n",
+                static_cast<unsigned long long>(total),
+                ns / static_cast<double>(total));
 }
 
 // ─── Calibration: what does a contended RMW actually cost here? ────────────

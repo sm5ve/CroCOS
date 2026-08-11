@@ -25,6 +25,15 @@ test.img
 # was decided and why lives in docs/ instead.
 specs/
 
+# ─── Benchmarking rulers ───────────────────────────────────────────────────
+# Vendored third-party baseline code (Linux's maple tree + shims, GPL-2.0) used
+# only to measure against. License-incompatible with the tree, so it must never
+# enter history — same arrangement as specs/: on disk, never committed.
+bench-maple/
+
+# ─── Local scripts ─────────────────────────────────────────────────────────
+tools/cloc-main.sh
+
 # ─── Claude Code ───────────────────────────────────────────────────────────
 # Personal overrides only. .claude/settings.json and .claude/skills/ are
 # deliberately NOT ignored — the skills directory holds this project's spec

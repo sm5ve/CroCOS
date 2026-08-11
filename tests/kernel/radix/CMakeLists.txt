@@ -198,7 +198,15 @@ add_custom_target(run_radix_progress_audit
 # absolute numbers are not portable and are not claimed to be.
 add_executable(KernelRadixBenchRunner EXCLUDE_FROM_ALL ${RDX_SOURCES})
 target_include_directories(KernelRadixBenchRunner PRIVATE ${RDX_INCLUDES})
-target_compile_definitions(KernelRadixBenchRunner PRIVATE ${RDX_DEFINES})
+# CROCOS_RCU_RELEASE_CHECKS: measure the RELEASE read path, not the debug one.
+# RCU.h created this flag for benchmark targets on 2026-08-01 (the stall stamp
+# alone once profiled at 34% of on-CPU work) and this target never adopted it,
+# so every bench number recorded before 2026-08-11 — including D-077..079's
+# 104.2 ns headline — includes two monoTimens() calls and seven asserts per
+# lookup that the release kernel compiles out. The A/Bs stay valid (both arms
+# equally contaminated); the absolute figures do not.
+target_compile_definitions(KernelRadixBenchRunner PRIVATE ${RDX_DEFINES}
+    CROCOS_RCU_RELEASE_CHECKS)
 target_compile_options(KernelRadixBenchRunner PRIVATE ${RDX_COMMON_OPTS} -O2 -g)
 target_link_libraries(KernelRadixBenchRunner PRIVATE TestHarness)
 if(APPLE)
@@ -206,5 +214,34 @@ if(APPLE)
         -Wl,-force_load,$<TARGET_FILE:TestHarness>)
 else()
     target_link_options(KernelRadixBenchRunner PRIVATE
+        -Wl,--keep-section=.crocos_unit_tests)
+endif()
+
+# ─── Profile runner: the bench build, with calls kept real ──────────────────
+#
+# `sample` attributes cost to stack frames and cannot resolve inlined ones, so
+# a profile of the -O2 bench binary is one flat frame — the entire descent
+# inlines into the test body. This target is the SAME code and flags with
+# -fno-inline added: within-function optimisation is intact, but every call
+# survives as a frame, so the flame graph shows structure. Its ABSOLUTE ns are
+# inflated by the call overhead the bench binary doesn't pay — read shapes and
+# ratios off it, and confirm any conclusion against an A/B of the real bench.
+#
+#   cmake --build build --target KernelRadixProfileRunner -j8
+#   CROCOS_RADIX_PROFILE_SECS=20 ./build/kernel/radix/KernelRadixProfileRunner radix_lookup_profile_loop &
+#   sample KernelRadixProfileRunner 10 -file /tmp/radix_sample.txt
+#   python3 ../tools/sample_to_flamegraph.py /tmp/radix_sample.txt
+add_executable(KernelRadixProfileRunner EXCLUDE_FROM_ALL ${RDX_SOURCES})
+target_include_directories(KernelRadixProfileRunner PRIVATE ${RDX_INCLUDES})
+target_compile_definitions(KernelRadixProfileRunner PRIVATE ${RDX_DEFINES}
+    CROCOS_RCU_RELEASE_CHECKS)
+target_compile_options(KernelRadixProfileRunner PRIVATE ${RDX_COMMON_OPTS} -O2 -g
+    -fno-inline)
+target_link_libraries(KernelRadixProfileRunner PRIVATE TestHarness)
+if(APPLE)
+    target_link_options(KernelRadixProfileRunner PRIVATE
+        -Wl,-force_load,$<TARGET_FILE:TestHarness>)
+else()
+    target_link_options(KernelRadixProfileRunner PRIVATE
         -Wl,--keep-section=.crocos_unit_tests)
 endif()
