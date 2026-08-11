@@ -704,6 +704,12 @@ ReadGuard::ReadGuard(Domain& d) CROCOS_RCU_NOEXCEPT
       // pinned slot storage".
       boundCpu(kernel::getLogicalProcessorID()),
       enteredAtNs(0) {
+#if defined(CROCOS_RADIX_BILL_NOGUARD)  // measurement scaffold — single-thread only:
+    // keep the nesting bookkeeping (mutation-path asserts check it), skip the
+    // interrupt masks; the engine skips the activation protocol under the same flag.
+    detail::Access::engine(domain).readLock(boundCpu);
+    return;
+#endif
 #if CROCOS_RCU_DEBUG_CHECKS
     assert(d.initialized(), "rcu: ReadGuard on a Domain that was never init()'d");
     assert(!inReadSideForbiddenContext(),
@@ -724,6 +730,10 @@ ReadGuard::ReadGuard(Domain& d) CROCOS_RCU_NOEXCEPT
 }
 
 ReadGuard::~ReadGuard() CROCOS_RCU_DTOR_NOEXCEPT {
+#if defined(CROCOS_RADIX_BILL_NOGUARD)  // measurement scaffold — single-thread only
+    detail::Access::engine(domain).readUnlock(boundCpu);
+    return;
+#endif
     // The unlock runs FIRST, before any diagnostic. That ordering is deliberate
     // in both build flavours. In the kernel it does not matter (assert panics);
     // under the test harness assert THROWS, and a diagnostic placed ahead of the

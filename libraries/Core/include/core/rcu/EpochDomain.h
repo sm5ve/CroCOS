@@ -556,6 +556,9 @@ namespace Core::rcu {
             assert(slot < slotCount, "rcu: slot index out of range");
             ReaderSlot& s = slots[slot];
             if (s.nesting++ != 0) return;                          // I5: plain, owner-only
+#if defined(CROCOS_RADIX_BILL_NOGUARD)  // measurement scaffold — nesting only, single-thread
+            return;
+#endif
 
             const uint64_t e = globalEpoch.load(kEpochLoadOnEnter); // RELAXED
             hooks.onAfterEpochLoad(e);                             // WINDOW-INTERIOR (I3 stall point)
@@ -569,6 +572,9 @@ namespace Core::rcu {
             ReaderSlot& s = slots[slot];
             assert(s.nesting > 0, "rcu: readUnlock without a matching readLock");
             if (--s.nesting != 0) return;
+#if defined(CROCOS_RADIX_BILL_NOGUARD)  // measurement scaffold — nesting only, single-thread
+            return;
+#endif
 
             hooks.onBeforeDeactivation();                          // WINDOW-INTERIOR
             s.state.store(kInactive, kStateRetire);                 // RELEASE — orders section reads before

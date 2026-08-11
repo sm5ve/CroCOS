@@ -206,7 +206,12 @@ target_include_directories(KernelRadixBenchRunner PRIVATE ${RDX_INCLUDES})
 # lookup that the release kernel compiles out. The A/Bs stay valid (both arms
 # equally contaminated); the absolute figures do not.
 target_compile_definitions(KernelRadixBenchRunner PRIVATE ${RDX_DEFINES}
-    CROCOS_RCU_RELEASE_CHECKS)
+    CROCOS_RCU_RELEASE_CHECKS
+    # Kernel-shaped mock freshness: charge the release fast path (arithmetic +
+    # one acquire load), not the checking mock's assert + TLS probe — see the
+    # mock header. Test runners keep the checking mock; only measurement
+    # targets take this.
+    CROCOS_FRESHNESS_RELEASE_SHAPE)
 target_compile_options(KernelRadixBenchRunner PRIVATE ${RDX_COMMON_OPTS} -O2 -g)
 target_link_libraries(KernelRadixBenchRunner PRIVATE TestHarness)
 if(APPLE)
@@ -234,7 +239,8 @@ endif()
 add_executable(KernelRadixProfileRunner EXCLUDE_FROM_ALL ${RDX_SOURCES})
 target_include_directories(KernelRadixProfileRunner PRIVATE ${RDX_INCLUDES})
 target_compile_definitions(KernelRadixProfileRunner PRIVATE ${RDX_DEFINES}
-    CROCOS_RCU_RELEASE_CHECKS)
+    CROCOS_RCU_RELEASE_CHECKS
+    CROCOS_FRESHNESS_RELEASE_SHAPE)
 target_compile_options(KernelRadixProfileRunner PRIVATE ${RDX_COMMON_OPTS} -O2 -g
     -fno-inline)
 target_link_libraries(KernelRadixProfileRunner PRIVATE TestHarness)

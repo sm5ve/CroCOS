@@ -4899,3 +4899,83 @@ for a decision, not actioned). Pump 3.4%.
 
 Suite 1,685 green (the +2 is the gate test, present in both core runners); all
 runners, ASan+TSan.
+
+---
+
+## D-082 — the additive bill, the harness's freshness tax, and the bar
+
+### The bill
+
+With the D-081 gate in, the remaining 55.4 ns single-thread was decomposed by
+measurement rather than profile shares: four measurement-only neutralizations
+(`CROCOS_RADIX_BILL_{NOPIN,NOGUARD,NOFRESH,NOBUMP}`, committed disabled as a
+repeatable instrument — same practice as the `CROCOS_RADIX_INSN_PROBE` modes),
+one build dir each, interleaved runs, minima:
+
+| neutralized | ns/lookup | saving |
+|---|---:|---:|
+| (baseline) | 55.4 | — |
+| freshness funnel (`NOFRESH`) | 38.4 | **17.0** |
+| read-section entry (`NOGUARD`: nesting kept, activation+fence+masks skipped) | 46.1 | **9.3** |
+| `Mapping` pin/release pair (`NOPIN`) | 48.5 | **7.0** |
+| descent-cache counter bumps (`NOBUMP`) | 55.0 | 0.3 |
+
+The bumps' 0.3 ns retroactively confirms the per-CPU-rows repair: the counters
+are no longer a cost story. `NOGUARD` needed one iteration to get right — its
+first form deleted the section outright and the mutation-path "retire outside a
+read-side section" assert correctly refused to run the fixture; the committed
+form keeps the nesting bookkeeping the asserts check and skips what the fence
+costs.
+
+### 16 of freshness's 17 ns were the HARNESS, not the design
+
+The checking mock's `ensureTLBEntryFresh` runs an `assert` (a call into the
+pinned-range test) plus a thread-local recording probe on every `SafePtr`
+access — instrumentation the release kernel compiles out. The release kernel's
+real fast path (VMSubstrate.cpp:1349) is address arithmetic, ONE acquire load
+of a dirty word, a bit test, a predictable branch. The mock now has a
+kernel-shaped mode (`CROCOS_FRESHNESS_RELEASE_SHAPE`, bench + profile targets
+only — every test runner keeps the checking mock): same arithmetic, one
+acquire load from a real shared table, never-taken branch. Deliberately absent:
+`getCurrentProcessorID`, a ~free GS read in the kernel that userspace TLS
+would price at 100× true cost.
+
+Measured: 55.4 -> **39.0 ns/lookup**. The design's own freshness price on this
+path is ~0.6 ns; the other ~16.4 ns was the instrument. This is the same
+species as the D-081 CMakeLists note (the bench measured the debug RCU path
+for its whole life) — the second time this campaign found the ruler reading
+the harness instead of the kernel. The rule both incidents teach: **a bench
+target must compile the release shape of every mechanism it prices, and each
+mechanism's mock must say which shape it is.**
+
+### The bar
+
+Min-of-4 alternating rounds against the maple ruler, aggregate ns/lookup:
+
+| threads | maple | CroCOS | ratio |
+|---:|---:|---:|---:|
+| 1 | 20.8 | 38.5 | **1.85x** |
+| 2 | 12.4 | 19.6 | **1.58x** |
+| 4 | 7.0 | 10.2 | **1.46x** |
+| 8 | 6.1 | 10.1 | **1.66x** |
+
+**Every thread count is inside the 2x bar** (campaign target: fault-path
+lookup within 2x of maple, else DoA). The claim's scope, stated precisely: an
+M1-native userspace build, release-shaped RCU checks and freshness, disjoint
+read-only hit-path workload, against maple v6.12 under liburcu-memb's macOS
+fallback — maple's own README notes its macOS numbers are inflated vs real
+Linux, so cross-OS bragging rights are not being claimed. Loaded machine
+(4-9); the quiet-machine rerun stays owed, and would move both arms.
+
+### What the bill says to do next, if the margin is wanted
+
+- **Item B (pin, 7.0 ns of 39):** a borrow-shaped lookup for the fault path —
+  the counted reference exists so a caller can close its section and block on
+  a pager (DEC-015), and the resident-page fault path does neither. Priced,
+  not designed; §3.1 is emphatic and this is referee territory.
+- **Read-section entry (9.3 ns):** the SEQ_CST activation fence, mostly.
+  Asymmetric schemes make a writer-side IPI correctness-load-bearing, which
+  the IPI policy currently forbids. Catalogued, not proposed.
+- The `CoreTree`-temporary and `LookupResult` machinery live in the ~22 ns
+  residual with the decode itself; the D-079 TreeStats placement fork is
+  unchanged.

@@ -436,7 +436,9 @@ namespace kernel::mm::radix {
     private:
         void reset() {
             if (mappingPtr) {
+#if !defined(CROCOS_RADIX_BILL_NOPIN)   // measurement scaffold — never commit enabled
                 releaseMappingRef(mappingPtr);
+#endif
                 mappingPtr = Ref{};
             }
         }
@@ -1085,7 +1087,9 @@ namespace kernel::mm::radix {
                     // unlinked, retired, graced, released to zero and destroyed,
                     // and its slab slot handed to an unrelated allocation, before
                     // the fetch_add landed on a stranger.
+#if !defined(CROCOS_RADIX_BILL_NOPIN)   // measurement scaffold — never commit enabled
                     acquireMappingRef(m);
+#endif
                     uint64_t lo = 0, hi = 0;
                     Codec::absoluteRange(word, slotBase, level, lo, hi);
                     return LookupResult{m, va, lo, hi};

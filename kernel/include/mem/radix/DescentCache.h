@@ -560,7 +560,11 @@ namespace kernel::mm::radix {
         // spelling that is not one. They also cost nothing extra: on both
         // targets a relaxed 64-bit load and store are a plain load and store.
         static void bump(Atomic<uint64_t>& c) {
+#if defined(CROCOS_RADIX_BILL_NOBUMP)   // measurement scaffold — never commit enabled
+            (void)c;
+#else
             c.store(c.load(kCacheAccounting) + 1, kCacheAccounting);
+#endif
         }
 
         // The one place a pin is released. Counted here rather than at the call

@@ -93,7 +93,45 @@ namespace kernel::mm::VMSubstrate {
     // copy had acquired one, and with the R-13 guard below that turns a catchable
     // assertion into `std::terminate` — a negative test cannot exercise a refusal
     // that kills the runner.
+    // Bench builds define CROCOS_FRESHNESS_RELEASE_SHAPE: the checking mock below
+    // charges an ASSERT (a function call into the pinned-range test) plus a
+    // thread-local recording probe on EVERY SafePtr access — instrumentation the
+    // release kernel compiles out — which made the bench's freshness arm an
+    // overestimate (the D-081 bill priced the checking mock at ~17 ns/lookup of
+    // the 55). The release kernel's real fast path is not free either: address
+    // arithmetic to the dirty word, one ACQUIRE load, a bit test and a
+    // predictable not-dirty branch (VMSubstrate.cpp:1349). This models exactly
+    // that — same arithmetic shape, one acquire load from a real shared table, a
+    // never-taken branch — so the bench charges the cost the design actually
+    // imposes rather than the cost the harness does. Deliberately absent:
+    // `getCurrentProcessorID`, which is a ~free GS read in the kernel and an
+    // expensive TLS call in userspace — charging TLS would re-import the same
+    // overestimate through the side door.
+#if defined(CROCOS_FRESHNESS_RELEASE_SHAPE)
+    namespace test {
+        // One 4 KiB page of dirty words, indexed by the same page-offset
+        // arithmetic the kernel uses. All-zero forever: every lookup takes the
+        // not-dirty branch, exactly as a warm kernel fault path does.
+        inline Atomic<uint64_t> mockDirtyWords[512] = {};
+    }
     inline bool ensureTLBEntryFresh(void* p) CROCOS_FRESHNESS_NOEXCEPT {
+#if defined(CROCOS_RADIX_BILL_NOFRESH)  // measurement scaffold — never commit enabled
+        (void)p;
+        return false;
+#endif
+        const auto a = reinterpret_cast<uint64_t>(p);
+        const size_t k = (a >> 12) & 511;                  // page index in a 2 MiB window
+        if (test::mockDirtyWords[k].load(ACQUIRE) & 1) {   // never taken; the load is the cost
+            return true;
+        }
+        return false;
+    }
+#else
+    inline bool ensureTLBEntryFresh(void* p) CROCOS_FRESHNESS_NOEXCEPT {
+#if defined(CROCOS_RADIX_BILL_NOFRESH)  // measurement scaffold — never commit enabled
+        (void)p;
+        return false;
+#endif
         // The kernel asserts this and would CORRUPT without the assert (R-13): a
         // pinned address's dirty word is somebody's live control block. Userspace
         // cannot reproduce the corruption, so it reproduces the refusal.
@@ -103,6 +141,7 @@ namespace kernel::mm::VMSubstrate {
         if (test::freshnessRecordingArmed) test::recordFreshnessCall(p);
         return false;                                      // userspace: never stale
     }
+#endif
 
     void* reservePerDomainStaticBuffer(size_t byteSize, numa::DomainID d);
     // vmsmalloc DEC-050/051: the failable, runtime-callable variant. The mock

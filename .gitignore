@@ -4,7 +4,9 @@
 # someone remembered to add it.
 cmake-build-*/
 tests/build/
+tests/build-bill-*/   # per-variant dirs for the D-082 additive-bill instrument
 stress_tests/build/
+tests/build-bill-*/   # per-variant dirs for the D-082 additive-bill instrument
 build/
 tools/__pycache__
 profile/
