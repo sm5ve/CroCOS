@@ -4979,3 +4979,94 @@ Linux, so cross-OS bragging rights are not being claimed. Loaded machine
 - The `CoreTree`-temporary and `LookupResult` machinery live in the ~22 ns
   residual with the decode itself; the D-079 TreeStats placement fork is
   unchanged.
+
+## D-083 — the borrow-shaped lookup (Item B), and what its A/B did to D-082's pin figure
+
+Implemented on `borrow-lookup` (2026-08-11, Spencer-directed same day) and
+merged after a five-referee adversarial pass. The read-side-overhead
+proposal's Item B, in the API shape B2 and B3 share, without pre-deciding
+between them: `DescentCache::borrow` runs the exact `lookup` body — one
+`Counted` template parameter over `lookupInner` / `resumeDescent` /
+`descendFromLocked`, so the descent loop and the install policy are spelled
+once — and skips the counted `Mapping` reference. The result
+(`BorrowedLookup`, trivially destructible) is protected only by the CALLER's
+open read section, asserted at every pointer-deriving entry; a caller that
+must block re-runs the counted `lookup`. `BorrowWindow` packages the borrow
+caller's obligations (section + DEC-060 pump on exit, member-order-enforced
+and now test-observed). The per-entry node pin (§7.5's seam handle) is
+untouched. Blocking/slow callers and B3's pin-on-block decision wait for the
+VMM; B1 (refcache) remains the engine-level candidate when VMObjects arrive.
+
+### The measurement, and the correction it forced on D-082
+
+The first A/B read borrow SLOWER (46.8 vs 38.0 ns at 1T): the borrow arm
+still opened the internal guards, and a nested `ReadGuard` skips the fence
+but not the out-of-line enter/exit pair. `SectionOrCallers<Counted>` compiles
+those guards out of the borrow arm (invariant 29 is discharged by the
+caller's section, which is open before the mark load by construction).
+
+With that fixed, disjoint regions are a WASH (38.2 vs 38.0 at 1T, and at
+every thread count). **That wash supersedes D-082's "pin 7.0 ns" line item**:
+the `NOPIN` neutralization was measured under the CHECKING freshness mock,
+so the 7.0 bundled two mock-inflated `SafePtr` accesses with the RMW pair —
+the third instance of D-082's own "the ruler read the harness" species,
+caught by D-082's rule finally being applied to D-082 itself. An uncontended
+pair on a core-local line is ~2-3 ns, fully consumed by borrow's remaining
+call scaffolding in the non-LTO harness.
+
+The pin's real bill is COHERENCE, which the disjoint workload is
+structurally incapable of showing (the recorded zero-looks-like-evidence
+lesson, third occurrence). The bench gained a shared-hot mode — every thread
+over the SAME region, the hot-library/VDSO shape, the per-VMA-refcount cliff
+the proposal's B5 note names for Linux. Min-of-6 alternating rounds, load
+~3, M1: identical at 1T (38.1 = 38.1, the cross-check), then borrow
+1.35×/1.57×/1.63× faster at 2/4/8T. The counted arm's own rows state it
+plainest: 8T costs 9.0 ns disjoint and 18.3 shared-hot (the pair roughly
+doubles the shared lookup — of the +9.3 ns, +7.0 is pin-attributable by the
+borrow delta, +2.3 appears in both arms); borrow holds 11.2. So the honest
+claim: **borrow costs nothing where it doesn't help and removes the
+shared-mapping refcount cliff where it does** — a concurrency-scaling lever,
+not a single-thread one.
+
+### What the referee pass caught (all in tests and the record; the design held)
+
+- `~PumpOnExit` was the noexcept/throwing-assert trap, occurrence four,
+  REPRODUCED as a SIGABRT that ate the failure report; fixed with
+  `CROCOS_RCU_DTOR_NOEXCEPT`.
+- The borrow survival test was VACUOUS as first committed — its retirees sat
+  in the writer's never-sealed open bag, unreclaimable by construction, so
+  it passed with the protection deleted. Found independently by two
+  referees; fixed with a bag-sealing sacrificial unmap, after which
+  protection-deleted fails as an ASan use-after-poison. The species is the
+  recorded is-it-the-property-or-a-proxy one, and the `>= 1` live-count
+  assert (slack a legitimate second record consumed) narrowed to `== 4`.
+- `BorrowWindow`'s close-section-then-pump order was comment-enforced only
+  (member swap turned nothing red); now observed by a staged-sealed-bag test
+  through the destroy-observer + `inSection` instrument.
+- Doc-truth: two comments still asserted the superseded 7.0 ns as the buy;
+  the pump-placement rule was misattributed to RCU-DEC-038 (which PERMITS
+  retire-from-deleter — the forbidder is DEC-060's placement argument).
+
+### Open items the pass surfaced, deliberately not settled here
+
+- **The in-section pump question**: a `BorrowWindow` nested inside an outer
+  section on the same domain runs its exit pump's deleters inside that outer
+  section, silently — no engine or veneer assert checks section-freedom, and
+  the same is already true of `lookup`'s pump under #PF-in-section. The
+  concurrency referee walked the epoch algebra and the in-section sweep is
+  memory-safe (a reader at snapshot s blocks advance past s+1; expiry needs
+  tag+2; observed ⟹ retired at ≥ s), and the engine itself pumps in-section
+  on the retire-threshold path. So DEC-060's "the pump never runs inside a
+  read section" is placement POLICY, not a safety invariant, and the spec
+  sentence, a possible debug assert in the veneer's `pumpIfWork`, and the
+  #PF-nesting reality need one reconciling decision.
+- §7.5's destroy license is worded for "the descent's open section"; under
+  borrow the same destroy runs in the caller's possibly-long section. The
+  legality argument is section-identity-independent; the sentence needs the
+  amendment.
+- `descendLocked<false>` returns empty for a null/out-of-range binding
+  before any assert can fire — harmless (no pointer derived), noted against
+  the "asserted at the entry points" phrasing.
+- Pre-existing, exposed in passing: the engine drain path is not
+  exception-safe under the harness (a throwing deleter leaves `inDrain`
+  set); afflicts every pump site equally, harness-only, unfixed.
