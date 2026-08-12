@@ -695,11 +695,12 @@ namespace kernel::mm::radix {
             Pin      pin;
             uint64_t nodeLo = 0, nodeHi = 0;
             {
-                // Under the borrow entry this guard NESTS inside the caller's
-                // section (an increment, no fence) and the result stays
-                // protected by the outer section after it closes; under the
-                // counted lookup it is the section, exactly as before.
-                kernel::rcu::ReadGuard guard(block.domain);
+                // Counted: this is the section, exactly as before. Borrow: the
+                // caller's section (asserted at the entry) already covers the
+                // descent, the §7.3 pin install AND §7.5's zero-observing
+                // eviction destroy — a nested guard here bought no protection
+                // and cost a real enter/exit pair (see SectionOrCallers).
+                SectionOrCallers<Counted> guard(block.domain);
                 result = tree.template descendLocked<Counted>(tree.currentBinding(), va, pinAtLevel, &site);
                 if (site.valid) {
                     nodeLo = site.base;

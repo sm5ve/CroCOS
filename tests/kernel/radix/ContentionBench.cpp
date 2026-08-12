@@ -162,8 +162,19 @@ rdx::Mapping* makeMapping(uint64_t baseVA) {
 // operation and the measured difference is the Mapping pin pair plus the
 // window's own scaffolding. A template rather than a parameter so neither arm
 // carries a branch in its hot loop.
+//
+// `sharedHot` selects which cost the trial can SEE. Disjoint regions (false)
+// keep every Mapping's refcount line core-local, which makes the counted pin
+// nearly free — the first borrow A/B read a wash at 1T for exactly that
+// reason. Shared-hot (true) walks every thread over the SAME region, so the
+// counted arm's acquire/release pair lands on refcount lines other cores are
+// hammering — the per-VMA-refcount cliff (a shared hot library mapping faulted
+// by many cores at once) that motivates Item B, and a shape the disjoint
+// workload is structurally incapable of producing. A workload that cannot
+// produce a shape reports zero, and zero looks like evidence.
 template <bool Borrow = false>
-double runTrial(CacheA& cache, BlockA& block, size_t threads, uint64_t regionSpan) {
+double runTrial(CacheA& cache, BlockA& block, size_t threads, uint64_t regionSpan,
+                bool sharedHot = false) {
     std::vector<std::thread> workers;
     std::atomic<bool>   go{false};
     std::atomic<size_t> ready{0};
@@ -176,7 +187,7 @@ double runTrial(CacheA& cache, BlockA& block, size_t threads, uint64_t regionSpa
             ready.fetch_add(1, std::memory_order_release);
             while (!go.load(std::memory_order_acquire)) { }
 
-            const uint64_t base = regionSpan * t;
+            const uint64_t base = sharedHot ? 0 : regionSpan * t;
             unsigned hits = 0;
             // A stride that is not a multiple of the cache-entry index stride, so
             // the four-entry set is exercised rather than one entry answering
@@ -224,7 +235,8 @@ double runTrial(CacheA& cache, BlockA& block, size_t threads, uint64_t regionSpa
 // per-lookup code is inside `runTrial<Borrow>`, so the indirection is paid per
 // TRIAL, not per operation.
 void scalingReport(const char* arm,
-                   double (*trial)(CacheA&, BlockA&, size_t, uint64_t)) {
+                   double (*trial)(CacheA&, BlockA&, size_t, uint64_t, bool),
+                   bool sharedHot = false) {
     if (const char* on = std::getenv("CROCOS_RADIX_BENCH"); on == nullptr || on[0] != '1') {
         std::printf("\n  SKIP contention benchmark — set CROCOS_RADIX_BENCH=1 to run it\n"
                     "  (opt-in: it burns several seconds and its numbers are only\n"
@@ -283,11 +295,11 @@ void scalingReport(const char* arm,
     for (size_t threads : kThreadCounts) {
         // One warm-up so descent-cache entries are installed and the measured
         // trials are steady state rather than cold installs.
-        (void)trial(*cache, *space.block, threads, regionSpan);
+        (void)trial(*cache, *space.block, threads, regionSpan, sharedHot);
 
         double best = 0.0;
         for (unsigned t = 0; t < kTrials; t++) {
-            const double ns = trial(*cache, *space.block, threads, regionSpan);
+            const double ns = trial(*cache, *space.block, threads, regionSpan, sharedHot);
             if (best == 0.0 || ns < best) best = ns;
         }
         // Aggregate (wall time over TOTAL lookups) and its per-thread inverse.
@@ -320,6 +332,23 @@ TEST(radix_lookup_contention_scaling_report) {
 // reference actually costs, measured rather than argued.
 TEST(radix_borrow_contention_scaling_report) {
     scalingReport("borrow", &runTrial<true>);
+}
+
+// The shared-hot pair: every thread over the SAME region, so the counted arm's
+// pin pair lands on refcount lines every other core is hammering — the shared
+// hot mapping faulted by many cores at once (a hot library, the VDSO), which is
+// the workload Item B exists for and the one the disjoint tables above are
+// structurally incapable of showing. Read these the same way: A/B the two arms
+// at a fixed thread count, alternating, minima. The single-thread rows should
+// match the disjoint tables (one thread shares with nobody); the divergence AS
+// THREADS RISE is the pin's contention bill, and it falls on the counted arm
+// alone.
+TEST(radix_lookup_shared_hot_scaling_report) {
+    scalingReport("lookup shared-hot", &runTrial<false>, /*sharedHot=*/true);
+}
+
+TEST(radix_borrow_shared_hot_scaling_report) {
+    scalingReport("borrow shared-hot", &runTrial<true>, /*sharedHot=*/true);
 }
 
 // ─── Profiling loop: the hit path, held on-CPU for `sample` ────────────────

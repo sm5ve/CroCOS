@@ -498,6 +498,24 @@ namespace kernel::mm::radix {
         uint64_t rangeHi = 0;
     };
 
+    // ─── SectionOrCallers (Item B) ─────────────────────────────────────────
+    //
+    // The conditional guard for the `Counted` templates: the counted arm needs
+    // its own read section here; the borrow arm is REQUIRED to already be in
+    // one (asserted at its entry points), so opening a nested guard buys no
+    // protection and costs a real enter/exit pair per operation — the first
+    // borrow A/B measured the scaffolding at MORE than the pin it saved, and
+    // this type is what removed it. An empty object rather than an `if
+    // constexpr` around the declaration because a guard is scoped RAII: the
+    // type switch keeps one body with one scope, and the empty arm compiles to
+    // nothing.
+    struct SectionOfCaller {
+        explicit SectionOfCaller(kernel::rcu::Domain&) {}
+    };
+    template <bool Counted>
+    using SectionOrCallers =
+        conditional_t<Counted, kernel::rcu::ReadGuard, SectionOfCaller>;
+
     // ─── The seam handle (§5.5, §7.5; DEC-016 / DEC-078) ───────────────────
     //
     // "The one genuine leak across the seam is the descent cache, which holds a
@@ -1276,7 +1294,9 @@ namespace kernel::mm::radix {
 #if defined(CROCOS_RADIX_INSN_PROBE) && CROCOS_RADIX_INSN_PROBE == 5
             const uint64_t g0 = probe5Counter();
 #endif
-            kernel::rcu::ReadGuard guard(*domain);
+            // Counted: a fresh section. Borrow: the CALLER's section, already
+            // asserted at entry — see SectionOrCallers for why no nested guard.
+            SectionOrCallers<Counted> guard(*domain);
             const bool marked = state::isMarked(pin.node.stateWord().load(kCacheFreshnessLoad));
 #if defined(CROCOS_RADIX_INSN_PROBE) && CROCOS_RADIX_INSN_PROBE == 5
             const uint64_t g1 = probe5Counter();
