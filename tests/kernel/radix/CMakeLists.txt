@@ -36,6 +36,7 @@ set(RDX_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/PlacementTest.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/AddressSpaceTest.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/DescentCacheTest.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/BorrowAdversarialTest.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/FreshnessTest.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ContentionBench.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/mocks/RadixOracle.cpp
@@ -192,10 +193,17 @@ add_custom_target(run_radix_progress_audit
 # not be. Build and run it deliberately:
 #
 #   cmake --build build --target KernelRadixBenchRunner -j8
-#   CROCOS_RADIX_BENCH=1 ./build/kernel/radix/KernelRadixBenchRunner
+#   CROCOS_RADIX_BENCH=1 ./build/kernel/radix/KernelRadixBenchRunner <report-test-name>
 #
 # Compare runs of THIS binary against each other on the same machine; the
 # absolute numbers are not portable and are not claimed to be.
+#
+# Run it with a test NAME, not bare: a full run of this binary reports a
+# family of STRUCTURAL failures that are not regressions — the tests that
+# verify the checking machinery itself (the freshness-recorder family, and
+# the assert-rejection negative tests) fail by construction here because
+# the two flags below compile that machinery out. The gate runners above
+# keep the checking shapes and are where those tests are load-bearing.
 add_executable(KernelRadixBenchRunner EXCLUDE_FROM_ALL ${RDX_SOURCES})
 target_include_directories(KernelRadixBenchRunner PRIVATE ${RDX_INCLUDES})
 # CROCOS_RCU_RELEASE_CHECKS: measure the RELEASE read path, not the debug one.

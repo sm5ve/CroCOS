@@ -465,10 +465,16 @@ namespace kernel::mm::radix {
     // which is what `BorrowWindow` exists to make the easy spelling.
     //
     // What it buys: the fast fault path stops paying `Mapping::refcount`'s
-    // acquire/release RMW pair — D-082 priced that pair at 7.0 ns of a 39 ns
-    // lookup — for callers that consume the answer inside their own section
-    // (B3's fast faults: present / COW-hit / anon-zero). A caller that decides
-    // it must block does NOT try to promote this object; it re-runs the counted
+    // acquire/release RMW pair, for callers that consume the answer inside
+    // their own section (B3's fast faults: present / COW-hit / anon-zero).
+    // Priced honestly (the borrow A/B, 2026-08-11, superseding D-082's 7.0 ns
+    // line — that figure bundled two checking-mock SafePtr accesses with the
+    // pair): an UNCONTENDED pair on a core-local line is ~2-3 ns and the
+    // borrow is a wash on disjoint faults; the real bill is COHERENCE, on
+    // mappings many cores fault concurrently (a hot library), where the pair
+    // roughly doubled the shared-hot lookup (9.0→18.3 ns at 8T) and borrow
+    // held 11.2 — 1.35-1.63× at 2-8 threads. A caller that decides it must
+    // block does NOT try to promote this object; it re-runs the counted
     // `lookup`, which re-observes the link inside a section as §7.3 requires.
     //
     // Still a SafePtr, not a Mapping*: the section answers recycling, not

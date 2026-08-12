@@ -1191,8 +1191,10 @@ TEST(radix_borrowed_mapping_survives_a_concurrent_unmap_until_the_window_closes)
     Space     space(2);
     auto      cache = std::make_unique<CacheA>();
 
-    const uint64_t va = 4 * kLeafNodeSpan;
+    const uint64_t va  = 4 * kLeafNodeSpan;
+    const uint64_t vaC = 64 * kLeafNodeSpan;   // the bag-sealing sacrifice, see below
     rdx::Mapping* m = space.mapPair(va);
+    (void)space.mapPair(vaC);
     const uint64_t backendTag = m->baseVA;
     fill(*cache, *space.block, va);
 
@@ -1206,6 +1208,15 @@ TEST(radix_borrowed_mapping_survives_a_concurrent_unmap_until_the_window_closes)
         kernel::test::bindThreadToCpu(1);
         while (!borrowed.load(std::memory_order_acquire)) {}
         space.unmap(va, va + 2 * kPage - 1);
+        // SEAL the bag those retirees landed in: retirees go into the retiring
+        // CPU's OPEN bag, and a sweep can only ever claim a SEALED bag — so
+        // without a second retire to rotate the bag out, NOTHING could reclaim
+        // the record mid-test and the reader's section would not be what keeps
+        // it alive (a referee pass verified the test then passes with the
+        // window's protection deleted). The sacrificial unmap rotates the bag:
+        // now the record is sealed, expiry-eligible one advance away, and the
+        // reader's open section is the ONLY thing holding that advance back.
+        space.unmap(vaC, vaC + 2 * kPage - 1);
         // Pump as hard as a writer legally can mid-test: the grace period
         // CANNOT complete — the reader's section is open — so if the record is
         // ever destroyed under the reader, these calls are what would have
@@ -1224,11 +1235,15 @@ TEST(radix_borrowed_mapping_survives_a_concurrent_unmap_until_the_window_closes)
         ASSERT_TRUE(static_cast<bool>(b) && b.mapping() == m);
         borrowed.store(true, std::memory_order_release);
         while (!unmapped.load(std::memory_order_acquire)) {}
-        // The record is unlinked and its grace period is pending. The borrow
-        // contract says this dereference is still safe — the window's section
-        // has been open since before the unlink was observed possible.
+        // The record is unlinked, its bag is sealed, and its grace period is
+        // pending behind exactly one epoch advance that this window's section
+        // forbids. The borrow contract says this dereference is still safe.
         ASSERT_TRUE(b.mapping()->baseVA == backendTag);
-        ASSERT_TRUE(liveCountOf<rdx::Mapping>() >= 1);
+        // All four records — the borrowed pair and the sacrificial pair — are
+        // unlinked but must still be alive. Exactly four: any smaller number
+        // is a record destroyed under an open window, any larger a fixture
+        // drift. (== rather than >=: the wider form passes while records die.)
+        ASSERT_TRUE(liveCountOf<rdx::Mapping>() == 4);
     }   // window closes: section ends, THEN the pump runs (DEC-060)
 
     writer.join();
@@ -1242,4 +1257,95 @@ TEST(radix_borrowed_mapping_survives_a_concurrent_unmap_until_the_window_closes)
 
     cache->evictAllOnThisCpu();
     space.quiesceSpace();
+}
+
+// BorrowWindow's comment says its member ORDER is the mechanism: the section
+// must close before the pump fires, or the pump's deleters run inside an open
+// section — the sequence DEC-060's placement argument forbids (a pump inside
+// the section could run deleters while link-loaded pointers are live; §7.6).
+// Nothing enforced that order but
+// the comment; a referee pass demonstrated that swapping the two members turned
+// every test in this file green. This test makes the order observable with the
+// same instrument radix_cache_eviction_destroy_runs_inside_the_descent_section
+// uses: a destroy observer that asks `kernel::rcu::test::inSection` at the
+// instant each deleter runs.
+//
+// The staging is the delicate part, because the writer path pumps for itself
+// (`apply` calls tryAdvance after retiring), so pending work must be pinned
+// across those pumps by a reader and released only to the window's own pump:
+//
+//   1. A helper CPU opens a plain read section at epoch e and holds it.
+//   2. unmap A: retirees land in an OPEN bag tagged e; apply's own pump can
+//      still advance e -> e+1 (a reader AT the current epoch does not block).
+//   3. unmap B: the retire rotates — bag A is now SEALED, tag e, and expiry
+//      needs epoch e+2. apply's pump is now BLOCKED (the helper is active at
+//      e != e+1), so bag A survives every writer-side sweep.
+//   4. The helper closes its section. The staged state is stable: one sealed,
+//      one-advance-from-expiry bag, and NOTHING left running that could pump.
+//   5. A BorrowWindow opens and closes on this CPU. Its exit pump is the next
+//      pump anywhere: it advances to e+2 and destroys bag A's retirees.
+//
+// With the committed member order the guard has already closed when the pump
+// runs, so every destroy is observed OUTSIDE the section. With the members
+// swapped, the pump fires while the window's section is still open — the
+// advance still succeeds (the section is at the current epoch), the destroys
+// still run, and the observer sees them INSIDE the section: exactly the
+// forbidden sequence, made red instead of silent.
+TEST(radix_borrow_window_pump_fires_after_the_section_closes) {
+    BareArena arena(2);
+    Space     space(2);
+    auto      cache = std::make_unique<CacheA>();
+
+    const uint64_t vaA = 4 * kLeafNodeSpan;
+    const uint64_t vaB = 40 * kLeafNodeSpan;
+    (void)space.mapPair(vaA);
+    (void)space.mapPair(vaB);
+
+    std::atomic<bool> sectionOpen{false};
+    std::atomic<bool> release{false};
+    std::thread holder([&] {
+        kernel::test::bindThreadToCpu(1);
+        {
+            kernel::rcu::ReadGuard guard(space.block->domain);
+            sectionOpen.store(true, std::memory_order_release);
+            while (!release.load(std::memory_order_acquire)) {}
+        }
+    });
+    while (!sectionOpen.load(std::memory_order_acquire)) {}
+
+    space.unmap(vaA, vaA + 2 * kPage - 1);   // bag A: open, tag e; epoch may reach e+1
+    space.unmap(vaB, vaB + 2 * kPage - 1);   // rotates: bag A sealed, expiry needs e+2
+
+    // Nothing may have died yet — the helper's section pinned bag A through
+    // both writer-side pumps. If this fires, the staging above no longer
+    // matches the engine and the test needs re-deriving, not loosening.
+    ASSERT_TRUE(liveCountOf<rdx::Mapping>() == 4);
+
+    release.store(true, std::memory_order_release);
+    holder.join();
+
+    gDestroysSeen.store(0, std::memory_order_relaxed);
+    gDestroysInsideSection.store(0, std::memory_order_relaxed);
+    gWatchedDomain = &space.block->domain;
+    setDestroyObserver(&watchDestroys);
+
+    {
+        rdx::BorrowWindow window(space.block->domain);
+        auto b = cache->borrow(*space.block, vaB);   // an ordinary borrow lives here
+        ASSERT_TRUE(!static_cast<bool>(b));          // ...and B is already unmapped
+    }   // guard closes, THEN the pump advances to e+2 and destroys bag A
+
+    clearDestroyObserver();
+    gWatchedDomain = nullptr;
+
+    // The pump did real work at the window's exit (bag A held two Mappings —
+    // if this is zero the staging failed and the ordering claim went untested)…
+    ASSERT_TRUE(gDestroysSeen.load(std::memory_order_relaxed) >= 2);
+    // …and every one of those deleters ran with the section already closed.
+    ASSERT_TRUE(gDestroysInsideSection.load(std::memory_order_relaxed) == 0);
+
+    kernel::test::bindThreadToCpu(0);
+    cache->evictAllOnThisCpu();
+    space.quiesceSpace();
+    ASSERT_TRUE(liveCountOf<rdx::Mapping>() == 0);
 }

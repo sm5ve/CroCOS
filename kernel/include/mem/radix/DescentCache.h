@@ -470,8 +470,9 @@ namespace kernel::mm::radix {
         // ─── The borrow lookup (Item B) ────────────────────────────────────
         //
         // `lookup`, minus the two things that make `lookup` safe to carry out
-        // of a section: the counted Mapping reference (7.0 ns of the lookup by
-        // D-082's bill) and the pump. The caller MUST already hold a read
+        // of a section: the counted Mapping reference (a wash uncontended; a
+        // ~2× shared-hot coherence bill at 8T — see BorrowedLookup's pricing
+        // note) and the pump. The caller MUST already hold a read
         // section on `block.domain` — asserted here, §7.3's one-sided check —
         // and the result must die before that section closes. A caller that
         // discovers it needs to block does not promote the borrow; it calls
@@ -760,9 +761,13 @@ namespace kernel::mm::radix {
     // a read section for the borrows to live inside, and DEC-060's pump run
     // AFTER that section closes. Member order is the mechanism, not a style
     // choice: members destroy in reverse declaration order, so `guard` (the
-    // section) closes first and `pump` (declared before it) fires second —
-    // reversing the two members would run deleters inside an open section,
-    // which is exactly the sequence RCU-DEC-038 exists to forbid.
+    // section) closes first and `pump` (declared before it) fires second.
+    // Reversing the two members would run deleters inside the window's own
+    // still-open section — the sequence DEC-060's placement argument exists
+    // to forbid (a pump inside the section could run deleters while
+    // link-loaded pointers are live; §7.6, and the reason `lookup` pumps only
+    // after its sections close). `radix_borrow_window_pump_fires_after_the_
+    // section_closes` observes the order; it is not comment-enforced.
     //
     //     {
     //         BorrowWindow window(block.domain);
@@ -773,10 +778,29 @@ namespace kernel::mm::radix {
     // A caller that opens its own ReadGuard instead owes the post-close
     // `pumpIfWork` itself; this type exists so that spelling is the exception
     // that has to justify itself, not the default that has to remember.
+    //
+    // Two composition limits, both shared with the pump site `lookup` already
+    // has, stated here because a window makes them caller-shaped:
+    //   - Do not nest a window inside another section on the same domain
+    //     (another window, or a caller-held ReadGuard): the exit pump would
+    //     then run its deleters inside the ENCLOSING section. Nothing asserts
+    //     this today — the engine's asserts check context, not section-freedom.
+    //   - The window must close before the address space can be destroyed,
+    //     exactly as an in-flight `lookup` must return first: the exit pump
+    //     touches `block.domain` after the section closes, and a teardown that
+    //     won the race would hand it freed memory. The consumer contract
+    //     already forbids destroying a space with operations in flight; a
+    //     window widens that in-flight span from a call to a scope.
     class BorrowWindow {
         struct PumpOnExit {
             kernel::rcu::Domain& d;
-            ~PumpOnExit() { (void)kernel::rcu::pumpIfWork(d); }
+            // CROCOS_RCU_DTOR_NOEXCEPT, the ~ReadGuard spelling, and for the
+            // same trap (fourth occurrence in this project): under the test
+            // harness the pump's deleters can assert, asserts THROW there, and
+            // a throw through an implicitly-noexcept destructor is
+            // std::terminate — the failure report is eaten. The kernel keeps
+            // the noexcept (asserts panic, they do not unwind).
+            ~PumpOnExit() CROCOS_RCU_DTOR_NOEXCEPT { (void)kernel::rcu::pumpIfWork(d); }
         };
         PumpOnExit            pump;    // declared first ⇒ destroyed LAST
         kernel::rcu::ReadGuard guard;  // destroyed first: the section closes, then the pump runs

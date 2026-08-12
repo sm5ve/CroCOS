@@ -165,8 +165,9 @@ rdx::Mapping* makeMapping(uint64_t baseVA) {
 //
 // `sharedHot` selects which cost the trial can SEE. Disjoint regions (false)
 // keep every Mapping's refcount line core-local, which makes the counted pin
-// nearly free — the first borrow A/B read a wash at 1T for exactly that
-// reason. Shared-hot (true) walks every thread over the SAME region, so the
+// nearly free — once the borrow arm's scaffolding was paid down
+// (SectionOrCallers), the disjoint A/B read a wash at every thread count for
+// exactly that reason. Shared-hot (true) walks every thread over the SAME region, so the
 // counted arm's acquire/release pair lands on refcount lines other cores are
 // hammering — the per-VMA-refcount cliff (a shared hot library mapping faulted
 // by many cores at once) that motivates Item B, and a shape the disjoint
@@ -218,11 +219,19 @@ double runTrial(CacheA& cache, BlockA& block, size_t threads, uint64_t regionSpa
     const auto t1 = std::chrono::steady_clock::now();
     kernel::test::bindThreadToCpu(0);
 
-    // The only assertion, and it is load-independent: every worker finished the
-    // work it was given. A timing number from a trial where a thread died is not
-    // a slow result, it is a wrong one.
+    // Both assertions are load-independent: every worker finished the work it
+    // was given, and every probed VA answered. A timing number from a trial
+    // where a thread died is not a slow result, it is a wrong one — and a
+    // trial where lookups MISSED measured a different path than the hit path
+    // this file claims (the population stride and the walk stride are the same
+    // by construction; an all-miss drift would silently compare two pin-free
+    // paths and report the pin as free). The profile loop already asserts
+    // exactly this; the referee pass found the trials did not.
     if (completed.load() != threads) {
         throw AssertionFailure("contention bench: a worker did not complete");
+    }
+    if (found.load() != threads * kLookupsPerThread) {
+        throw AssertionFailure("contention bench: a lookup missed — wrong path measured");
     }
 
     const double ns = static_cast<double>(
@@ -310,14 +319,25 @@ void scalingReport(const char* arm,
                     threads, best, best * static_cast<double>(threads));
     }
 
-    std::printf("\n  Per-thread regions are DISJOINT, so anything that degrades with\n"
-                "  thread count is not the tree — it is the per-fault bookkeeping every\n"
-                "  lookup performs, with DescentCacheStats' shared atomics the standing\n"
-                "  suspect. But do not read a scaling claim off this table: threads are\n"
-                "  not pinned to physical cores (they cannot be, here), so P-core vs\n"
-                "  E-core placement is mixed into every row.\n"
-                "  Sound use: A/B two builds at ONE thread count, alternating, idle\n"
-                "  machine, compare minima.\n\n");
+    // The footer states the workload shape, so it must state the RIGHT one —
+    // a saved log claiming disjoint regions for a shared-hot run is the exact
+    // misreading the shape-note fix on this file exists to prevent.
+    if (sharedHot) {
+        std::printf("\n  Every thread walks the SAME region, so refcount and node lines are\n"
+                    "  SHARED across cores — degradation with thread count here IS coherence\n"
+                    "  traffic (plus P-core/E-core placement, which is not controlled).\n"
+                    "  Sound use: A/B the lookup and borrow arms at ONE thread count,\n"
+                    "  alternating, idle machine, compare minima.\n\n");
+    } else {
+        std::printf("\n  Per-thread regions are DISJOINT, so anything that degrades with\n"
+                    "  thread count is not the tree — it is the per-fault bookkeeping every\n"
+                    "  lookup performs, with DescentCacheStats' shared atomics the standing\n"
+                    "  suspect. But do not read a scaling claim off this table: threads are\n"
+                    "  not pinned to physical cores (they cannot be, here), so P-core vs\n"
+                    "  E-core placement is mixed into every row.\n"
+                    "  Sound use: A/B two builds at ONE thread count, alternating, idle\n"
+                    "  machine, compare minima.\n\n");
+    }
 }
 
 }  // namespace
