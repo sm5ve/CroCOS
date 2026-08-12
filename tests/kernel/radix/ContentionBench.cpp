@@ -233,10 +233,32 @@ TEST(radix_lookup_contention_scaling_report) {
 
     std::printf("\n  radix lookup throughput vs thread count"
                 " (native, real caches — the one thing -icount cannot see)\n");
-    std::printf("  NOTE: this runner is a Debug build under AddressSanitizer, so the\n"
+    // This file is compiled into both the ASan gate runner and the -O2
+    // uninstrumented bench runner, and a saved log does not say which produced
+    // it — so the binary states its own shape rather than assuming one.
+#if !defined(CROCOS_BENCH_ASAN)
+#  if defined(__has_feature)
+#    if __has_feature(address_sanitizer)
+#      define CROCOS_BENCH_ASAN 1
+#    endif
+#  endif
+#  if !defined(CROCOS_BENCH_ASAN) && defined(__SANITIZE_ADDRESS__)
+#    define CROCOS_BENCH_ASAN 1
+#  endif
+#  if !defined(CROCOS_BENCH_ASAN)
+#    define CROCOS_BENCH_ASAN 0
+#  endif
+#endif
+#if CROCOS_BENCH_ASAN
+    std::printf("  NOTE: this runner is instrumented (AddressSanitizer), so the\n"
                 "  absolute ns are dominated by instrumentation. Only the SCALING\n"
                 "  column is being claimed, and only against another run of this\n"
                 "  same binary shape on this same machine.\n");
+#else
+    std::printf("  NOTE: uninstrumented -O2 build, release-shaped checks. Absolute\n"
+                "  ns are comparable only against runs of this same binary shape on\n"
+                "  this same machine; they are not portable and are not claimed to be.\n");
+#endif
     std::printf("      threads |  min ns/lookup (aggregate) |  min ns/lookup/thread\n");
 
     constexpr unsigned kTrials = 5;
