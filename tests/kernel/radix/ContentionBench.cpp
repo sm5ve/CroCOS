@@ -154,6 +154,15 @@ rdx::Mapping* makeMapping(uint64_t baseVA) {
 // the data structure.
 //
 // Returns nanoseconds per lookup, aggregated across threads.
+//
+// Templated on the arm (Item B): `false` is the classic counted lookup, whose
+// section lives inside `resumeDescent`; `true` is the borrow shape the fast
+// fault path would use — one `BorrowWindow` (section + DEC-060 pump) around
+// each borrow, so both arms pay one section entry and one pump-gate load per
+// operation and the measured difference is the Mapping pin pair plus the
+// window's own scaffolding. A template rather than a parameter so neither arm
+// carries a branch in its hot loop.
+template <bool Borrow = false>
 double runTrial(CacheA& cache, BlockA& block, size_t threads, uint64_t regionSpan) {
     std::vector<std::thread> workers;
     std::atomic<bool>   go{false};
@@ -175,8 +184,14 @@ double runTrial(CacheA& cache, BlockA& block, size_t threads, uint64_t regionSpa
             // realistic descent.
             uint64_t va = base;
             for (unsigned k = 0; k < kLookupsPerThread; k++) {
-                auto r = cache.lookup(block, va);
-                if (r) hits++;
+                if constexpr (Borrow) {
+                    rdx::BorrowWindow window(block.domain);
+                    auto r = cache.borrow(block, va);
+                    if (r) hits++;
+                } else {
+                    auto r = cache.lookup(block, va);
+                    if (r) hits++;
+                }
                 va += kPage * 3;
                 if (va - base >= regionSpan) va = base;
             }
@@ -204,9 +219,12 @@ double runTrial(CacheA& cache, BlockA& block, size_t threads, uint64_t regionSpa
     return ns / static_cast<double>(threads * kLookupsPerThread);
 }
 
-}  // namespace
-
-TEST(radix_lookup_contention_scaling_report) {
+// The report body, shared by the two arms. A function pointer rather than a
+// template so the ~60 lines of population and printing exist once; the
+// per-lookup code is inside `runTrial<Borrow>`, so the indirection is paid per
+// TRIAL, not per operation.
+void scalingReport(const char* arm,
+                   double (*trial)(CacheA&, BlockA&, size_t, uint64_t)) {
     if (const char* on = std::getenv("CROCOS_RADIX_BENCH"); on == nullptr || on[0] != '1') {
         std::printf("\n  SKIP contention benchmark — set CROCOS_RADIX_BENCH=1 to run it\n"
                     "  (opt-in: it burns several seconds and its numbers are only\n"
@@ -231,8 +249,8 @@ TEST(radix_lookup_contention_scaling_report) {
         }
     }
 
-    std::printf("\n  radix lookup throughput vs thread count"
-                " (native, real caches — the one thing -icount cannot see)\n");
+    std::printf("\n  radix %s throughput vs thread count"
+                " (native, real caches — the one thing -icount cannot see)\n", arm);
     // This file is compiled into both the ASan gate runner and the -O2
     // uninstrumented bench runner, and a saved log does not say which produced
     // it — so the binary states its own shape rather than assuming one.
@@ -265,11 +283,11 @@ TEST(radix_lookup_contention_scaling_report) {
     for (size_t threads : kThreadCounts) {
         // One warm-up so descent-cache entries are installed and the measured
         // trials are steady state rather than cold installs.
-        (void)runTrial(*cache, *space.block, threads, regionSpan);
+        (void)trial(*cache, *space.block, threads, regionSpan);
 
         double best = 0.0;
         for (unsigned t = 0; t < kTrials; t++) {
-            const double ns = runTrial(*cache, *space.block, threads, regionSpan);
+            const double ns = trial(*cache, *space.block, threads, regionSpan);
             if (best == 0.0 || ns < best) best = ns;
         }
         // Aggregate (wall time over TOTAL lookups) and its per-thread inverse.
@@ -288,6 +306,20 @@ TEST(radix_lookup_contention_scaling_report) {
                 "  E-core placement is mixed into every row.\n"
                 "  Sound use: A/B two builds at ONE thread count, alternating, idle\n"
                 "  machine, compare minima.\n\n");
+}
+
+}  // namespace
+
+TEST(radix_lookup_contention_scaling_report) {
+    scalingReport("lookup", &runTrial<false>);
+}
+
+// Item B's A/B partner: the same workload through `borrow` under a per-lookup
+// `BorrowWindow`. Run BOTH reports from the same binary, alternating, and read
+// the difference at a fixed thread count — that difference is what the counted
+// reference actually costs, measured rather than argued.
+TEST(radix_borrow_contention_scaling_report) {
+    scalingReport("borrow", &runTrial<true>);
 }
 
 // ─── Profiling loop: the hit path, held on-CPU for `sample` ────────────────

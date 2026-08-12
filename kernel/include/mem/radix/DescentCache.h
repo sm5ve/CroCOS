@@ -467,6 +467,29 @@ namespace kernel::mm::radix {
 #endif
         }
 
+        // ─── The borrow lookup (Item B) ────────────────────────────────────
+        //
+        // `lookup`, minus the two things that make `lookup` safe to carry out
+        // of a section: the counted Mapping reference (7.0 ns of the lookup by
+        // D-082's bill) and the pump. The caller MUST already hold a read
+        // section on `block.domain` — asserted here, §7.3's one-sided check —
+        // and the result must die before that section closes. A caller that
+        // discovers it needs to block does not promote the borrow; it calls
+        // `lookup`, which re-observes the link inside a section.
+        //
+        // NO pump, and that is forced rather than stylistic: DEC-060's pump
+        // must run with every section this call opened CLOSED (deleters run
+        // outside sections, RCU-DEC-038), and under borrow the caller's section
+        // is still open when this returns. The pump obligation moves to the
+        // caller's section close. `BorrowWindow` below packages exactly that
+        // pairing so the fault path cannot forget it; a caller managing its own
+        // guard owes the `pumpIfWork` itself, and DEC-060's coverage argument
+        // is only intact if every borrow site reaches one of the two.
+        [[nodiscard]] BorrowedLookup borrow(Block& block, uint64_t va) {
+            kernel::rcu::assertInReadSection(block.domain);
+            return lookupInner<false>(block, va);
+        }
+
         // Drop everything this CPU holds. Not part of the protocol — teardown
         // deliberately does no cache work — but the harness needs a way to
         // return the residue deterministically, and so does a CPU going offline.
@@ -583,7 +606,15 @@ namespace kernel::mm::radix {
             e = Entry{};
         }
 
-        [[nodiscard]] LookupResult lookupInner(Block& block, uint64_t va) {
+        // Templated on `Counted` for Item B: `true` is the classic lookup
+        // (counted result, may outlive any section); `false` is the borrow body
+        // (uncounted result, caller's section asserted at the `borrow` entry).
+        // Every step BETWEEN the two result materialisations — row, counters,
+        // hit check, candidate, install — is identical by construction, which
+        // is the reason this is one template and not two functions.
+        template <bool Counted = true>
+        [[nodiscard]] auto lookupInner(Block& block, uint64_t va) {
+            using Result = conditional_t<Counted, LookupResult, BorrowedLookup>;
             Row&        row  = rowForThisCpu();
             Counters&   ctr  = row.counters;
             const unsigned i = indexFor(va);
@@ -615,14 +646,14 @@ namespace kernel::mm::radix {
                     // attributed to this function's own preamble and tail.
                     const uint64_t rs0 = probe5Counter();
 #endif
-                    auto resumed = tree.resumeDescent(e.pin, va);
+                    auto resumed = tree.template resumeDescent<Counted>(e.pin, va);
 #if defined(CROCOS_RADIX_INSN_PROBE) && CROCOS_RADIX_INSN_PROBE == 5
                     const uint64_t rs1 = probe5Counter();
                     probe5RecordMin(gProbe5ResumeMin, rs1 - rs0);
 #endif
                     if (resumed.status == Tree::ResumeStatus::Ok) {
                         bump(ctr.hits);
-                        return static_cast<LookupResult&&>(resumed.result);
+                        return static_cast<Result&&>(resumed.result);
                     }
                     if (resumed.status == Tree::ResumeStatus::OutOfRange) {
                         bump(ctr.outOfRangeResumes);
@@ -659,13 +690,17 @@ namespace kernel::mm::radix {
             const bool install =
                 threshold <= 1 || (inCandidate && (cand.sightings + 1) >= threshold);
 
-            LookupResult result;
+            Result result;
             typename Tree::PinSite site;
             Pin      pin;
             uint64_t nodeLo = 0, nodeHi = 0;
             {
+                // Under the borrow entry this guard NESTS inside the caller's
+                // section (an increment, no fence) and the result stays
+                // protected by the outer section after it closes; under the
+                // counted lookup it is the section, exactly as before.
                 kernel::rcu::ReadGuard guard(block.domain);
-                result = tree.descendLocked(tree.currentBinding(), va, pinAtLevel, &site);
+                result = tree.template descendLocked<Counted>(tree.currentBinding(), va, pinAtLevel, &site);
                 if (site.valid) {
                     nodeLo = site.base;
                     nodeHi = site.base + Geo<G>::nodeSpan(site.level) - 1;
@@ -716,6 +751,39 @@ namespace kernel::mm::radix {
         // The whole of this cache's mutable state, and every byte of it is
         // owned by exactly one CPU.
         Row rows[arch::MAX_PROCESSOR_COUNT]{};
+    };
+
+    // ─── BorrowWindow: the easy spelling of the borrow contract ────────────
+    //
+    // One object that IS the borrow caller's obligations, in the right order:
+    // a read section for the borrows to live inside, and DEC-060's pump run
+    // AFTER that section closes. Member order is the mechanism, not a style
+    // choice: members destroy in reverse declaration order, so `guard` (the
+    // section) closes first and `pump` (declared before it) fires second —
+    // reversing the two members would run deleters inside an open section,
+    // which is exactly the sequence RCU-DEC-038 exists to forbid.
+    //
+    //     {
+    //         BorrowWindow window(block.domain);
+    //         auto b = cache.borrow(block, va);
+    //         if (b) consume(b.mapping());
+    //     }   // section closes, then pumpIfWork — DEC-060 coverage intact
+    //
+    // A caller that opens its own ReadGuard instead owes the post-close
+    // `pumpIfWork` itself; this type exists so that spelling is the exception
+    // that has to justify itself, not the default that has to remember.
+    class BorrowWindow {
+        struct PumpOnExit {
+            kernel::rcu::Domain& d;
+            ~PumpOnExit() { (void)kernel::rcu::pumpIfWork(d); }
+        };
+        PumpOnExit            pump;    // declared first ⇒ destroyed LAST
+        kernel::rcu::ReadGuard guard;  // destroyed first: the section closes, then the pump runs
+
+    public:
+        explicit BorrowWindow(kernel::rcu::Domain& d) : pump{d}, guard(d) {}
+        BorrowWindow(const BorrowWindow&)            = delete;
+        BorrowWindow& operator=(const BorrowWindow&) = delete;
     };
 
 }  // namespace kernel::mm::radix

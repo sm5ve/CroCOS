@@ -43,6 +43,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <core/utility.h>   // conditional_t — the Counted/borrow result-type switch
 #include <kassert.h>
 #include <mem/VMSubstrate.h>
 #include <rcu/RCU.h>
@@ -442,6 +443,55 @@ namespace kernel::mm::radix {
                 mappingPtr = Ref{};
             }
         }
+        Ref      mappingPtr{};
+        uint64_t searchVA = 0;
+        uint64_t rangeLo = 0;
+        uint64_t rangeHi = 0;
+    };
+
+    // ─── BorrowedLookup (Item B: the uncounted fast-path answer) ───────────
+    //
+    // The same four values as `LookupResult`, WITHOUT the counted reference —
+    // and therefore without `LookupResult`'s central property. A LookupResult
+    // is DESIGNED to outlive its section (DEC-015: close, block on a pager,
+    // resume on another CPU); a BorrowedLookup is designed not to: its mapping
+    // pointer is protected only by the read section the caller was already
+    // inside when it was produced, and it dies with that section. Carrying one
+    // across the caller's section close is the §7.3 hazard verbatim — the
+    // record can be unlinked, retired, graced, released to zero and its slab
+    // slot recycled the instant the section is no longer open — and nothing
+    // about this type will crash to say so. `borrow` asserts a section is open
+    // at production; where it dies is only enforceable by the caller's shape,
+    // which is what `BorrowWindow` exists to make the easy spelling.
+    //
+    // What it buys: the fast fault path stops paying `Mapping::refcount`'s
+    // acquire/release RMW pair — D-082 priced that pair at 7.0 ns of a 39 ns
+    // lookup — for callers that consume the answer inside their own section
+    // (B3's fast faults: present / COW-hit / anon-zero). A caller that decides
+    // it must block does NOT try to promote this object; it re-runs the counted
+    // `lookup`, which re-observes the link inside a section as §7.3 requires.
+    //
+    // Still a SafePtr, not a Mapping*: the section answers recycling, not
+    // freshness. Every dereference this CPU performs still owes the per-access
+    // freshness call, exactly as with the counted result.
+    //
+    // Trivially destructible and copyable — destruction does nothing because
+    // this object owns nothing.
+    class BorrowedLookup {
+    public:
+        using Ref = VMSubstrate::SafePtr<Mapping>;
+
+        BorrowedLookup() = default;
+        BorrowedLookup(Ref m, uint64_t va, uint64_t lo, uint64_t hi)
+            : mappingPtr(m), searchVA(va), rangeLo(lo), rangeHi(hi) {}
+
+        [[nodiscard]] Ref mapping() const { return mappingPtr; }
+        [[nodiscard]] uint64_t va() const { return searchVA; }
+        [[nodiscard]] uint64_t lo() const { return rangeLo; }
+        [[nodiscard]] uint64_t hi() const { return rangeHi; }   // inclusive
+        explicit operator bool() const { return mappingPtr != nullptr; }
+
+    private:
         Ref      mappingPtr{};
         uint64_t searchVA = 0;
         uint64_t rangeLo = 0;
@@ -1030,25 +1080,38 @@ namespace kernel::mm::radix {
         // nothing.
         static constexpr unsigned kPinAtDeepest = ~0u;
 
-        [[nodiscard]] LookupResult descendLocked(const RootBinding& bind, uint64_t va) const {
-            return descendLocked(bind, va, kPinAtDeepest, nullptr);
+        // Both descents are templated on `Counted` (Item B). `true` — the
+        // default, and every pre-borrow call site — acquires the §7.3 counted
+        // reference at the leaf and returns a `LookupResult`; `false` skips the
+        // acquisition and returns a `BorrowedLookup`, legal ONLY because the
+        // caller's enclosing section (asserted at the `borrow` entry points)
+        // protects the pointer for as long as that section stays open. One
+        // template rather than two functions so the descent loop — the part
+        // that must not drift — is spelled once.
+        template <bool Counted = true>
+        [[nodiscard]] auto descendLocked(const RootBinding& bind, uint64_t va) const {
+            return descendLocked<Counted>(bind, va, kPinAtDeepest, nullptr);
         }
 
-        [[nodiscard]] LookupResult descendLocked(const RootBinding& bind, uint64_t va,
-                                                 unsigned pinLevel, PinSite* outSite) const {
-            if (!bind) return {};
-            if (va < bind.base || va >= bind.base + Geo<G>::nodeSpan(bind.level)) return {};
-            return descendFromLocked(bind.root, bind.level, bind.base, va, pinLevel, outSite);
+        template <bool Counted = true>
+        [[nodiscard]] auto descendLocked(const RootBinding& bind, uint64_t va,
+                                         unsigned pinLevel, PinSite* outSite) const {
+            using Result = conditional_t<Counted, LookupResult, BorrowedLookup>;
+            if (!bind) return Result{};
+            if (va < bind.base || va >= bind.base + Geo<G>::nodeSpan(bind.level)) return Result{};
+            return descendFromLocked<Counted>(bind.root, bind.level, bind.base, va, pinLevel, outSite);
         }
 
         // The descent proper, resumable from any node. `resumeDescent` enters
         // here with a pinned node rather than with the root binding, and that is
         // the entire mechanical content of the cache: a hit is this loop started
         // partway down.
-        [[nodiscard]] LookupResult descendFromLocked(NodeRef node, unsigned level,
-                                                     uint64_t nodeBase, uint64_t va,
-                                                     unsigned pinLevel,
-                                                     PinSite* outSite) const {
+        template <bool Counted = true>
+        [[nodiscard]] auto descendFromLocked(NodeRef node, unsigned level,
+                                             uint64_t nodeBase, uint64_t va,
+                                             unsigned pinLevel,
+                                             PinSite* outSite) const {
+            using Result = conditional_t<Counted, LookupResult, BorrowedLookup>;
             for (;;) {
                 // Recorded BEFORE the slot load, so a descent that terminates
                 // here still leaves the node it terminated on as the site.
@@ -1066,12 +1129,12 @@ namespace kernel::mm::radix {
 
                 switch (Codec::kindOf(word)) {
                 case SlotKind::Empty:
-                    return {};
+                    return Result{};
                 case SlotKind::Leaf: {
                     // The `covers` hook resolves the NEGATIVE answer without
                     // dereferencing the Mapping at all, which is the common
                     // unmapped-VA lookup (DEC-022).
-                    if (!Codec::covers(word, va - slotBase, level)) return {};
+                    if (!Codec::covers(word, va - slotBase, level)) return Result{};
                     // DEC-073: the slot word came through `protectWord`, and
                     // "whatever pointer it derives carries the SafePtr freshness
                     // obligation exactly as with `protect`". The obligation
@@ -1087,12 +1150,20 @@ namespace kernel::mm::radix {
                     // unlinked, retired, graced, released to zero and destroyed,
                     // and its slab slot handed to an unrelated allocation, before
                     // the fetch_add landed on a stranger.
+                    //
+                    // The Counted=false arm acquires NOTHING, which is only
+                    // legal under the borrow contract: the caller's own section
+                    // — open before this load, asserted at the borrow entry
+                    // points — protects the pointer, and the BorrowedLookup
+                    // must die before that section closes.
+                    if constexpr (Counted) {
 #if !defined(CROCOS_RADIX_BILL_NOPIN)   // measurement scaffold — never commit enabled
-                    acquireMappingRef(m);
+                        acquireMappingRef(m);
 #endif
+                    }
                     uint64_t lo = 0, hi = 0;
                     Codec::absoluteRange(word, slotBase, level, lo, hi);
-                    return LookupResult{m, va, lo, hi};
+                    return Result{m, va, lo, hi};
                 }
                 case SlotKind::Child:
                     assert(level < G.levelCount,
@@ -1141,10 +1212,12 @@ namespace kernel::mm::radix {
         // space is gone", because teardown marks every node (invariant 23).
         enum class ResumeStatus : uint8_t { Ok, Detached, OutOfRange };
 
-        struct ResumeResult {
+        template <typename R>
+        struct ResumeResultT {
             ResumeStatus status = ResumeStatus::Detached;
-            LookupResult result;
+            R result;
         };
+        using ResumeResult = ResumeResultT<LookupResult>;
 
         // **resume**: a fresh section, an acquire load of the mark, then the
         // descent — in that order, and the order is load-bearing.
@@ -1162,9 +1235,21 @@ namespace kernel::mm::radix {
         //
         // kCacheFreshnessLoad is the acquire counterpart to kMarkStore's
         // release. A release with no acquire opposite establishes nothing.
-        [[nodiscard]] ResumeResult resumeDescent(const PinnedNode<G>& pin, uint64_t key) const {
+        //
+        // Counted=false (the borrow resume) keeps the internal guard — nesting
+        // makes it an increment, and one spelling of the mark-then-descend
+        // order is better than two — but the RESULT outlives that guard, so the
+        // caller must already hold the enclosing section, and that is asserted
+        // before anything is loaded. Invariant 29's one-section requirement is
+        // then discharged by the CALLER's section, which was open before the
+        // mark load by construction.
+        template <bool Counted = true>
+        [[nodiscard]] auto resumeDescent(const PinnedNode<G>& pin, uint64_t key) const {
             assert(static_cast<bool>(pin), "radix: a resume from an empty pin");
-            ResumeResult out;
+            if constexpr (!Counted) {
+                kernel::rcu::assertInReadSection(*domain);
+            }
+            ResumeResultT<conditional_t<Counted, LookupResult, BorrowedLookup>> out;
 
 #if defined(CROCOS_RADIX_INSN_PROBE) && CROCOS_RADIX_INSN_PROBE == 5
             const uint64_t pb0 = probe5Counter();
@@ -1205,8 +1290,8 @@ namespace kernel::mm::radix {
 #if defined(CROCOS_RADIX_INSN_PROBE) && CROCOS_RADIX_INSN_PROBE == 5
             const uint64_t d0 = probe5Counter();
 #endif
-            out.result = descendFromLocked(pin.node, pin.nodeLevel, pin.nodeBase, key,
-                                           kPinAtDeepest, nullptr);
+            out.result = descendFromLocked<Counted>(pin.node, pin.nodeLevel, pin.nodeBase, key,
+                                                    kPinAtDeepest, nullptr);
 #if defined(CROCOS_RADIX_INSN_PROBE) && CROCOS_RADIX_INSN_PROBE == 5
             const uint64_t d1 = probe5Counter();
             probe5RecordMin(gProbe5DescendMin, d1 - d0);

@@ -1082,3 +1082,164 @@ TEST(radix_cache_concurrent_readers_never_answer_for_the_wrong_address) {
     kernel::test::bindThreadToCpu(0);
     space.quiesceSpace();
 }
+
+// ─── The borrow lookup (Item B) ─────────────────────────────────────────────
+//
+// Four properties, one per test: the answer is the lookup's answer with NO
+// count taken; the borrow drives the same install policy the lookup does (it
+// is the same body); production outside a section is rejected, §7.3's
+// one-sided check; and the section genuinely protects the borrowed pointer
+// against a concurrent unmap for exactly as long as the window stays open —
+// the property the missing refcount used to provide, now purchased from RCU.
+
+TEST(radix_borrow_returns_the_lookup_answer_without_a_count) {
+    BareArena arena;
+    Space     space;
+    auto      cache = std::make_unique<CacheA>();
+
+    const uint64_t va = 4 * kLeafNodeSpan;
+    rdx::Mapping* m = space.mapPair(va);
+    fill(*cache, *space.block, va);
+
+    // The counted lookup's shape, as the baseline: +1 while held, back on drop.
+    const uint64_t resting = m->refcountRelaxed();
+    uint64_t lo = 0, hi = 0;
+    {
+        auto r = cache->lookup(*space.block, va);
+        ASSERT_TRUE(static_cast<bool>(r) && r.mapping() == m);
+        ASSERT_TRUE(m->refcountRelaxed() == resting + 1);
+        lo = r.lo(); hi = r.hi();
+    }
+    ASSERT_TRUE(m->refcountRelaxed() == resting);
+
+    // The borrow: same record, same range, and the count never moves.
+    {
+        rdx::BorrowWindow window(space.block->domain);
+        auto b = cache->borrow(*space.block, va);
+        ASSERT_TRUE(static_cast<bool>(b) && b.mapping() == m);
+        ASSERT_TRUE(b.va() == va && b.lo() == lo && b.hi() == hi);
+        ASSERT_TRUE(m->refcountRelaxed() == resting);
+    }
+    ASSERT_TRUE(m->refcountRelaxed() == resting);
+
+    // A miss through the borrow is the lookup's miss: empty answer, no count.
+    {
+        rdx::BorrowWindow window(space.block->domain);
+        auto b = cache->borrow(*space.block, va + 64 * kLeafNodeSpan);
+        ASSERT_TRUE(!static_cast<bool>(b));
+    }
+
+    cache->evictAllOnThisCpu();
+    space.quiesceSpace();
+}
+
+TEST(radix_borrow_drives_the_same_install_policy_as_lookup) {
+    BareArena arena;
+    Space     space;
+    auto      cache = std::make_unique<CacheA>();
+
+    const uint64_t va = 8 * kLeafNodeSpan;
+    (void)space.mapPair(va);
+
+    // Two borrows on a cold cache: candidate, then install — DEC-079's
+    // one-miss deferral, exactly as `fill` performs it with lookups.
+    {
+        rdx::BorrowWindow window(space.block->domain);
+        (void)cache->borrow(*space.block, va);
+        ASSERT_TRUE(stat(cache->stats().candidatesRecorded) == 1);
+        ASSERT_TRUE(stat(cache->stats().installs) == 0);
+        (void)cache->borrow(*space.block, va);
+        ASSERT_TRUE(stat(cache->stats().installs) == 1);
+    }
+
+    // The third is a hit through the entry the borrows installed — and a
+    // LOOKUP hits the same entry, because there is only one cache.
+    {
+        rdx::BorrowWindow window(space.block->domain);
+        auto b = cache->borrow(*space.block, va);
+        ASSERT_TRUE(static_cast<bool>(b));
+        ASSERT_TRUE(stat(cache->stats().hits) == 1);
+    }
+    {
+        auto r = cache->lookup(*space.block, va);
+        ASSERT_TRUE(static_cast<bool>(r));
+        ASSERT_TRUE(stat(cache->stats().hits) == 2);
+    }
+
+    cache->evictAllOnThisCpu();
+    space.quiesceSpace();
+}
+
+TEST(radix_borrow_outside_a_section_is_rejected) {
+    BareArena arena;
+    Space     space;
+    auto      cache = std::make_unique<CacheA>();
+
+    const uint64_t va = 2 * kLeafNodeSpan;
+    (void)space.mapPair(va);
+
+    // §7.3's one-sided check at the entry point: no open section on the
+    // domain, no borrow. This is the assert that catches the "compiles in
+    // release, silently unprotected" misuse the borrow contract creates.
+    EXPECT_ASSERT_FAILURE((void)cache->borrow(*space.block, va));
+
+    space.quiesceSpace();
+}
+
+TEST(radix_borrowed_mapping_survives_a_concurrent_unmap_until_the_window_closes) {
+    BareArena arena(2);
+    Space     space(2);
+    auto      cache = std::make_unique<CacheA>();
+
+    const uint64_t va = 4 * kLeafNodeSpan;
+    rdx::Mapping* m = space.mapPair(va);
+    const uint64_t backendTag = m->baseVA;
+    fill(*cache, *space.block, va);
+
+    // Handshake: the reader borrows, THEN the writer unmaps and pumps, THEN
+    // the reader dereferences. Plain acquire/release flags — the point is the
+    // ordering of the phases, not a race on them.
+    std::atomic<bool> borrowed{false};
+    std::atomic<bool> unmapped{false};
+
+    std::thread writer([&] {
+        kernel::test::bindThreadToCpu(1);
+        while (!borrowed.load(std::memory_order_acquire)) {}
+        space.unmap(va, va + 2 * kPage - 1);
+        // Pump as hard as a writer legally can mid-test: the grace period
+        // CANNOT complete — the reader's section is open — so if the record is
+        // ever destroyed under the reader, these calls are what would have
+        // done it, and ASan turns that into a hard failure at the reader's
+        // dereference below.
+        for (int i = 0; i < 64; i++) {
+            (void)kernel::rcu::tryAdvance(space.block->domain);
+            (void)kernel::rcu::drain(space.block->domain);
+        }
+        unmapped.store(true, std::memory_order_release);
+    });
+
+    {
+        rdx::BorrowWindow window(space.block->domain);
+        auto b = cache->borrow(*space.block, va);
+        ASSERT_TRUE(static_cast<bool>(b) && b.mapping() == m);
+        borrowed.store(true, std::memory_order_release);
+        while (!unmapped.load(std::memory_order_acquire)) {}
+        // The record is unlinked and its grace period is pending. The borrow
+        // contract says this dereference is still safe — the window's section
+        // has been open since before the unlink was observed possible.
+        ASSERT_TRUE(b.mapping()->baseVA == backendTag);
+        ASSERT_TRUE(liveCountOf<rdx::Mapping>() >= 1);
+    }   // window closes: section ends, THEN the pump runs (DEC-060)
+
+    writer.join();
+    kernel::test::bindThreadToCpu(0);
+
+    // With the section closed, the deferred release is free to finish. Drive
+    // it to completion and require the record actually died — the test would
+    // otherwise pass against a leak.
+    space.quiesceSpace();
+    ASSERT_TRUE(liveCountOf<rdx::Mapping>() == 0);
+
+    cache->evictAllOnThisCpu();
+    space.quiesceSpace();
+}
