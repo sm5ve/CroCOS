@@ -1254,13 +1254,14 @@ namespace kernel::mm::radix {
         // kCacheFreshnessLoad is the acquire counterpart to kMarkStore's
         // release. A release with no acquire opposite establishes nothing.
         //
-        // Counted=false (the borrow resume) keeps the internal guard — nesting
-        // makes it an increment, and one spelling of the mark-then-descend
-        // order is better than two — but the RESULT outlives that guard, so the
-        // caller must already hold the enclosing section, and that is asserted
-        // before anything is loaded. Invariant 29's one-section requirement is
-        // then discharged by the CALLER's section, which was open before the
-        // mark load by construction.
+        // Counted=false (the borrow resume) opens NO guard of its own —
+        // SectionOrCallers compiles it away, because the caller must already
+        // hold the enclosing section (asserted before anything is loaded) and
+        // a nested guard bought no protection at the price of a real
+        // enter/exit pair. Invariant 29's one-section requirement is then
+        // discharged by the CALLER's section, which was open before the mark
+        // load by construction; "a fresh section" above describes the counted
+        // arm only.
         template <bool Counted = true>
         [[nodiscard]] auto resumeDescent(const PinnedNode<G>& pin, uint64_t key) const {
             assert(static_cast<bool>(pin), "radix: a resume from an empty pin");
